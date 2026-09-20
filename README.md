@@ -1492,8 +1492,12 @@ set to its own container address so the agent's callbacks and tool calls stay on
 private, like neo4j: no Traefik route and no public hostname, because the UI lists the account's instances,
 probes, costs and decisions. Reach it on the host's private IP at port 9034 (over the VPN or a tunnel), and
 sign in with the `API_TOKEN` the swarm generated for the node (in the stack's config.yaml). The swarm
-generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created and forwards
-`ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY` from its env when present. It passes no AWS credentials: the
+generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created. Everything else the
+advisor takes from the swarm's `.env` is read under an `ADVISOR_` prefix only, so it never clashes with what
+other images read: `ADVISOR_AGENT_MODEL` and `ADVISOR_AGENT_API_KEY` (the agent still runs through repo2graph,
+but with its own provider, model and key, in repo2graph's `provider/model` form), `ADVISOR_TYPESAFE_API_KEY`,
+`ADVISOR_AGENT_WEB_SEARCH`, the crons, `ADVISOR_PROBE_SCOPE`, `ADVISOR_ALERT_INVESTIGATE` and
+`ADVISOR_AGENT_AUTO_DISPATCH`; the list is `ADVISOR_ENV` in the swarm's `src/images/advisor.rs`. It passes no AWS credentials: the
 advisor is configured read-only from its Settings page, exactly as documented above, and `advisor` is on the
 stack's auto-update list.
 
