@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { logGroupOwner, systemsFromInventory } from "../graph_knowledge.js";
+import { attributionContext, lambdaSystems, systemsFromInventory } from "../graph_knowledge.js";
+import { attributeLogGroup } from "../log_attribution.js";
 
 const ec2 = [
   { instance_id: "i-a1", name: "web-1", instance_type: "m6i.4xlarge", state: "running", region: "us-east-1", gone: 0, pool_kind: "asg", pool: "web-asg", ebs_gb: 100 },
@@ -29,10 +30,15 @@ test("systems: pools, clusters and groups collapse into one system each; standal
   assert.equal(byId["nat:nat-1"].kind, "nat");
 });
 
-test("log group owner: the longest system name, pool or member id inside the group name wins", () => {
-  const systems = systemsFromInventory(ec2, rds, cache, new Map());
-  assert.equal(logGroupOwner("/aws/rds/cluster/prod/postgresql", systems), "rds:prod");
-  assert.equal(logGroupOwner("/web-asg/app", systems), "pool:web-asg");
-  assert.equal(logGroupOwner("/aws/lambda/something-else", systems), null);
-  assert.equal(logGroupOwner("/hosts/i-b1/syslog", systems), "ec2:i-b1");
+test("attribution context: cluster and beanstalk maps come from the members' tags, lambdas from findings", () => {
+  const withTags = ec2.map((r) => ({ ...r, snapshot: JSON.stringify({ tags: r.pool === "web-asg" ? { "aws:eks:cluster-name": "prod-cluster", "elasticbeanstalk:environment-name": "web-env" } : {} }) }));
+  const systems = [...systemsFromInventory(withTags, rds, cache, new Map()), ...lambdaSystems(["arn:aws:lambda:us-east-1:1:function:fn-a"])];
+  const cluster = systems.find((s) => s.id === "eks:prod-cluster");
+  assert.ok(cluster && cluster.members.length === 2, "cluster system with the pool's members");
+  assert.equal(systems.find((s) => s.id === "pool:web-asg")!.parent, "eks:prod-cluster");
+  const ctx = attributionContext(systems, withTags);
+  assert.equal(attributeLogGroup("/aws/eks/prod-cluster/cluster", ctx).owner, "eks:prod-cluster");
+  assert.equal(attributeLogGroup("/aws/elasticbeanstalk/web-env/nginx", ctx).owner, "pool:web-asg");
+  assert.equal(attributeLogGroup("/aws/lambda/fn-a", ctx).owner, "lambda:fn-a");
+  assert.equal(attributeLogGroup("/aws/rds/cluster/prod/error", ctx).owner, "rds:prod");
 });
