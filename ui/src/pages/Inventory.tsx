@@ -90,13 +90,18 @@ export default function Inventory() {
   };
 
   const loadSummary = () => api("/inventory/summary").then(setSummary).catch((e) => setErr(e.message));
+  // A tab switch clears the table at once and ignores a slower response from the previous tab, so EC2 rows can
+  // never sit under the Lambda header (or stick when a request fails).
+  const rowsRequest = useRef(0);
   const loadRows = () => {
+    const seq = ++rowsRequest.current;
+    setRows(null);
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (params.get("q")) qs.set("q", params.get("q")!);
     if (sort) qs.set("sort", sort);
     if (gone) qs.set("gone", "1");
-    return api(`/inventory/${tab}?${qs}`).then(setRows).catch((e) => { setErr(e.message); setRows([]); });
+    return api(`/inventory/${tab}?${qs}`).then((r) => { if (seq === rowsRequest.current) setRows(r); }).catch((e) => { if (seq === rowsRequest.current) { setErr(e.message); setRows([]); } });
   };
   const loadDetail = () => {
     if (!selectedId) { setDetail(null); return Promise.resolve(); }
