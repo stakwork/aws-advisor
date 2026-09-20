@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt } from "lucide-react";
+import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History } from "lucide-react";
 import { api, signIn, token } from "./api";
 import Overview from "./pages/Overview";
 import Runs from "./pages/Runs";
@@ -12,6 +12,7 @@ import Recommendations from "./pages/Recommendations";
 import Settings from "./pages/Settings";
 import Knowledge from "./pages/Knowledge";
 import Bill from "./pages/Bill";
+import Changes from "./pages/Changes";
 
 const nav = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -20,6 +21,7 @@ const nav = [
   { to: "/findings", label: "Findings", icon: Search },
   { to: "/inventory", label: "Inventory", icon: Server },
   { to: "/recommendations", label: "Recommendations", icon: ListChecks },
+  { to: "/changes", label: "Changes", icon: History },
   { to: "/bill", label: "Bill", icon: Receipt },
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
@@ -92,6 +94,7 @@ function AppShell() {
           <Route path="/recommendations" element={<Recommendations />} />
           <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/bill" element={<Bill />} />
+          <Route path="/changes" element={<Changes />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

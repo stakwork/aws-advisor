@@ -106,6 +106,20 @@ function ObservationCard() {
   );
 }
 
+/** CloudTrail write events by people and deployments, top actions; heartbeats counted. */
+function ChangesSummary() {
+  const [t, setT] = useState<any>(null);
+  useEffect(() => { api("/trail?hours=24").then(setT).catch(() => setT(null)); }, []);
+  if (!t) return <Empty>Loading…</Empty>;
+  if (!t.last_fetch) return <div className="text-sm text-zinc-500">Not collected yet: needs cloudtrail:LookupEvents, then the 06:50 job or <Link to="/changes" className="underline">Collect now</Link>.</div>;
+  return (
+    <div className="space-y-1 text-sm">
+      <div className="text-xs text-zinc-500">{t.events} by people or deployments · {Number(t.noise).toLocaleString()} machine heartbeats hidden · collected {when(t.last_fetch)}</div>
+      <ul className="space-y-0.5">{t.by_action.slice(0, 7).map((a: any, i: number) => <li key={i} className="flex justify-between gap-2 text-xs"><span className="min-w-0 truncate text-zinc-300"><span className="font-mono text-zinc-100">{a.event_name}</span> <span className="text-zinc-500">by {a.username || "unknown"}</span></span><span className="text-zinc-500">{a.n}</span></li>)}</ul>
+    </div>
+  );
+}
+
 const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up" };
 /** Yesterday's read of the collected statistics: idle instances, memory pressure, disks filling, idle containers, spend steps. */
 function ReviewSummary() {
@@ -306,6 +320,9 @@ export default function Overview() {
               })}
             </ul>
           )}
+        </Card>
+        <Card title={<span className="flex items-center justify-between">Changes in the last 24 h <Link to="/changes" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">open →</Link></span>}>
+          <ChangesSummary />
         </Card>
         <Card title="Inside EC2 - Other (last full month)">
           {metric("ec2_other_usage").length === 0 ? <Empty>No data.</Empty> : (
