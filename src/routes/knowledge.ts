@@ -12,6 +12,7 @@ import { latestReview, runReview } from "../review.js";
 import { buildObserveBrief, dispatchObservation, latestObservation, listObservations } from "../observe.js";
 import { refreshLogs, topLogGroups } from "../logs.js";
 import { refreshTrail, trailSummary } from "../trail.js";
+import { latestVerification, runVerifications, verificationSummary } from "../verify.js";
 
 /** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
@@ -163,3 +164,12 @@ knowledge.get("/logs", (req, res) => res.json(topLogGroups(Math.max(5, Math.min(
 knowledge.post("/logs/refresh", async (_req, res) => { try { res.json(await refreshLogs()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 knowledge.get("/trail", (req, res) => res.json(trailSummary(Math.max(1, Math.min(168, Number(req.query.hours || 24))))));
 knowledge.post("/trail/refresh", async (req, res) => { try { res.json(await refreshTrail(Math.max(1, Math.min(168, Number(req.query.hours || 26))))); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+
+// ---- realised savings: approved recommendations checked against the bill ---------------------------------------
+knowledge.get("/verifications", (_req, res) => res.json(verificationSummary()));
+knowledge.get("/verifications/:id", (req, res) => res.json({ verification: latestVerification(Number(req.params.id)) }));
+knowledge.post("/verifications/run", async (req, res) => {
+  const log: string[] = [];
+  const ids = typeof req.query.id === "string" ? [Number(req.query.id)] : undefined;
+  try { res.json({ ...(await runVerifications({ force: req.query.force === "1", ids, onLog: (l) => log.push(l) })), log }); } catch (e: any) { res.status(500).json({ error: e.message, log }); }
+});

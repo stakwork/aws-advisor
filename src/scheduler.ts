@@ -11,6 +11,7 @@ import { runReview } from "./review.js";
 import { dispatchObservation } from "./observe.js";
 import { refreshLogs } from "./logs.js";
 import { refreshTrail } from "./trail.js";
+import { runVerifications } from "./verify.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -34,7 +35,7 @@ export function restartScheduler(): ReturnType<typeof startScheduler> {
 let watching = false;
 
 /** Starts the scheduled full run (RUN_CRON) and the lightweight watcher (WATCH_CRON). */
-export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null; observe: string | null; logs: string | null } {
+export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null; observe: string | null; logs: string | null; verify: string | null } {
   const run = schedule("Scheduler (RUN_CRON)", config.runCron, async () => {
     if (isBusy()) { console.log("[scheduler] skipped: a run is already in progress"); return; }
     if (!hasConnectionFile()) { console.log("[scheduler] skipped: AWS credentials are not configured"); return; }
@@ -83,5 +84,9 @@ export function startScheduler(): { run: string | null; watch: string | null; pr
     refreshLogs((l) => console.log(`[logs] ${l}`)).catch((e: any) => console.error(`[logs] failed: ${e?.message || e}`))
       .then(() => refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`))).catch((e: any) => console.error(`[cloudtrail] failed: ${e?.message || e}`));
   });
-  return { run, watch, probe, spend, baselines, review, observe, logs };
+  const verify = schedule("Saving verification (VERIFY_CRON)", config.verifyCron, () => {
+    if (!hasConnectionFile()) return;
+    runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }).catch((e: any) => console.error(`[verify] failed: ${e?.message || e}`));
+  });
+  return { run, watch, probe, spend, baselines, review, observe, logs, verify };
 }
