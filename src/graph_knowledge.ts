@@ -15,6 +15,7 @@ import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE } from "./logs.js";
 import { getReconciliation, lastFullMonth } from "./reconcile.js";
 import { accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
 import { AttributionContext, attributeLogGroup } from "./log_attribution.js";
+import { LAMBDA_PRICE, lambdaFactsMap, lambdaMonthlyCost } from "./lambda_inventory.js";
 
 export const KN_LABELS = ["KnSystemType", "KnArchetype", "KnPattern", "KnSystem", "KnService", "KnLogGroup", "KnPricingOverlay"] as const;
 
@@ -66,16 +67,7 @@ export function systemsFromInventory(ec2: any[], rds: any[], cache: any[], roles
   return [...out.values()];
 }
 
-export interface LambdaFacts { name: string; region: string; memory_mb: number; arm: boolean; invocations_30d: number; duration_ms_30d: number; days: number }
-export const LAMBDA_PRICE = { gb_second_x86: 0.0000166667, gb_second_arm: 0.0000133334, per_request: 0.20 / 1e6 };
-/** A function's monthly cost at list from 30 days of metrics: GB-seconds × the architecture's rate + requests. Pure. */
-export function lambdaMonthlyCost(f: LambdaFacts): { gb_seconds_month: number; invocations_month: number; usd_month: number } {
-  const scale = f.days > 0 ? 30 / f.days : 0;
-  const gbSeconds = (f.duration_ms_30d / 1000) * (f.memory_mb / 1024) * scale;
-  const invocations = f.invocations_30d * scale;
-  const usd = gbSeconds * (f.arm ? LAMBDA_PRICE.gb_second_arm : LAMBDA_PRICE.gb_second_x86) + invocations * LAMBDA_PRICE.per_request;
-  return { gb_seconds_month: Math.round(gbSeconds), invocations_month: Math.round(invocations), usd_month: Math.round(usd * 100) / 100 };
-}
+export { LAMBDA_PRICE, lambdaMonthlyCost, type LambdaFacts } from "./lambda_inventory.js";
 
 /** Lambda functions as systems, from the account's function list (fallback: the ARNs the latest run flagged). */
 export function lambdaSystems(arns: string[]): SystemDef[] {
@@ -131,19 +123,9 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   const ec2Rows = db.prepare("select * from inventory_ec2").all() as any[];
   const latestRun = (db.prepare("select max(run_id) as id from findings").get() as { id: number | null }).id;
   const lambdaArns = latestRun ? (db.prepare("select distinct resource from findings where run_id = ? and resource like 'arn:aws:lambda:%'").all(latestRun) as { resource: string }[]).map((r) => r.resource) : [];
-  // Lambda: every function in the account with 30 days of invocations and duration, priced at list
-  const lambdaFacts = new Map<string, LambdaFacts>();
-  try {
-    const fns = await query<any>(`select name, region, memory_size, architectures from ${S}.aws_lambda_function`);
-    const inv = await query<any>(`select name, sum(sum) as n, count(*) as days from ${S}.aws_lambda_function_metric_invocations_daily where timestamp > now() - interval '30 days' group by 1`);
-    const dur = await query<any>(`select name, sum(sum) as ms from ${S}.aws_lambda_function_metric_duration_daily where timestamp > now() - interval '30 days' group by 1`);
-    const invBy = new Map(inv.map((r) => [r.name, r])); const durBy = new Map(dur.map((r) => [r.name, r]));
-    for (const f of fns) {
-      const arch = Array.isArray(f.architectures) ? f.architectures : (() => { try { return JSON.parse(f.architectures || "[]"); } catch { return []; } })();
-      lambdaFacts.set(f.name, { name: f.name, region: f.region, memory_mb: Number(f.memory_size || 128), arm: arch.includes("arm64"), invocations_30d: Number(invBy.get(f.name)?.n || 0), duration_ms_30d: Number(durBy.get(f.name)?.ms || 0), days: Number(invBy.get(f.name)?.days || 0) });
-    }
-  } catch (e) { console.warn(`[graph] lambda facts unavailable: ${String((e as any)?.message || e).slice(0, 160)}`); }
-  const lambdaFromAccount: SystemDef[] = [...lambdaFacts.values()].map((f) => ({ id: `lambda:${f.name}`, name: f.name, kind: "lambda", archetype: "batch_or_worker", members: [`arn:aws:lambda:${f.region}:${account}:function:${f.name}`], types: [], ebs_gb: 0, region: f.region }));
+  // Lambda: every function in the inventory (src/lambda_inventory.ts), priced from 30 days of invocations and duration
+  const lambdaFacts = lambdaFactsMap();
+  const lambdaFromAccount: SystemDef[] = [...lambdaFacts.values()].map((f) => ({ id: `lambda:${f.name}`, name: f.name, kind: "lambda", archetype: "batch_or_worker", members: [f.arn], types: [], ebs_gb: 0, region: f.region }));
   const systems = [...systemsFromInventory(ec2Rows, db.prepare("select * from inventory_rds").all(), db.prepare("select * from inventory_elasticache").all(), roles, nats), ...(lambdaFromAccount.length ? lambdaFromAccount : lambdaSystems(lambdaArns))];
   const attribution = attributionContext(systems, ec2Rows);
   const rows = systems.map((s) => {

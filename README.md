@@ -917,6 +917,16 @@ running instances, EBS GB, and the RDS and ElastiCache equivalents), `GET /api/i
 `GET /api/inventory/rds` and `GET /api/inventory/elasticache` (`q`, `sort`, `gone`), `POST /api/inventory/refresh`.
 The agent gets the same data through the `instance_inventory` MCP tool.
 
+### Lambda
+
+The Inventory page has a Lambda tab (`src/lambda_inventory.ts`, `GET /api/inventory/lambda`, refreshed with the
+rest of the inventory): every function with its runtime, memory, architecture and timeout, 30 days of
+invocations, average duration and errors from CloudWatch, the GB-seconds that follow, and the monthly cost at
+list (GB-seconds at the architecture's rate plus requests). The detail shows the arithmetic, what the bill
+applies on top (the Compute Savings Plan discount and the free tier), and what the function would cost on
+arm64. The knowledge graph's `lambda:<name>` systems read the same table. The account's 30-day GB-seconds from
+the metrics match Cost Explorer's usage line within a percent.
+
 ### Playbooks and the Graviton rule
 
 A finding such as "X is not using Graviton processor" says what is wrong, not what to do. `src/playbooks.ts` is the

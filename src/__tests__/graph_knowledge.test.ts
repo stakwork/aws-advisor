@@ -44,7 +44,7 @@ test("attribution context: cluster and beanstalk maps come from the members' tag
 });
 
 test("lambda cost from 30 days of metrics: GB-seconds at the architecture rate plus requests, scaled to a month", async () => {
-  const { lambdaMonthlyCost } = await import("../graph_knowledge.js");
+  const { lambdaMonthlyCost } = await import("../lambda_inventory.js");
   // 1 GB function running 1,000 s a day for 30 days, one million invocations
   const c = lambdaMonthlyCost({ name: "f", region: "us-east-1", memory_mb: 1024, arm: false, invocations_30d: 1e6, duration_ms_30d: 30 * 1000 * 1000, days: 30 });
   assert.equal(c.gb_seconds_month, 30000);
