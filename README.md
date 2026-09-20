@@ -1201,6 +1201,25 @@ Where it is used today:
 memory and spend per service in the watcher, the p95 band on the instance charts, and change-point detection
 over the daily roll-ups.
 
+## The daily review: what the statistics say
+
+Collecting statistics is only worth it if something reads them back. `src/review.ts` runs every morning after
+the baselines (`REVIEW_CRON`, 07:00) and on demand (Overview card, `POST /api/review/run`), looks at the last
+30 days of roll-ups, the baselines and the last complete days of spend, and turns what they show into
+recommendations and alerts with the numbers attached (`src/review_math.ts`, pure and tested):
+
+| observation | evidence | result |
+|---|---|---|
+| sustained idle | at least 5 days of probes with memory under 40 % (peak under 60 %), load under 25 % of cores, CPU p95 under 20 % | recommendation `review_idle` (right-size, saving ≈ half the list price); report-only for pool members, protected or naturally idle roles; Batch workers skipped |
+| memory pressure | memory over 85 % on average for 5+ days | warning alert |
+| disk filling | a least-squares line through the root disk usage reaches 90 % within 60 days (fit r² ≥ 0.5) | recommendation `review_disk_fill`; alarm when under 14 days |
+| idle container | ran 90 %+ of the window at under 0.3 % CPU | observation on the Overview |
+| spend step | a service's last 3 complete days average more than 3 spreads and 30 % above its 60-day median, at least 20 USD/day | warning alert with the monthly excess |
+
+Every observation is stored per day in `review_findings` (90 days) and listed on the Overview with a link to the
+instance. Review recommendations are refreshed by the review itself and never resolved by the collection run.
+Next: pool growth over weeks, and the same observations offered to the agent as facts.
+
 ## Bill reconstruction: the pricing eval
 
 The Bill page (`/bill`, `GET /api/bill?month=`, `POST /api/bill/reconcile?month=`) prices a month's usage from the
@@ -1288,7 +1307,7 @@ Everything has a working default for a laptop. What each one is for:
 | `PUBLIC_URL` | repo2graph runs in a container and must reach the webhook and `/mcp` | `http://localhost:PORT` |
 | `AGENT_MODEL` | a different model for the agent, in repo2graph's `provider/model` form | `anthropic/claude-opus-5` |
 | `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
-| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40 |
+| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON`, `REVIEW_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00 |
 | `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
@@ -1313,6 +1332,7 @@ Everything has a working default for a laptop. What each one is for:
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
 - `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `POST /api/inventory/refresh`
+- `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
 - `GET /api/baselines?scope_kind&scope_id`, `POST /api/baselines/refresh` (see [Baselines](#baselines-what-is-typical))
 - `GET /api/bill?month=YYYY-MM`, `POST /api/bill/reconcile?month=` (the bill reconstruction, see [Bill reconstruction](#bill-reconstruction-the-pricing-eval))
 - `GET /api/graph`, `POST /api/graph/sync?wipe=1`, `GET /api/graph/resource/:id` (the Neo4j mirror, see [Graph mirror](#graph-mirror))

@@ -8,6 +8,7 @@ import { credentialGate } from "../gate.js";
 import { instanceHistory, rollupDaily } from "../history.js";
 import { getReconciliation, lastFullMonth, listReconciliations, reconcileMonth } from "../reconcile.js";
 import { ScopeKind, baselineSummary, listBaselines, refreshBaselines } from "../baselines.js";
+import { latestReview, runReview } from "../review.js";
 
 /** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
@@ -138,4 +139,11 @@ knowledge.get("/baselines", (req, res) => {
 knowledge.post("/baselines/refresh", async (_req, res) => {
   const log: string[] = [];
   try { res.json({ ...(await refreshBaselines((l) => log.push(l))), log }); } catch (e: any) { res.status(500).json({ error: e.message, log }); }
+});
+
+// ---- the daily review of the collected statistics ---------------------------------------------------------------
+knowledge.get("/review", (_req, res) => res.json(latestReview()));
+knowledge.post("/review/run", async (_req, res) => {
+  const log: string[] = [];
+  try { res.json({ ...(await runReview((l) => log.push(l))), log }); } catch (e: any) { res.status(500).json({ error: e.message, log }); }
 });

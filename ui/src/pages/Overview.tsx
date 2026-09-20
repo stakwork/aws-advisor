@@ -77,6 +77,30 @@ function DailyCostChart({ series, today, asOf }: { series: any[]; today: string;
   );
 }
 
+const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up" };
+/** Yesterday's read of the collected statistics: idle instances, memory pressure, disks filling, idle containers, spend steps. */
+function ReviewSummary() {
+  const [r, setR] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const load = () => api("/review").then(setR).catch(() => setR(null));
+  useEffect(() => { load(); }, []);
+  const run = async () => { setBusy(true); try { await api("/review/run", { method: "POST", body: "{}" }); await load(); } finally { setBusy(false); } };
+  if (!r) return <Empty>Loading…</Empty>;
+  const counts: Record<string, number> = {};
+  for (const f of r.findings) counts[f.kind] = (counts[f.kind] || 0) + 1;
+  return (
+    <div className="space-y-1 text-sm">
+      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{r.day ? `${r.day} · ${r.findings.length} observation${r.findings.length === 1 ? "" : "s"}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Reviewing…" : "Run now"}</Button></div>
+      {r.day && r.findings.length === 0 && <div className="text-zinc-500">Nothing stands out in the statistics.</div>}
+      <div className="flex flex-wrap gap-2 text-xs">{Object.entries(counts).map(([k, n]) => <Badge key={k}>{`${n} ${REVIEW_LABEL[k] || k}`}</Badge>)}</div>
+      <ul className="space-y-0.5">{r.findings.slice(0, 6).map((f: any) => (
+        <li key={f.id} className="flex items-start gap-2 text-xs"><Badge>{f.severity}</Badge><span className="min-w-0 text-zinc-300">{/^i-/.test(f.resource) ? <Link to={`/inventory?tab=ec2&id=${f.resource}`} className="hover:underline">{f.message}</Link> : f.message}</span></li>
+      ))}</ul>
+      {r.findings.length > 6 && <div className="text-xs text-zinc-500">and {r.findings.length - 6} more in Recommendations and Alerts</div>}
+    </div>
+  );
+}
+
 /** Last month priced from our own knowledge against the bill: the eval of the pricing side of the graph. */
 function BillSummary() {
   const [b, setB] = useState<any>(null);
@@ -260,6 +284,9 @@ export default function Overview() {
               {metric("ec2_other_usage").map((m) => <li key={m.label} className="flex justify-between"><span className="text-zinc-300">{m.label}</span><span>{usd(m.value)}</span></li>)}
             </ul>
           )}
+        </Card>
+        <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
+          <ReviewSummary />
         </Card>
         <Card title={<span className="flex items-center justify-between">Bill reconstruction <Link to="/bill" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">open →</Link></span>}>
           <BillSummary />

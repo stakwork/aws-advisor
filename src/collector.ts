@@ -281,7 +281,8 @@ export function upsertRecommendations(runId: number, recs: RecInput[], source: "
     }
     // A partial batch (the watcher's flow-logs rule, an incident's fixes) must not resolve the rules it did not recompute.
     if (source === "rules" && opts.reconcile !== false) {
-      const stale = db.prepare("select id, fingerprint, decided_at from recommendations where status = 'open' and source = 'rules'").all() as { id: number; fingerprint: string; decided_at: string | null }[];
+      // the daily review's items (rule review_*) come from the statistics, not from this batch: it refreshes them itself
+      const stale = db.prepare("select id, fingerprint, decided_at from recommendations where status = 'open' and source = 'rules' and rule not like 'review_%'").all() as { id: number; fingerprint: string; decided_at: string | null }[];
       for (const s of stale) {
         if (seen.has(s.fingerprint)) continue;
         db.prepare("update recommendations set status = 'resolved', updated_at = datetime('now') where id = ?").run(s.id);
