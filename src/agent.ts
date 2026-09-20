@@ -57,7 +57,11 @@ live account): aws_steampipe_query for existing resources such as VPC endpoints 
 for real on-demand prices, aws_cloudwatch_metric for utilisation, aws_resource_cost_history and aws_findings_for_resource
 for history, aws_recommendation_history for what the team already decided, aws_instance_inventory for the fleet (which
 instances run, their SSM status, CPU, EBS and list price), and aws_instance_probe for memory, disk and processes on an
-SSM-managed instance. Do not guess a price or assume a resource is missing without checking.
+SSM-managed instance, aws_instance_history for a month of daily memory, disk, load and containers per instance,
+aws_baseline for what is typical per gateway, instance or service, aws_review_findings for what the daily review of the
+statistics found, aws_bill for the month priced from our own knowledge, aws_pools for the pools and their churn,
+aws_log_groups for log ingestion and retention costs, and aws_cloudtrail_changes for who changed what in the account.
+Do not guess a price or assume a resource is missing without checking.
 Past team decisions are stored as Concepts under the namespace aws/cost-advisor; call learn_concept with a concept id
 from the prompt when you need the full record before proposing something similar.
 Emit the JSON object first, then any commentary.`;

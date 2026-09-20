@@ -262,7 +262,10 @@ facts the advisor holds about the resource (inventory, role, probe, volumes), th
 knowledge graph (Concepts: generic rules and internal decisions, each with an id), the resource's history in the
 advisor, and a first opinion from Jev (a classifier) on whether the playbook applies and what blocks it.
 Verify before you write: aws_steampipe_query for the resource's current state (type, AMI, architecture, tags, attached
-volumes, security groups, what depends on it), aws_price_lookup for the real on-demand prices of the current and the
+volumes, security groups, what depends on it), aws_instance_history for a month of daily memory, disk, load and
+containers (the evidence that it is really idle or really busy), aws_baseline for what is typical, aws_cloudtrail_changes
+for who touched the resource recently (a plan must not fight an ongoing change), aws_log_groups when the finding is
+about logs, aws_price_lookup for the real on-demand prices of the current and the
 target SKU, aws_instance_probe or aws_instance_inventory for what runs on an instance, aws_resource_cost_history and
 aws_findings_for_resource and aws_recommendation_history for history, learn_concept for the full text of a concept id.
 Write the plan for THIS resource: real ids, names, sizes and regions in every step and command; one verify line per
