@@ -1,0 +1,97 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AdvisorReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "rds:Describe*",
+        "rds:ListTagsForResource",
+        "elasticache:Describe*",
+        "elasticache:ListTagsForResource",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:ListTagsForResource",
+        "ce:GetCostAndUsage",
+        "ce:GetCostAndUsageWithResources",
+        "ce:GetSavingsPlansUtilization",
+        "ce:GetSavingsPlansCoverage",
+        "ce:GetReservationUtilization",
+        "savingsplans:DescribeSavingsPlans",
+        "pricing:GetProducts",
+        "ssm:DescribeInstanceInformation",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetBucketTagging",
+        "lambda:ListFunctions",
+        "lambda:GetFunction*",
+        "lambda:GetPolicy",
+        "lambda:ListTags",
+        "ecr:DescribeRepositories",
+        "ecr:DescribeImages",
+        "ecr:ListImages",
+        "ecr:GetLifecyclePolicy",
+        "ecr:ListTagsForResource",
+        "ecs:Describe*",
+        "ecs:List*",
+        "eks:Describe*",
+        "eks:List*",
+        "dynamodb:Describe*",
+        "dynamodb:List*",
+        "application-autoscaling:DescribeScalableTargets",
+        "elasticloadbalancing:Describe*",
+        "secretsmanager:ListSecrets",
+        "secretsmanager:DescribeSecret",
+        "cloudtrail:DescribeTrails",
+        "cloudtrail:GetTrailStatus",
+        "cloudtrail:ListTags",
+        "cloudfront:List*",
+        "cloudfront:Get*",
+        "route53:List*",
+        "route53:Get*",
+        "redshift:Describe*",
+        "elasticmapreduce:List*",
+        "elasticmapreduce:Describe*",
+        "apigateway:GET",
+        "tag:GetResources",
+        "sts:GetCallerIdentity",
+        "iam:ListAccountAliases"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AdvisorSsmProbe",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*:*:document/AWS-RunShellScript",
+        "arn:aws:ec2:*:*:instance/*"
+      ]
+    },
+    {
+      "Sid": "AdvisorSsmProbeDocument",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeDocument",
+        "ssm:GetDocument"
+      ],
+      "Resource": "arn:aws:ssm:*:*:document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "AdvisorSsmProbeResults",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
