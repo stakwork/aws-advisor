@@ -6,10 +6,10 @@ import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache", "lambda"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", ebs: "EBS", s3: "S3" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const gb = (v: number | null | undefined) => (v == null ? "—" : `${Number(v).toLocaleString()} GB`);
@@ -184,6 +184,22 @@ export default function Inventory() {
         </div>
       )}
 
+      {tab === "ebs" && inv && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <Stat label="Volumes" value={inv.total} hint={`${Number(inv.gb).toLocaleString()} GB${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
+          <Stat label="At list / month" value={usd(inv.monthly_usd)} hint="storage plus provisioned IOPS and throughput" />
+          <Stat label="Unattached" value={inv.unattached} hint={inv.unattached ? `${usd(inv.unattached_usd)}/month for nothing` : "none"} />
+          <Stat label="Still gp2" value={inv.gp2} hint={inv.gp2 ? "gp3 is 20 % cheaper for the same size" : "all gp3 or better"} />
+        </div>
+      )}
+      {tab === "s3" && inv && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <Stat label="Buckets" value={inv.total} hint={`${Number(inv.gb).toLocaleString(undefined, { maximumFractionDigits: 0 })} GB${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
+          <Stat label="At list / month" value={usd(inv.monthly_usd)} hint={`${Number(inv.standard_gb).toLocaleString(undefined, { maximumFractionDigits: 0 })} GB in Standard`} />
+          <Stat label="Big, no lifecycle" value={inv.big_no_lifecycle} hint="over 5 GB with no lifecycle rule" />
+          <Stat label="Public" value={inv.public_unknown && !inv.public ? "?" : inv.public} hint={inv.public ? "bucket policy allows public access" : inv.public_unknown ? "unknown: grant s3:GetBucketPolicyStatus" : "none"} />
+        </div>
+      )}
       {tab === "lambda" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Stat label="Functions" value={inv.total} hint={`${inv.active} invoked in 30 days${inv.gone ? ` · ${inv.gone} gone` : ""} · ${inv.arm} on arm64`} />
@@ -227,6 +243,18 @@ export default function Inventory() {
                   <SortTh col="created">Created</SortTh><SortTh col="open_recs" className="text-right">Recs</SortTh><SortTh col="findings" className="text-right">Findings</SortTh>
                 </tr></thead>
               )}
+              {tab === "ebs" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="volume_id">Volume</SortTh><SortTh col="volume_type">Type</SortTh><SortTh col="size_gb" className="text-right">Size</SortTh><SortTh col="iops" className="text-right">IOPS prov.</SortTh>
+                  <SortTh col="iops_max" className="text-right">IOPS peak 30d</SortTh><SortTh col="state">State</SortTh><SortTh col="instance_id">Attached to</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="created">Created</SortTh>
+                </tr></thead>
+              )}
+              {tab === "s3" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="name">Bucket</SortTh><SortTh col="region">Region</SortTh><SortTh col="total_gb" className="text-right">Size</SortTh><SortTh col="standard_gb" className="text-right">In Standard</SortTh>
+                  <SortTh col="objects" className="text-right">Objects</SortTh><SortTh col="lifecycle_rules" className="text-right">Lifecycle</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="created">Created</SortTh>
+                </tr></thead>
+              )}
               {tab === "lambda" && (
                 <thead className="bg-zinc-900"><tr>
                   <SortTh col="name">Function</SortTh><SortTh col="runtime">Runtime</SortTh><SortTh col="memory_mb" className="text-right">Memory</SortTh><SortTh col="invocations_month" className="text-right">Invocations / mo</SortTh>
@@ -250,6 +278,8 @@ export default function Inventory() {
                         : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={() => runProbe(detail.instance_id)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
                         : tab === "lambda" ? <LambdaDetail d={detail} />
+                        : tab === "ebs" ? <EbsDetail d={detail} />
+                        : tab === "s3" ? <S3Detail d={detail} />
                         : <CacheDetail d={detail} />}
                     </DetailCell></td></tr>
                   ) : null;
@@ -280,6 +310,31 @@ export default function Inventory() {
                       <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
                       <Td className="text-right">{r.open_recs || "—"}</Td>
                       <Td className="text-right">{r.findings || "—"}</Td>
+                    </tr>{detailRow}
+                  </Fragment>);
+                  if (tab === "ebs") return (<Fragment key={id}>
+                    <tr onClick={() => set({ id })} className={cls}>
+                      <Td><div className="flex items-center gap-2"><span className="font-mono text-xs text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}</div>{r.name && <div className="text-xs text-zinc-500">{r.name}</div>}</Td>
+                      <Td>{r.volume_type}{r.encrypted ? " 🔒" : ""}</Td>
+                      <Td className="text-right">{r.size_gb} GB</Td>
+                      <Td className="text-right">{r.provisioned_iops != null ? Number(r.provisioned_iops).toLocaleString() : "—"}</Td>
+                      <Td className={`text-right ${r.iops_max != null && r.provisioned_iops && r.iops_max < 0.3 * r.provisioned_iops && r.iops > 3000 ? "text-amber-300" : ""}`}>{r.iops_max != null ? Number(r.iops_max).toLocaleString() : <span className="text-zinc-600">—</span>}</Td>
+                      <Td><Badge>{r.state}</Badge></Td>
+                      <Td className="text-xs">{r.instance_id ? <Link className="hover:underline" to={`/inventory?tab=ec2&id=${r.instance_id}`}>{r.instance_name || r.instance_id}<span className="text-zinc-500"> {r.device}</span></Link> : <span className="text-amber-300">unattached</span>}</Td>
+                      <Td className="text-right font-medium text-zinc-100">{usd(r.monthly_usd, 2)}</Td>
+                      <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
+                    </tr>{detailRow}
+                  </Fragment>);
+                  if (tab === "s3") return (<Fragment key={id}>
+                    <tr onClick={() => set({ id })} className={cls}>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.public ? <Badge>public</Badge> : null}{r.versioning ? <Badge>versioned</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div></Td>
+                      <Td className="text-zinc-400">{r.region}</Td>
+                      <Td className="text-right">{r.total_gb >= 1 ? `${Number(r.total_gb).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB` : r.total_gb > 0 ? `${Math.round(r.total_gb * 1000)} MB` : <span className="text-zinc-600">empty</span>}</Td>
+                      <Td className="text-right">{r.standard_gb >= 1 ? `${Number(r.standard_gb).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB` : "—"}</Td>
+                      <Td className="text-right">{r.objects != null ? Number(r.objects).toLocaleString() : "—"}</Td>
+                      <Td className={`text-right ${!r.lifecycle_rules && r.total_gb > 5 ? "text-amber-300" : ""}`}>{r.lifecycle_rules ? `${r.lifecycle_rules} rule${r.lifecycle_rules === 1 ? "" : "s"}` : "none"}</Td>
+                      <Td className="text-right font-medium text-zinc-100">{r.monthly_usd ? usd(r.monthly_usd, 2) : <span className="text-zinc-600">$0.00</span>}</Td>
+                      <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
                     </tr>{detailRow}
                   </Fragment>);
                   if (tab === "lambda") return (<Fragment key={id}>
@@ -319,7 +374,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 9, s3: 8 };
 
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
 function DetailCell({ id, onClose, children }: { id: string; onClose: () => void; children: ReactNode }) {
@@ -550,6 +605,45 @@ function RdsDetail({ d }: { d: any }) {
       </Group>
       <Group title="Tags"><Tags tags={s.tags} /></Group>
       <Related id={d.db_instance_identifier} recs={d.open_recs} findings={d.findings} />
+    </>
+  );
+}
+
+function EbsDetail({ d }: { d: any }) {
+  const used = Math.max(Number(d.iops_max || 0), Number(d.read_iops_avg || 0) + Number(d.write_iops_avg || 0));
+  return (
+    <>
+      <h2 className="text-base font-medium text-zinc-100">{d.name || d.volume_id}</h2>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><Badge>{d.volume_type}</Badge>{d.encrypted ? <Badge>encrypted</Badge> : null}<Mono>{d.volume_id}</Mono></div>
+      <Group title="Volume">
+        <Dl rows={[["Size", `${d.size_gb} GB`], ["Provisioned", d.provisioned_iops != null ? `${Number(d.provisioned_iops).toLocaleString()} IOPS${d.throughput_mibps ? ` · ${d.throughput_mibps} MiB/s` : ""}` : null], ["Attached to", d.instance_id ? <Link className="underline" to={`/inventory?tab=ec2&id=${d.instance_id}`}>{d.instance_name || d.instance_id} {d.device}</Link> : "nothing: unattached volumes cost the same as attached ones"], ["Region", d.region], ["Created", when(d.created)]]} />
+      </Group>
+      <Group title="Usage, 30 days">
+        <Dl rows={[["Read / write", d.read_iops_avg != null ? `${d.read_iops_avg} / ${d.write_iops_avg} IOPS average` : "no metrics"], ["Peak", d.iops_max != null ? `${Number(d.iops_max).toLocaleString()} IOPS peak sample (30 d)` : null], ["Provisioned used", d.provisioned_iops ? <span className={used < 0.3 * d.provisioned_iops && d.iops > 3000 ? "text-amber-300" : ""}>{Math.round((100 * used) / d.provisioned_iops)} % of {Number(d.provisioned_iops).toLocaleString()}{used < 0.3 * d.provisioned_iops && d.iops > 3000 ? " (over-provisioned)" : ""}</span> : null]]} />
+      </Group>
+      <Group title="Price">
+        <Dl rows={[["At list", `${usd(d.monthly_usd, 2)} / month`], ["gp3 instead", d.volume_type === "gp2" ? `${usd(d.size_gb * 0.08, 2)} / month for the same size and 3,000 IOPS included` : null]]} />
+      </Group>
+    </>
+  );
+}
+
+function S3Detail({ d }: { d: any }) {
+  const sizes: Record<string, number> = d.sizes || {};
+  const PRICE: Record<string, number> = { StandardStorage: 0.023, StandardIAStorage: 0.0125, OneZoneIAStorage: 0.01, IntelligentTieringFAStorage: 0.023, IntelligentTieringIAStorage: 0.0125, IntelligentTieringAAStorage: 0.004, IntelligentTieringAIAStorage: 0.004, IntelligentTieringDAAStorage: 0.00099, GlacierInstantRetrievalStorage: 0.004, GlacierStorage: 0.0036, DeepArchiveStorage: 0.00099, ReducedRedundancyStorage: 0.023 };
+  return (
+    <>
+      <h2 className="text-base font-medium text-zinc-100">{d.name}</h2>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.region}</Badge>{d.public ? <Badge>public</Badge> : null}{d.versioning ? <Badge>versioned</Badge> : null}<span className="text-zinc-500">created {when(d.created)}</span></div>
+      <Group title="Storage by class">
+        {Object.keys(sizes).length === 0 ? <div className="text-sm text-zinc-500">No storage metrics yet (CloudWatch publishes bucket sizes once a day; empty buckets have none).</div> : (
+          <table className="w-full text-sm"><thead><tr className="text-zinc-500"><th className="text-left font-normal">Class</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">$ / GB-mo</th><th className="text-right font-normal">$ / mo</th></tr></thead>
+            <tbody>{Object.entries(sizes).sort((a, b) => b[1] - a[1]).map(([c, gb]) => <tr key={c} className="border-t border-zinc-800/60"><td className="py-0.5">{c.replace(/Storage$/, "")}</td><td className="text-right">{gb.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td><td className="text-right font-mono text-xs">{PRICE[c] ?? "—"}</td><td className="text-right">{usd(gb * (PRICE[c] ?? 0.023), 2)}</td></tr>)}</tbody></table>
+        )}
+      </Group>
+      <Group title="Lifecycle">
+        <Dl rows={[["Rules", d.lifecycle_rules ? `${d.lifecycle_rules}` : <span className={d.standard_gb > 20 ? "text-amber-300" : ""}>none{d.standard_gb > 20 ? `: ${Number(d.standard_gb).toFixed(0)} GB sit in Standard; a transition to Infrequent Access after 30 days would save about ${usd(d.standard_gb * (0.023 - 0.0125))}/month if rarely read` : ""}</span>], ["Objects", d.objects != null ? Number(d.objects).toLocaleString() : null], ["Metrics day", d.metric_day]]} />
+      </Group>
     </>
   );
 }

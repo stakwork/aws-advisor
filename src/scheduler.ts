@@ -13,6 +13,7 @@ import { refreshLogs } from "./logs.js";
 import { refreshTrail } from "./trail.js";
 import { runVerifications } from "./verify.js";
 import { refreshCommitments } from "./commitments.js";
+import { refreshS3Inventory } from "./s3_inventory.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -85,7 +86,8 @@ export function startScheduler(): { run: string | null; watch: string | null; pr
   const logs = schedule("Logs and CloudTrail (LOGS_CRON)", config.logsCron, () => {
     if (!hasConnectionFile()) return;
     refreshLogs((l) => console.log(`[logs] ${l}`)).catch((e: any) => console.error(`[logs] failed: ${e?.message || e}`))
-      .then(() => refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`))).catch((e: any) => console.error(`[cloudtrail] failed: ${e?.message || e}`));
+      .then(() => refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`))).catch((e: any) => console.error(`[cloudtrail] failed: ${e?.message || e}`))
+      .then(() => refreshS3Inventory((l) => console.log(`[s3] ${l}`))).catch((e: any) => console.error(`[s3] failed: ${e?.message || e}`));
   });
   const verify = schedule("Saving verification (VERIFY_CRON)", config.verifyCron, () => {
     if (!hasConnectionFile()) return;

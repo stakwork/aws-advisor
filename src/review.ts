@@ -142,6 +142,22 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
       count("log_no_retention");
     }
   }
+  // ---- S3: big buckets kept entirely in Standard with no lifecycle rule ------------------------------------------
+  for (const b of db.prepare("select name, total_gb, standard_gb, monthly_usd, objects from inventory_s3 where gone = 0 and lifecycle_rules = 0 and standard_gb >= 20 order by standard_gb desc limit 30").all() as any[]) {
+    const iaSaving = Math.round(b.standard_gb * (0.023 - 0.0125));
+    const msg = `bucket ${b.name}: ${b.standard_gb.toFixed(0)} GB in Standard (${Math.round(b.monthly_usd)} USD/month) with no lifecycle rule; a transition to Infrequent Access after 30 days would save about ${iaSaving} USD/month if the objects are rarely read`;
+    insertFinding.run(day, "s3_no_lifecycle", b.name, null, "info", msg, JSON.stringify({ standard_gb: b.standard_gb, total_gb: b.total_gb, monthly_usd: b.monthly_usd, objects: b.objects, ia_saving_usd_month: iaSaving }));
+    count("s3_no_lifecycle");
+  }
+  // ---- EBS: provisioned IOPS far above what is used --------------------------------------------------------------
+  for (const v of db.prepare("select * from inventory_ebs where gone = 0 and state = 'in-use' and volume_type in ('gp3', 'io1', 'io2') and iops > 3000 and metric_days >= 5").all() as any[]) {
+    const used = Math.max(Number(v.iops_max || 0), Number(v.read_iops_avg || 0) + Number(v.write_iops_avg || 0));
+    if (used >= 0.3 * v.iops) continue;
+    const extra = v.volume_type === "gp3" ? (v.iops - 3000) * 0.005 : v.iops * 0.065;
+    const msg = `volume ${v.volume_id}${v.name ? ` (${v.name})` : ""}${v.instance_id ? ` on ${v.instance_id}` : ""}: ${v.iops.toLocaleString()} IOPS provisioned, peak ${used.toFixed(0)} used in 30 days; about ${Math.round(extra)} USD/month of provisioned IOPS`;
+    insertFinding.run(day, "ebs_overprovisioned_iops", v.volume_id, v.name, "info", msg, JSON.stringify({ iops: v.iops, iops_max: v.iops_max, read_iops_avg: v.read_iops_avg, write_iops_avg: v.write_iops_avg, extra_usd_month: extra, instance_id: v.instance_id }));
+    count("ebs_overprovisioned_iops");
+  }
   db.prepare("delete from review_findings where day < date('now', '-90 days')").run();
   out.took_ms = Date.now() - t0;
   onLog(`${out.recommendations} recommendations, ${out.alerts} new alerts, ${out.took_ms} ms`);

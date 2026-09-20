@@ -110,6 +110,39 @@ export async function refreshBaselines(onLog: (s: string) => void = () => {}): P
   }
   onLog(`cpu: ${out.cpu} instances`);
 
+  // ---- network per instance: NetworkIn and NetworkOut per day, 14 days, one CloudWatch call per instance and direction
+  const netRows = db.prepare("select instance_id, region from inventory_ec2 where gone = 0 and state = 'running'").all() as { instance_id: string; region: string }[];
+  let net = 0;
+  const netQueue = [...netRows];
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (let r = netQueue.shift(); r; r = netQueue.shift()) {
+      for (const [metric, name] of [["NetworkIn", "network_in_gb_day"], ["NetworkOut", "network_out_gb_day"]] as const) {
+        try {
+          const rows = await query<{ timestamp: string; value: string | null }>(`select timestamp, sum as value from ${S}.aws_cloudwatch_metric_statistic_data_point
+            where namespace = 'AWS/EC2' and metric_name = ${lit(metric)} and dimensions = ${lit(JSON.stringify([{ Name: "InstanceId", Value: r.instance_id }]))}
+              and timestamp between now() - interval '${CPU_DAYS} days' and now() and period = 86400 and region = ${lit(r.region || "us-east-1")} order by timestamp`);
+          const pts: Point[] = rows.filter((x) => x.value != null).map((x) => ({ t: new Date(x.timestamp).getTime(), v: Number(x.value) / 1e9 }));
+          if (store("instance", r.instance_id, name, pts, CPU_DAYS, "cloudwatch", "GB/day")) net++;
+          // a step: the last two complete days far above the instance's own 14-day median
+          if (pts.length >= 7) {
+            const b = buildBaseline(pts, CPU_DAYS, "cloudwatch", "GB/day");
+            const recent = pts.slice(-3, -1).map((p) => p.v); const avg = recent.reduce((s, v) => s + v, 0) / Math.max(1, recent.length);
+            const kind = "network_step"; const res = `${r.instance_id}:${metric}`;
+            const open = db.prepare("select id from alerts where kind = ? and resource = ? and acknowledged = 0 limit 1").get(kind, res);
+            const step = recent.length === 2 && avg >= 5 && avg >= 2 * b.median && avg - b.median >= 3 * (b.mad || 0);
+            if (step && !open) {
+              const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(r.instance_id) as any)?.name || r.instance_id;
+              const msg = `${name}: ${metric === "NetworkOut" ? "sends" : "receives"} ${avg.toFixed(1)} GB/day over the last two days, ${(avg / Math.max(0.01, b.median)).toFixed(1)}x its 14-day median of ${b.median.toFixed(1)} GB/day`;
+              db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)").run(kind, res, msg, JSON.stringify({ summary: msg, instance_id: r.instance_id, metric, recent_gb_day: avg, median_gb_day: b.median, p95_gb_day: b.p95 }));
+            }
+            if (!step && open) db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where id = ?").run((open as any).id);
+          }
+        } catch (e) { if (out.errors.length < 3) out.errors.push(describeError(e, `network baseline ${r.instance_id}`)); }
+      }
+    }
+  }));
+  onLog(`network: ${net} series`);
+
   // ---- probes: memory, disk, load per core and running containers, 30 days, from our own samples
   const probes = db.prepare("select instance_id, collected_at, json from instance_metrics where datetime(collected_at) > datetime('now', ?) order by instance_id, collected_at").all(`-${PROBE_DAYS} days`) as { instance_id: string; collected_at: string; json: string }[];
   const perInstance = new Map<string, Record<string, Point[]>>();
