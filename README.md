@@ -1460,18 +1460,39 @@ advisor never reads back.
 - `mod/` Powerpipe mod: the AWS Thrifty dependency plus custom queries and dashboards.
 - `data/` SQLite database (gitignored).
 
-## Deployment plan (sphinx-swarm)
+## Deployment: the image and the swarm
 
-Two images behind a preset flag, on one internal swarm per AWS account rather than on every swarm:
+The advisor ships as one image, `ghcr.io/stakwork/aws-advisor`, built the way stakgraph-mcp's is
+(`.github/workflows/publish.yml`: a native build per architecture on a published release, then a multi-arch
+manifest tagged with the release name and `latest`). The image holds the app with its built UI, a Steampipe
+service with the AWS plugin, and Powerpipe with the Thrifty mod, all fetched at build time so a container
+starts without network access to Turbot. Steampipe refuses to run as root, so everything runs as the
+`advisor` user; the entrypoint starts the service on 9193 and then the app. About 1.3 GB.
 
-- `steampipe`: the official `turbot/steampipe` image on 9193, plugins and config on a named volume, credentials
-  from the instance profile through the assumable `aws-advisor-read` role (the advisor's **Instance / default
-  chain** mode with the role ARN; the AWS config file with the managed profile is shared between the two
-  containers through `AWS_CONFIG_FILE`).
-- `advisor`: this repo, on 9034, linked to `steampipe`, `repo2graph` and `boltwall` (which supplies the
-  repo2graph token). `DATA_DIR` on a named volume. Swarm-side changes follow the pattern of the hermes image:
-  `src/images/*.rs`, the `Image` enum and its matches, `config.rs` (`remove_tokens`, `migrate_stack`), the
-  preset, the reserved-port list under port-based SSL, and `app/src/nodes.ts`.
+```
+docker build -t aws-advisor .
+docker run -d -p 9034:9034 -v aws-advisor-data:/data \
+  -e API_TOKEN=$(openssl rand -hex 32) -e MCP_TOKEN=$(openssl rand -hex 32) -e CALLBACK_SECRET=$(openssl rand -hex 32) \
+  -e PUBLIC_URL=http://host.docker.internal:9034 ghcr.io/stakwork/aws-advisor:latest
+```
+
+One volume, `/data`, holds everything that must survive a recreation: the SQLite database (`/data/advisor`),
+the Steampipe connection the app writes (`/data/steampipe/config`) and the AWS config and credentials files
+(`/data/aws`, linked to the advisor user's `~/.aws`). Credentials are entered in Settings as on a laptop, or
+come from the host's instance role in chain mode. `DATA_DIR`, `STEAMPIPE_CONFIG_DIR`, `AWS_CONFIG_FILE`,
+`AWS_SHARED_CREDENTIALS_FILE` and `STEAMPIPE_DATABASE_URL` are preset in the image; every other variable in
+[Environment variables](#environment-variables) applies. The UI is built with `npm install` rather than `npm
+ci` in the image because the lockfile is written on macOS and `ci` skips the optional native packages
+(lightningcss, tailwind) of another platform.
+
+**In sphinx-swarm** the image is part of the graph-mindset stack when the swarm's `.env` has `DEVOPS=1`
+(`src/images/advisor.rs`, added in `graph_mindset_imgs`): node `advisor` on port 9034, linked to repo2graph
+(the agent; boltwall's `stakwork_secret` becomes `REPO2GRAPH_TOKEN`) and neo4j (the mirror), with `PUBLIC_URL`
+set to its own container address so the agent's callbacks and tool calls stay on the swarm network. The swarm
+generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created and forwards
+`ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY` from its env when present. It passes no AWS credentials: the
+advisor is configured read-only from its Settings page, exactly as documented above, and `advisor` is on the
+stack's auto-update list.
 
 ## Roadmap
 
