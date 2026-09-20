@@ -1425,9 +1425,15 @@ after the 2026-09-19 review (`src/__tests__/security.test.ts` pins the guards):
   the remaining risk is a misleading recommendation, which a human reads before anything happens.
 - `data/` is created `0700`; credential files are `0600`; no secret is written to the database or the log.
 
-Not done, worth doing before the executor: a per-hour quota on agent dispatches and probes (cost, not
-compromise); an allowlist of AWS profiles selectable from Settings; reading the setup token from a file instead
-of the command line; a decision hash stored at approval time and checked before execution.
+- **Quotas** (`src/quota.ts`, Settings > Quotas): agent runs per hour and per day (findings batches,
+  investigations, resolutions and observations together; default 6 and 20) and SSM probes per hour (default
+  150), checked at the two choke points every dispatch and every probe go through. Failed probe attempts count,
+  so a loop cannot spend through a quota by failing. A hit refuses the call with the time until it frees up and
+  opens one `quota` alarm. `GET /api/quotas` shows the counters.
+
+Not done, worth doing before the executor: an allowlist of AWS profiles selectable from Settings; reading the
+setup token from a file instead of the command line; a decision hash stored at approval time and checked before
+execution.
 
 ## Environment variables
 

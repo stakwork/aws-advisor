@@ -43,6 +43,9 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "probeMax", env: "PROBE_MAX", kind: "number", def: "25", min: 1, max: 500, group: "Probe pass", label: "Instances per pass", help: "" },
   { key: "probeIdleCpu", env: "PROBE_IDLE_CPU", kind: "number", def: "20", min: 1, max: 100, group: "Probe pass", label: "Idle CPU threshold (%)", help: "Below this 30-day average an instance is a probe candidate (scope idle)." },
   { key: "probeMinIntervalHours", env: "PROBE_MIN_INTERVAL_HOURS", kind: "number", def: "20", min: 0.1, max: 168, group: "Probe pass", label: "Minimum hours between probes", help: "Match it to the probe cron (0.9 for hourly)." },
+  { key: "agentRunsPerHour", env: "AGENT_RUNS_PER_HOUR", kind: "number", def: "6", min: 1, max: 100, group: "Quotas", label: "Agent runs per hour", help: "Findings batches, investigations, resolutions and observations together; each costs a few USD. A hit raises a quota alert and refuses the run." },
+  { key: "agentRunsPerDay", env: "AGENT_RUNS_PER_DAY", kind: "number", def: "20", min: 1, max: 500, group: "Quotas", label: "Agent runs per day", help: "" },
+  { key: "probesPerHour", env: "PROBES_PER_HOUR", kind: "number", def: "150", min: 1, max: 5000, group: "Quotas", label: "SSM probes per hour", help: "Every probe is one SendCommand on an instance; the hourly pass over the whole fleet is about 60 here." },
 ];
 const SPEC = new Map(RUNTIME_SETTINGS.map((r) => [r.key, r]));
 
@@ -136,6 +139,9 @@ export const config = {
   get probeMax(): number { return rtNum("probeMax"); },
   get probeIdleCpu(): number { return rtNum("probeIdleCpu"); },
   get probeMinIntervalHours(): number { return rtNum("probeMinIntervalHours"); },
+  get agentRunsPerHour(): number { return rtNum("agentRunsPerHour"); },
+  get agentRunsPerDay(): number { return rtNum("agentRunsPerDay"); },
+  get probesPerHour(): number { return rtNum("probesPerHour"); },
 };
 
 if (!/^[A-Za-z0-9_.:/-]+$/.test(config.probeDocument)) {

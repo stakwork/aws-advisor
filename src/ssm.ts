@@ -5,6 +5,7 @@ import { db } from "./db.js";
 import { AWS_RUN_SHELL_SCRIPT, PermissionIssue, explainPermissionError, recordPermissionIssue, remedyFor, usesCustomProbeDocument } from "./permissions.js";
 import { NoSdkCredentials, credentialRemedy } from "./aws_config.js";
 import { S, credentialsMeta, query, sdkCredentials } from "./steampipe.js";
+import { checkProbeQuota } from "./quota.js";
 
 /**
  * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
@@ -239,6 +240,7 @@ function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" |
 /** Sends the probe to one SSM-managed instance, waits for it, parses and stores the result. */
 export async function probeInstance(instanceId: string, opts: { timeoutMs?: number } = {}): Promise<StoredProbe> {
   if (!/^i-[0-9a-f]{8,17}$/.test(instanceId)) throw new ProbeError("not_managed", `"${instanceId}" is not an EC2 instance id`);
+  checkProbeQuota(instanceId);
   // The same identity Steampipe uses (keys, profile or default chain, with the role when one is set), as an SDK provider.
   let creds: ReturnType<typeof sdkCredentials>;
   try { creds = sdkCredentials(); }
