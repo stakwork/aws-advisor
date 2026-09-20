@@ -23,7 +23,8 @@ export function alertLevel(a: { kind: string; triage?: unknown }): AlertLevel {
   if (a.kind === "nat_traffic") return triage && Number(triage.severity) < 1 ? "warning" : "alarm";
   if (a.kind === "instance_state") return triage && Number(triage.expected) >= 0.7 ? "info" : "warning";
   if (a.kind === "disk_fill" || a.kind === "quota" || a.kind === "disk_full") return "alarm";
-  if (a.kind === "disk_high") return "warning";
+  if (a.kind === "disk_high" || a.kind === "memory_high" || a.kind === "swap_in_use" || a.kind === "load_high" || a.kind === "reboot") return "warning";
+  if (a.kind === "memory_full") return "alarm";
   if (a.kind === "spend_step" || a.kind === "memory_pressure" || a.kind === "log_step") return "warning";
   return "info"; // node_churn and anything expected
 }

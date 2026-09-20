@@ -10,6 +10,7 @@ import { ProbeError, probeInstance } from "./ssm.js";
 import { credentialGate } from "./gate.js";
 import { pruneHistory, rollupDaily } from "./history.js";
 import { checkAllDiskLevels } from "./disk_alerts.js";
+import { checkAllHostLevels } from "./host_alerts.js";
 
 export interface ProbePassResult {
   started_at: string;
@@ -73,6 +74,7 @@ async function run(): Promise<ProbePassResult> {
   await Promise.all([worker(), worker(), worker()]);
   // roll yesterday (and any day not yet rolled) into the daily tables before the raw detail expires
   try { const r = rollupDaily(); console.log(`[probe-pass] rolled up ${r.instance_days} instance-days, ${r.container_days} container-days`); } catch (e: any) { console.error(`[probe-pass] rollup failed: ${e?.message || e}`); }
+  try { checkAllHostLevels(); } catch (e: any) { console.error(`[probe-pass] host check failed: ${e?.message || e}`); }
   try { checkAllDiskLevels(); } catch (e: any) { console.error(`[probe-pass] disk check failed: ${e?.message || e}`); }
   result.pruned = pruneHistory().probes;
   result.took_ms = Date.now() - t0;

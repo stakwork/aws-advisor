@@ -7,6 +7,7 @@ import { NoSdkCredentials, credentialRemedy } from "./aws_config.js";
 import { S, credentialsMeta, query, sdkCredentials } from "./steampipe.js";
 import { checkProbeQuota } from "./quota.js";
 import { checkDiskLevels } from "./disk_alerts.js";
+import { checkHostLevels } from "./host_alerts.js";
 
 /**
  * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
@@ -298,7 +299,7 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
     const collectedAt = data.collected_at;
     const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data)).lastInsertRowid);
     try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }
-    try { const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null; checkDiskLevels(instanceId, name, data.disks as any, collectedAt); } catch (e: any) { console.error(`[probe] disk levels not checked for ${instanceId}: ${e?.message || e}`); }
+    try { const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null; checkDiskLevels(instanceId, name, data.disks as any, collectedAt); checkHostLevels(instanceId, name, id, collectedAt, data); } catch (e: any) { console.error(`[probe] disk or host levels not checked for ${instanceId}: ${e?.message || e}`); }
     return { id, instance_id: instanceId, collected_at: collectedAt, data };
   } finally {
     client.destroy();

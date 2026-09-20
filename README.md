@@ -1181,6 +1181,15 @@ warning with an alarm. The latest probe of every running instance is judged agai
 probe pass, so a disk that filled while the advisor was down alerts immediately. This is the level today; the
 daily review's `disk_fill` is the trend, days until full at the current rate.
 
+## Host alerts from the probes
+
+The same pass judges memory, swap, load and reboots (`src/host_alerts.ts`): `memory_high` at `MEM_WARN_PCT`
+(85 %) and `memory_full` at `MEM_ALARM_PCT` (95 %) of used memory with available subtracted; `swap_in_use` at
+`SWAP_WARN_PCT` (25 %) of the swap space; `load_high` when the 15-minute load average per vCPU reaches
+`LOAD_PER_CORE` (1.5), a sustained saturation rather than a spike; `reboot` when a probe's uptime is lower than
+the previous probe's, with the reboot time worked back from the uptime. Hysteresis and system acknowledgement as
+for disks. All thresholds are runtime settings under Probe pass.
+
 ## Alerts, alarm first, paginated
 
 - `GET /api/alerts?status=open|acknowledged|all&page=1&page_size=10&day=YYYY-MM-DD` →
