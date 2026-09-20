@@ -1233,6 +1233,26 @@ saving), `findings_for_resource`, `recommendation_history`, `review_findings`. B
 every draft with its rationale, about 66k tokens for 300 drafts and roughly half of the run's cost; it is now
 under 8k tokens for the same run.
 
+## Realised savings: verifying an approval against the bill
+
+Approving a recommendation is a claim; seven days later the bill can confirm it. `src/verify.ts` runs daily
+(`VERIFY_CRON`, 07:30, a runtime setting) over every approved recommendation up to thirty days after its
+decision, pulls the daily cost of the Cost Explorer lines the action moves (`costScopeFor` in
+`src/verify_math.ts`: Aurora storage and I/O lines for a storage-tier change, EBS GB-months for a termination
+or a volume deletion, the instance type's `BoxUsage` hours for a right-size or a Graviton move, NAT bytes for a
+cache or an endpoint, and so on), and compares the median of the 14 days before the decision with the median
+of the days after it, skipping the decision day and the next. The difference, scaled to a month, against the
+claimed saving gives the verdict: `realised` (60 % or more of the estimate), `partial`, `none`, `increase`;
+`too_early` until seven complete days exist; `not_verifiable` for actions that move no cost line (a flow log,
+a reservation). Where the inventory can see it, the row also says whether the action was applied (an instance
+gone or stopped, a type changed). The scope is account-wide for the line, since resource-level cost data is not
+enabled, and the row says so.
+
+Results are stored per recommendation per day (`verifications`), shown on the recommendation's detail
+("Realised") and summed on the Overview next to the top recommendations (claimed vs realised, how many still
+waiting). `GET /api/verifications`, `GET /api/verifications/:id`, `POST /api/verifications/run?force=1&id=`
+(force gives an early read before the seven days). Next: attach the verdict to the decision in the graph.
+
 ## The morning observation: the agent's read of the day
 
 Every morning after the review (`OBSERVE_CRON`, 07:15, only when repo2graph is configured) and on demand

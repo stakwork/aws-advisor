@@ -120,6 +120,14 @@ function ChangesSummary() {
   );
 }
 
+/** Approved savings: claimed against realised, from the daily verification (seven days after a decision). */
+function RealisedLine() {
+  const [v, setV] = useState<any>(null);
+  useEffect(() => { api("/verifications").then(setV).catch(() => setV(null)); }, []);
+  if (!v || !v.approved) return null;
+  return <Link to="/recommendations?status=approved" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">{v.approved} approved · claimed {usd(v.claimed_usd_month)}/mo · realised {usd(v.realised_usd_month)}/mo{v.pending ? ` · ${v.pending} awaiting ${v.min_days_after} days` : ""}</Link>;
+}
+
 const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up" };
 /** Yesterday's read of the collected statistics: idle instances, memory pressure, disks filling, idle containers, spend steps. */
 function ReviewSummary() {
@@ -294,7 +302,7 @@ export default function Overview() {
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Top recommendations by saving">
+        <Card title={<span className="flex items-center justify-between">Top recommendations by saving <RealisedLine /></span>}>
           {d.top.length === 0 ? <Empty>None open.</Empty> : (
             <ul className="divide-y divide-zinc-800">
               {d.top.map((r: any) => (

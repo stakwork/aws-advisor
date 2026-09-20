@@ -26,6 +26,7 @@ export default function Recommendations() {
   const [probe, setProbe] = useState<{ busy: boolean; result: any; error: string }>({ busy: false, result: null, error: "" });
   // Tailored resolution (src/resolve.ts): the latest one for the selected recommendation, polled while pending.
   const [resolution, setResolution] = useState<any>(null);
+  const [verification, setVerification] = useState<any>(null);
   const [resolving, setResolving] = useState(false);
   const rows = data?.recommendations ?? [];
 
@@ -34,6 +35,7 @@ export default function Recommendations() {
   useEffect(() => { if (selectedId) api(`/recommendations/${selectedId}`).then(setSel).catch(() => setSel(null)); else setSel(null); }, [selectedId]);
   const loadResolution = (id: number) => api(`/recommendations/${id}/resolution`).then(setResolution).catch(() => setResolution(null));
   useEffect(() => { setResolution(null); if (sel?.id) loadResolution(sel.id); }, [sel?.id]);
+  useEffect(() => { setVerification(null); if (sel?.id && sel.status === "approved") api(`/verifications/${sel.id}`).then((d) => setVerification(d.verification)).catch(() => setVerification(null)); }, [sel?.id, sel?.status]);
   useEffect(() => {
     if (resolution?.status !== "pending" || !sel?.id) return;
     const t = setInterval(() => {
@@ -147,6 +149,11 @@ export default function Recommendations() {
             <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
               <dt className="text-zinc-500">Estimated saving</dt><dd>{usd(sel.est_monthly_saving)} / month</dd>
               <dt className="text-zinc-500">Confidence</dt><dd>{sel.confidence != null ? Math.round(sel.confidence * 100) + "%" : "—"}</dd>
+              {sel.status === "approved" && <><dt className="text-zinc-500">Realised</dt><dd className="text-xs">{!verification ? <span className="text-zinc-500">not checked yet; the daily verification starts seven days after the decision</span>
+                : verification.verdict === "too_early" ? <span className="text-zinc-500">too early: {verification.note}</span>
+                : verification.verdict === "not_verifiable" ? <span className="text-zinc-500">{verification.note}</span>
+                : <><span className={verification.verdict === "realised" ? "text-emerald-300" : verification.verdict === "increase" ? "text-red-300" : "text-amber-300"}>{verification.verdict}</span> · {usd(verification.realised_usd_month)} / month{verification.ratio != null ? ` (${Math.round(verification.ratio * 100)} % of the estimate)` : ""} <span className="text-zinc-500">· {verification.note}{verification.scope_note ? ` · measured on ${verification.scope_note}` : ""}</span></>}
+                {verification?.applied && <div className="text-zinc-500">inventory: applied {verification.applied}</div>}</dd></>}
               <dt className="text-zinc-500">Resource</dt><dd className="break-all font-mono text-xs">{sel.resource}</dd>
               <dt className="text-zinc-500">Last seen in run</dt><dd>#{sel.run_id} · {when(sel.updated_at)}</dd>
               {sel.decided_at && <><dt className="text-zinc-500">Decision</dt><dd>{sel.status} by {sel.decided_by} at {when(sel.decided_at)}{sel.decision_scope && <span className="text-zinc-400"> · {sel.decision_scope === "generic" ? "generic: all resources of this kind" : "internal: this resource only"}</span>}{sel.decision_reason && <div className="text-zinc-400">“{sel.decision_reason}”</div>}</dd></>}
