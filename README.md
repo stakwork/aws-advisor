@@ -168,13 +168,15 @@ Expected: `"Arn": "arn:aws:iam::<ACCOUNT_ID>:user/aws-advisor"`. Give it the rea
 moves it to the role):
 
 ```
-aws iam put-user-policy --user-name aws-advisor --policy-name aws-advisor-read --policy-document file://policy.json
-# alternative: aws iam create-policy --policy-name aws-advisor-read --policy-document file://policy.json
-#              aws iam attach-user-policy --user-name aws-advisor --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/aws-advisor-read
+aws iam create-policy --policy-name aws-advisor-read --policy-document file://policy.json
+aws iam attach-user-policy --user-name aws-advisor --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/aws-advisor-read
+# not put-user-policy: an IAM user's inline policies are capped at 2,048 bytes in total, which the read policy
+# exceeds and which leaves no room for the next action the advisor asks for; a managed policy allows 6,144 bytes
+# and a user can carry ten of them. A role, as in the one-command setup, allows 10,240 bytes inline.
 aws iam create-access-key --user-name aws-advisor
 ```
 
-`put-user-policy` prints nothing on success. `create-access-key` prints `AccessKeyId` (`AKIA...`) and
+`attach-user-policy` prints nothing on success. `create-access-key` prints `AccessKeyId` (`AKIA...`) and
 `SecretAccessKey` once; store the two values in `~/.aws/credentials` under `[aws-advisor-user]` and nowhere else
 (not in the app, not in `.env`, not in a chat):
 
@@ -508,9 +510,28 @@ you just want keys to paste into the **Access keys** tab:
 
 ```
 aws iam create-user --user-name aws-advisor
-aws iam put-user-policy --user-name aws-advisor --policy-name aws-advisor-read --policy-document file://policy.json
+aws iam create-policy --policy-name aws-advisor-read --policy-document file://policy.json --query Policy.Arn --output text
+aws iam attach-user-policy --user-name aws-advisor --policy-arn <the ARN printed above>
 aws iam create-access-key --user-name aws-advisor          # paste AccessKeyId and SecretAccessKey into Settings
 aws ssm create-document --name AwsAdvisorProbe --document-type Command --document-format JSON --content file://probe-document.json
+```
+
+Use a managed policy (`create-policy` + `attach-user-policy`), not `put-user-policy`: a user's inline policies
+are limited to 2,048 bytes in total, the read policy is larger than that, and adding a later permission then
+fails with `LimitExceeded`. Managed policies allow 6,144 bytes each, up to ten per user.
+
+**Adding one permission later** (Settings > Permissions names the action; `cloudtrail:LookupEvents` was the
+first one added after onboarding): create a small managed policy and attach it, or replace the read policy
+with a new version of the recommended one from `GET /api/permissions` (`recommended_policy`):
+
+```
+aws iam create-policy --policy-name aws-advisor-cloudtrail \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"cloudtrail:LookupEvents","Resource":"*"}]}' \
+  --query Policy.Arn --output text
+aws iam attach-user-policy --user-name aws-advisor --policy-arn <the ARN printed above>
+# or, to update the read policy in place (keeps five versions at most; delete an old one first if it refuses):
+aws iam create-policy-version --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/aws-advisor-read \
+  --policy-document file://policy.json --set-as-default
 ```
 
 The recommended version, where the keys can only assume a role and the app never sees them, is the
