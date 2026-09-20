@@ -1255,12 +1255,25 @@ Two more sources, collected daily before the review (`LOGS_CRON`, 06:50) and on 
   three days run above its 14-day median (`log_step`) and notes groups over 5 GB with no retention. The brief
   carries the top ingesters. In the graph design this is the "ships logs to" edge with its rate and price.
 - **CloudTrail write events as the change feed** (`src/trail.ts`, `GET /api/trail?hours=`, `POST
-  /api/trail/refresh`, agent tool `cloudtrail_changes`): non read-only events of the last 26 hours from
-  `LookupEvents`, stored by event id (`trail_events`, 90 days) and summarised by action, source and user with
-  sample resources, the advisor's own SSM commands filtered out. This needs **`cloudtrail:LookupEvents`**, now
-  in the recommended policy; until it is granted the job records the missing action under Settings > Permissions
-  and the brief says the feed is not available. The observing agent is told to look here first for the cause of
-  a cost move: who changed what, when.
+  /api/trail/refresh`, agent tool `cloudtrail_changes`): non read-only events of the last 26 hours through the
+  SDK's `LookupEvents` with a real time window (Steampipe's `aws_cloudtrail_lookup_event` does not push the
+  window down and pages through the whole 90-day trail, at 2 requests per second, for any query), stored by
+  event id (`trail_events`, 90 days). The API returns 50 events per page at 2 pages a second, and this account
+  writes about 20,000 events a day, so the daily job takes three to four minutes; it stops at 900 pages. Almost
+  all of that is machine heartbeat the trail files as writes: SSM agents checking in, log streams being opened,
+  Batch and EKS running their tasks, instance roles registering push endpoints. Those are stored with `noise = 1`
+  (`isNoise`: a fixed list of event names, and any principal that is an AWS service, an instance id, a Batch or
+  autoscaling controller or a botocore session) and only counted; the summary and the brief show the rest, about
+  170 events a day here: people, deployment roles, lifecycle managers, CloudFormation. This needs
+  **`cloudtrail:LookupEvents`**, in the recommended policy; until it is granted the job records the missing
+  action under Settings > Permissions and the brief says the feed is not available. The observing agent is told
+  to look here first for the cause of a cost move: who changed what, when.
+
+What the collection costs in AWS API charges: nearly nothing. EC2, RDS, ElastiCache, SSM, Pricing, IAM and
+CloudTrail `LookupEvents` calls are free; CloudWatch `GetMetricStatistics` is free within the first million
+requests a month; the Cost Explorer API is the one metered call at 0.01 USD per request, and the advisor makes a
+few dozen a day (the spend refresh, the run, the baselines, the review, a reconstruction), about 3 USD a month.
+The `CloudTrail InsightsEvents` line on the bill is CloudTrail Insights, a feature of the account, not the advisor.
 
 ## The daily review: what the statistics say
 
