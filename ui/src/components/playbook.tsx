@@ -68,7 +68,11 @@ export function PlaybookPanel({ controlId, onClose, findings }: { controlId: str
   const ref = useRef<HTMLDivElement>(null);
   // Bring the panel into view when it opens or switches control: "nearest" leaves the
   // page alone if it is already visible, and only scrolls the minimum otherwise.
-  useEffect(() => { ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [controlId]);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    if (top < 0 || top > window.innerHeight * 0.66) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [controlId]);
   return (
     <div ref={ref}>
     <Card title={<span className="flex items-center justify-between">How to act <button className="text-zinc-500" onClick={onClose}>close</button></span>}>

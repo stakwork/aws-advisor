@@ -324,7 +324,13 @@ const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda:
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
 function DetailCell({ id, onClose, children }: { id: string; onClose: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [id]);
+  // Scroll only when the top of the detail is out of view (above, or in the bottom third): a tall detail must never
+  // be bottom-aligned by "nearest", which pushes the row you clicked off the screen.
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    if (top < 0 || top > window.innerHeight * 0.66) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [id]);
   return (
     <div ref={ref} className="min-w-0 break-words" onClick={(e) => e.stopPropagation()}>
       <Card title={<span className="flex items-center justify-between">Detail <button className="text-zinc-500" onClick={onClose}>close</button></span>}>
