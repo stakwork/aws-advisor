@@ -46,6 +46,8 @@ export function graphUriForDisplay(uri = config.neo4jUri): string | null {
 // ---- driver, logging ----------------------------------------------------------------------------------------
 
 let driver: Driver | null = null;
+/** Drops the cached driver so the next call connects with the current settings. */
+export function resetGraphDriver(): void { const d = driver; driver = null; if (d) d.close().catch(() => { /* closing */ }); }
 function getDriver(): Driver {
   if (!driver) {
     driver = neo4j.driver(config.neo4jUri, neo4j.auth.basic(config.neo4jUser, config.neo4jPassword), {

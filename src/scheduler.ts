@@ -14,12 +14,21 @@ import { refreshTrail } from "./trail.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
+const tasks: { stop: () => void }[] = [];
+
 function schedule(name: string, expr: string, fn: () => void): string | null {
   if (cronOff(expr)) { console.log(`${name} disabled`); return null; }
   if (!cron.validate(expr)) { console.error(`${name}: "${expr}" is not a valid cron expression; disabled`); return null; }
-  cron.schedule(expr, fn);
+  tasks.push(cron.schedule(expr, fn));
   console.log(`${name}: "${expr}"`);
   return expr;
+}
+
+/** Stops every scheduled task and starts them again from the current settings (after a cron was changed in Settings). */
+export function restartScheduler(): ReturnType<typeof startScheduler> {
+  for (const t of tasks.splice(0)) { try { t.stop(); } catch { /* already stopped */ } }
+  console.log("[scheduler] restarting on the current settings");
+  return startScheduler();
 }
 
 let watching = false;

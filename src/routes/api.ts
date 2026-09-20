@@ -15,6 +15,7 @@ import { checkPermissions, lastPermissionCheck } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
 import { latestWatchSummary, watchOnce } from "../watcher.js";
 import { cronOff } from "../scheduler.js";
+import { listRuntimeSettings, setRuntimeSetting } from "../runtime_settings.js";
 import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refreshInventory } from "../inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
@@ -131,6 +132,15 @@ api.post("/settings/aws/test", async (_req, res) => {
 });
 
 api.delete("/settings/aws", (_req, res) => { clearConnection(); res.json({ ok: true }); });
+
+// Runtime settings: the agent, Jev, the graph, the schedules, the probe pass. Saved values win over the env.
+api.get("/settings/runtime", (_req, res) => res.json({ settings: listRuntimeSettings() }));
+api.put("/settings/runtime", (req, res) => {
+  const { key, value } = req.body || {};
+  if (typeof key !== "string") return res.status(400).json({ error: "key required" });
+  try { res.json({ setting: setRuntimeSetting(key, value == null ? null : String(value)) }); }
+  catch (e: any) { res.status(400).json({ error: e.message }); }
+});
 
 api.put("/settings/benchmarks", (req, res) => {
   const enabled = (req.body?.enabled || []).filter((b: string) => ALL_BENCHMARKS.includes(b));

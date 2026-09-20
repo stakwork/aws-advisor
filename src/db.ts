@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
-import { config } from "./config.js";
+import { config, registerSettingsResolver } from "./config.js";
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 try { fs.chmodSync(config.dataDir, 0o700); } catch { /* not ours to change (mounted volume) */ }
@@ -365,3 +365,6 @@ export function getJsonSetting<T>(key: string, fallback: T): T {
   if (!v) return fallback;
   try { return JSON.parse(v) as T; } catch { return fallback; }
 }
+
+// Runtime settings saved from the Settings page live here as cfg:<key>; the config getters read them first.
+registerSettingsResolver((key) => getSetting(`cfg:${key}`));

@@ -1,8 +1,81 @@
 import "dotenv/config";
 import os from "node:os";
 import path from "node:path";
+import cron from "node-cron";
 
 const port = Number(process.env.PORT || 9034);
+
+/**
+ * Two kinds of setting. Bootstrap settings (port, paths, the three shared secrets, the Steampipe connection,
+ * the probe document) come from the environment only: the app needs them before the database exists, or they
+ * gate what a person can change from the UI. Runtime settings (the agent, Jev, the graph, the schedules, the
+ * probe pass) come from the Settings page first, then the environment, then a default: `settings` rows named
+ * `cfg:<key>` win, so a value entered in the app survives a restart and needs no env at all. The environment
+ * is the seed a deployment (the swarm) can provide; the app owns the rest.
+ */
+export type RuntimeKind = "string" | "secret" | "url" | "cron" | "number" | "bool" | "enum";
+export interface RuntimeSpec { key: string; env: string; kind: RuntimeKind; def: string; group: string; label: string; help: string; options?: readonly string[]; min?: number; max?: number }
+
+export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
+  { key: "repo2graphUrl", env: "REPO2GRAPH_URL", kind: "url", def: "", group: "Agent", label: "repo2graph URL", help: "The agent runner. Empty = rules only, no agent." },
+  { key: "repo2graphToken", env: "REPO2GRAPH_TOKEN", kind: "secret", def: "", group: "Agent", label: "repo2graph token", help: "boltwall's stakwork_secret (x-api-token)." },
+  { key: "agentModel", env: "AGENT_MODEL", kind: "string", def: "anthropic/claude-opus-5", group: "Agent", label: "Model", help: "repo2graph's provider/model form: anthropic/claude-opus-5, openai/gpt-5, openrouter/…" },
+  { key: "agentApiKey", env: "AGENT_API_KEY", kind: "secret", def: "", group: "Agent", label: "Provider API key", help: "Sent per request, so the agent can use a provider or key repo2graph does not hold. Empty = repo2graph's own key." },
+  { key: "agentWebSearch", env: "AGENT_WEB_SEARCH", kind: "bool", def: "false", group: "Agent", label: "Web search", help: "Off by default: a search query is an exfiltration channel for anything a hostile tag or probe line injects into a prompt." },
+  { key: "agentAutoDispatch", env: "AGENT_AUTO_DISPATCH", kind: "enum", def: "changes", options: ["changes", "always", "never"], group: "Agent", label: "Send findings after a run", help: "changes = only when the run's diff is not empty." },
+  { key: "alertInvestigate", env: "ALERT_INVESTIGATE", kind: "enum", def: "auto", options: ["auto", "manual", "off"], group: "Agent", label: "Investigate alerts", help: "auto = every new NAT alert Jev does not dismiss; manual = the button only; off = refuse." },
+  { key: "typesafeApiKey", env: "TYPESAFE_API_KEY", kind: "secret", def: "", group: "Jev (TypeSafe)", label: "API key", help: "Typed decisions: alert triage, resource roles, tier checks, decision scope. Empty = every Jev use is a no-op." },
+  { key: "jevModel", env: "JEV_MODEL", kind: "string", def: "jev-latest", group: "Jev (TypeSafe)", label: "Model", help: "" },
+  { key: "neo4jUri", env: "NEO4J_URI", kind: "url", def: "", group: "Graph mirror (Neo4j)", label: "Bolt URI", help: "bolt://host:7687. Empty = the mirror is off." },
+  { key: "neo4jUser", env: "NEO4J_USER", kind: "string", def: "neo4j", group: "Graph mirror (Neo4j)", label: "User", help: "" },
+  { key: "neo4jPassword", env: "NEO4J_PASSWORD", kind: "secret", def: "", group: "Graph mirror (Neo4j)", label: "Password", help: "" },
+  { key: "neo4jDatabase", env: "NEO4J_DATABASE", kind: "string", def: "", group: "Graph mirror (Neo4j)", label: "Database", help: "Empty = the server's default database." },
+  { key: "runCron", env: "RUN_CRON", kind: "cron", def: "0 6 * * *", group: "Schedules", label: "Collection run", help: "Powerpipe benchmarks, rules, changes. off = disabled." },
+  { key: "watchCron", env: "WATCH_CRON", kind: "cron", def: "*/30 * * * *", group: "Schedules", label: "Watcher", help: "Instances, NAT traffic, pools, EBS; raises alerts." },
+  { key: "probeCron", env: "PROBE_CRON", kind: "cron", def: "30 5 * * *", group: "Schedules", label: "Probe pass", help: "SSM probes; hourly (5 * * * *) fills the utilisation charts." },
+  { key: "spendCron", env: "SPEND_CRON", kind: "cron", def: "15 */6 * * *", group: "Schedules", label: "Spend refresh", help: "Cost Explorer, at most every 6 hours." },
+  { key: "logsCron", env: "LOGS_CRON", kind: "cron", def: "50 6 * * *", group: "Schedules", label: "Logs and CloudTrail", help: "Log groups, ingestion, write events (3 to 4 minutes)." },
+  { key: "baselineCron", env: "BASELINE_CRON", kind: "cron", def: "40 6 * * *", group: "Schedules", label: "Baselines", help: "What is typical per gateway, instance and service." },
+  { key: "reviewCron", env: "REVIEW_CRON", kind: "cron", def: "0 7 * * *", group: "Schedules", label: "Daily review", help: "Reads the statistics back: idle, disks, containers, spend steps." },
+  { key: "observeCron", env: "OBSERVE_CRON", kind: "cron", def: "15 7 * * *", group: "Schedules", label: "Morning observation", help: "The agent's read of the day; needs the repo2graph URL." },
+  { key: "probeScope", env: "PROBE_SCOPE", kind: "enum", def: "idle", options: ["idle", "all"], group: "Probe pass", label: "Scope", help: "idle = idle candidates and open idle recommendations; all = every SSM-online running instance." },
+  { key: "probeMax", env: "PROBE_MAX", kind: "number", def: "25", min: 1, max: 500, group: "Probe pass", label: "Instances per pass", help: "" },
+  { key: "probeIdleCpu", env: "PROBE_IDLE_CPU", kind: "number", def: "20", min: 1, max: 100, group: "Probe pass", label: "Idle CPU threshold (%)", help: "Below this 30-day average an instance is a probe candidate (scope idle)." },
+  { key: "probeMinIntervalHours", env: "PROBE_MIN_INTERVAL_HOURS", kind: "number", def: "20", min: 0.1, max: 168, group: "Probe pass", label: "Minimum hours between probes", help: "Match it to the probe cron (0.9 for hourly)." },
+];
+const SPEC = new Map(RUNTIME_SETTINGS.map((r) => [r.key, r]));
+
+/** Registered by src/db.ts once the settings table exists; until then only the environment is consulted. */
+let resolver: (key: string) => string | null = () => null;
+export function registerSettingsResolver(fn: (key: string) => string | null): void { resolver = fn; }
+
+const envRaw = (spec: RuntimeSpec) => { const v = process.env[spec.env]; return v === undefined ? null : v; };
+/** The raw string for a key: the saved setting, else the environment, else the default. */
+export function runtimeRaw(key: string): { value: string; source: "setting" | "env" | "default" } {
+  const spec = SPEC.get(key); if (!spec) throw new Error(`unknown runtime setting ${key}`);
+  const saved = resolver(key); if (saved != null) return { value: saved, source: "setting" };
+  const env = envRaw(spec); if (env != null) return { value: env.trim(), source: "env" };
+  return { value: spec.def, source: "default" };
+}
+const rt = (key: string) => runtimeRaw(key).value;
+const rtBool = (key: string) => /^(1|true|yes|on)$/i.test(rt(key));
+const rtNum = (key: string) => { const s = SPEC.get(key)!; const n = Number(rt(key)); return Number.isFinite(n) ? n : Number(s.def); };
+const rtEnum = <T extends string>(key: string): T => { const s = SPEC.get(key)!; const v = rt(key); return (s.options!.includes(v) ? v : s.def) as T; };
+
+/** Validates a value for a key; returns the normalised string to store, or throws with a message for the UI. */
+export function validateRuntime(key: string, value: string): string {
+  const spec = SPEC.get(key); if (!spec) throw new Error(`unknown setting ${key}`);
+  const v = String(value ?? "").trim();
+  switch (spec.kind) {
+    case "cron": if (!/^(off|none|false|0)$/i.test(v) && !cron.validate(v)) throw new Error(`"${v}" is not a cron expression (five fields, e.g. "0 6 * * *") or "off"`); return v;
+    case "number": { const n = Number(v); if (!Number.isFinite(n)) throw new Error("a number is required"); if (spec.min != null && n < spec.min) throw new Error(`at least ${spec.min}`); if (spec.max != null && n > spec.max) throw new Error(`at most ${spec.max}`); return String(n); }
+    case "bool": if (!/^(true|false|1|0|yes|no|on|off)$/i.test(v)) throw new Error("true or false"); return /^(1|true|yes|on)$/i.test(v) ? "true" : "false";
+    case "enum": if (!spec.options!.includes(v)) throw new Error(`one of ${spec.options!.join(", ")}`); return v;
+    case "url": if (v && !/^(https?|bolt(\+s|\+ssc)?|neo4j(\+s|\+ssc)?):\/\/[^\s]+$/i.test(v)) throw new Error("a URL (http://, https://, bolt:// or neo4j://) or empty"); return v.replace(/\/$/, "");
+    default: if (v.length > 500) throw new Error("too long"); return v;
+  }
+}
+export const isSecretSetting = (key: string) => SPEC.get(key)?.kind === "secret";
 
 export const config = {
   port,
@@ -25,58 +98,42 @@ export const config = {
   awsSharedCredentialsFile: process.env.AWS_SHARED_CREDENTIALS_FILE || path.join(os.homedir(), ".aws", "credentials"),
   modDir: process.env.POWERPIPE_MOD_DIR || path.resolve("mod"),
   powerpipeBin: process.env.POWERPIPE_BIN || "powerpipe",
-  repo2graphUrl: (process.env.REPO2GRAPH_URL || "").replace(/\/$/, ""),
-  repo2graphToken: process.env.REPO2GRAPH_TOKEN || "",
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, ""),
   /** Interface to listen on. Unset = every interface (containers reach the host that way); 127.0.0.1 for a laptop with no swarm. */
   bindAddr: (process.env.BIND_ADDR || "").trim(),
-  /** Let the repo2graph agent use web search. Off by default: prices and facts come from the MCP tools, and a search query is an exfiltration channel for anything a hostile tag or probe line injected into the prompt. */
-  agentWebSearch: /^(1|true|yes)$/i.test(process.env.AGENT_WEB_SEARCH || ""),
-  agentModel: process.env.AGENT_MODEL || "anthropic/claude-opus-5",
-  /** Optional: LLM key forwarded per request so a local repo2graph needs no key of its own. */
-  agentApiKey: process.env.AGENT_API_KEY || "",
   /** Bearer token the MCP fact server at /mcp expects. Unset = open (local dev only). */
   mcpToken: process.env.MCP_TOKEN || "",
-  /** Cron expression for scheduled full runs. "off" disables it. */
-  runCron: process.env.RUN_CRON === undefined ? "0 6 * * *" : process.env.RUN_CRON.trim(),
-  /** Cron expression for the lightweight watcher (cheap live queries, no Powerpipe/Cost Explorer). "off" disables it. */
-  watchCron: process.env.WATCH_CRON === undefined ? "*/30 * * * *" : process.env.WATCH_CRON.trim(),
-  /** Automatic SSM probe pass over idle candidates, shortly before the daily run. */
-  probeCron: process.env.PROBE_CRON === undefined ? "30 5 * * *" : process.env.PROBE_CRON.trim(),
-  probeMax: Number(process.env.PROBE_MAX || 25),
-  /** `idle` (default): only idle candidates and open idle recommendations. `all`: every SSM-online running instance. */
-  probeScope: (process.env.PROBE_SCOPE || "idle").trim() === "all" ? "all" as const : "idle" as const,
-  /** Daily spend refresh (one Cost Explorer call per fetch, skipped when the last one is younger than 6 hours). "off" disables it. */
-  spendCron: process.env.SPEND_CRON === undefined ? "15 */6 * * *" : process.env.SPEND_CRON.trim(),
-  /** SSM document the probe runs through. AWS-RunShellScript needs no setup but runs any shell; a custom document (GET /api/probe/document) embeds the fixed script so IAM can be scoped to it. */
   /** SSM document the probe runs through. The custom document embeds the fixed script, so ssm:SendCommand
-   *  can be granted on it alone. AWS-RunShellScript runs ANY shell text and is only for a throwaway test. */
+   *  can be granted on it alone. AWS-RunShellScript runs ANY shell text and is refused outside the tests.
+   *  Environment only: it is part of the IAM scoping, not something to change from a browser. */
   probeDocument: (process.env.PROBE_DOCUMENT || "AwsAdvisorProbe").trim(),
-  probeIdleCpu: Number(process.env.PROBE_IDLE_CPU || 20),
-  /** Daily baseline refresh (NAT bytes, CPU, probes, spend per service). "off" disables it. */
-  baselineCron: (process.env.BASELINE_CRON || "40 6 * * *").trim(),
-  /** Daily review of the collected statistics (after the baselines). "off" disables it. */
-  reviewCron: (process.env.REVIEW_CRON || "0 7 * * *").trim(),
-  /** Daily CloudWatch Logs (groups, ingestion) and CloudTrail (write events) collection, before the review. */
-  logsCron: (process.env.LOGS_CRON || "50 6 * * *").trim(),
-  /** The agent's morning observation (after the review; needs REPO2GRAPH_URL). "off" disables it. */
-  observeCron: (process.env.OBSERVE_CRON || "15 7 * * *").trim(),
-  /** Do not re-probe an instance probed more recently than this (hours). Match it to PROBE_CRON. */
-  probeMinIntervalHours: Number(process.env.PROBE_MIN_INTERVAL_HOURS || 20),
-  /** After a run: hand findings to repo2graph "always", "never", or only on material "changes" (default). */
-  agentAutoDispatch: (["changes", "always", "never"].includes(process.env.AGENT_AUTO_DISPATCH || "") ? process.env.AGENT_AUTO_DISPATCH : "changes") as "changes" | "always" | "never",
-  /** Watcher alerts: "auto" investigates every new nat_traffic alert with the agent (when REPO2GRAPH_URL is set), "manual" only on the button or the API, "off" refuses investigations. */
-  alertInvestigate: (["auto", "manual", "off"].includes(process.env.ALERT_INVESTIGATE || "") ? process.env.ALERT_INVESTIGATE : "auto") as "auto" | "manual" | "off",
-  /** TypeSafe (Jev) API key for typed decisions: alert triage, resource roles, tier checks. Unset = every Jev use is a no-op. */
-  typesafeApiKey: (process.env.TYPESAFE_API_KEY || "").trim(),
-  /** Jev model name sent with every systemOne call. */
-  jevModel: (process.env.JEV_MODEL || "jev-latest").trim(),
-  /** Neo4j the operational data is mirrored into (one way, see src/graph_mirror.ts). Unset = the mirror is off and every mirror call is a no-op. */
-  neo4jUri: (process.env.NEO4J_URI || "").trim(),
-  neo4jUser: (process.env.NEO4J_USER || "neo4j").trim(),
-  neo4jPassword: process.env.NEO4J_PASSWORD || "",
-  /** Optional database name (Neo4j Enterprise / multi-database); unset = the server's default database. */
-  neo4jDatabase: (process.env.NEO4J_DATABASE || "").trim(),
+
+  // ---- runtime settings: Settings page, then env, then default (see RUNTIME_SETTINGS) ----
+  get repo2graphUrl(): string { return rt("repo2graphUrl").replace(/\/$/, ""); },
+  get repo2graphToken(): string { return rt("repo2graphToken"); },
+  get agentModel(): string { return rt("agentModel") || "anthropic/claude-opus-5"; },
+  get agentApiKey(): string { return rt("agentApiKey"); },
+  get agentWebSearch(): boolean { return rtBool("agentWebSearch"); },
+  get agentAutoDispatch(): "changes" | "always" | "never" { return rtEnum("agentAutoDispatch"); },
+  get alertInvestigate(): "auto" | "manual" | "off" { return rtEnum("alertInvestigate"); },
+  get typesafeApiKey(): string { return rt("typesafeApiKey"); },
+  get jevModel(): string { return rt("jevModel") || "jev-latest"; },
+  get neo4jUri(): string { return rt("neo4jUri"); },
+  get neo4jUser(): string { return rt("neo4jUser") || "neo4j"; },
+  get neo4jPassword(): string { return rt("neo4jPassword"); },
+  get neo4jDatabase(): string { return rt("neo4jDatabase"); },
+  get runCron(): string { return rt("runCron"); },
+  get watchCron(): string { return rt("watchCron"); },
+  get probeCron(): string { return rt("probeCron"); },
+  get spendCron(): string { return rt("spendCron"); },
+  get logsCron(): string { return rt("logsCron"); },
+  get baselineCron(): string { return rt("baselineCron"); },
+  get reviewCron(): string { return rt("reviewCron"); },
+  get observeCron(): string { return rt("observeCron"); },
+  get probeScope(): "idle" | "all" { return rtEnum("probeScope"); },
+  get probeMax(): number { return rtNum("probeMax"); },
+  get probeIdleCpu(): number { return rtNum("probeIdleCpu"); },
+  get probeMinIntervalHours(): number { return rtNum("probeMinIntervalHours"); },
 };
 
 if (!/^[A-Za-z0-9_.:/-]+$/.test(config.probeDocument)) {
@@ -98,7 +155,4 @@ if (!/^[a-z_][a-z0-9_]*$/.test(config.schema)) {
 }
 if (!/^[A-Za-z0-9_.-]+$/.test(config.advisorAwsProfile)) {
   throw new Error(`ADVISOR_AWS_PROFILE must be an AWS profile name (letters, digits, _ . -), got "${config.advisorAwsProfile}"`);
-}
-if (config.probeDocument === "AWS-RunShellScript") {
-  console.warn("PROBE_DOCUMENT=AWS-RunShellScript lets whoever holds the advisor's credentials run any command on any instance. Use the custom AwsAdvisorProbe document (the default) outside throwaway tests.");
 }

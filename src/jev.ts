@@ -31,6 +31,8 @@ export interface AskOptions {
 export const jevEnabled = () => Boolean(config.typesafeApiKey);
 
 let client: TypeSafeClient | null = null;
+/** Drops the cached client so the next call uses the current key and model. */
+export function resetJevClient(): void { client = null; }
 function getClient(): TypeSafeClient | null {
   if (!jevEnabled()) return null;
   if (!client) {
