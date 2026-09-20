@@ -301,6 +301,29 @@ export function createFactServer(): McpServer {
     annotations: ro,
   }, (a) => instanceInventory(a));
 
+  server.registerTool("open_recommendations", {
+    title: "Open recommendations with their full rationale",
+    description: "The advisor's open recommendations (rule drafts and earlier agent items) with title, resource, action type, claimed monthly saving, tier, confidence, the full rationale and the evidence the rule attached (prices, metrics, probe, role). Filter by rule (e.g. graviton_migration, idle_instance, review_idle), by resource id or substring, by ids, or by minimum saving; ordered by saving. The findings batch prompt only summarises these: call this for any item you want to judge, rank or merge.",
+    inputSchema: {
+      rule: z.string().max(60).optional(), resource: z.string().max(200).optional(),
+      ids: z.array(z.number().int()).max(50).optional(), min_saving: z.number().optional(),
+      status: z.enum(["open", "approved", "rejected", "snoozed", "resolved", "any"]).default("open"),
+      limit: z.number().int().min(1).max(100).default(20),
+    },
+    annotations: ro,
+  }, (a) => {
+    const where: string[] = []; const params: unknown[] = [];
+    if (a.status !== "any") { where.push("status = ?"); params.push(a.status); }
+    if (a.rule) { where.push("rule = ?"); params.push(a.rule); }
+    if (a.resource) { where.push("(resource = ? or resource like ? or resource_name like ?)"); params.push(a.resource, `%${a.resource}%`, `%${a.resource}%`); }
+    if (a.ids?.length) { where.push(`id in (${a.ids.map(() => "?").join(",")})`); params.push(...a.ids); }
+    if (a.min_saving != null) { where.push("coalesce(est_monthly_saving, 0) >= ?"); params.push(a.min_saving); }
+    const rows = db.prepare(`select id, rule, source, title, resource, resource_name, action_type, est_monthly_saving, tier, confidence, rationale, evidence, status, decided_by, decision_reason, run_id, updated_at
+      from recommendations ${where.length ? `where ${where.join(" and ")}` : ""} order by coalesce(est_monthly_saving, -1) desc, id desc limit ?`).all(...params, a.limit) as any[];
+    const total = (db.prepare(`select count(*) as n from recommendations ${where.length ? `where ${where.join(" and ")}` : ""}`).get(...params) as { n: number }).n;
+    return text({ total, returned: rows.length, recommendations: rows.map((r) => ({ ...r, evidence: (() => { try { return JSON.parse(r.evidence); } catch { return r.evidence; } })() })) });
+  });
+
   server.registerTool("baseline", {
     title: "What is typical for a gateway, instance or service",
     description: "The advisor's baselines: median, MAD (robust spread), p95, max, days of history and, after seven days, a median per hour of day (UTC) and per day of week. Scopes: nat (bytes_hour, bytes_hour_in, bytes_hour_out; 14 days of CloudWatch), instance (cpu_pct, cpu_pct_max from CloudWatch; mem_pct, disk_pct, load_per_cpu, containers from the hourly probes, 30 days), service (net_usd_day, 60 days of Cost Explorer). Pass a value to have it scored against the baseline for the current hour: expected value, ratio, robust z and a level (normal / high / extreme). Use this before calling anything 'unusual'.",
