@@ -269,7 +269,6 @@ export async function investigateAlert(alertId: number, opts: { force?: boolean 
     const { requestId } = await postAgentRequest({
       prompt,
       systemOverride: getPrompt("incident"),
-      jsonSchema: INCIDENT_SCHEMA,
       sessionId: `aws-advisor-incident-${incidentId}-${Date.now().toString(36)}`,
       agentName: "aws-incident-investigator",
       metadata: { alertId, incidentId, kind: alert.kind },

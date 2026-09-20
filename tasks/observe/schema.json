@@ -1,0 +1,118 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "three sentences at most: the state of the account today"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "what": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string",
+            "description": "the most likely cause, or 'unknown'"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "the numbers and the tool or fact they come from"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "expected": {
+            "type": "boolean",
+            "description": "routine for this environment"
+          },
+          "confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "what",
+          "why",
+          "evidence",
+          "expected",
+          "confidence"
+        ]
+      }
+    },
+    "attention": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "urgency": {
+            "type": "string",
+            "enum": [
+              "today",
+              "this week",
+              "when convenient"
+            ]
+          }
+        },
+        "required": [
+          "item",
+          "reason",
+          "urgency"
+        ]
+      }
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "est_monthly_saving": {
+            "type": "number"
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "approve",
+              "report"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "rationale",
+          "tier"
+        ]
+      }
+    },
+    "nothing_to_report": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "summary",
+    "changes",
+    "attention",
+    "proposals",
+    "nothing_to_report"
+  ]
+}

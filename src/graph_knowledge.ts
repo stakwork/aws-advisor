@@ -66,7 +66,18 @@ export function systemsFromInventory(ec2: any[], rds: any[], cache: any[], roles
   return [...out.values()];
 }
 
-/** Lambda functions the latest run flagged, as systems of their own (there is no Lambda inventory yet). */
+export interface LambdaFacts { name: string; region: string; memory_mb: number; arm: boolean; invocations_30d: number; duration_ms_30d: number; days: number }
+export const LAMBDA_PRICE = { gb_second_x86: 0.0000166667, gb_second_arm: 0.0000133334, per_request: 0.20 / 1e6 };
+/** A function's monthly cost at list from 30 days of metrics: GB-seconds × the architecture's rate + requests. Pure. */
+export function lambdaMonthlyCost(f: LambdaFacts): { gb_seconds_month: number; invocations_month: number; usd_month: number } {
+  const scale = f.days > 0 ? 30 / f.days : 0;
+  const gbSeconds = (f.duration_ms_30d / 1000) * (f.memory_mb / 1024) * scale;
+  const invocations = f.invocations_30d * scale;
+  const usd = gbSeconds * (f.arm ? LAMBDA_PRICE.gb_second_arm : LAMBDA_PRICE.gb_second_x86) + invocations * LAMBDA_PRICE.per_request;
+  return { gb_seconds_month: Math.round(gbSeconds), invocations_month: Math.round(invocations), usd_month: Math.round(usd * 100) / 100 };
+}
+
+/** Lambda functions as systems, from the account's function list (fallback: the ARNs the latest run flagged). */
 export function lambdaSystems(arns: string[]): SystemDef[] {
   const out = new Map<string, SystemDef>();
   for (const arn of arns) {
@@ -120,17 +131,40 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   const ec2Rows = db.prepare("select * from inventory_ec2").all() as any[];
   const latestRun = (db.prepare("select max(run_id) as id from findings").get() as { id: number | null }).id;
   const lambdaArns = latestRun ? (db.prepare("select distinct resource from findings where run_id = ? and resource like 'arn:aws:lambda:%'").all(latestRun) as { resource: string }[]).map((r) => r.resource) : [];
-  const systems = [...systemsFromInventory(ec2Rows, db.prepare("select * from inventory_rds").all(), db.prepare("select * from inventory_elasticache").all(), roles, nats), ...lambdaSystems(lambdaArns)];
+  // Lambda: every function in the account with 30 days of invocations and duration, priced at list
+  const lambdaFacts = new Map<string, LambdaFacts>();
+  try {
+    const fns = await query<any>(`select name, region, memory_size, architectures from ${S}.aws_lambda_function`);
+    const inv = await query<any>(`select name, sum(sum) as n, count(*) as days from ${S}.aws_lambda_function_metric_invocations_daily where timestamp > now() - interval '30 days' group by 1`);
+    const dur = await query<any>(`select name, sum(sum) as ms from ${S}.aws_lambda_function_metric_duration_daily where timestamp > now() - interval '30 days' group by 1`);
+    const invBy = new Map(inv.map((r) => [r.name, r])); const durBy = new Map(dur.map((r) => [r.name, r]));
+    for (const f of fns) {
+      const arch = Array.isArray(f.architectures) ? f.architectures : (() => { try { return JSON.parse(f.architectures || "[]"); } catch { return []; } })();
+      lambdaFacts.set(f.name, { name: f.name, region: f.region, memory_mb: Number(f.memory_size || 128), arm: arch.includes("arm64"), invocations_30d: Number(invBy.get(f.name)?.n || 0), duration_ms_30d: Number(durBy.get(f.name)?.ms || 0), days: Number(invBy.get(f.name)?.days || 0) });
+    }
+  } catch (e) { console.warn(`[graph] lambda facts unavailable: ${String((e as any)?.message || e).slice(0, 160)}`); }
+  const lambdaFromAccount: SystemDef[] = [...lambdaFacts.values()].map((f) => ({ id: `lambda:${f.name}`, name: f.name, kind: "lambda", archetype: "batch_or_worker", members: [`arn:aws:lambda:${f.region}:${account}:function:${f.name}`], types: [], ebs_gb: 0, region: f.region }));
+  const systems = [...systemsFromInventory(ec2Rows, db.prepare("select * from inventory_rds").all(), db.prepare("select * from inventory_elasticache").all(), roles, nats), ...(lambdaFromAccount.length ? lambdaFromAccount : lambdaSystems(lambdaArns))];
   const attribution = attributionContext(systems, ec2Rows);
   const rows = systems.map((s) => {
+    if (s.kind === "lambda") {
+      const f = lambdaFacts.get(s.name);
+      const cost = f ? lambdaMonthlyCost(f) : null;
+      const types = f && cost ? [
+        { id: f.arm ? "usage|lambda_gb_second_arm" : "usage|lambda_gb_second", key: "", kind: "usage", sku: f.arm ? "lambda_gb_second_arm" : "lambda_gb_second", region: f.region, count: cost.gb_seconds_month, hours_month: null, list_price: f.arm ? LAMBDA_PRICE.gb_second_arm : LAMBDA_PRICE.gb_second_x86, list_usd_month: Math.round(cost.gb_seconds_month * (f.arm ? LAMBDA_PRICE.gb_second_arm : LAMBDA_PRICE.gb_second_x86) * 100) / 100 },
+        { id: "usage|lambda_requests", key: "", kind: "usage", sku: "lambda_requests", region: f.region, count: cost.invocations_month, hours_month: null, list_price: LAMBDA_PRICE.per_request, list_usd_month: Math.round(cost.invocations_month * LAMBDA_PRICE.per_request * 100) / 100 },
+      ] : [];
+      return { id: s.id, name: s.name, kind: s.kind, parent: null, pool_kind: null, archetype: s.archetype, member_count: 1, members: [], refs: s.members, ebs_gb: 0, ebs_usd_month: 0, region: s.region, monthly_list_usd: cost?.usd_month ?? 0, types, lambda: f ? { memory_mb: f.memory_mb, arm: f.arm, invocations_month: cost!.invocations_month, gb_seconds_month: cost!.gb_seconds_month, days: f.days } : null };
+    }
     const types = s.types.map((t) => { const price = priceFor(t.kind, t.sku, t.region); return { ...t, id: t.key, hours_month: HOURS_PER_MONTH * t.count, list_price: price, list_usd_month: price != null ? Math.round(price * HOURS_PER_MONTH * t.count * 100) / 100 : null }; });
     const list = types.reduce((sum, t) => sum + (t.list_usd_month || 0), 0) + s.ebs_gb * 0.08;
-    return { id: s.id, name: s.name, kind: s.kind, parent: s.parent ?? null, pool_kind: s.pool_kind ?? null, archetype: s.archetype, member_count: s.members.length, members: s.kind === "lambda" ? [] : s.members, refs: s.kind === "lambda" ? s.members : [], ebs_gb: Math.round(s.ebs_gb), ebs_usd_month: Math.round(s.ebs_gb * 0.08 * 100) / 100, region: s.region, monthly_list_usd: Math.round(list * 100) / 100, types };
+    return { id: s.id, name: s.name, kind: s.kind, parent: s.parent ?? null, pool_kind: s.pool_kind ?? null, archetype: s.archetype, member_count: s.members.length, members: s.members, refs: [] as string[], ebs_gb: Math.round(s.ebs_gb), ebs_usd_month: Math.round(s.ebs_gb * 0.08 * 100) / 100, region: s.region, monthly_list_usd: Math.round(list * 100) / 100, types, lambda: null as any };
   });
   await writeCypher(`
 UNWIND $rows AS row
 MERGE (s:KnSystem {id: row.id})
 SET s += {name: row.name, kind: row.kind, pool_kind: row.pool_kind, archetype: row.archetype, member_count: row.member_count, ebs_gb: row.ebs_gb, ebs_usd_month: row.ebs_usd_month, region: row.region, monthly_list_usd: row.monthly_list_usd, account_id: $account, gone: false, updated_at: $now}
+SET s.lambda_memory_mb = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.memory_mb END, s.lambda_arm = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.arm END, s.invocations_month = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.invocations_month END, s.gb_seconds_month = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.gb_seconds_month END
 WITH s, row
 MATCH (a:AdvisorAccount {id: $account}) MERGE (s)-[:IN_ACCOUNT]->(a)
 WITH s, row
@@ -257,6 +291,7 @@ export async function graphBill() {
     { category: "EC2 compute (running fleet, a month at list)", graph_usd_month: c.ec2?.list_usd_month ?? 0, bill_usd_month: byService("Amazon Elastic Compute Cloud - Compute"), detail: `${c.ec2?.units ?? 0} instances in ${c.ec2?.systems ?? 0} systems` },
     { category: "RDS instances", graph_usd_month: c.rds?.list_usd_month ?? 0, bill_usd_month: null, detail: `${c.rds?.units ?? 0} instances; the bill's RDS line also carries storage and I/O` },
     { category: "ElastiCache nodes", graph_usd_month: c.elasticache?.list_usd_month ?? 0, bill_usd_month: byService("Amazon ElastiCache"), detail: `${c.elasticache?.units ?? 0} nodes` },
+    { category: "Lambda (30 days of invocations and duration)", graph_usd_month: c.usage?.list_usd_month ?? 0, bill_usd_month: byService("AWS Lambda"), detail: `${c.usage?.systems ?? 0} functions with metrics; at list, before the Compute Savings Plan and the free tier the bill applies to Lambda` },
     { category: "EBS attached to running instances", graph_usd_month: Number(ebs.rows[0]?.usd || 0), bill_usd_month: null, detail: `${Math.round(Number(ebs.rows[0]?.gb || 0))} GB at gp3 list` },
     ...transfer.rows.map((r) => ({ category: `Transfer: ${r.mechanism}`, graph_usd_month: Number(r.usd || 0), bill_usd_month: null, detail: `${Number(r.gb_day || 0).toFixed(1)} GB/day` })),
     { category: "CloudWatch Logs ingestion + storage", graph_usd_month: Number(logs.rows[0]?.ingest || 0) + Number(logs.rows[0]?.storage || 0), bill_usd_month: byService("AmazonCloudWatch"), detail: `${logs.rows[0]?.groups ?? 0} groups` },

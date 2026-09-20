@@ -15,7 +15,9 @@ import { spendSummary } from "./spend.js";
 import { getBaseline } from "./baselines.js";
 import { poolSummary } from "./inventory.js";
 import { changeSummaryText } from "./changes.js";
-import { BriefFacts, gradeObservation } from "./observe_grade.js";
+import { BriefFacts } from "./observe_grade.js";
+import { gradeByRubric } from "./rubric.js";
+import { taskFor } from "./tasks.js";
 import { postAgentRequest, type AgentRunRow } from "./agent.js";
 import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
@@ -115,11 +117,9 @@ export async function dispatchObservation(day = new Date().toISOString().slice(0
   const { requestId } = await postAgentRequest({
     prompt: brief.text,
     systemOverride: getPrompt("observe"),
-    jsonSchema: OBSERVE_SCHEMA,
     sessionId: `aws-advisor-observe-${day}-${Date.now().toString(36)}`,
     agentName: "aws-observer",
     metadata: { day, observationId: id },
-    maxTurns: 40,
     link: { kind: "observe", day },
   });
   db.prepare("update observations set request_id = ? where id = ?").run(requestId, id);
@@ -134,7 +134,8 @@ export function completeObservation(run: AgentRunRow, payload: { status: string;
     return;
   }
   const content = payload.result?.content ?? payload.result;
-  const grade = gradeObservation(content, buildObserveBrief(row.day).facts);
+  const f = buildObserveBrief(row.day).facts;
+  const grade = gradeByRubric(content, taskFor("observe").rubric, { resources: [...f.review_resources, ...f.alert_resources] });
   db.prepare("update observations set status = 'completed', result = ?, score = ?, grade = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(content), grade.score, JSON.stringify(grade), row.id);
   console.log(`[observe] ${row.day}: score ${grade.score.toFixed(2)} (${grade.checks.filter((c) => c.pass).length}/${grade.checks.length})`);
 }

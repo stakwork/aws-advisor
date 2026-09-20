@@ -11,6 +11,8 @@ import { prompts } from "./routes/prompts.js";
 import { browse } from "./routes/browse.js";
 import { mountMcp } from "./mcp.js";
 import { startScheduler } from "./scheduler.js";
+import { loadTasks } from "./tasks.js";
+loadTasks();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();

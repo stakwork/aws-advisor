@@ -1,0 +1,78 @@
+{
+  "kind": "observe",
+  "title": "Morning observation",
+  "when": "every morning after the review, with what changed in the last day: review findings, alerts, spend against baseline, pools, logs, CloudTrail, run changes",
+  "tools": [
+    "baseline",
+    "instance_history",
+    "review_findings",
+    "bill",
+    "pools",
+    "log_groups",
+    "cloudtrail_changes",
+    "graph_systems",
+    "graph_system",
+    "graph_bill",
+    "instance_inventory",
+    "steampipe_query",
+    "cloudwatch_metric",
+    "recommendation_history",
+    "alert_context"
+  ],
+  "max_turns": 40,
+  "rubric": [
+    {
+      "check": "required",
+      "path": "summary",
+      "label": "summary present"
+    },
+    {
+      "check": "numbers",
+      "path": "changes[].evidence",
+      "label": "every change cites numbers in its evidence"
+    },
+    {
+      "check": "covers",
+      "path": "*",
+      "facts": "resources",
+      "min_share": 0.6,
+      "label": "covers what the review and the alerts raised"
+    },
+    {
+      "check": "no_destructive_auto",
+      "path": "proposals[]",
+      "label": "no destructive proposal at tier auto"
+    },
+    {
+      "check": "required",
+      "path": "proposals[].resource",
+      "label": "every proposal names its resource"
+    },
+    {
+      "check": "range",
+      "path": "changes[].confidence",
+      "min": 0,
+      "max": 1,
+      "label": "confidence between 0 and 1"
+    },
+    {
+      "check": "max_sentences",
+      "path": "summary",
+      "max": 3,
+      "label": "summary is three sentences or fewer"
+    },
+    {
+      "check": "flag_consistent",
+      "flag": "nothing_to_report",
+      "lists": [
+        "changes[]",
+        "attention[]"
+      ],
+      "label": "nothing_to_report is consistent with the lists"
+    }
+  ],
+  "retry": {
+    "on_score_below": 0.75,
+    "max": 1
+  }
+}

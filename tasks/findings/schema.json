@@ -1,0 +1,73 @@
+{
+  "type": "object",
+  "properties": {
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string",
+            "description": "resource id or ARN exactly as it appears in the findings"
+          },
+          "resource_name": {
+            "type": "string"
+          },
+          "action_type": {
+            "type": "string",
+            "enum": [
+              "terminate_stopped_instance",
+              "delete_snapshot",
+              "release_eip",
+              "set_log_retention",
+              "rightsize_instance",
+              "stop_instance",
+              "aurora_set_storage_standard",
+              "aurora_set_storage_iopt",
+              "delete_volume",
+              "buy_reservation",
+              "change_storage_class",
+              "other"
+            ]
+          },
+          "est_monthly_saving": {
+            "type": "number",
+            "description": "USD per month, 0 if unknown"
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "approve",
+              "report"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "description": "0 to 1"
+          },
+          "rationale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "resource",
+          "action_type",
+          "est_monthly_saving",
+          "tier",
+          "confidence",
+          "rationale"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "recommendations"
+  ],
+  "additionalProperties": false
+}

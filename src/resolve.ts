@@ -369,11 +369,9 @@ export async function resolveRecommendation(recId: number, opts: { force?: boole
     const { requestId } = await postAgentRequest({
       prompt: buildResolutionPrompt(ctx, gate),
       systemOverride: getPrompt("resolution"),
-      jsonSchema: RESOLUTION_SCHEMA,
       sessionId: `aws-advisor-resolution-${resolutionId}-${Date.now().toString(36)}`,
       agentName: "aws-resolution-writer",
       metadata: { recommendationId: recId, resolutionId, rule: rec.rule },
-      maxTurns: 40,
       link: { kind: "resolution", recommendationId: recId },
     });
     db.prepare("update resolutions set request_id = ? where id = ?").run(requestId, resolutionId);

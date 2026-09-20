@@ -1040,6 +1040,12 @@ Cost Explorer's; on the first complete day the scaled instance hours and EBS GB-
 of Cost Explorer's, which is the evidence that a reconstruction from the graph alone is within reach once the
 watcher runs uninterrupted.
 
+**Lambda** functions are systems too (`lambda:<name>`, from the account's function list), priced from 30 days
+of CloudWatch invocations and duration: GB-seconds (duration × memory) at the architecture's rate plus requests,
+scaled to a month; the account's 30-day GB-seconds from the metrics match Cost Explorer's usage line within a
+percent. The graph carries the list price; the bill's Lambda line is lower because the Compute Savings Plan and
+the free tier apply to it.
+
 **The bill from the graph** (`graphBill`, on the Bill page under the reconstruction) prices the current fleet
 for a month at list from `RUNS_ON`, adds EBS, the transfer edges and the log groups, and shows last full
 month's on-demand value beside each category the mapping covers. First build, 2026-09-20: 65 systems, 98 system
@@ -1289,6 +1295,21 @@ Results are stored per recommendation per day (`verifications`), shown on the re
 ("Realised") and summed on the Overview next to the top recommendations (claimed vs realised, how many still
 waiting). `GET /api/verifications`, `GET /api/verifications/:id`, `POST /api/verifications/run?force=1&id=`
 (force gives an early read before the seven days). Next: attach the verdict to the decision in the graph.
+
+## Tasks: the agent's work as files
+
+Each kind of agent run is a folder under `tasks/` in the Harvey LAB shape: `system.md` (the instruction),
+`schema.json` (the deliverable) and `task.json` (the tools it is meant to use, `max_turns`, a `rubric`, and a
+`retry` policy). `src/tasks.ts` loads them at startup; the instruction becomes the code default of that prompt
+kind (an override saved from Settings still wins), and every dispatch takes its schema and turn limit from the
+task. `src/rubric.ts` grades an answer with the task's rubric, a small declarative language: `required`,
+`numbers`, `range`, `enum`, `min_items`, `max_items`, `max_sentences`, `unique`, `no_destructive_auto`,
+`covers` (a share of the facts in the brief must be mentioned) and `flag_consistent`, over dotted paths that fan
+out across arrays (`fixes[].resource`). Every completed run is scored and the score stored on `agent_runs`
+(shown on the run's page); when it falls below the task's threshold the same brief goes back once with the
+failed checks appended under "Your previous answer failed these checks", under the agent quota, and the
+retry's answer replaces the first on the observation, incident or resolution it belongs to. Adding a situation
+is adding a folder; every run has a score; a weak answer gets one concrete second chance.
 
 ## The morning observation: the agent's read of the day
 
