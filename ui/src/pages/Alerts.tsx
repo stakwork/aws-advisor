@@ -44,6 +44,7 @@ function Details({ alert }: { alert: any }) {
   if (alert.kind === "instance_state") {
     return <div className="text-xs text-zinc-400">{d.name || alert.resource} · {d.type} · {d.region} · {d.from ?? "new"} → {d.to ?? "gone"}</div>;
   }
+  if (d?.summary) return <div className="space-y-1 text-sm"><div className="text-zinc-200">{d.summary}</div><div className="text-xs text-zinc-500">From the daily review of the collected statistics (probes, roll-ups, baselines).</div></div>;
   return <pre className="max-h-40 overflow-auto rounded bg-zinc-950 p-2 text-xs">{alert.details}</pre>;
 }
 

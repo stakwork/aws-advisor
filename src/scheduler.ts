@@ -7,6 +7,7 @@ import { probePass } from "./probe_pass.js";
 import { credentialGate } from "./gate.js";
 import { refreshSpend } from "./spend.js";
 import { refreshBaselines } from "./baselines.js";
+import { runReview } from "./review.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -21,7 +22,7 @@ function schedule(name: string, expr: string, fn: () => void): string | null {
 let watching = false;
 
 /** Starts the scheduled full run (RUN_CRON) and the lightweight watcher (WATCH_CRON). */
-export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null } {
+export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null } {
   const run = schedule("Scheduler (RUN_CRON)", config.runCron, async () => {
     if (isBusy()) { console.log("[scheduler] skipped: a run is already in progress"); return; }
     if (!hasConnectionFile()) { console.log("[scheduler] skipped: AWS credentials are not configured"); return; }
@@ -59,5 +60,8 @@ export function startScheduler(): { run: string | null; watch: string | null; pr
       .then((r) => console.log(`[baselines] nat ${r.nat}, cpu ${r.cpu}, probes ${r.probes}, spend ${r.spend} in ${r.took_ms} ms${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`))
       .catch((e: any) => console.error(`[baselines] failed: ${e?.message || e}`));
   });
-  return { run, watch, probe, spend, baselines };
+  const review = schedule("Daily review (REVIEW_CRON)", config.reviewCron, () => {
+    runReview((l) => console.log(`[review] ${l}`)).catch((e: any) => console.error(`[review] failed: ${e?.message || e}`));
+  });
+  return { run, watch, probe, spend, baselines, review };
 }
