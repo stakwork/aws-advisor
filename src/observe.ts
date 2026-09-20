@@ -97,7 +97,7 @@ export function buildObserveBrief(day: string): { text: string; facts: BriefFact
     for (const g of logs.groups.slice(0, 8)) lines.push(`- ${g.name}: ${g.ingest_gb_day != null ? `${g.ingest_gb_day.toFixed(2)} GB/day` : "ingestion not metered"}, ${g.stored_gb.toFixed(1)} GB stored, retention ${g.retention_days ?? "never"}`);
   }
   const trail = trailSummary(24);
-  lines.push("", `## Changes made in the account in the last 24 h (CloudTrail write events): ${trail.last_fetch ? `${trail.events}` : "not available (cloudtrail:LookupEvents not granted or not collected yet)"}`);
+  lines.push("", `## Changes made in the account in the last 24 h (CloudTrail write events): ${trail.last_fetch ? `${trail.events} by people or deployments (${trail.noise} machine heartbeats left out)` : "not available (cloudtrail:LookupEvents not granted or not collected yet)"}`);
   for (const t of trail.by_action.slice(0, 15)) lines.push(`- ${t.n} × ${t.event_source} ${t.event_name} by ${t.username ?? "?"}${t.resources.length ? ` on ${t.resources.slice(0, 4).join(", ")}${t.resources.length > 4 ? ", …" : ""}` : ""}${t.errors ? ` (${t.errors} failed)` : ""}`);
   const natBase = (db.prepare("select scope_id, median, p95, days from baselines where scope_kind = 'nat' and metric = 'bytes_hour'").all() as any[]).map((b) => `${b.scope_id} median ${(b.median / 1e9).toFixed(2)} GB/h, p95 ${(b.p95 / 1e9).toFixed(2)} (${b.days} d)`);
   if (natBase.length) lines.push("", `## NAT baselines`, ...natBase.map((s) => `- ${s}`));
