@@ -98,6 +98,8 @@ export const TABLE_ACTIONS: Record<string, string> = {
   aws_vpc_endpoint: "ec2:DescribeVpcEndpoints",
   aws_cloudwatch_log_group: "logs:DescribeLogGroups",
   aws_cloudtrail_lookup_event: "cloudtrail:LookupEvents",
+  ce_savings_plans_utilization: "ce:GetSavingsPlansUtilization",
+  ce_reservation_utilization: "ce:GetReservationUtilization",
   aws_ecr_registry: "ecr:DescribeRegistry",
   aws_cloudwatch_log_stream: "logs:DescribeLogStreams",
   aws_cloudwatch_metric_statistic_data_point: "cloudwatch:GetMetricStatistics",

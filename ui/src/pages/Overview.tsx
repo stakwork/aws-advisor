@@ -128,6 +128,28 @@ function RealisedLine() {
   return <Link to="/recommendations?status=approved" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">{v.approved} approved · claimed {usd(v.claimed_usd_month)}/mo · realised {usd(v.realised_usd_month)}/mo{v.pending ? ` · ${v.pending} awaiting ${v.min_days_after} days` : ""}</Link>;
 }
 
+/** Savings Plan and reservations with 30-day utilisation (Cost Explorer) and days to expiry. */
+function CommitmentsList({ fallback }: { fallback: any[] }) {
+  const [c, setC] = useState<any[] | null>(null);
+  useEffect(() => { api("/commitments").then((d) => setC(d.commitments)).catch(() => setC(null)); }, []);
+  const rows = c ?? fallback.map((f: any) => JSON.parse(f.dimensions));
+  if (!rows.length) return <Empty>No active Savings Plans or reservations found.</Empty>;
+  return (
+    <ul className="space-y-1 text-sm">
+      {rows.map((x: any, i: number) => (
+        <li key={i} className="flex justify-between gap-2">
+          <span className="min-w-0 truncate text-zinc-300">{x.kind === "savings_plan" ? "Savings Plan" : x.kind.replace(/_ri$/, " RI")} · {x.detail}{x.monthly_usd ? <span className="text-zinc-500"> · {usd(x.monthly_usd)}/mo</span> : null}</span>
+          <span className="whitespace-nowrap text-xs">
+            {x.utilization_pct != null && <span className={x.utilization_pct < 80 ? "text-amber-300" : "text-emerald-300"} title="30-day utilisation from Cost Explorer">{Math.round(x.utilization_pct)} % used</span>}
+            {x.utilization_pct == null && <span className="text-zinc-600" title="utilisation arrives with the next spend refresh">— used</span>}
+            <span className={`ml-2 ${Number(x.days_left) < 60 ? "text-amber-300" : "text-zinc-400"}`}>{x.days_left} days</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up" };
 /** Yesterday's read of the collected statistics: idle instances, memory pressure, disks filling, idle containers, spend steps. */
 function ReviewSummary() {
@@ -349,14 +371,7 @@ export default function Overview() {
           <BillSummary />
         </Card>
         <Card title="Commitments">
-          {d.commitments.length === 0 ? <Empty>No active Savings Plans or reservations found.</Empty> : (
-            <ul className="space-y-1 text-sm">
-              {d.commitments.map((c: any, i: number) => {
-                const x = JSON.parse(c.dimensions);
-                return <li key={i} className="flex justify-between gap-2"><span className="truncate text-zinc-300">{x.kind} · {x.detail}</span><span className={Number(x.days_left) < 60 ? "text-amber-300" : "text-zinc-400"}>{x.days_left} days</span></li>;
-              })}
-            </ul>
-          )}
+          <CommitmentsList fallback={d.commitments} />
         </Card>
       </div>
     </div>

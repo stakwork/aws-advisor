@@ -533,8 +533,13 @@ function RdsDetail({ d }: { d: any }) {
       <Group title="Network">
         <Dl rows={[["Endpoint", net.endpoint && <Mono>{net.endpoint}:{net.port}</Mono>], ["Publicly accessible", yesNo(net.publicly_accessible)], ["VPC", net.vpc_id && <Mono>{net.vpc_id}</Mono>]]} />
       </Group>
-      <Group title="Utilisation">
-        <Dl rows={[["CPU, 30 days", ut.cpu_days ? `${pct(ut.cpu_30d_avg_max)} avg daily peak · ${pct(ut.cpu_30d_avg)} avg · ${ut.cpu_days} days of data` : "no CloudWatch data"]]} />
+      <Group title="Utilisation, 30 days">
+        <Dl rows={[
+          ["CPU", ut.cpu_days ? `${pct(ut.cpu_30d_avg_max)} avg daily peak · ${pct(ut.cpu_30d_avg)} avg · ${ut.cpu_days} days of data` : "no CloudWatch data"],
+          ["Connections", ut.connections_avg != null ? `${ut.connections_avg} avg · ${ut.connections_max} peak` : null],
+          ["I/O", ut.read_iops_avg != null ? `${ut.read_iops_avg} read + ${ut.write_iops_avg} write IOPS avg` : null],
+          ["Freeable memory, minimum", ut.freeable_memory_min_gb != null ? `${ut.freeable_memory_min_gb} GB` : null],
+        ]} />
       </Group>
       <Group title="Price">
         {price?.monthly != null ? <Dl rows={[["On-demand", `${usd(price.monthly, 2)} / month · ${usd(price.hourly, 4)} / hour (${price.pricing_engine}; instance hours only, storage and I/O not included)`], ["Price fetched", when(price.fetched_at)]]} />
@@ -583,7 +588,7 @@ function LambdaDetail({ d }: { d: any }) {
 
 function CacheDetail({ d }: { d: any }) {
   const s = d.snapshot || {};
-  const id = s.identity || {}; const price = s.price;
+  const id = s.identity || {}; const price = s.price; const ut = s.utilisation || {};
   return (
     <>
       <h2 className="text-base font-medium text-zinc-100">{d.cache_cluster_id}</h2>
@@ -600,6 +605,14 @@ function CacheDetail({ d }: { d: any }) {
           ["Auto minor upgrade", yesNo(id.auto_minor_version_upgrade)],
           ["Snapshot retention", id.snapshot_retention_days != null ? `${id.snapshot_retention_days} days` : null],
           ["ARN", id.arn && <Mono>{id.arn}</Mono>],
+        ]} />
+      </Group>
+      <Group title="Utilisation, 30 days">
+        <Dl rows={[
+          ["Engine CPU", ut.cpu_days ? `${pct(ut.cpu_30d_avg_max)} avg daily peak · ${pct(ut.cpu_30d_avg)} avg · ${ut.cpu_days} days of data` : "no CloudWatch data"],
+          ["Memory, peak", ut.memory_pct_max != null ? <span className={ut.memory_pct_max >= 90 ? "text-amber-300" : ""}>{ut.memory_pct_max}% of the node's memory</span> : null],
+          ["Evictions", ut.evictions_30d != null ? (ut.evictions_30d ? <span className="text-amber-300">{Number(ut.evictions_30d).toLocaleString()} keys evicted: the cache is too small for its working set</span> : "none") : null],
+          ["Connections, peak", ut.connections_max != null ? String(ut.connections_max) : null],
         ]} />
       </Group>
       <Group title="Price">
