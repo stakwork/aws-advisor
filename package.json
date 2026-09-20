@@ -26,6 +26,7 @@
     "neo4j-driver": "^5.28.3",
     "node-cron": "^4.6.0",
     "pg": "^8.16.0",
+    "tsx": "^4.23.15",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -34,7 +35,6 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.15.0",
     "@types/pg": "^8.15.4",
-    "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }
 }
