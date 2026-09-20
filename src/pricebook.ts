@@ -100,6 +100,14 @@ const BY_SERVICE: { service: RegExp; usage: RegExp; price: PriceRule }[] = [
   { service: /Textract/, usage: /FormsQueriesTablesPagesProcessed$/, price: { rule: "textract_forms_queries_tables", unit_price: 0.07, unit: "Pages", note: "forms + queries + tables, first million pages" } },
 ];
 
+/** Every distinct pricebook rule, for seeding the graph's system types (one node per rule). */
+export function pricebookCatalog(): PriceRule[] {
+  const seen = new Map<string, PriceRule>();
+  for (const r of RULES) { const pr = typeof r.price === "function" ? r.price([""] as unknown as RegExpMatchArray) : r.price; if (!seen.has(pr.rule)) seen.set(pr.rule, pr); }
+  for (const o of BY_SERVICE) if (!seen.has(o.price.rule)) seen.set(o.price.rule, o.price);
+  return [...seen.values()];
+}
+
 const REGION_PREFIX: Record<string, string> = {
   USE1: "us-east-1", USE2: "us-east-2", USW1: "us-west-1", USW2: "us-west-2", CAN1: "ca-central-1", SAE1: "sa-east-1",
   EU: "eu-west-1", EUW2: "eu-west-2", EUW3: "eu-west-3", EUC1: "eu-central-1", EUN1: "eu-north-1",

@@ -22,6 +22,8 @@ export default function Bill() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [gb, setGb] = useState<any>(null);
+  useEffect(() => { api("/graph/bill").then(setGb).catch(() => setGb(null)); }, []);
   const load = (m = month) => api(`/bill${m ? `?month=${m}` : ""}`).then((d) => { setData(d); if (!month) setMonth(d.month); }).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [month]);
   const run = async () => {
@@ -98,6 +100,16 @@ export default function Bill() {
               </tbody>
             </table>
           </Card>
+          {gb && (
+            <Card title={<span>From the graph <span className="font-normal text-zinc-500">· the current fleet at list for a month, from system types, overlays and edges; the bill column is {gb.month_compared}</span></span>}>
+              <table className="w-full border-collapse text-sm">
+                <thead><tr><Th>Category</Th><Th className="text-right">Graph, a month at list</Th><Th className="text-right">Bill, on-demand value</Th><Th>Detail</Th></tr></thead>
+                <tbody>{gb.lines.map((l: any) => <tr key={l.category} className="border-t border-zinc-800"><Td className="text-zinc-100">{l.category}</Td><Td className="text-right">{usd(l.graph_usd_month)}</Td><Td className="text-right">{l.bill_usd_month != null ? usd(l.bill_usd_month) : <span className="text-zinc-600">—</span>}</Td><Td className="text-xs text-zinc-500">{l.detail}</Td></tr>)}
+                  <tr className="border-t border-zinc-700 font-medium"><Td className="text-zinc-100">Total the graph explains</Td><Td className="text-right">{usd(gb.graph_total_list)}</Td><Td></Td><Td className="text-xs text-zinc-500">{gb.savings_plan ? `Savings Plan overlay: ${usd(gb.savings_plan.fee_usd_month)}/mo buys ${usd(gb.savings_plan.covered_od_usd_month)} of on-demand value (${gb.savings_plan.discount_rate} % off)` : "no Savings Plan overlay yet"}</Td></tr></tbody>
+              </table>
+              <div className="mt-2 text-xs text-zinc-500">{gb.note}</div>
+            </Card>
+          )}
           <Card title="How the numbers are built">
             <ul className="list-disc space-y-1 pl-4 text-sm text-zinc-400">{r.assumptions.map((a) => <li key={a}>{a}</li>)}</ul>
             <div className="mt-2 text-xs text-zinc-500">Identity: modelled net = the uncovered part of every usage line at our price (as billed where unpriced) + the Savings Plan fee + modelled support + billed tax. The on-demand value of everything, covered or not, is compared per line and per service above.</div>

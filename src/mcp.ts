@@ -19,6 +19,7 @@ import { getReconciliation, lastFullMonth, listReconciliations } from "./reconci
 import { poolSummary } from "./inventory.js";
 import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
+import { graphBill, listSystems, systemView } from "./graph_knowledge.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 
 /**
@@ -397,6 +398,27 @@ export function createFactServer(): McpServer {
     inputSchema: { hours: z.number().int().min(1).max(168).default(24) },
     annotations: ro,
   }, (a) => { const r = trailSummary(a.hours); return r.last_fetch ? text(r) : fail("CloudTrail events not collected yet: the daily job needs cloudtrail:LookupEvents (see Settings > Permissions) and runs at LOGS_CRON; POST /api/trail/refresh runs it now"); });
+
+  server.registerTool("graph_systems", {
+    title: "Our systems, from the knowledge graph",
+    description: "The account as a schematic: every system (an autoscaled pool, a standalone instance, an RDS cluster or instance, an ElastiCache group, a NAT gateway) with its archetype, member count, monthly cost at list, and what it moves (transfer and log shipping in USD/month). Start here for any question about what runs and what it costs; then graph_system for one of them.",
+    inputSchema: { kind: z.enum(["pool", "instance", "rds_cluster", "rds_instance", "cache_group", "cache_cluster", "nat"]).optional() },
+    annotations: ro,
+  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { return text({ systems: await listSystems(a.kind) }); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
+
+  server.registerTool("graph_system", {
+    title: "One system and everything linked to it",
+    description: "A system by id (pool:<name>, ec2:<instance id>, rds:<cluster>, cache:<group>, nat:<id>) or name: its archetype, the types it runs on with count and list price, the pricing overlays that cover those types (Savings Plan discount, reservations), its members with state and CPU, its traffic edges (NAT to the internet with GB/day and USD/month), the log groups it ships to, and the recommendations on its members with their verdict once verified. This is the graph walk that explains a system's cost.",
+    inputSchema: { id: z.string().max(200) },
+    annotations: ro,
+  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror"); try { const v = await systemView(a.id); return v ? text(v) : fail(`no system ${a.id}; graph_systems lists them`); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
+
+  server.registerTool("graph_bill", {
+    title: "The bill as the graph explains it",
+    description: "The current fleet priced for a month at list from the graph's system types (EC2, RDS, ElastiCache, EBS), the transfer edges (NAT, cross-AZ), the log groups, and the Savings Plan overlay, each next to last full month's on-demand value from the bill where the mapping is one to one. Use it to see which cost categories the graph explains and where it is short.",
+    inputSchema: {},
+    annotations: ro,
+  }, async () => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror"); try { return text(await graphBill()); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
 
   server.registerTool("instance_probe", {
     title: "Probe an instance over SSM",

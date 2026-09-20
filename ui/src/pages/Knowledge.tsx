@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, usd, when } from "../api";
-import { Badge, Button, Card, Code, CopyButton, Empty } from "../components/ui";
+import { Badge, Button, Card, Code, CopyButton, Empty, Td, Th } from "../components/ui";
 
 type Concept = { id: string; name: string; description: string; scope: string; synced_at: string | null; sync_error: string | null; recommendation: any | null };
 
@@ -121,6 +121,52 @@ function BaselinesCard() {
   );
 }
 
+/** Our systems as the graph holds them: the schematic side of the knowledge graph. */
+function SystemsCard() {
+  const [d, setD] = useState<any>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [view, setView] = useState<any>(null);
+  useEffect(() => { api("/graph/systems").then(setD).catch((e) => setD({ error: e.message })); }, []);
+  useEffect(() => { setView(null); if (open) api(`/graph/system/${encodeURIComponent(open)}`).then(setView).catch((e) => setView({ error: e.message })); }, [open]);
+  if (!d) return null;
+  if (d.error) return <Card title="Systems · the schematic"><div className="text-sm text-zinc-500">{d.error}</div></Card>;
+  const rows: any[] = d.systems || [];
+  return (
+    <Card title={<span>Systems · the schematic <span className="font-normal text-zinc-500">· {rows.length} systems, their types at list price, what they move; click one</span></span>}>
+      {rows.length === 0 ? <div className="text-sm text-zinc-500">Nothing yet: Resync now builds it from the inventory, the price cache, the baselines and the log groups.</div> : (
+        <table className="w-full border-collapse text-sm">
+          <thead><tr><Th>System</Th><Th>Kind</Th><Th>Archetype</Th><Th className="text-right">Members</Th><Th className="text-right">At list / mo</Th><Th className="text-right">Transfer / mo</Th><Th className="text-right">Logs / mo</Th></tr></thead>
+          <tbody>{rows.map((s) => (
+            <Fragment key={s.id}>
+              <tr className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open === s.id ? "bg-zinc-900/40" : ""}`} onClick={() => setOpen(open === s.id ? null : s.id)}>
+                <Td className="text-zinc-100">{s.name}{s.pool_kind ? <span className="ml-1 text-xs text-zinc-500">{s.pool_kind}</span> : null}</Td>
+                <Td className="text-zinc-400">{s.kind}</Td><Td className="text-zinc-400">{s.archetype}</Td>
+                <Td className="text-right">{s.members}</Td><Td className="text-right">{usd(s.monthly_list_usd)}</Td>
+                <Td className="text-right text-zinc-400">{s.transfer_usd_month ? usd(s.transfer_usd_month) : "—"}</Td><Td className="text-right text-zinc-400">{s.logs_usd_month ? usd(s.logs_usd_month) : "—"}</Td>
+              </tr>
+              {open === s.id && <tr className="border-t border-zinc-800 bg-zinc-950/40"><td colSpan={7} className="max-w-0 p-3 text-xs">
+                {!view ? <span className="text-zinc-500">Loading…</span> : view.error ? <span className="text-red-300">{view.error}</span> : (
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <div><div className="mb-1 uppercase tracking-wide text-zinc-500">Runs on</div>{view.runs_on.map((t: any, i: number) => <div key={i} className="text-zinc-300">{t.count} × <span className="font-mono">{t.sku}</span> at {t.list_price != null ? `${t.list_price} ${t.price_unit}` : "no price"} = {usd(t.list_usd_month)}/mo</div>)}
+                      {view.overlays.length > 0 && <div className="mt-1 text-zinc-400">Covered by: {view.overlays.map((o: any) => `${o.kind}${o.discount_rate != null ? ` (${o.discount_rate} % off)` : ""}${o.sku ? ` ${o.count} × ${o.sku}` : ""}`).join("; ")}</div>}
+                      <div className="mt-2 mb-1 uppercase tracking-wide text-zinc-500">Members</div>{view.members.slice(0, 12).map((m: any) => <div key={m.id} className="text-zinc-300"><Link to={`/inventory?tab=ec2&id=${m.id}`} className="font-mono hover:underline">{m.id}</Link> {m.name} · {m.type} · {m.state}{m.cpu_30d != null ? ` · CPU ${m.cpu_30d}%` : ""}</div>)}{view.members.length > 12 && <div className="text-zinc-500">and {view.members.length - 12} more</div>}</div>
+                    <div><div className="mb-1 uppercase tracking-wide text-zinc-500">Edges</div>
+                      {view.transfers.map((t: any, i: number) => <div key={i} className="text-zinc-300">→ {t.to} via {t.mechanism}: {Number(t.gb_day).toFixed(1)} GB/day × {t.price_per_gb} = {usd(t.usd_month)}/mo <span className="text-zinc-500">({t.source})</span></div>)}
+                      {view.logs.map((l: any, i: number) => <div key={i} className="text-zinc-300">→ logs <span className="font-mono">{l.log_group}</span>: {l.gb_day != null ? `${Number(l.gb_day).toFixed(2)} GB/day, ${usd(l.usd_month)}/mo` : "not metered"}, retention {l.retention_days ?? "never"}</div>)}
+                      {!view.transfers.length && !view.logs.length && <div className="text-zinc-500">no traffic or log edges attributed</div>}
+                      <div className="mt-2 mb-1 uppercase tracking-wide text-zinc-500">Decisions</div>
+                      {view.recommendations.length ? view.recommendations.map((r: any) => <div key={r.id} className="text-zinc-300"><Link to={`/recommendations?id=${r.id}`} className="hover:underline">#{r.id}</Link> {r.status} · {r.title} · {usd(r.est_monthly_saving)}/mo{r.verdict ? ` · ${r.verdict}${r.realised_usd_month != null ? ` (${usd(r.realised_usd_month)} realised)` : ""}` : ""}</div>) : <div className="text-zinc-500">none on its members</div>}
+                      <div className="mt-2 text-zinc-500">{view.archetype_description}</div></div>
+                  </div>)}
+              </td></tr>}
+            </Fragment>
+          ))}</tbody>
+        </table>
+      )}
+    </Card>
+  );
+}
+
 export default function Knowledge() {
   const [d, setD] = useState<any>(null);
   const [err, setErr] = useState("");
@@ -188,6 +234,7 @@ export default function Knowledge() {
         <h1 className="text-xl font-semibold text-zinc-100">Knowledge</h1>
         <div className="text-sm text-zinc-500">What the agent reads before it proposes anything: the concept graph under <code className="text-zinc-300">{d.namespace}</code> in repo2graph. Click a concept for the full record.</div>
       </div>
+      <SystemsCard />
       <BaselinesCard />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title={<span>Generic rules · apply to any account ({d.generic.length})</span>}>

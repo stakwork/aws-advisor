@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { accountId, enabled, graphStats, graphUriForDisplay, mirrorAll, resourceView, verifyConnection, wipeMirror } from "../graph_mirror.js";
+import { graphBill, listSystems, mirrorKnowledge, systemView } from "../graph_knowledge.js";
 
 /**
  * The Neo4j mirror (src/graph_mirror.ts) as the UI sees it: whether it is configured and reachable, what is
@@ -46,3 +47,10 @@ graph.get("/graph/resource/:id", async (req, res) => {
     res.status(502).json({ error: String(e?.message || e).slice(0, 300) });
   }
 });
+
+// ---- the knowledge layer: systems, one system, the bill as the graph explains it ------------------------------
+const off = (res: any) => res.status(503).json({ error: "The Neo4j mirror is not configured (Settings > Graph mirror)" });
+graph.get("/graph/systems", async (req, res) => { if (!enabled()) return off(res); try { res.json({ systems: await listSystems(typeof req.query.kind === "string" ? req.query.kind : undefined) }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+graph.get("/graph/system/:id", async (req, res) => { if (!enabled()) return off(res); try { const v = await systemView(String(req.params.id)); v ? res.json(v) : res.status(404).json({ error: "no such system" }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+graph.get("/graph/bill", async (_req, res) => { if (!enabled()) return off(res); try { res.json(await graphBill()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+graph.post("/graph/knowledge", async (_req, res) => { if (!enabled()) return off(res); try { res.json(await mirrorKnowledge()); } catch (e: any) { res.status(500).json({ error: e.message }); } });

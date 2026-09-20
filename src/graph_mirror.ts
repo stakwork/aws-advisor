@@ -26,6 +26,8 @@ export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef"
 
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
+  "(:KnSystem {id, name, kind: pool|instance|rds_cluster|rds_instance|cache_group|cache_cluster|nat, pool_kind, archetype, member_count, ebs_gb, monthly_list_usd, gone}) our systems as a schematic; (:AdvisorResource)-[:MEMBER_OF]->(:KnSystem); (:KnSystem)-[:IS_A]->(:KnArchetype {name, description}); (:KnSystem)-[:RUNS_ON {count, hours_month, list_price, list_usd_month}]->(:KnSystemType {id, kind: ec2|rds|elasticache|usage, sku, region, list_price, price_unit, source})",
+  "(:KnPricingOverlay {kind: savings_plan|reservation, discount_rate, commitment_usd_month, sku, count, end})-[:COVERS]->(:KnSystemType); (:KnSystem|:AdvisorAccount)-[:TRANSFERS_TO {mechanism: nat|cross-az, gb_day, price_per_gb, usd_month, source}]->(:KnService {name}); (:KnSystem|:AdvisorAccount)-[:SHIPS_LOGS_TO {gb_day, usd_month}]->(:KnLogGroup {name, retention_days, stored_gb, ingest_gb_day, ingest_usd_month, storage_usd_month}); (:KnPattern {text}) operational rules; AdvisorRecommendation carries verdict, realised_usd_month, realised_ratio once verified",
   "(:AdvisorResource {id, kind: ec2|rds|elasticache, name, type, state, region, role, role_confidence, protected_prob, monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})-[:IN_ACCOUNT]->(:AdvisorAccount {id})",
   "(:AdvisorResource)-[:HAS_ROLE]->(:AdvisorRole {name}); (:AdvisorResource)-[:IN_POOL]->(:AdvisorNodePool {name}) for autoscaled EC2 nodes (Karpenter pool, EKS node group, ASG)",
   "(:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule, est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef {id})",
@@ -251,6 +253,9 @@ export async function readQuery(cypher: string, params: Record<string, unknown> 
     return { columns, rows, row_count: rows.length, truncated: res.records.length > cap };
   } finally { await s.close(); }
 }
+
+/** A write in one transaction; used by the knowledge layer too. */
+export async function writeCypher(cypher: string, params: Record<string, unknown> = {}): Promise<void> { return write(cypher, params); }
 
 async function write(cypher: string, params: Record<string, unknown> = {}): Promise<void> {
   const s = session("WRITE");
@@ -509,7 +514,8 @@ export async function mirrorAlertsAndIncidents(): Promise<{ alerts: number; inci
 
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
-export interface MirrorCounts { account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; took_ms: number }
+export interface MirrorCounts {
+  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; took_ms: number }
 
 /** Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. */
 export async function mirrorAll(): Promise<MirrorCounts | null> {
@@ -525,15 +531,17 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const ctl = await mirrorControls();
   const { recommendations } = await mirrorRecommendations();
   const { alerts, incidents } = await mirrorAlertsAndIncidents();
-  return { account_id: account, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, took_ms: Date.now() - t0 };
+  const { mirrorKnowledge } = await import("./graph_knowledge.js");
+  const knowledge = await mirrorKnowledge();
+  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, took_ms: Date.now() - t0 };
 }
 
 export interface GraphStats { nodes: Record<string, number>; relationships: Record<string, number>; decided_as: number; total_nodes: number; total_relationships: number }
 
 /** Node counts per Advisor label and relationship counts per type (relationships leaving an Advisor node, so DECIDED_AS to Concepts is included). */
 export async function graphStats(): Promise<GraphStats> {
-  const nodes = await readQuery("MATCH (n) WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor') UNWIND labels(n) AS l WITH l, count(*) AS n WHERE l STARTS WITH 'Advisor' RETURN l AS label, n ORDER BY l", {}, { timeoutMs: 30_000, rowCap: 1000 });
-  const rels = await readQuery("MATCH (n)-[r]->() WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor') RETURN type(r) AS type, count(r) AS n ORDER BY type", {}, { timeoutMs: 30_000, rowCap: 1000 });
+  const nodes = await readQuery("MATCH (n) WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') UNWIND labels(n) AS l WITH l, count(*) AS n WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn' RETURN l AS label, n ORDER BY l", {}, { timeoutMs: 30_000, rowCap: 1000 });
+  const rels = await readQuery("MATCH (n)-[r]->() WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') RETURN type(r) AS type, count(r) AS n ORDER BY type", {}, { timeoutMs: 30_000, rowCap: 1000 });
   const nodeCounts = Object.fromEntries(nodes.rows.map((r) => [String(r.label), Number(r.n)]));
   const relCounts = Object.fromEntries(rels.rows.map((r) => [String(r.type), Number(r.n)]));
   return { nodes: nodeCounts, relationships: relCounts, decided_as: relCounts.DECIDED_AS || 0,
@@ -547,7 +555,7 @@ export async function graphStats(): Promise<GraphStats> {
  */
 export async function wipeMirror(account = accountId()): Promise<{ deleted: number }> {
   if (!enabled()) return { deleted: 0 };
-  const owned = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRecommendation", "AdvisorRun", "AdvisorAlert", "AdvisorIncident"];
+  const owned = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRecommendation", "AdvisorRun", "AdvisorAlert", "AdvisorIncident", "KnSystem", "KnLogGroup", "KnPricingOverlay"];
   const del = async (cypher: string, params: Record<string, unknown>) => {
     let total = 0;
     for (;;) {
