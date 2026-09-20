@@ -8,9 +8,11 @@ import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
 import { getBaseline } from "./baselines.js";
+import { LOG_INGEST_PRICE } from "./logs.js";
 import { resourceRole } from "./roles.js";
 import { NATURALLY_IDLE_ROLES, ROLE_CONFIDENCE_THRESHOLD, RecInput, isProtected } from "./rules.js";
 import { upsertRecommendations } from "./collector.js";
+import { recentIngest, topLogGroups } from "./logs.js";
 import { ContainerStat, DISK_URGENT_DAYS, DISK_HORIZON_DAYS, DailyRow, diskForecast, idleContainers, memoryPressure, spendStep, sustainedIdle } from "./review_math.js";
 
 db.exec(`create table if not exists review_findings (
@@ -122,6 +124,23 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
         if (alertOnce("spend_step", service, msg, { summary: msg, ...step })) out.alerts++;
       }
     } catch (e) { out.errors.push(describeError(e, "review spend (aws_cost_by_service_daily)")); }
+  }
+  // ---- log groups: ingestion step against the 14-day baseline, and big groups that never expire ---------------
+  for (const g of topLogGroups(80).groups) {
+    const b = getBaseline("loggroup", g.name, "ingest_bytes_day");
+    const recent = recentIngest(g.name, 3);
+    const step = b ? spendStep(g.name, recent.map((x) => x / 1e9), { median: (b.median ?? 0) / 1e9, mad: (b.mad ?? 0) / 1e9 }, 0.5) : null;
+    if (step && step.recent_avg >= 0.5) {
+      const msg = `log group ${g.name}: ${step.recent_avg.toFixed(1)} GB/day over the last ${step.recent_days} days, ${step.ratio.toFixed(1)}x its 14-day median of ${step.median.toFixed(1)} (about ${Math.round(step.excess_per_day * 30 * LOG_INGEST_PRICE)} USD/month more in ingestion)`;
+      insertFinding.run(day, "log_step", g.name, null, "warning", msg, JSON.stringify({ ...step, unit: "GB/day" }));
+      count("log_step");
+      if (alertOnce("log_step", g.name, msg, { summary: msg, ...step })) out.alerts++;
+    }
+    if (g.retention_days == null && g.stored_gb >= 5) {
+      const msg = `log group ${g.name}: ${g.stored_gb.toFixed(1)} GB stored with no retention policy (${g.storage_usd_month.toFixed(0)} USD/month and growing)`;
+      insertFinding.run(day, "log_no_retention", g.name, null, "info", msg, JSON.stringify({ stored_gb: g.stored_gb, storage_usd_month: g.storage_usd_month, ingest_gb_day: g.ingest_gb_day }));
+      count("log_no_retention");
+    }
   }
   db.prepare("delete from review_findings where day < date('now', '-90 days')").run();
   out.took_ms = Date.now() - t0;

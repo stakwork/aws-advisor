@@ -17,6 +17,8 @@ import { poolSummary } from "./inventory.js";
 import { changeSummaryText } from "./changes.js";
 import { BriefFacts, gradeObservation } from "./observe_grade.js";
 import { postAgentRequest, type AgentRunRow } from "./agent.js";
+import { topLogGroups } from "./logs.js";
+import { trailSummary } from "./trail.js";
 
 db.exec(`create table if not exists observations (
   id integer primary key autoincrement,
@@ -50,7 +52,8 @@ today and what you propose. Be short and numeric: every change cites its numbers
 proposal names the resource and a tier (auto = reversible, approve = needs a human, report = never automate).
 Verify with the read-only aws_* tools: aws_baseline (what is typical, and to score a value), aws_instance_history
 (a month of daily memory, disk, load and containers per instance), aws_review_findings, aws_bill (the month priced
-from our own knowledge, per service), aws_pools, aws_instance_inventory, aws_steampipe_query, aws_cloudwatch_metric,
+from our own knowledge, per service), aws_pools, aws_log_groups (ingestion and retention per log group),
+aws_cloudtrail_changes (who changed what, the first place to look for the cause of a cost move), aws_instance_inventory, aws_steampipe_query, aws_cloudwatch_metric,
 aws_recommendation_history (what the team already decided). A spend step that matches a decision the team approved
 is expected, say so. A routine thing is not worth a sentence. If nothing changed, say so in one line and set
 nothing_to_report. Emit the JSON object first, then any commentary.`;
@@ -88,6 +91,14 @@ export function buildObserveBrief(day: string): { text: string; facts: BriefFact
   lines.push("", `## Recommendations: ${openRecs.n} open (≈ ${usd(openRecs.saving)}/month claimed)`);
   for (const d of decided) lines.push(`- decided in the last day: #${d.id} ${d.status}: ${d.title}`);
   if (changes) lines.push("", `## Changes in the latest collection run (#${latestRun!.id})`, changes);
+  const logs = topLogGroups(8);
+  if (logs.refreshed_at) {
+    lines.push("", `## CloudWatch Logs: ${logs.total_gb_day != null ? `${logs.total_gb_day.toFixed(1)} GB/day ingested (≈ ${Math.round(logs.total_gb_day * 30 * 0.5)} USD/month)` : "ingestion total unknown"}, ${logs.total_stored_gb.toFixed(0)} GB stored, ${logs.no_retention} groups without retention`);
+    for (const g of logs.groups.slice(0, 8)) lines.push(`- ${g.name}: ${g.ingest_gb_day != null ? `${g.ingest_gb_day.toFixed(2)} GB/day` : "ingestion not metered"}, ${g.stored_gb.toFixed(1)} GB stored, retention ${g.retention_days ?? "never"}`);
+  }
+  const trail = trailSummary(24);
+  lines.push("", `## Changes made in the account in the last 24 h (CloudTrail write events): ${trail.last_fetch ? `${trail.events}` : "not available (cloudtrail:LookupEvents not granted or not collected yet)"}`);
+  for (const t of trail.by_action.slice(0, 15)) lines.push(`- ${t.n} × ${t.event_source} ${t.event_name} by ${t.username ?? "?"}${t.resources.length ? ` on ${t.resources.slice(0, 4).join(", ")}${t.resources.length > 4 ? ", …" : ""}` : ""}${t.errors ? ` (${t.errors} failed)` : ""}`);
   const natBase = (db.prepare("select scope_id, median, p95, days from baselines where scope_kind = 'nat' and metric = 'bytes_hour'").all() as any[]).map((b) => `${b.scope_id} median ${(b.median / 1e9).toFixed(2)} GB/h, p95 ${(b.p95 / 1e9).toFixed(2)} (${b.days} d)`);
   if (natBase.length) lines.push("", `## NAT baselines`, ...natBase.map((s) => `- ${s}`));
   const facts = { review_resources: review.findings.map((f: any) => f.resource), alert_ids: alerts.map((a) => a.id), alert_resources: alerts.map((a) => a.resource).filter(Boolean), review_count: review.findings.length, alert_count: alerts.length, pools: pools.pools.map((p) => p.name) };
