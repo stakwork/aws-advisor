@@ -66,6 +66,25 @@ const RDS_SQL = `
          performance_insights_enabled, vpc_id, read_replica_source_db_instance_identifier, tags
   from ${S}.aws_rds_db_instance`;
 
+// RDS connections and I/O per day (30 days), from the daily metric tables; freeable memory through the generic
+// statistic table (one query per instance, in the refresh below). ElastiCache: engine CPU per day, then memory
+// usage, evictions and connections per cluster through the generic table.
+const RDS_CONN_SQL = `
+  select db_instance_identifier, round(avg(average)::numeric, 1) as avg, round(max(maximum)::numeric, 0) as max
+  from ${S}.aws_rds_db_instance_metric_connections_daily where timestamp > now() - interval '30 days' group by 1`;
+const RDS_IOPS_SQL = `
+  select r.db_instance_identifier, round(avg(r.average)::numeric, 0) as read_avg, round(avg(w.average)::numeric, 0) as write_avg
+  from ${S}.aws_rds_db_instance_metric_read_iops_daily r
+  join ${S}.aws_rds_db_instance_metric_write_iops_daily w on w.db_instance_identifier = r.db_instance_identifier and w.timestamp = r.timestamp
+  where r.timestamp > now() - interval '30 days' group by 1`;
+const CACHE_CPU_SQL = `
+  select cache_cluster_id, round(avg(maximum)::numeric, 1) as avg_max, round(avg(average)::numeric, 1) as avg, count(*) as days
+  from ${S}.aws_elasticache_redis_metric_engine_cpu_utilization_daily where timestamp > now() - interval '30 days' group by 1`;
+const cwStat = (namespace: string, metric: string, dimName: string, dimValue: string, region: string, stat: "Maximum" | "Minimum" | "Sum" | "Average") => `
+  select ${stat.toLowerCase()} as v, timestamp from ${S}.aws_cloudwatch_metric_statistic_data_point
+  where namespace = '${namespace}' and metric_name = '${metric}' and dimensions = '[{"Name":"${dimName}","Value":"${dimValue.replace(/'/g, "''")}"}]'
+    and timestamp between now() - interval '30 days' and now() and period = 86400 and region = '${region.replace(/'/g, "''")}'`;
+
 const RDS_CPU_SQL = `
   select db_instance_identifier, round(avg(maximum)::numeric, 1) as avg_max, round(avg(average)::numeric, 1) as avg, count(*) as days
   from ${S}.aws_rds_db_instance_metric_cpu_utilization_daily
@@ -141,14 +160,35 @@ async function doRefresh(): Promise<RefreshResult> {
     try { return await query<any>(sql); } catch (e: any) { errors.push(`${what}: ${describeError(e, `inventory ${what} (${tablesIn(sql).join(", ")})`, 300)}`); return undefined; }
   };
 
-  const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows] = await Promise.all([
+  const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu] = await Promise.all([
     attempt("ec2", EC2_SQL),
     attempt("ebs", EBS_SQL),
     attempt("ec2 cpu", EC2_CPU_SQL),
     attempt("rds", RDS_SQL),
     attempt("rds cpu", RDS_CPU_SQL),
     attempt("elasticache", ELASTICACHE_SQL),
+    attempt("rds connections", RDS_CONN_SQL),
+    attempt("rds iops", RDS_IOPS_SQL),
+    attempt("elasticache cpu", CACHE_CPU_SQL),
   ]);
+  // per-resource CloudWatch statistics the daily tables do not cover (a handful of resources, one call each)
+  const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
+  const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };
+  const minOf = (vs: number[]) => Math.min(...vs), maxOf = (vs: number[]) => Math.max(...vs), sumOf = (vs: number[]) => vs.reduce((a, b) => a + b, 0);
+  await Promise.all([
+    ...(rdsRows || []).map(async (r: any) => { const v = await stat(cwStat("AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", r.db_instance_identifier, r.region, "Minimum"), minOf); if (v != null) rdsMem.set(r.db_instance_identifier, v); }),
+    ...(cacheRows || []).map(async (r: any) => {
+      const [m, e, c] = await Promise.all([
+        stat(cwStat("AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", r.cache_cluster_id, r.region, "Maximum"), maxOf),
+        stat(cwStat("AWS/ElastiCache", "Evictions", "CacheClusterId", r.cache_cluster_id, r.region, "Sum"), sumOf),
+        stat(cwStat("AWS/ElastiCache", "CurrConnections", "CacheClusterId", r.cache_cluster_id, r.region, "Maximum"), maxOf),
+      ]);
+      if (m != null) cacheMem.set(r.cache_cluster_id, m); if (e != null) cacheEvict.set(r.cache_cluster_id, e); if (c != null) cacheConn.set(r.cache_cluster_id, c);
+    }),
+  ]);
+  const rdsConnById = new Map<string, any>((rdsConn || []).map((r: any) => [r.db_instance_identifier, r]));
+  const rdsIopsById = new Map<string, any>((rdsIops || []).map((r: any) => [r.db_instance_identifier, r]));
+  const cacheCpuById = new Map<string, any>((cacheCpu || []).map((r: any) => [r.cache_cluster_id, r]));
 
   // Prices: one distinct SKU at a time, cache first.
   const wants: PriceWant[] = [];
@@ -232,7 +272,10 @@ async function doRefresh(): Promise<RefreshResult> {
           storage: { storage_type: r.storage_type, allocated_gb: num(r.allocated_storage), max_allocated_gb: num(r.max_allocated_storage), iops: num(r.iops), throughput: num(r.storage_throughput), encrypted: r.storage_encrypted },
           network: { endpoint: r.endpoint_address, port: num(r.endpoint_port), publicly_accessible: r.publicly_accessible, vpc_id: r.vpc_id },
           tags: r.tags || {},
-          utilisation: { cpu_30d_avg_max: num(cpu?.avg_max), cpu_30d_avg: num(cpu?.avg), cpu_days: num(cpu?.days) ?? 0 },
+          utilisation: { cpu_30d_avg_max: num(cpu?.avg_max), cpu_30d_avg: num(cpu?.avg), cpu_days: num(cpu?.days) ?? 0,
+            connections_avg: num(rdsConnById.get(id)?.avg), connections_max: num(rdsConnById.get(id)?.max),
+            read_iops_avg: num(rdsIopsById.get(id)?.read_avg), write_iops_avg: num(rdsIopsById.get(id)?.write_avg),
+            freeable_memory_min_gb: rdsMem.has(id) ? Math.round((rdsMem.get(id)! / 1e9) * 100) / 100 : null },
           price: price ? { hourly: price.hourly, monthly: price.monthly, pricing_engine: want!.engine, fetched_at: price.fetched_at } : null,
         };
         upsertRds.run({
@@ -252,7 +295,9 @@ async function doRefresh(): Promise<RefreshResult> {
         const nodes = num(r.num_cache_nodes) ?? 1;
         const monthly = price?.monthly == null ? null : Math.round(price.monthly * nodes * 100) / 100;
         const id = r.cache_cluster_id;
+        const ccpu = cacheCpuById.get(id);
         const snapshot = {
+          utilisation: { cpu_30d_avg_max: num(ccpu?.avg_max), cpu_30d_avg: num(ccpu?.avg), cpu_days: num(ccpu?.days) ?? 0, memory_pct_max: cacheMem.has(id) ? Math.round(cacheMem.get(id)! * 10) / 10 : null, evictions_30d: cacheEvict.has(id) ? cacheEvict.get(id)! : null, connections_max: cacheConn.has(id) ? cacheConn.get(id)! : null },
           identity: { cache_cluster_id: id, arn: r.arn, node_type: r.cache_node_type, engine: r.engine, engine_version: r.engine_version, num_nodes: nodes, status: r.cache_cluster_status,
             replication_group: r.replication_group_id, region: r.region, availability_zone: r.preferred_availability_zone, created: iso(r.cache_cluster_create_time),
             subnet_group: r.cache_subnet_group_name, transit_encryption: r.transit_encryption_enabled, at_rest_encryption: r.at_rest_encryption_enabled,
@@ -268,6 +313,26 @@ async function doRefresh(): Promise<RefreshResult> {
         elasticache++;
       }
       goneElasticache.run(now);
+      // memory pressure on a cache is an alert: at 90 % of DatabaseMemoryUsagePercentage keys start being evicted
+      const openCache = db.prepare("select id from alerts where kind = 'cache_memory_high' and resource = ? and acknowledged = 0 limit 1");
+      const insCache = db.prepare("insert into alerts(kind, resource, message, details) values ('cache_memory_high', ?, ?, ?)");
+      const ackCache = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = 'cache_memory_high' and resource = ? and acknowledged = 0");
+      // an RDS instance whose freeable memory touched half a gigabyte is one query away from swapping
+      const openRds = db.prepare("select id from alerts where kind = 'rds_memory_low' and resource = ? and acknowledged = 0 limit 1");
+      const insRds = db.prepare("insert into alerts(kind, resource, message, details) values ('rds_memory_low', ?, ?, ?)");
+      const ackRds = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = 'rds_memory_low' and resource = ? and acknowledged = 0");
+      for (const [id, bytes] of rdsMem) {
+        const gbFree = bytes / 1e9; const open = openRds.get(id);
+        const low = gbFree < 0.5 || (open && gbFree < 1);
+        if (low && !open) { const msg = `${id}: freeable memory fell to ${gbFree.toFixed(2)} GB in the last 30 days; the instance swaps or refuses connections when it runs out`; insRds.run(id, msg, JSON.stringify({ summary: msg, db_instance_identifier: id, freeable_memory_min_gb: gbFree })); }
+        if (!low && open) ackRds.run(id);
+      }
+      for (const [id, m] of cacheMem) {
+        const open = openCache.get(id); const evictions = cacheEvict.get(id) ?? 0;
+        const high = m >= 90 || (open && m >= 85);
+        if (high && !open) { const msg = `${id}: cache memory peaked at ${m.toFixed(0)}% in the last 30 days${evictions ? `, ${Math.round(evictions).toLocaleString()} evictions` : ""}`; insCache.run(id, msg, JSON.stringify({ summary: msg, cache_cluster_id: id, memory_pct_max: m, evictions_30d: evictions })); }
+        if (!high && open) ackCache.run(id);
+      }
     }
   })();
 

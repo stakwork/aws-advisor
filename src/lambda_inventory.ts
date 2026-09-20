@@ -7,6 +7,18 @@
 import { db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
+import { config } from "./config.js";
+
+const openErr = db.prepare("select id from alerts where kind = 'lambda_errors' and resource = ? and acknowledged = 0 limit 1");
+const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const ackErr = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = 'lambda_errors' and resource = ? and acknowledged = 0");
+
+/** Pure: a function whose error share of invocations crosses the threshold (with enough invocations to mean it); closes at half the threshold. */
+export function lambdaErrorVerdict(errors: number, invocations: number, thresholdPct: number, minInvocations: number, open: boolean): boolean {
+  if (invocations < minInvocations) return false;
+  const pct = (100 * errors) / invocations;
+  return pct >= thresholdPct || (open && pct >= thresholdPct / 2);
+}
 
 db.exec(`create table if not exists inventory_lambda (
   name text primary key, arn text, region text, runtime text, memory_mb integer, arm integer not null default 0, timeout_s integer,
@@ -50,6 +62,11 @@ export async function refreshLambdaInventory(onError: (m: string) => void = () =
       const arch = Array.isArray(f.architectures) ? f.architectures : (() => { try { return JSON.parse(f.architectures || "[]"); } catch { return []; } })();
       const facts: LambdaFacts = { name: f.name, region: f.region, memory_mb: Number(f.memory_size || 128), arm: arch.includes("arm64"), invocations_30d: inv.get(f.name)?.v ?? 0, duration_ms_30d: dur.get(f.name)?.v ?? 0, days: inv.get(f.name)?.days ?? 0 };
       const cost = lambdaMonthlyCost(facts);
+      const errors = err.get(f.name)?.v ?? 0;
+      const isOpen = Boolean(openErr.get(f.arn));
+      const bad = lambdaErrorVerdict(errors, facts.invocations_30d, config.lambdaErrorPct, 100, isOpen);
+      if (bad && !isOpen) { const pct = (100 * errors) / facts.invocations_30d; const msg = `${f.name}: ${pct.toFixed(1)}% of invocations failed in the last 30 days (${Math.round(errors).toLocaleString()} errors of ${Math.round(facts.invocations_30d).toLocaleString()}); failed invocations are billed like the rest`; insertAlert.run("lambda_errors", f.arn, msg, JSON.stringify({ summary: msg, function: f.name, errors_30d: errors, invocations_30d: facts.invocations_30d, error_pct: pct, memory_mb: facts.memory_mb, monthly_usd: cost.usd_month })); }
+      if (!bad && isOpen) ackErr.run(f.arn);
       up.run({ name: f.name, arn: f.arn, region: f.region, runtime: f.runtime ?? null, memory_mb: facts.memory_mb, arm: facts.arm ? 1 : 0, timeout_s: f.timeout ?? null, invocations_30d: facts.invocations_30d, duration_ms_30d: facts.duration_ms_30d, errors_30d: err.get(f.name)?.v ?? 0, days: facts.days,
         invocations_month: cost.invocations_month, gb_seconds_month: cost.gb_seconds_month, avg_duration_ms: facts.invocations_30d > 0 ? Math.round(facts.duration_ms_30d / facts.invocations_30d) : null, monthly_usd: cost.usd_month,
         open_recs: (recsFor.get(f.arn) as any).n, findings: (findingsFor.get(f.arn) as any).n, now });

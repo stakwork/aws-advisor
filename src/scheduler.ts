@@ -12,6 +12,7 @@ import { dispatchObservation } from "./observe.js";
 import { refreshLogs } from "./logs.js";
 import { refreshTrail } from "./trail.js";
 import { runVerifications } from "./verify.js";
+import { refreshCommitments } from "./commitments.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -65,7 +66,9 @@ export function startScheduler(): { run: string | null; watch: string | null; pr
     if (!hasConnectionFile()) return;
     refreshSpend()
       .then((r) => console.log(`[spend] ${r.refreshed ? `${r.days} days stored` : `skipped: ${r.skipped || r.error}`}`))
-      .catch((e: any) => console.error(`[spend] failed: ${e?.message || e}`));
+      .catch((e: any) => console.error(`[spend] failed: ${e?.message || e}`))
+      .then(() => refreshCommitments((l) => console.log(`[commitments] ${l}`)))
+      .catch((e: any) => console.error(`[commitments] failed: ${e?.message || e}`));
   });
   const baselines = schedule("Baselines (BASELINE_CRON)", config.baselineCron, () => {
     if (!hasConnectionFile()) return;

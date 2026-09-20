@@ -1190,6 +1190,25 @@ The same pass judges memory, swap, load and reboots (`src/host_alerts.ts`): `mem
 the previous probe's, with the reboot time worked back from the uptime. Hysteresis and system acknowledgement as
 for disks. All thresholds are runtime settings under Probe pass.
 
+## Lambda errors, commitments, RDS and ElastiCache
+
+- **Lambda error rate** (`lambda_errors`, warning): with every inventory refresh, a function with at least 100
+  invocations in 30 days whose failed share reaches `LAMBDA_ERROR_PCT` (5 %) alerts, and closes at half that;
+  failed invocations are billed like the rest.
+- **Commitments** (`src/commitments.ts`, with the spend refresh every six hours; `GET /api/commitments`,
+  `POST /api/commitments/refresh`): the Savings Plan's 30-day utilisation, unused commitment and net savings
+  from Cost Explorer's `GetSavingsPlansUtilization`, and every reservation's utilisation from
+  `GetReservationUtilization` asked per service (without a SERVICE filter only EC2 reservations answer), joined
+  to the reservations by instance type. Two alerts: `commitment_underused` (warning) under
+  `COMMITMENT_MIN_UTIL_PCT` (80 %) over 30 days, and `commitment_expiring` (alarm) at 60 days from expiry. The
+  Overview's Commitments card shows utilisation and days left. Both Cost Explorer calls need
+  `ce:GetSavingsPlansUtilization` and `ce:GetReservationUtilization` (covered by `ce:*` in the policy).
+- **RDS**: connections (average and peak), read and write IOPS and the 30-day minimum of freeable memory join
+  the CPU figure in the inventory and the drawer; `rds_memory_low` (warning) when freeable memory fell under
+  half a gigabyte.
+- **ElastiCache**: engine CPU, peak memory usage, evictions and peak connections over 30 days in the inventory
+  and the drawer; `cache_memory_high` (warning) at 90 % of the node's memory, where keys start being evicted.
+
 ## Alerts, alarm first, paginated
 
 - `GET /api/alerts?status=open|acknowledged|all&page=1&page_size=10&day=YYYY-MM-DD` →

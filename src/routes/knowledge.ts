@@ -14,6 +14,7 @@ import { refreshLogs, topLogGroups } from "../logs.js";
 import { refreshTrail, trailSummary } from "../trail.js";
 import { latestVerification, runVerifications, verificationSummary } from "../verify.js";
 import { quantitiesFromHistory } from "../quantities.js";
+import { listCommitments, refreshCommitments } from "../commitments.js";
 
 /** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
@@ -182,3 +183,7 @@ knowledge.get("/bill/quantities", async (req, res) => {
   const from = day(req.query.from, `${today.slice(0, 7)}-01`); const to = day(req.query.to, today);
   try { res.json(await quantitiesFromHistory(from, to)); } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
+
+// ---- commitments: utilisation and expiry -------------------------------------------------------------------------
+knowledge.get("/commitments", (_req, res) => res.json({ commitments: listCommitments() }));
+knowledge.post("/commitments/refresh", async (_req, res) => { try { res.json(await refreshCommitments()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
