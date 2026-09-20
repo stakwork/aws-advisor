@@ -1171,6 +1171,16 @@ the paths below supersede the older unpaginated ones with the same path; everyth
 - Overview: a spend row at the top (today, last 7 days, month to date with the projection, previous month), the
   as-of date and a 45-day bar sparkline (plain divs) with a Refresh button.
 
+## Disk alerts
+
+Every probe's mounts are judged at once (`src/disk_alerts.ts`): a mount at `DISK_WARN_PCT` (80 %, a runtime
+setting) opens a `disk_high` warning, at `DISK_ALARM_PCT` (90 %) a `disk_full` alarm, one open alert per instance
+and mount with the free GB in the message. The alert closes by itself (acknowledged by the system) when the level
+falls five points under its threshold, so a disk hovering at the line does not flap; an escalation replaces the
+warning with an alarm. The latest probe of every running instance is judged again at startup and after every
+probe pass, so a disk that filled while the advisor was down alerts immediately. This is the level today; the
+daily review's `disk_fill` is the trend, days until full at the current rate.
+
 ## Alerts, alarm first, paginated
 
 - `GET /api/alerts?status=open|acknowledged|all&page=1&page_size=10&day=YYYY-MM-DD` →
