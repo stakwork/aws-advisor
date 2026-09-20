@@ -994,22 +994,40 @@ Recommendations detail has a **Resolve** button and a "Tailored resolution" bloc
 confidences, blockers, the numbered plan with commands in code blocks and verify lines, what it needs from a human,
 the concepts used as links), with the static playbook below it as the fallback.
 
-## Graph mirror
+## Graph mirror and the knowledge graph
 
-"I don't see inventory nodes in the graph, nor recommendations" was the complaint: the advisor kept everything in
-SQLite and only its decisions reached Neo4j, as Concepts through repo2graph. `src/graph_mirror.ts` now mirrors the
-operational data into the swarm's Neo4j too, so the agent (through the `graph_query` tool), NavFiber and Neo4j
-Browser can walk resources, roles, recommendations, decisions, incidents and rules in one place, next to the code
-graph and the Concepts. Three rules govern it:
+Two layers in the same Neo4j. The **mirror** is a one-way projection of the advisor's tables (resources,
+recommendations, runs, alerts, incidents, controls, playbooks; `Advisor*` labels). The **knowledge graph**
+(`src/graph_knowledge.ts`, `Kn*` labels, rebuilt with every sync) is the shape the design note asks for:
 
-1. **One way.** SQLite stays the source of truth. The advisor never reads the mirror back: no rule, prompt, decision
-   or UI list depends on it. It is a projection, and only the `graph_query` tool and the Knowledge / Inventory pages
-   look at it.
-2. **Safe to wipe and resync at any time.** Every write is a `MERGE` on the node's id, so a resync creates no
-   duplicates; `POST /api/graph/sync` (the "Resync now" button on Knowledge) rebuilds everything, `?wipe=1` first
-   removes this account's nodes so stale ones disappear too.
-3. **Never in the way.** Every hook is fire-and-forget: a Neo4j that is down or slow is logged (at most once a
-   minute) and never breaks a run, a decision or the UI. With `NEO4J_URI` unset every function is a no-op.
+- **General area**, true in any account: `KnSystemType` nodes for every instance SKU in the price cache and
+  every pricebook rule, with the list price, its unit and source; `KnArchetype` nodes (the workload roles Jev
+  assigns, with their descriptions); `KnPattern` nodes (the operational rules the prompts carry).
+- **Our side**, a schematic: `KnSystem` nodes, one per autoscaled pool, RDS cluster, ElastiCache replication
+  group or NAT gateway, and one per standalone instance, cluster or node (`systemsFromInventory`); each linked
+  `IS_A` to its archetype (from Jev's role, or from the pool kind), `RUNS_ON` to the types it uses with the
+  count, the hours and the cost at list, and reached from its members through `MEMBER_OF`. Stopped instances
+  are not members. `KnPricingOverlay` nodes (the Savings Plan with its implied discount from the bill
+  reconstruction, active RDS and ElastiCache reservations) `COVERS` the types they apply to, so a system carries
+  both a list price and what covers it.
+- **Traffic on the edges**: each NAT gateway system `TRANSFERS_TO` the internet with GB/day, price per GB,
+  USD/month and the measurement source (the 14-day baseline); the account `TRANSFERS_TO` the region for cross-AZ
+  bytes (from the bill); `KnLogGroup` nodes carry ingestion and storage cost, and `SHIPS_LOGS_TO` edges attach
+  them to the system whose name, pool or member id appears in the group's name, else to the account.
+- **Outcomes**: a verified recommendation carries `verdict`, `realised_usd_month` and `realised_ratio`.
+
+Read it back: `GET /api/graph/systems?kind=`, `GET /api/graph/system/:id` (id such as `pool:<name>`,
+`ec2:<instance id>`, `rds:<cluster>`, `cache:<group>`, `nat:<id>`, or a name), `GET /api/graph/bill`, and the
+Knowledge page (Systems card, click a system for its types, overlays, members, edges and decisions). The
+agent has the same through `graph_systems`, `graph_system` and `graph_bill`, next to the raw `graph_query`.
+
+**The bill from the graph** (`graphBill`, on the Bill page under the reconstruction) prices the current fleet
+for a month at list from `RUNS_ON`, adds EBS, the transfer edges and the log groups, and shows last full
+month's on-demand value beside each category the mapping covers. First build, 2026-09-20: 65 systems, 98 system
+types, 4 overlays, 128 traffic and log edges; the graph explains about 15.6k USD of a month at list, and the
+gaps are the ones expected at v1: fleet change during the month (August ran more compute than runs today),
+lines the graph does not hold yet (Lambda, S3, support), and log groups whose names match no system, which fall
+to the account. Closing those is the graph's own eval, the same way the reconstruction is the pricebook's.
 
 ### Schema
 
@@ -1452,6 +1470,7 @@ What each one is for (✎ = also editable in Settings):
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
 - `GET /api/baselines?scope_kind&scope_id`, `POST /api/baselines/refresh` (see [Baselines](#baselines-what-is-typical))
 - `GET /api/bill?month=YYYY-MM`, `POST /api/bill/reconcile?month=` (the bill reconstruction, see [Bill reconstruction](#bill-reconstruction-the-pricing-eval))
+- `GET /api/graph/systems?kind=`, `GET /api/graph/system/:id`, `GET /api/graph/bill`, `POST /api/graph/knowledge` (see [the knowledge graph](#graph-mirror-and-the-knowledge-graph))
 - `GET /api/graph`, `POST /api/graph/sync?wipe=1`, `GET /api/graph/resource/:id` (the Neo4j mirror, see [Graph mirror](#graph-mirror))
 - `POST /mcp` the MCP fact server
 
