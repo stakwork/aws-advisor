@@ -5,6 +5,8 @@ import { PriceWant, ec2OperatingSystem, elasticachePricingEngine, ensurePrices, 
 import { describeError, tablesIn } from "./permissions.js";
 import { poolOf } from "./pools.js";
 import { lambdaSummary, refreshLambdaInventory } from "./lambda_inventory.js";
+import { ebsSummary, refreshEbsInventory } from "./ebs_inventory.js";
+import { s3Summary } from "./s3_inventory.js";
 
 /**
  * Inventory: a snapshot of EC2 instances (with their SSM status, EBS, CPU, latest probe and list price),
@@ -18,7 +20,7 @@ export interface RefreshResult {
   refreshed_at: string;
   ec2: number;
   rds: number;
-  elasticache: number; lambda: number;
+  elasticache: number; lambda: number; ebs: number;
   prices_fetched: number;
   errors: string[];
   took_ms: number;
@@ -337,8 +339,9 @@ async function doRefresh(): Promise<RefreshResult> {
   })();
 
   const lambda = await refreshLambdaInventory((m) => errors.push(m));
+  const ebsVolumes = await refreshEbsInventory((m) => errors.push(m));
   if (ec2Rows || rdsRows || cacheRows) setSetting("inventory_refreshed_at", now);
-  return { refreshed_at: now, ec2, rds, elasticache, lambda, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
+  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
 }
 
 export const inventoryRefreshedAt = () => getSetting("inventory_refreshed_at");
@@ -463,5 +466,5 @@ export function inventorySummary() {
     from inventory_elasticache where gone = 0`).get() as Record<string, number>;
   const cacheGone = (db.prepare("select count(*) as n from inventory_elasticache where gone = 1").get() as { n: number }).n;
   const r1 = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 100) / 100 : v]));
-  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary() };
+  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(), ebs: ebsSummary(), s3: s3Summary() };
 }

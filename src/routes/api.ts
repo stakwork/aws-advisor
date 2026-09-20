@@ -19,6 +19,8 @@ import { listRuntimeSettings, setRuntimeSetting } from "../runtime_settings.js";
 import { quotaStatus } from "../quota.js";
 import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refreshInventory } from "../inventory.js";
 import { listLambda } from "../lambda_inventory.js";
+import { listEbs } from "../ebs_inventory.js";
+import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
 import { jevStats, listJevCalls } from "../jev.js";
@@ -351,6 +353,9 @@ api.get("/inventory/ec2/:id", (req, res) => {
 api.get("/inventory/rds", (req, res) => res.json(listRds({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }).map((r: any) => ({ ...r, role: resourceRole(String(r.db_instance_identifier)) }))));
 api.get("/inventory/elasticache", (req, res) => res.json(listElasticache({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
 api.get("/inventory/lambda", (req, res) => res.json(listLambda({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
+api.get("/inventory/ebs", (req, res) => res.json(listEbs({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));
+api.get("/inventory/s3", (req, res) => res.json(listS3({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
+api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await refreshS3Inventory()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
 // ---- watcher and alerts -----------------------------------------------------
 let watchInFlight = false;

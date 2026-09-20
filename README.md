@@ -88,7 +88,7 @@ advisor (or mount the same files into its container).
 | Alerts | every watcher alert (open, acknowledged or all) with Jev's triage (kind, severity, expected probability, auto-acknowledged by Jev), expandable to its details (top receivers table for NAT alerts) and its incident: cause, confidence, episode cost, run-rate, evidence, fixes linking to their recommendations | investigate, poll result, retry, acknowledge, reopen (undo) |
 | Run detail | live log, findings by control, what changed vs the previous run, agent runs for this collection with a live event stream | send findings to agent, watch, poll result |
 | Findings | every alarm from the benchmarks and custom queries, filterable by control, searchable | |
-| Inventory | EC2 / RDS / ElastiCache tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, and links to the resource's findings and recommendations; gone resources on request | refresh now, probe (SSM-online Linux instances) |
+| Inventory | EC2 / RDS / ElastiCache / Lambda / EBS / S3 tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, and links to the resource's findings and recommendations; gone resources on request | refresh now, probe (SSM-online Linux instances) |
 | Recommendations | ranked list with saving, tier, confidence and source; sticky detail panel with rationale, evidence and probe data | approve, reject with reason, snooze, mark done, reopen, probe (idle instances) |
 | Settings | AWS credentials (mode picker: access keys, AWS profile, instance / default chain, each with an optional role to assume; save and test checks Steampipe and the SDK side), permissions (what the credentials should be, the SSM probe document and its commands, per-capability check results, missing actions seen anywhere in the app with when and where, the IAM policy JSON that fixes them), benchmark toggles, agent configuration, Jev (enabled, calls and tokens today, last error), dev API token | save and test, remove, check permissions |
 
@@ -411,7 +411,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
         "ssm:DescribeInstanceInformation",
-        "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging",
+        "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
         "lambda:ListFunctions", "lambda:GetFunction*", "lambda:GetPolicy", "lambda:ListTags",
         "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
         "ecs:Describe*", "ecs:List*",
@@ -927,6 +927,31 @@ applies on top (the Compute Savings Plan discount and the free tier), and what t
 arm64. The knowledge graph's `lambda:<name>` systems read the same table. The account's 30-day GB-seconds from
 the metrics match Cost Explorer's usage line within a percent.
 
+### EBS volumes
+
+The EBS tab (`src/ebs_inventory.ts`, `GET /api/inventory/ebs?q&sort&gone`, refreshed with the inventory) lists
+every volume with its type, size, provisioned IOPS and throughput, state, the instance and device it is attached
+to, and the price at list (`ebsMonthlyCost`: GB-month by type, plus provisioned IOPS above the gp3 baseline of
+3,000 and throughput above 125 MiB/s, or the io1/io2 IOPS rate). Against that it puts 30 days of the volume's
+own read and write ops from the daily CloudWatch tables: the average IOPS is the month's total divided by its
+seconds, the peak the busiest single sample (the table's `maximum` scaled by its sample period). The detail
+shows the share of the provisioned IOPS actually used and flags gp3/io volumes provisioned above 3,000 IOPS
+whose 30-day peak stays under 30 % of it. Unattached volumes and gp2 volumes (gp3 is cheaper and faster) are
+counted in the tiles.
+
+### S3 buckets
+
+The S3 tab (`src/s3_inventory.ts`, `GET /api/inventory/s3?q&sort&gone`, `POST /api/inventory/s3/refresh`,
+refreshed daily after CloudTrail in `LOGS_CRON` because it is slow) lists every bucket with its region,
+versioning, lifecycle rule count, and the storage held per class from the `BucketSizeBytes` CloudWatch metric
+(published once a day per bucket and class; one `ListMetrics` per region finds which classes each bucket has and one `GetMetricData` call fetches them all, so the pass takes seconds; the newest point of the last three days is used) plus the object
+count, priced at the list GB-month of each class (`S3_CLASS_PRICE`: Standard 0.023, IA 0.0125, Glacier
+Instant 0.004, Deep Archive 0.00099 and the rest). The detail shows the class split and what moving the Standard
+part to IA would save. Every hydrated column of `aws_s3_bucket` is a separate S3 call with its own permission,
+so a denied one (`s3:GetBucketVersioning`, `s3:GetBucketPolicyStatus`, `s3:GetLifecycleConfiguration`) drops
+that column and the refresh continues, reporting the missing action; the affected fields show as unknown rather
+than as zero.
+
 ### Playbooks and the Graviton rule
 
 A finding such as "X is not using Graviton processor" says what is wrong, not what to do. `src/playbooks.ts` is the
@@ -1292,6 +1317,7 @@ Before the advisor can judge a value it needs to know what is normal for this sy
 | NAT gateway | bytes per hour (total, in, out) | CloudWatch hourly sums | 14 days |
 | EC2 instance | CPU % (average and maximum per hour) | CloudWatch hourly | 14 days |
 | EC2 instance | memory %, root disk %, load as % of cores, running containers | the hourly probes | 30 days |
+| EC2 instance | network in and out, GB per day | CloudWatch daily sums | 14 days |
 | service | net spend per day | Cost Explorer daily | 60 days |
 
 Each baseline holds the median, the MAD (a spread a spike cannot move), p95, max, the number of days seen, and,
@@ -1312,6 +1338,10 @@ Where it is used today:
 `GET /api/baselines?scope_kind=nat|instance|service&scope_id=` returns them. Next: the same scoring for CPU,
 memory and spend per service in the watcher, the p95 band on the instance charts, and change-point detection
 over the daily roll-ups.
+
+The network baselines also raise `network_step` (warning): an instance whose last two complete days moved at
+least twice its own 14-day median and three spreads above it, with at least 5 GB/day, in either direction. A
+bandwidth or data-transfer line that grows on the bill then has a named instance and a day behind it.
 
 ## What the findings batch sends
 
@@ -1426,6 +1456,8 @@ recommendations and alerts with the numbers attached (`src/review_math.ts`, pure
 | disk filling | a least-squares line through the root disk usage reaches 90 % within 60 days (fit r² ≥ 0.5) | recommendation `review_disk_fill`; alarm when under 14 days |
 | idle container | ran 90 %+ of the window at under 0.3 % CPU | observation on the Overview |
 | spend step | a service's last 3 complete days average more than 3 spreads and 30 % above its 60-day median, at least 20 USD/day | warning alert with the monthly excess |
+| bucket without lifecycle | a bucket with at least 20 GB in Standard and no lifecycle rule | observation `s3_no_lifecycle` with the IA saving |
+| over-provisioned IOPS | an in-use gp3/io1/io2 volume above 3,000 provisioned IOPS whose 30-day peak stays under 30 % of it (5+ days of metrics) | observation `ebs_overprovisioned_iops` with the monthly IOPS charge |
 
 Every observation is stored per day in `review_findings` (90 days) and listed on the Overview with a link to the
 instance. Review recommendations are refreshed by the review itself and never resolved by the collection run.
@@ -1558,7 +1590,7 @@ What each one is for (✎ = also editable in Settings):
 - `POST /api/instances/:id/probe`, `GET /api/instances/:id/metrics`, `GET /api/instances/:id/timeseries?hours=`, `GET /api/instances/:id/history?days=`, `POST /api/history/rollup?days=`, `GET /api/probe/document` (the SSM document for `aws ssm create-document`)
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
-- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `POST /api/inventory/refresh`
+- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`
 - `GET /api/logs?limit=`, `POST /api/logs/refresh`, `GET /api/trail?hours=`, `POST /api/trail/refresh` (see [CloudWatch Logs and CloudTrail](#cloudwatch-logs-and-cloudtrail))
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))

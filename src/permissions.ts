@@ -386,7 +386,7 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
         "ssm:DescribeInstanceInformation",
-        "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging",
+        "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
         "lambda:ListFunctions", "lambda:GetFunction*", "lambda:GetPolicy", "lambda:ListTags",
         "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
         "ecs:Describe*", "ecs:List*",
