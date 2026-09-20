@@ -67,7 +67,10 @@ samples), aws_nat_attribution (instances in a NAT gateway's VPC ranked by networ
 instance, ranking is what matters), aws_cloudwatch_metric (NetworkIn/NetworkOut per instance or BytesOutToDestination of
 the gateway over days, to see whether the spike is periodic or new), aws_steampipe_query (VPC endpoints, flow logs, ECR
 repositories, EKS node groups, security groups, anything in the account), aws_instance_inventory and aws_instance_probe
-(what runs on an instance), aws_resource_cost_history and aws_findings_for_resource.
+(what runs on an instance), aws_resource_cost_history and aws_findings_for_resource, aws_cloudtrail_changes (who changed
+what in the account in the last days: a deploy, a scaling change or a new job often explains a traffic or cost move),
+aws_log_groups (which log groups ingest the most and what they cost), aws_baseline (what is typical for the gateway or
+instance, and a value scored against it) and aws_instance_history (a month of daily memory, disk, load and containers).
 Limits you must respect: attribution is at instance level. Without VPC flow logs nobody can name the destination or the
 pod, so do not claim to. If flow logs are missing, say so in the evidence and include an enable_flow_logs fix (tier
 approve); the advisor never enables them itself. Do not propose Kubernetes-level changes as if they were verified.
