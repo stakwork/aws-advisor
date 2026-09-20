@@ -9,7 +9,7 @@
     "start": "tsx src/index.ts",
     "build": "tsc --noEmit && npm --prefix ui run build",
     "typecheck": "tsc --noEmit",
-    "test": "NODE_ENV=test NEO4J_URI= node --import tsx --test \"src/**/*.test.ts\"",
+    "test": "NODE_ENV=test NEO4J_URI= DATA_DIR=.test-data node --import tsx --test \"src/**/*.test.ts\"",
     "test:live": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {

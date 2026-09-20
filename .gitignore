@@ -6,3 +6,4 @@ data/
 mod/.powerpipe/
 mod/.mod.cache.json
 *.log
+.test-data/

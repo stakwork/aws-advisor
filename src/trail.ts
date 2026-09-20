@@ -9,7 +9,7 @@ import { sdkCredentials } from "./steampipe.js";
 import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
 import { config } from "./config.js";
 import { credentialGate } from "./gate.js";
-import { describeError } from "./permissions.js";
+import { describeError, noteSuccess } from "./permissions.js";
 
 db.exec(`create table if not exists trail_events (
   event_id text primary key, event_time text not null, event_name text not null, event_source text not null,
@@ -66,6 +66,7 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
           const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0);
           if (res2.changes) out.stored++;
         }
+        if (pages === 0) noteSuccess(["cloudtrail:LookupEvents"], `cloudtrail ${region}`);
         NextToken = res.NextToken; pages++;
         if (pages >= MAX_PAGES) { out.errors.push(`${region}: stopped after ${MAX_PAGES} pages (${out.events} events); narrow the window`); break; }
       } while (NextToken);
