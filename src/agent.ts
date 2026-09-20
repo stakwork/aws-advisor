@@ -67,26 +67,43 @@ from the prompt when you need the full record before proposing something similar
 Emit the JSON object first, then any commentary.`;
 registerDefaultPrompt("findings", `${SYSTEM}\n${OPERATIONAL_PATTERNS}`);
 
-function buildPrompt(runId: number): string {
+const EXAMPLES_PER_CONTROL = 3, TOP_DRAFTS = 15, TOP_PER_RULE = 3;
+const short = (t: unknown, n: number) => { const x = String(t ?? "").replace(/\s+/g, " ").trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
+const usd0 = (v: unknown) => (v == null ? "?" : String(Math.round(Number(v))));
+
+/**
+ * The findings batch as a summary plus the diff, not a dump: counts and a few examples per control, the rule
+ * drafts as a table with the biggest items, the diff since the previous run in full. The agent pulls the rest
+ * with aws_open_recommendations, aws_findings_for_resource and aws_recommendation_history. Before this the
+ * prompt carried every draft with its rationale, about 66k tokens for 300 drafts, most of it never read.
+ * Exported for the tests.
+ */
+export function buildPrompt(runId: number): string {
   const findings = db.prepare("select control_id, control_title, status, resource, reason from findings where run_id = ? and status = 'alarm' order by control_id").all(runId) as any[];
   const byControl = new Map<string, any[]>();
   for (const f of findings) byControl.set(f.control_id, [...(byControl.get(f.control_id) || []), f]);
-  const lines: string[] = ["## Findings (alarm) grouped by control"];
-  for (const [control, rows] of byControl) {
-    lines.push(`\n### ${control} — ${rows[0].control_title} (${rows.length})`);
-    for (const r of rows.slice(0, 40)) lines.push(`- ${r.resource}: ${r.reason}`);
-    if (rows.length > 40) lines.push(`- … ${rows.length - 40} more`);
+  const lines: string[] = [`## Findings (alarm) in run #${runId}: ${findings.length} across ${byControl.size} controls`, "Counts with a few examples; aws_findings_for_resource lists every finding for a resource, aws_review_findings what the daily review of the statistics found."];
+  for (const [control, rows] of [...byControl.entries()].sort((x, y) => y[1].length - x[1].length)) {
+    lines.push(`- ${control} (${rows[0].control_title}): ${rows.length}. e.g. ${rows.slice(0, EXAMPLES_PER_CONTROL).map((r) => `${short(r.resource, 60)}: ${short(r.reason, 110)}`).join(" | ")}`);
   }
-  const recs = db.prepare("select rule, title, est_monthly_saving, tier, confidence, rationale from recommendations where run_id = ? and source = 'rules' and status = 'open'").all(runId) as any[];
-  lines.push("\n## Draft recommendations from fixed rules");
-  for (const r of recs) lines.push(`- [${r.rule}] ${r.title} — est ${r.est_monthly_saving ?? "?"} USD/mo, tier ${r.tier}, confidence ${r.confidence}. ${r.rationale}`);
+  const recs = db.prepare("select id, rule, title, resource, est_monthly_saving, tier, confidence from recommendations where run_id = ? and source = 'rules' and status = 'open' order by coalesce(est_monthly_saving, -1) desc").all(runId) as any[];
+  const byRule = new Map<string, any[]>();
+  for (const r of recs) byRule.set(r.rule, [...(byRule.get(r.rule) || []), r]);
+  const total = recs.reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0);
+  lines.push("", `## Draft recommendations from the fixed rules: ${recs.length} open, ≈ ${usd0(total)} USD/month claimed`, "Per rule: count, claimed saving, the biggest items (id, title, saving, tier, confidence). aws_open_recommendations(rule or resource) returns any draft with its full rationale and evidence; aws_recommendation_history what the team decided before.");
+  for (const [rule, rows] of [...byRule.entries()].sort((x, y) => y[1].reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0) - x[1].reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0))) {
+    const sum = rows.reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0);
+    lines.push(`- ${rule}: ${rows.length} item${rows.length === 1 ? "" : "s"}, ≈ ${usd0(sum)} USD/mo. ${rows.slice(0, TOP_PER_RULE).map((r) => `#${r.id} ${short(r.title, 90)} (${usd0(r.est_monthly_saving)}, ${r.tier}, ${Number(r.confidence).toFixed(2)})`).join("; ")}${rows.length > TOP_PER_RULE ? `; … ${rows.length - TOP_PER_RULE} more` : ""}`);
+  }
+  const top = recs.slice(0, TOP_DRAFTS);
+  if (top.length) lines.push("", `### The ${top.length} largest drafts by claimed saving`, ...top.map((r) => `- #${r.id} [${r.rule}] ${short(r.title, 110)} — ${usd0(r.est_monthly_saving)} USD/mo, ${r.tier}, confidence ${Number(r.confidence).toFixed(2)}, resource ${short(r.resource, 60)}`));
   const rejected = db.prepare("select title, decision_reason from recommendations where status = 'rejected' and decision_reason is not null order by decided_at desc limit 30").all() as any[];
   if (rejected.length) {
-    lines.push("\n## Previously rejected by the team (do not propose again unless something changed)");
-    for (const r of rejected) lines.push(`- ${r.title}: ${r.decision_reason}`);
+    lines.push("", "## Previously rejected by the team (do not propose again unless something changed)");
+    for (const r of rejected) lines.push(`- ${short(r.title, 100)}: ${short(r.decision_reason, 160)}`);
   }
   const metrics = db.prepare("select key, label, value from metrics where run_id = ? order by key, value desc").all(runId) as any[];
-  lines.push("\n## Last full month cost context");
+  lines.push("", "## Last full month cost context");
   for (const m of metrics) lines.push(`- ${m.key} / ${m.label}: ${m.value}`);
   const changes = changeSummaryText(runId);
   if (changes) lines.push("", changes);

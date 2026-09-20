@@ -1222,6 +1222,17 @@ Where it is used today:
 memory and spend per service in the watcher, the p95 band on the instance charts, and change-point detection
 over the daily roll-ups.
 
+## What the findings batch sends
+
+The prompt for the findings batch is a summary plus the diff, not a dump (`buildPrompt` in `src/agent.ts`):
+per control a count and three examples; the rule drafts as a table per rule (count, claimed saving, the three
+biggest items) plus the fifteen largest drafts overall; the rejected decisions; the month's cost context; and
+the full "what changed since the previous run". Everything else the agent pulls on demand:
+`open_recommendations` (any draft with its full rationale and evidence, by rule, resource, ids or minimum
+saving), `findings_for_resource`, `recommendation_history`, `review_findings`. Before this the prompt carried
+every draft with its rationale, about 66k tokens for 300 drafts and roughly half of the run's cost; it is now
+under 8k tokens for the same run.
+
 ## The morning observation: the agent's read of the day
 
 Every morning after the review (`OBSERVE_CRON`, 07:15, only when repo2graph is configured) and on demand
