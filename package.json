@@ -1,0 +1,39 @@
+{
+  "name": "aws-advisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AWS cost advisor: Steampipe + Powerpipe facts, agent-ranked recommendations, guarded actions",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc --noEmit && npm --prefix ui run build",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_ENV=test NEO4J_URI= node --import tsx --test \"src/**/*.test.ts\"",
+    "test:live": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-ssm": "^3.1135.0",
+    "@aws-sdk/client-sts": "^3.1136.0",
+    "@aws-sdk/credential-providers": "^3.1136.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@typesafe-ai/sdk": "^0.6.0",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "neo4j-driver": "^5.28.3",
+    "node-cron": "^4.6.0",
+    "pg": "^8.16.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.15.4",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

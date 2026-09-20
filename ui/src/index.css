@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+:root { color-scheme: dark; }
+body { @apply bg-zinc-950 text-zinc-200 antialiased; }
+a { @apply text-inherit; }
+input, select, textarea { @apply bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-zinc-400; }
+button { @apply cursor-pointer; }
