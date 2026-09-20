@@ -309,6 +309,18 @@ const SSM_WHERE: Record<SsmFilter, string> = {
 
 const EC2_COLUMNS = "instance_id, name, instance_type, state, region, az, launch_time, private_ip, public_ip, platform, ssm_status, ssm_platform, ebs_gb, volumes, cpu_30d, cpu_days, probe_mem_pct, probe_at, monthly_usd, open_recs, findings, first_seen, last_seen, gone, pool_kind, pool";
 
+/** Pools with their running members, for the agent and the observe task. */
+export function poolSummary() {
+  const rows = db.prepare(`select coalesce(pool_kind, '') as pool_kind, coalesce(pool, '') as pool, count(*) as members, group_concat(distinct instance_type) as types,
+      round(sum(coalesce(monthly_usd, 0))) as monthly_usd, sum(case when datetime(launch_time) > datetime('now', '-1 day') then 1 else 0 end) as launched_24h
+    from inventory_ec2 where gone = 0 and state = 'running' group by 1, 2 order by monthly_usd desc`).all() as any[];
+  const churn = db.prepare("select resource as pool, details from alerts where kind = 'node_churn' and date(created_at) = date('now')").all() as { pool: string; details: string }[];
+  const churnByPool = new Map(churn.map((c) => { let d: any = {}; try { d = JSON.parse(c.details); } catch { /* ignore */ } return [c.pool, { launched: d.launched ?? null, terminated: d.terminated ?? null }]; }));
+  const pools = rows.filter((r) => r.pool_kind).map((r) => ({ kind: r.pool_kind, name: r.pool, members: r.members, instance_types: String(r.types || "").split(","), monthly_usd_list: r.monthly_usd, launched_24h: r.launched_24h, churn_today: [...churnByPool.entries()].find(([k]) => k.endsWith(r.pool))?.[1] ?? null }));
+  const standalone = rows.find((r) => !r.pool_kind);
+  return { refreshed_at: inventoryRefreshedAt(), pools, standalone: standalone ? { members: standalone.members, monthly_usd_list: standalone.monthly_usd } : { members: 0, monthly_usd_list: 0 } };
+}
+
 export function listEc2(f: Ec2Filter = {}) {
   const where: string[] = []; const params: unknown[] = [];
   if (!f.gone) where.push("gone = 0");

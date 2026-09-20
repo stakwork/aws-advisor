@@ -4,12 +4,13 @@
  */
 import { getSetting, setSetting, db } from "./db.js";
 
-export type PromptKind = "findings" | "incident" | "resolution";
-export const PROMPT_KINDS: PromptKind[] = ["findings", "incident", "resolution"];
+export type PromptKind = "findings" | "incident" | "resolution" | "observe";
+export const PROMPT_KINDS: PromptKind[] = ["findings", "incident", "resolution", "observe"];
 export const PROMPT_LABELS: Record<PromptKind, { title: string; when: string }> = {
   findings: { title: "Findings batch", when: "sent after a collection run, with the findings, the rules' drafts, the diff and the team's decisions" },
   incident: { title: "Incident investigation", when: "sent when an alert is investigated, with the alert, its attribution and the resource facts" },
   resolution: { title: "Tailored resolution", when: "sent when Resolve is pressed on a recommendation, with the playbook, the graph context and the resource facts" },
+  observe: { title: "Daily observation", when: "sent every morning after the review, with what changed in the last day: review findings, alerts, spend against baseline, pools, run changes" },
 };
 
 const defaults = new Map<PromptKind, string>();

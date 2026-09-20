@@ -77,6 +77,35 @@ function DailyCostChart({ series, today, asOf }: { series: any[]; today: string;
   );
 }
 
+/** The agent's morning note: what changed, what deserves attention, what it proposes, with its rubric score. */
+function ObservationCard() {
+  const [d, setD] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const load = () => api("/observe").then(setD).catch(() => setD(null));
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
+  const run = async () => { setBusy(true); setMsg(""); try { await api("/observe/run?force=1", { method: "POST", body: "{}" }); await load(); } catch (e: any) { setMsg(e.message); } finally { setBusy(false); } };
+  const o = d?.latest;
+  const r = o?.result;
+  return (
+    <div className="space-y-1 text-sm">
+      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{o ? `${o.day} · ${o.status}${o.score != null ? ` · rubric ${Math.round(o.score * 100)} %` : ""}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Dispatching…" : "Observe now"}</Button></div>
+      {msg && <div className="text-xs text-red-300">{msg}</div>}
+      {o?.status === "pending" && <div className="text-xs text-zinc-500">The agent is reading the brief and checking facts; a few minutes.</div>}
+      {o?.status === "failed" && <div className="text-xs text-red-300">{String(o.error).slice(0, 200)}</div>}
+      {r && (
+        <>
+          <div className="text-zinc-200">{r.summary}</div>
+          {r.attention?.length > 0 && <ul className="space-y-0.5 text-xs">{r.attention.map((a: any, i: number) => <li key={i} className="flex items-start gap-2"><Badge>{a.urgency}</Badge><span className="text-zinc-300">{a.item}{a.reason ? <span className="text-zinc-500"> — {a.reason}</span> : null}</span></li>)}</ul>}
+          {r.changes?.length > 0 && <details className="text-xs"><summary className="cursor-pointer text-zinc-500">{r.changes.length} change{r.changes.length === 1 ? "" : "s"} explained</summary><ul className="mt-1 space-y-1 pl-3">{r.changes.map((c: any, i: number) => <li key={i} className="text-zinc-300">{c.what} <span className="text-zinc-500">· {c.why} · {c.evidence}{c.expected ? " · expected" : ""}</span></li>)}</ul></details>}
+          {r.proposals?.length > 0 && <details className="text-xs"><summary className="cursor-pointer text-zinc-500">{r.proposals.length} proposal{r.proposals.length === 1 ? "" : "s"}</summary><ul className="mt-1 space-y-1 pl-3">{r.proposals.map((p: any, i: number) => <li key={i} className="text-zinc-300"><Badge>{p.tier}</Badge> {p.action}{p.resource ? <span className="font-mono text-zinc-500"> {p.resource}</span> : null}{p.est_monthly_saving ? <span className="text-zinc-500"> · ≈ {usd(p.est_monthly_saving)}/mo</span> : null}<div className="text-zinc-500">{p.rationale}</div></li>)}</ul></details>}
+          {o.grade?.checks && <details className="text-xs"><summary className="cursor-pointer text-zinc-500">rubric</summary><ul className="mt-1 space-y-0.5 pl-3">{o.grade.checks.map((c: any) => <li key={c.check}><Badge>{c.pass ? "pass" : "fail"}</Badge> <span className="text-zinc-300">{c.check}</span> <span className="text-zinc-500">{c.detail}</span></li>)}</ul></details>}
+        </>
+      )}
+    </div>
+  );
+}
+
 const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up" };
 /** Yesterday's read of the collected statistics: idle instances, memory pressure, disks filling, idle containers, spend steps. */
 function ReviewSummary() {
@@ -284,6 +313,9 @@ export default function Overview() {
               {metric("ec2_other_usage").map((m) => <li key={m.label} className="flex justify-between"><span className="text-zinc-300">{m.label}</span><span>{usd(m.value)}</span></li>)}
             </ul>
           )}
+        </Card>
+        <Card title={<span className="flex items-center justify-between">Morning observation <span className="text-xs font-normal text-zinc-500">the agent's read of the day</span></span>}>
+          <ObservationCard />
         </Card>
         <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
           <ReviewSummary />

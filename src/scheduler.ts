@@ -8,6 +8,7 @@ import { credentialGate } from "./gate.js";
 import { refreshSpend } from "./spend.js";
 import { refreshBaselines } from "./baselines.js";
 import { runReview } from "./review.js";
+import { dispatchObservation } from "./observe.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -22,7 +23,7 @@ function schedule(name: string, expr: string, fn: () => void): string | null {
 let watching = false;
 
 /** Starts the scheduled full run (RUN_CRON) and the lightweight watcher (WATCH_CRON). */
-export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null } {
+export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null; observe: string | null } {
   const run = schedule("Scheduler (RUN_CRON)", config.runCron, async () => {
     if (isBusy()) { console.log("[scheduler] skipped: a run is already in progress"); return; }
     if (!hasConnectionFile()) { console.log("[scheduler] skipped: AWS credentials are not configured"); return; }
@@ -63,5 +64,8 @@ export function startScheduler(): { run: string | null; watch: string | null; pr
   const review = schedule("Daily review (REVIEW_CRON)", config.reviewCron, () => {
     runReview((l) => console.log(`[review] ${l}`)).catch((e: any) => console.error(`[review] failed: ${e?.message || e}`));
   });
-  return { run, watch, probe, spend, baselines, review };
+  const observe = config.repo2graphUrl ? schedule("Observation (OBSERVE_CRON)", config.observeCron, () => {
+    dispatchObservation().then((r) => console.log(`[observe] dispatched ${r.requestId}`)).catch((e: any) => console.error(`[observe] not dispatched: ${e?.message || e}`));
+  }) : null;
+  return { run, watch, probe, spend, baselines, review, observe };
 }

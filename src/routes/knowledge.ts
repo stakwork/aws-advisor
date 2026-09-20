@@ -9,6 +9,7 @@ import { instanceHistory, rollupDaily } from "../history.js";
 import { getReconciliation, lastFullMonth, listReconciliations, reconcileMonth } from "../reconcile.js";
 import { ScopeKind, baselineSummary, listBaselines, refreshBaselines } from "../baselines.js";
 import { latestReview, runReview } from "../review.js";
+import { buildObserveBrief, dispatchObservation, latestObservation, listObservations } from "../observe.js";
 
 /** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
@@ -146,4 +147,11 @@ knowledge.get("/review", (_req, res) => res.json(latestReview()));
 knowledge.post("/review/run", async (_req, res) => {
   const log: string[] = [];
   try { res.json({ ...(await runReview((l) => log.push(l))), log }); } catch (e: any) { res.status(500).json({ error: e.message, log }); }
+});
+
+// ---- the agent's morning observation ---------------------------------------------------------------------------
+knowledge.get("/observe", (_req, res) => res.json({ latest: latestObservation(), history: listObservations() }));
+knowledge.get("/observe/brief", (_req, res) => res.type("text/plain; charset=utf-8").send(buildObserveBrief(new Date().toISOString().slice(0, 10)).text));
+knowledge.post("/observe/run", async (req, res) => {
+  try { res.json(await dispatchObservation(undefined, { force: req.query.force === "1" })); } catch (e: any) { res.status(400).json({ error: e.message }); }
 });

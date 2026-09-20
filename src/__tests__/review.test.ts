@@ -38,4 +38,5 @@ test("memory pressure, idle containers and spend steps", () => {
   assert.ok(s && s.ratio > 1.6 && s.excess_per_day > 60);
   assert.equal(spendStep("tiny", [12, 13], { median: 5, mad: 1 }), null, "under 20 USD a day of excess is noise");
   assert.equal(spendStep("EC2", [160], { median: 100, mad: 5 }), null, "one day is not enough");
+  assert.equal(spendStep("RDS", [155, 91, 94], { median: 86, mad: 4 }), null, "one purchase day does not make a step: the median of the three days rules");
 });

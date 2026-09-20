@@ -6,6 +6,7 @@ import { credentialGate } from "./gate.js";
 import { db } from "./db.js";
 import { RecInput } from "./rules.js";
 import { changeSummaryText } from "./changes.js";
+import { completeObservation } from "./observe.js";
 import { listDecisionConcepts } from "./concepts.js";
 import { checkTiers } from "./tiercheck.js";
 
@@ -97,7 +98,7 @@ export interface AgentRequest {
   metadata?: Record<string, unknown>;
   maxTurns?: number;
   /** Which advisor flow owns the answer; the callback routes on it. */
-  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number };
+  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string };
 }
 
 export interface AgentAccepted { requestId: string; sessionId: string; eventsToken: string }
@@ -184,7 +185,7 @@ export async function openAgentEvents(requestId: string): Promise<Response> {
   return res;
 }
 
-export interface AgentRunRow { id: number; kind: "findings" | "incident" | "resolution"; run_id: number | null; alert_id: number | null; recommendation_id?: number | null; request_id: string }
+export interface AgentRunRow { id: number; kind: "findings" | "incident" | "resolution" | "observe"; run_id: number | null; alert_id: number | null; recommendation_id?: number | null; request_id: string }
 
 /**
  * Handles the terminal webhook from repo2graph (also usable with a polled /progress record). Routes on the
@@ -201,11 +202,13 @@ export async function handleAgentResult(requestId: string, payload: { status: st
     db.prepare("update agent_runs set status = 'failed', error = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.error ?? payload), run.id);
     if (run.kind === "incident") await completeIncident(run, payload);
     if (run.kind === "resolution") completeResolution(run, payload);
+    if (run.kind === "observe") completeObservation(run, payload);
     return { kind: run.kind, imported: 0 };
   }
   db.prepare("update agent_runs set status = 'completed', result = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.result), run.id);
   if (run.kind === "incident") return { kind: run.kind, imported: (await completeIncident(run, payload)).imported };
   if (run.kind === "resolution") { completeResolution(run, payload); return { kind: run.kind, imported: 0 }; }
+  if (run.kind === "observe") { completeObservation(run, payload); return { kind: run.kind, imported: 0 }; }
   return { kind: run.kind, imported: await importFindingsResult(run, payload.result) };
 }
 

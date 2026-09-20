@@ -67,10 +67,10 @@ export function idleContainers(stats: ContainerStat[], windowDays: number): Cont
 
 export interface SpendStep { service: string; recent_avg: number; median: number; mad: number; ratio: number; recent_days: number; excess_per_day: number }
 
-/** A service whose last complete days sit well above its 60-day median: more than 3 spreads and 30 % up, and at least 20 USD a day. */
+/** A service whose last complete days sit well above its 60-day median: more than 3 spreads and 30 % up, and at least 20 USD a day. The median of the recent days is used, so a one-off charge (a reservation purchase) on one day is not a step. */
 export function spendStep(service: string, recent: number[], baseline: { median: number | null; mad: number | null } | null): SpendStep | null {
   if (!baseline || baseline.median == null || recent.length < 2) return null;
-  const r = avg(recent); const mad = baseline.mad ?? 0;
+  const sorted = [...recent].sort((a, b) => a - b); const r = sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2; const mad = baseline.mad ?? 0;
   const excess = r - baseline.median;
   if (excess < Math.max(3 * mad, 20) || r < 1.3 * baseline.median) return null;
   return { service, recent_avg: r, median: baseline.median, mad, ratio: baseline.median > 0 ? r / baseline.median : Infinity, recent_days: recent.length, excess_per_day: excess };
