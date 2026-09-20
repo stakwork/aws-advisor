@@ -1488,7 +1488,10 @@ ci` in the image because the lockfile is written on macOS and `ci` skips the opt
 **In sphinx-swarm** the image is part of the graph-mindset stack when the swarm's `.env` has `DEVOPS=1`
 (`src/images/advisor.rs`, added in `graph_mindset_imgs`): node `advisor` on port 9034, linked to repo2graph
 (the agent; boltwall's `stakwork_secret` becomes `REPO2GRAPH_TOKEN`) and neo4j (the mirror), with `PUBLIC_URL`
-set to its own container address so the agent's callbacks and tool calls stay on the swarm network. The swarm
+set to its own container address so the agent's callbacks and tool calls stay on the swarm network. It is
+private, like neo4j: no Traefik route and no public hostname, because the UI lists the account's instances,
+probes, costs and decisions. Reach it on the host's private IP at port 9034 (over the VPN or a tunnel), and
+sign in with the `API_TOKEN` the swarm generated for the node (in the stack's config.yaml). The swarm
 generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created and forwards
 `ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY` from its env when present. It passes no AWS credentials: the
 advisor is configured read-only from its Settings page, exactly as documented above, and `advisor` is on the
