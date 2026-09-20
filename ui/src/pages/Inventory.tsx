@@ -6,10 +6,10 @@ import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const gb = (v: number | null | undefined) => (v == null ? "—" : `${Number(v).toLocaleString()} GB`);
@@ -179,6 +179,15 @@ export default function Inventory() {
         </div>
       )}
 
+      {tab === "lambda" && inv && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <Stat label="Functions" value={inv.total} hint={`${inv.active} invoked in 30 days${inv.gone ? ` · ${inv.gone} gone` : ""} · ${inv.arm} on arm64`} />
+          <Stat label="At list / month" value={usd(inv.monthly_usd)} hint="GB-seconds and requests from 30 days of metrics, before the Savings Plan and the free tier" />
+          <Stat label="Invocations / month" value={Number(inv.invocations_month).toLocaleString()} hint={`${(Number(inv.gb_seconds_month) / 1e6).toFixed(2)}M GB-seconds`} />
+          <Stat label="Open recs · findings" value={`${inv.open_recs} · ${inv.findings}`} />
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         {tab === "ec2" && (
           <>
@@ -213,6 +222,12 @@ export default function Inventory() {
                   <SortTh col="created">Created</SortTh><SortTh col="open_recs" className="text-right">Recs</SortTh><SortTh col="findings" className="text-right">Findings</SortTh>
                 </tr></thead>
               )}
+              {tab === "lambda" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="name">Function</SortTh><SortTh col="runtime">Runtime</SortTh><SortTh col="memory_mb" className="text-right">Memory</SortTh><SortTh col="invocations_month" className="text-right">Invocations / mo</SortTh>
+                  <SortTh col="avg_duration_ms" className="text-right">Avg ms</SortTh><SortTh col="gb_seconds_month" className="text-right">GB-s / mo</SortTh><SortTh col="errors_30d" className="text-right">Errors 30d</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="open_recs" className="text-right">Recs</SortTh><SortTh col="findings" className="text-right">Findings</SortTh>
+                </tr></thead>
+              )}
               {tab === "elasticache" && (
                 <thead className="bg-zinc-900"><tr>
                   <SortTh col="cache_cluster_id">Cluster</SortTh><SortTh col="node_type">Node type</SortTh><SortTh col="engine">Engine</SortTh><SortTh col="num_nodes" className="text-right">Nodes</SortTh><SortTh col="status">Status</SortTh>
@@ -229,6 +244,7 @@ export default function Inventory() {
                       {!detail ? <div className="text-sm text-zinc-500">{rows ? "Not in the snapshot." : "Loading…"}</div>
                         : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={() => runProbe(detail.instance_id)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
+                        : tab === "lambda" ? <LambdaDetail d={detail} />
                         : <CacheDetail d={detail} />}
                     </DetailCell></td></tr>
                   ) : null;
@@ -261,6 +277,20 @@ export default function Inventory() {
                       <Td className="text-right">{r.findings || "—"}</Td>
                     </tr>{detailRow}
                   </Fragment>);
+                  if (tab === "lambda") return (<Fragment key={id}>
+                    <tr onClick={() => set({ id })} className={cls}>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.arm ? <Badge>arm64</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{r.region}</div></Td>
+                      <Td className="whitespace-nowrap text-zinc-400">{r.runtime || "—"}</Td>
+                      <Td className="text-right">{r.memory_mb} MB</Td>
+                      <Td className="text-right">{r.invocations_month ? Number(r.invocations_month).toLocaleString() : <span className="text-zinc-600">0</span>}</Td>
+                      <Td className="text-right text-zinc-400">{r.avg_duration_ms != null ? Number(r.avg_duration_ms).toLocaleString() : "—"}</Td>
+                      <Td className="text-right">{r.gb_seconds_month ? Number(r.gb_seconds_month).toLocaleString() : "—"}</Td>
+                      <Td className={`text-right ${r.errors_30d ? "text-amber-300" : "text-zinc-500"}`}>{r.errors_30d ? Number(r.errors_30d).toLocaleString() : "0"}</Td>
+                      <Td className="text-right font-medium text-zinc-100">{r.monthly_usd ? usd(r.monthly_usd, 2) : <span className="text-zinc-600">$0.00</span>}</Td>
+                      <Td className="text-right">{r.open_recs || "—"}</Td>
+                      <Td className="text-right">{r.findings || "—"}</Td>
+                    </tr>{detailRow}
+                  </Fragment>);
                   return (<Fragment key={id}>
                     <tr onClick={() => set({ id })} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}</div>{r.replication_group && <div className="text-xs text-zinc-500">group {r.replication_group}</div>}</Td>
@@ -284,7 +314,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10 };
 
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
 function DetailCell({ id, onClose, children }: { id: string; onClose: () => void; children: ReactNode }) {
@@ -504,6 +534,38 @@ function RdsDetail({ d }: { d: any }) {
       </Group>
       <Group title="Tags"><Tags tags={s.tags} /></Group>
       <Related id={d.db_instance_identifier} recs={d.open_recs} findings={d.findings} />
+    </>
+  );
+}
+
+function LambdaDetail({ d }: { d: any }) {
+  const rate = d.arm ? 0.0000133334 : 0.0000166667;
+  return (
+    <>
+      <h2 className="text-base font-medium text-zinc-100">{d.name}</h2>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.runtime || "runtime ?"}</Badge><Badge>{d.arm ? "arm64" : "x86_64"}</Badge>{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.arn}</Mono></div>
+      <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <Group title="Configuration">
+        <Dl rows={[["Memory", `${d.memory_mb} MB`], ["Timeout", d.timeout_s != null ? `${d.timeout_s} s` : null], ["Region", d.region]]} />
+      </Group>
+      <Group title="Usage, last 30 days">
+        <Dl rows={[
+          ["Invocations", `${Number(d.invocations_30d).toLocaleString()} over ${d.days} day${d.days === 1 ? "" : "s"} with data`],
+          ["Average duration", d.avg_duration_ms != null ? `${Number(d.avg_duration_ms).toLocaleString()} ms` : "—"],
+          ["Errors", Number(d.errors_30d).toLocaleString()],
+          ["Compute", `${Number(d.gb_seconds_month).toLocaleString()} GB-seconds / month (duration × ${d.memory_mb / 1024} GB)`],
+        ]} />
+      </Group>
+      <Group title="Price">
+        <Dl rows={[
+          ["At list", <>{usd(d.monthly_usd, 2)} / month = {Number(d.gb_seconds_month).toLocaleString()} GB-s × {rate} + {Number(d.invocations_month).toLocaleString()} requests × 0.0000002</>],
+          ["What the bill applies", "the Compute Savings Plan discount and the free tier (400,000 GB-s and one million requests a month across the account), so the net line is lower"],
+          ["Graviton", d.arm ? "already on arm64" : `arm64 would cost ${usd(Number(d.gb_seconds_month) * 0.0000133334 + Number(d.invocations_month) * 0.0000002, 2)} / month at list (20 % less on compute); needs an arm64 build of the function`],
+        ]} />
+      </Group>
+      <Group title="Findings and recommendations">
+        <div className="text-sm text-zinc-400">{d.findings ? <Link className="underline" to={`/findings?q=${encodeURIComponent(d.name)}`}>{d.findings} finding{d.findings === 1 ? "" : "s"}</Link> : "no findings"} · {d.open_recs ? <Link className="underline" to={`/recommendations?q=${encodeURIComponent(d.name)}`}>{d.open_recs} open recommendation{d.open_recs === 1 ? "" : "s"}</Link> : "no open recommendations"}</div>
+      </Group>
     </>
   );
 }
