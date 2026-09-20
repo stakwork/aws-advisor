@@ -129,6 +129,12 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
   return out;
 }
 
+export function reviewForDay(day: string) {
+  const findings = db.prepare("select * from review_findings where day = ? order by case severity when 'alarm' then 0 when 'warning' then 1 else 2 end, kind, resource_name").all(day) as any[];
+  const days = db.prepare("select day, count(*) as n from review_findings group by day order by day desc limit 30").all() as any[];
+  return { day: findings.length ? day : null, findings: findings.map((f: any) => ({ ...f, details: safeJson(f.details) })), days };
+}
+
 export function latestReview(): { day: string | null; findings: any[]; days: { day: string; n: number }[] } {
   const day = (db.prepare("select max(day) as day from review_findings").get() as { day: string | null }).day;
   const findings = day ? db.prepare("select * from review_findings where day = ? order by case severity when 'alarm' then 0 when 'warning' then 1 else 2 end, kind, resource_name").all(day) : [];

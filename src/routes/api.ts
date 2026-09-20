@@ -1,5 +1,5 @@
 import { Router, type Request } from "express";
-import { authMiddleware, safeEqual, signToken } from "../auth.js";
+import { authMiddleware, signToken } from "../auth.js";
 import { config } from "../config.js";
 import { db, getJsonSetting, setSetting } from "../db.js";
 import { isBusy, runEvents, startRun } from "../collector.js";
@@ -25,18 +25,7 @@ import { resourceRole } from "../roles.js";
 
 export const api = Router();
 
-// repo2graph posts here without our auth; it echoes the callback secret in the query string instead.
-api.post("/agent-callback", async (req, res) => {
-  if (config.callbackSecret && !safeEqual(req.query.key, config.callbackSecret)) return res.status(401).json({ error: "bad key" });
-  const { request_id, ...rest } = req.body || {};
-  console.log(`[agent-callback] ${request_id} status=${rest.status}`);
-  if (!request_id) return res.status(400).json({ error: "request_id required" });
-  try {
-    res.json(await handleAgentResult(request_id, rest));
-  } catch (e: any) {
-    res.status(404).json({ error: e.message });
-  }
-});
+// The agent webhook lives in src/routes/callback.ts, mounted before every authenticated router.
 
 api.use(authMiddleware);
 

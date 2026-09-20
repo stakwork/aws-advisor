@@ -12,6 +12,11 @@ import { inventoryRefreshedAt, listEc2 } from "./inventory.js";
 import { attributeNatTraffic } from "./watcher.js";
 import { alertContext } from "./investigate.js";
 import { describeError, tablesIn } from "./permissions.js";
+import { ScopeKind, getBaseline, listBaselines, scoreValue } from "./baselines.js";
+import { instanceHistory } from "./history.js";
+import { latestReview, reviewForDay } from "./review.js";
+import { getReconciliation, lastFullMonth, listReconciliations } from "./reconcile.js";
+import { poolSummary } from "./inventory.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 
 /**
@@ -293,6 +298,66 @@ export function createFactServer(): McpServer {
     },
     annotations: ro,
   }, (a) => instanceInventory(a));
+
+  server.registerTool("baseline", {
+    title: "What is typical for a gateway, instance or service",
+    description: "The advisor's baselines: median, MAD (robust spread), p95, max, days of history and, after seven days, a median per hour of day (UTC) and per day of week. Scopes: nat (bytes_hour, bytes_hour_in, bytes_hour_out; 14 days of CloudWatch), instance (cpu_pct, cpu_pct_max from CloudWatch; mem_pct, disk_pct, load_per_cpu, containers from the hourly probes, 30 days), service (net_usd_day, 60 days of Cost Explorer). Pass a value to have it scored against the baseline for the current hour: expected value, ratio, robust z and a level (normal / high / extreme). Use this before calling anything 'unusual'.",
+    inputSchema: {
+      scope_kind: z.enum(["nat", "instance", "service"]),
+      scope_id: z.string().max(200).describe("nat gateway id, instance id, or the Cost Explorer service name"),
+      metric: z.string().max(40).optional().describe("omit for every metric of the scope"),
+      value: z.number().optional().describe("a current value to score against the baseline"),
+    },
+    annotations: ro,
+  }, (a) => {
+    const rows = listBaselines(a.scope_kind as ScopeKind, a.scope_id).filter((b) => !a.metric || b.metric === a.metric);
+    if (!rows.length) return fail(`no baseline for ${a.scope_kind} ${a.scope_id}${a.metric ? ` ${a.metric}` : ""}: baselines are computed daily (POST /api/baselines/refresh) and need history`);
+    const score = a.value != null && a.metric ? scoreValue(rows[0], a.value) : undefined;
+    return text({ baselines: rows.map((b) => ({ metric: b.metric, unit: b.unit, source: b.source, window_days: b.window_days, days: b.days, samples: b.samples, median: b.median, mad: b.mad, p95: b.p95, max: b.max, min: b.min, by_hour_utc: b.by_hour, by_day_of_week: b.by_dow, computed_at: b.computed_at })), ...(score ? { score: { value: a.value, ...score } } : {}) });
+  });
+
+  server.registerTool("instance_history", {
+    title: "Daily history of one instance",
+    description: "Per-day roll-ups from the hourly SSM probes for one instance over up to 90 days (samples, memory % avg and max, root disk % avg and max, load per core avg and max, containers running) plus every Docker container seen in the window with its running share, average and peak CPU and memory, and the containers in the latest probe. This is the evidence for 'is it really idle' and 'what runs there': a month of data, not one probe.",
+    inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]{8,17}$/), days: z.number().int().min(7).max(90).default(30) },
+    annotations: ro,
+  }, (a) => {
+    const h = instanceHistory(a.instance_id, a.days);
+    if (!h.daily.length && !h.containers_now.length) return fail(`no probe history for ${a.instance_id}: it is not probed (not SSM-online, a Batch worker, or younger than the hourly pass)`);
+    return text(h);
+  });
+
+  server.registerTool("review_findings", {
+    title: "The daily review's observations",
+    description: "What the advisor's daily review of the collected statistics found: sustained_idle (5+ days of low memory, load and CPU), memory_pressure, disk_fill (days until the root disk is full at the current rate), idle_container, spend_step (a service above its 60-day median), each with severity, a message and the numbers. Defaults to the latest day.",
+    inputSchema: { day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() },
+    annotations: ro,
+  }, (a) => {
+    const r = a.day ? reviewForDay(a.day) : latestReview();
+    if (!r.day) return fail("the review has not run yet (POST /api/review/run)");
+    return text({ day: r.day, count: r.findings.length, findings: r.findings.map((f: any) => ({ kind: f.kind, severity: f.severity, resource: f.resource, resource_name: f.resource_name, message: f.message, details: f.details })), days_available: r.days.map((d: any) => d.day) });
+  });
+
+  server.registerTool("bill", {
+    title: "A month's bill, priced from our own knowledge",
+    description: "The bill reconstruction for a month: what Cost Explorer billed, what the advisor's own prices (pricebook per usage type, Pricing API for instance hours, the Savings Plan and support as overlays) say it should be, the gap, and per service the on-demand value, the modelled cost, the gap and the unpriced residual. Pass a service to get its lines (usage type, quantity, our unit price, rule, modelled, observed on-demand value, residual). Use it to start any cost question from a priced breakdown. Months are YYYY-MM; the last full month by default.",
+    inputSchema: { month: z.string().regex(/^\d{4}-\d{2}$/).optional(), service: z.string().max(120).optional().describe("Cost Explorer service name for its lines") },
+    annotations: ro,
+  }, (a) => {
+    const month = a.month || lastFullMonth();
+    const r = getReconciliation(month);
+    if (!r) return fail(`no reconstruction for ${month}: months available ${listReconciliations().map((m) => m.month).join(", ") || "none"} (POST /api/bill/reconcile?month=${month})`);
+    const services = r.services.map((s) => ({ service: s.service, billed_net: s.actual_net, on_demand_value: s.actual_od, modelled: s.modelled, gap_pct: s.gap_pct, unpriced: s.unpriced_actual, status: s.status }));
+    const lines = a.service ? r.lines.filter((l) => l.service.toLowerCase().includes(a.service!.toLowerCase())).map((l) => ({ usage_type: l.usage_type, quantity: l.quantity, unit: l.unit, region: l.region, rule: l.rule, unit_price: l.unit_price, modelled: l.modelled, on_demand_value: l.actual_od, billed_net: l.net, residual: l.residual, covered: l.covered, note: l.note })) : undefined;
+    return text({ month, computed_at: r.computed_at, totals: r.totals, eval: r.eval, services, ...(lines ? { lines } : {}), assumptions: r.assumptions });
+  });
+
+  server.registerTool("pools", {
+    title: "Instance pools and their membership",
+    description: "Every pool the inventory knows (batch = AWS Batch compute environment, karpenter NodePool, eks node group, asg) with its running members, instance types, list price per month and today's churn (launched / terminated), plus the standalone instances count. Pool members are launched and terminated by their controller: reason and recommend at the pool level, never about one member.",
+    inputSchema: {},
+    annotations: ro,
+  }, () => text(poolSummary()));
 
   server.registerTool("instance_probe", {
     title: "Probe an instance over SSM",

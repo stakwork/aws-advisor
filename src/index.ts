@@ -23,6 +23,8 @@ app.get("/busy", async (_req, res) => {
 });
 
 // Paginated browsing routes (alerts, findings, recommendations, spend) take precedence for the paths they define.
+import { callback } from "./routes/callback.js";
+app.use("/api", callback); // the agent webhook: before every authenticated router
 app.use("/api", browse);
 app.use("/api", knowledge);
 app.use("/api", graph);

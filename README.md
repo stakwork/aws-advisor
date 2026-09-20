@@ -1201,6 +1201,27 @@ Where it is used today:
 memory and spend per service in the watcher, the p95 band on the instance charts, and change-point detection
 over the daily roll-ups.
 
+## The morning observation: the agent's read of the day
+
+Every morning after the review (`OBSERVE_CRON`, 07:15, only when repo2graph is configured) and on demand
+(Overview card, `POST /api/observe/run`), the agent gets a brief (`GET /api/observe/brief` shows today's):
+spend against its baselines, the review's observations, the alerts still open from the last day, the pools with
+their churn, decisions of the last day, and the latest run's changes. It answers in a fixed shape (summary,
+changes with cause and evidence, attention items with urgency, proposals with tier) after verifying with the
+read-only tools, and the answer is graded by a deterministic rubric (`src/observe_grade.ts`): every change cites
+numbers, the review's and the alerts' resources are covered, no destructive proposal at tier auto, every proposal
+names its resource, confidence in range, a summary of three sentences, a consistent nothing-to-report flag. The
+result, the brief and the score are stored in `observations` and shown on the Overview.
+
+This is the first task of the runner design (a brief, a schema, a rubric, a score per run). The first live
+observation scored 8 of 8 and corrected the review: what the review flagged as an RDS spend step was a one-day
+reservation purchase fee, while the real drift underneath was Aurora I/O on a cluster whose approved storage
+change had not been applied. The review's spend-step rule now uses the median of the recent days for that reason.
+
+The agent's tools grew with it (`/mcp`): `baseline` (what is typical, and a value scored against it),
+`instance_history` (a month of daily memory, disk, load and containers per instance), `review_findings`, `bill`
+(the month priced from our own knowledge, per service and per line) and `pools`.
+
 ## The daily review: what the statistics say
 
 Collecting statistics is only worth it if something reads them back. `src/review.ts` runs every morning after
@@ -1265,6 +1286,9 @@ after the 2026-09-19 review (`src/__tests__/security.test.ts` pins the guards):
   `MCP_TOKEN` (the fact server the agent calls back into) and `CALLBACK_SECRET` (the webhook). The advisor sends
   the last two to repo2graph itself, so setting them is a `.env` change and a restart. Comparisons are constant
   time; a webhook result is accepted once per dispatch, so a replay or a forged second answer changes nothing.
+  The webhook router is mounted before every authenticated router (`src/routes/callback.ts`): a router-level
+  `use(authMiddleware)` answers 401 to any `/api` path passing through it, which silently blocked every callback
+  once `API_TOKEN` was set until this was fixed; `POST /api/agent-runs/:id/poll` remains the fallback.
 - **The agent stays inside the advisor's connection.** `steampipe_query` runs in a read-only transaction with
   `search_path` pinned to the advisor schema, refuses any other connection by name (`aws_parent.…`, `aws.…`, the
   aggregator, Steampipe's internal schemas) and the Postgres admin functions (`pg_sleep`, `pg_terminate_backend`,
@@ -1307,7 +1331,7 @@ Everything has a working default for a laptop. What each one is for:
 | `PUBLIC_URL` | repo2graph runs in a container and must reach the webhook and `/mcp` | `http://localhost:PORT` |
 | `AGENT_MODEL` | a different model for the agent, in repo2graph's `provider/model` form | `anthropic/claude-opus-5` |
 | `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
-| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON`, `REVIEW_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00 |
+| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15 |
 | `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
@@ -1332,6 +1356,7 @@ Everything has a working default for a laptop. What each one is for:
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
 - `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `POST /api/inventory/refresh`
+- `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
 - `GET /api/baselines?scope_kind&scope_id`, `POST /api/baselines/refresh` (see [Baselines](#baselines-what-is-typical))
 - `GET /api/bill?month=YYYY-MM`, `POST /api/bill/reconcile?month=` (the bill reconstruction, see [Bill reconstruction](#bill-reconstruction-the-pricing-eval))
