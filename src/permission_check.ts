@@ -1,7 +1,8 @@
 import { DescribeDocumentCommand, DescribeInstanceInformationCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
 import { getJsonSetting, setSetting } from "./db.js";
-import { AWS_RUN_SHELL_SCRIPT, PermissionIssue, clearPermissionIssues, explainPermissionError, policyForIssues, recordPermissionIssue, remedyFor } from "./permissions.js";
+import { AWS_RUN_SHELL_SCRIPT, PermissionIssue, clearPermissionIssues, explainPermissionError, listPermissionIssues, policyForIssues, recordPermissionIssue, remedyFor, tableForAction } from "./permissions.js";
+import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
 import { ProbeError, probeDocumentInfo, probeInstance } from "./ssm.js";
 import { NoSdkCredentials } from "./aws_config.js";
 import { S, credentialsMeta, queryReadOnly, sdkCredentials, sdkIdentity } from "./steampipe.js";
@@ -27,6 +28,8 @@ export interface CapabilityResult {
 }
 
 export interface PermissionCheckResult {
+  /** recorded issues outside the capability list, proved again on this check */
+  reverified?: { action: string; status: "ok" | "missing" | "error"; message: string }[];
   checked_at: string;
   account_id: string | null;
   region: string;
@@ -162,11 +165,35 @@ async function run(opts: { instanceId?: string }): Promise<PermissionCheckResult
   const okActions = results.filter((r) => r.status === "ok").flatMap((r) => r.actions);
   const missingActions = new Set(results.filter((r) => r.status === "missing").map((r) => r.issue!.action));
   clearPermissionIssues(okActions.filter((a) => !missingActions.has(a)));
+  // Recorded issues the capabilities above do not cover (an agent query on some table, the CloudTrail feed):
+  // prove each one again with the cheapest call that needs the action, and drop the ones that work now.
+  const covered = new Set(results.flatMap((r) => r.actions));
+  const reverified: { action: string; status: "ok" | "missing" | "error"; message: string }[] = [];
+  for (const issue of listPermissionIssues()) {
+    if (covered.has(issue.action)) continue;
+    try {
+      if (issue.action === "cloudtrail:LookupEvents") {
+        const creds = sdkCredentials();
+        const client = new CloudTrailClient({ region, credentials: creds.provider });
+        try { await client.send(new LookupEventsCommand({ StartTime: new Date(Date.now() - 60_000), EndTime: new Date(), MaxResults: 1 })); } finally { client.destroy(); }
+      } else {
+        const table = tableForAction(issue.action);
+        if (!table) { reverified.push({ action: issue.action, status: "error", message: "no probe for this action; dismiss it once the policy carries it" }); continue; }
+        await queryReadOnly(`select 1 from ${S}.${table} where ${regionQual} limit 1`, { timeoutMs: PROBE_TIMEOUT_MS });
+      }
+      clearPermissionIssues([issue.action]);
+      reverified.push({ action: issue.action, status: "ok", message: "works now; cleared" });
+    } catch (e: any) {
+      const still = explainPermissionError(e, `re-check ${issue.action}`);
+      reverified.push({ action: issue.action, status: still ? "missing" : "error", message: String(e?.message || e).slice(0, 200) });
+    }
+  }
   const issues = results.filter((r) => r.issue).map((r) => r.issue!);
   const out: PermissionCheckResult = {
     checked_at: new Date().toISOString(),
     account_id: account,
     region,
+    reverified,
     ...(credentialsError ? { credentials_error: `The credentials of the "${S}" connection were rejected (${credentialsError}); ${meta?.mode === "profile" ? `refresh the profile (for SSO: \`aws sso login --profile ${meta.profile}\`)` : meta?.mode === "chain" ? "check the instance or environment credentials" : "save valid credentials in Settings"}, then check again. Nothing below says anything about permissions.` }
       : sdkCreds?.status === "error" ? { credentials_error: `The advisor's own AWS SDK calls (SSM probe, identity) cannot resolve credentials: ${sdkCreds.message}` } : {}),
     results,

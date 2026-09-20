@@ -98,6 +98,7 @@ export const TABLE_ACTIONS: Record<string, string> = {
   aws_vpc_endpoint: "ec2:DescribeVpcEndpoints",
   aws_cloudwatch_log_group: "logs:DescribeLogGroups",
   aws_cloudtrail_lookup_event: "cloudtrail:LookupEvents",
+  aws_ecr_registry: "ecr:DescribeRegistry",
   aws_cloudwatch_log_stream: "logs:DescribeLogStreams",
   aws_cloudwatch_metric_statistic_data_point: "cloudwatch:GetMetricStatistics",
   aws_cloudwatch_metric_data_point: "cloudwatch:GetMetricData",
@@ -285,6 +286,7 @@ export function recordPermissionIssue(issue: PermissionIssue): PermissionIssue {
   contexts = [...contexts.filter((c) => c !== issue.context), issue.context].slice(-20);
   const json = JSON.stringify(contexts);
   upsertIssue.run(issue.action, issue.service, json, issue.message, json);
+  openIssues.add(issue.action);
   console.warn(`[permissions] ${issue.context}: ${remedyFor(issue)}`);
   return issue;
 }
@@ -298,7 +300,32 @@ export function listPermissionIssues(): PermissionIssueRow[] {
 export function clearPermissionIssues(actions: string[]) {
   const del = db.prepare("delete from permission_issues where action = ?");
   db.transaction(() => { for (const a of actions) del.run(a); })();
+  for (const a of actions) openIssues.delete(a);
 }
+
+/** Actions with a recorded issue, kept in memory so the success hooks cost nothing when there is none. */
+const openIssues = new Set<string>((db.prepare("select action from permission_issues").all() as { action: string }[]).map((r) => r.action));
+
+/** A call that needs `actions` just succeeded: any recorded issue for them is stale, drop it. */
+export function noteSuccess(actions: string[], context = ""): string[] {
+  const cleared = actions.filter((a) => openIssues.has(a));
+  if (cleared.length) {
+    clearPermissionIssues(cleared);
+    console.log(`[permissions] cleared ${cleared.join(", ")}: it worked${context ? ` (${context})` : ""}`);
+  }
+  return cleared;
+}
+/** Same, for a successful query over these tables. */
+export function noteSuccessForTables(tables: string[], context = ""): string[] {
+  if (!openIssues.size) return [];
+  return noteSuccess([...new Set(tables.map((t) => TABLE_ACTIONS[t]).filter((a): a is string => Boolean(a)))], context);
+}
+/** The table that proves an action, for re-verifying a recorded issue. */
+export function tableForAction(action: string): string | null {
+  for (const [t, a] of Object.entries(TABLE_ACTIONS)) if (a === action) return t;
+  return null;
+}
+export const hasOpenIssues = () => openIssues.size > 0;
 
 /**
  * Runs an error through the diagnostics: when it is a permission failure the issue is recorded and the

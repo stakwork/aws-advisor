@@ -18,6 +18,7 @@ export function PermissionsCard() {
   const load = () => api("/permissions").then((d) => { setP(d); if (d.last_check) setCheck(d.last_check); }).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, []);
 
+  const dismiss = async (action: string) => { try { await api(`/permissions/issues/${encodeURIComponent(action)}`, { method: "DELETE" }); load(); } catch { /* shown on the next load */ } };
   const run = async () => {
     setChecking(true); setErr("");
     try { setCheck(await api("/permissions/check", { method: "POST", body: JSON.stringify({ instance_id: instanceId.trim() || undefined }) })); load(); }
@@ -79,10 +80,11 @@ export function PermissionsCard() {
       )}
 
       <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Missing permissions seen anywhere in the app</div>
-      {issues.length === 0 ? <div className="mb-4 text-sm text-zinc-500">None recorded. Run a check, a collection, the watcher or a probe: any denial lands here with the action it needs.</div> : (
+      {check?.reverified?.length > 0 && <ul className="mb-2 space-y-0.5 text-xs">{check.reverified.map((r: any) => <li key={r.action}><span className={r.status === "ok" ? "text-emerald-300" : r.status === "missing" ? "text-red-300" : "text-amber-300"}>{r.status}</span> <span className="font-mono text-zinc-300">{r.action}</span> <span className="text-zinc-500">{r.message}</span></li>)}</ul>}
+      {issues.length === 0 ? <div className="mb-4 text-sm text-zinc-500">None recorded. Run a check, a collection, the watcher or a probe: any denial lands here with the action it needs, and leaves once the same call works again or a check proves it.</div> : (
         <div className="mb-4 overflow-auto rounded border border-zinc-800">
           <table className="w-full table-fixed">
-            <thead><tr><Th className="w-48">Action</Th><Th className="w-40">Seen</Th><Th className="w-48">Where</Th><Th>Last message</Th></tr></thead>
+            <thead><tr><Th className="w-48">Action</Th><Th className="w-40">Seen</Th><Th className="w-48">Where</Th><Th>Last message</Th><Th className="w-20"></Th></tr></thead>
             <tbody>
               {issues.map((i: any) => (
                 <tr key={i.action} className="border-t border-zinc-800">
@@ -90,6 +92,7 @@ export function PermissionsCard() {
                   <Td className="text-xs text-zinc-400">{i.count}x · first {when(i.first_seen)} · last {when(i.last_seen)}</Td>
                   <Td className="break-words text-xs text-zinc-400">{(i.contexts || []).slice(-5).join("; ")}</Td>
                   <Td className="break-words text-xs text-zinc-500"><span title={i.last_message || ""}>{String(i.last_message || "").slice(0, 160)}</span></Td>
+                  <Td className="text-right text-xs"><button type="button" className="text-zinc-500 hover:text-zinc-200" title="Remove this entry; it comes back if the call is denied again" onClick={() => dismiss(i.action)}>dismiss</button></Td>
                 </tr>
               ))}
             </tbody>

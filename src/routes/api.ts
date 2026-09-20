@@ -10,7 +10,7 @@ import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } 
 import { getRunChanges } from "../changes.js";
 import { postRejectionLearning } from "../learnings.js";
 import { ProbeError, instanceMetrics, probeDocument, probeDocumentInfo, probeErrorStatus, probeInstance, summarizeProbe } from "../ssm.js";
-import { listPermissionIssues, policyForIssues, recommendedPolicy } from "../permissions.js";
+import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy } from "../permissions.js";
 import { checkPermissions, lastPermissionCheck } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
 import { latestWatchSummary, watchOnce } from "../watcher.js";
@@ -77,6 +77,14 @@ api.get("/permissions", (_req, res) => {
 });
 
 // One cheap probe per capability; body.instance_id (an SSM-online Linux instance) also runs the real SSM probe once.
+// A person dismisses a recorded issue (it also clears itself the next time the call works, and Check permissions re-verifies it).
+api.delete("/permissions/issues/:action", (req, res) => {
+  const action = String(req.params.action);
+  if (!/^[a-z0-9-]+:[A-Za-z0-9*]+$/.test(action)) return res.status(400).json({ error: "an IAM action is expected" });
+  clearPermissionIssues([action]);
+  res.json({ ok: true, issues: listPermissionIssues() });
+});
+
 api.post("/permissions/check", async (req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
   const instanceId = typeof req.body?.instance_id === "string" && req.body.instance_id.trim() ? req.body.instance_id.trim() : undefined;
@@ -396,7 +404,8 @@ api.get("/incidents", (_req, res) => res.json(listIncidents()));
 
 // ---- overview -------------------------------------------------------------
 api.get("/overview", (_req, res) => {
-  const latest = db.prepare("select * from runs where status = 'completed' order by id desc limit 1").get() as any;
+  // the latest completed run that produced cost metrics: an interrupted or empty run must not blank the cards
+  const latest = db.prepare("select * from runs where status = 'completed' and id in (select run_id from metrics) order by id desc limit 1").get() as any;
   const running = db.prepare("select id, started_at from runs where status = 'running' order by id desc limit 1").get() as any;
   const metrics = latest ? db.prepare("select key, label, value, dims from metrics where run_id = ? order by key, value desc").all(latest.id) as any[] : [];
   const recs = db.prepare("select status, count(*) as n, coalesce(sum(est_monthly_saving), 0) as saving from recommendations group by status").all();

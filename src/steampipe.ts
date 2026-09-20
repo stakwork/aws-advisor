@@ -4,7 +4,7 @@ import pg from "pg";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { config } from "./config.js";
 import { getSetting, setSetting } from "./db.js";
-import { describeError } from "./permissions.js";
+import { describeError, hasOpenIssues, noteSuccessForTables, tablesIn } from "./permissions.js";
 import {
   CredentialMode, CredentialPaths, CredentialSettings, CredentialSource, DEFAULT_CREDENTIAL_SOURCE, NoSdkCredentials, ProviderKind, SdkCredentials,
   credentialRemedy, describeSettings, readStaticKeys, removeCredentialFiles, sdkCredentialsFor, writeCredentialFiles,
@@ -17,7 +17,8 @@ const pool = new pg.Pool({ connectionString: config.steampipeUrl, max: 4, statem
 
 export async function query<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
   const res = await pool.query(sql, params);
-  return res.rows as T[];
+  if (hasOpenIssues()) noteSuccessForTables(tablesIn(sql), "query");
+    return res.rows as T[];
 }
 
 /**
@@ -33,6 +34,7 @@ export async function queryReadOnly<T = any>(sql: string, opts: { timeoutMs: num
     await client.query(`set local statement_timeout = ${Math.max(1000, Math.floor(opts.timeoutMs))}`);
     const res = await client.query(sql);
     await client.query("rollback");
+    if (hasOpenIssues()) noteSuccessForTables(tablesIn(sql), "query");
     return { rows: res.rows as T[], columns: res.fields.map((f) => f.name) };
   } catch (e) {
     try { await client.query("rollback"); } catch { /* connection may be gone */ }
