@@ -7,10 +7,11 @@ type Setting = { key: string; env: string; kind: string; group: string; label: s
 /** Everything that used to be an environment variable and is not a bootstrap secret: saved here, it wins over the env. */
 export function RuntimeSettings() {
   const [rows, setRows] = useState<Setting[] | null>(null);
+  const [quotas, setQuotas] = useState<any[] | null>(null);
   const [edit, setEdit] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>("");
   const [err, setErr] = useState<Record<string, string>>({});
-  const load = () => api("/settings/runtime").then((d) => setRows(d.settings)).catch(() => setRows([]));
+  const load = () => { api("/settings/runtime").then((d) => setRows(d.settings)).catch(() => setRows([])); api("/quotas").then((d) => setQuotas(d.quotas)).catch(() => setQuotas(null)); };
   useEffect(() => { load(); }, []);
   const save = async (key: string, value: string | null) => {
     setBusy(key); setErr((e) => ({ ...e, [key]: "" }));
@@ -24,7 +25,7 @@ export function RuntimeSettings() {
       <div className="space-y-4">
         {groups.map((g) => (
           <div key={g}>
-            <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">{g}</div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">{g}{g === "Quotas" && quotas && <span className="ml-2 normal-case tracking-normal text-zinc-400">· now: {quotas.map((q) => `${q.used}/${q.limit} ${q.quota.replace(/_/g, " ")}`).join(" · ")}</span>}</div>
             <table className="w-full border-collapse text-sm">
               <tbody>{rows.filter((r) => r.group === g).map((r) => {
                 const editing = r.key in edit;

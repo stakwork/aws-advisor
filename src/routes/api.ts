@@ -16,6 +16,7 @@ import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommand
 import { latestWatchSummary, watchOnce } from "../watcher.js";
 import { cronOff } from "../scheduler.js";
 import { listRuntimeSettings, setRuntimeSetting } from "../runtime_settings.js";
+import { quotaStatus } from "../quota.js";
 import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refreshInventory } from "../inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
@@ -143,6 +144,7 @@ api.delete("/settings/aws", (_req, res) => { clearConnection(); res.json({ ok: t
 
 // Runtime settings: the agent, Jev, the graph, the schedules, the probe pass. Saved values win over the env.
 api.get("/settings/runtime", (_req, res) => res.json({ settings: listRuntimeSettings() }));
+api.get("/quotas", (_req, res) => res.json({ quotas: quotaStatus() }));
 api.put("/settings/runtime", (req, res) => {
   const { key, value } = req.body || {};
   if (typeof key !== "string") return res.status(400).json({ error: "key required" });

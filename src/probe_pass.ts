@@ -65,7 +65,7 @@ async function run(): Promise<ProbePassResult> {
         const code = e instanceof ProbeError ? e.code : "failed";
         result.failed.push({ instance_id: t.instance_id, code, message: String(e?.message || e).slice(0, 200) });
         // a permission problem is the same for every instance: stop early
-        if (code === "permission" || code === "no_credentials") { queue.length = 0; }
+        if (code === "permission" || code === "no_credentials" || e?.name === "QuotaError") { queue.length = 0; }
       }
     }
   };

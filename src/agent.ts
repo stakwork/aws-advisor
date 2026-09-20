@@ -7,6 +7,7 @@ import { db } from "./db.js";
 import { RecInput } from "./rules.js";
 import { changeSummaryText } from "./changes.js";
 import { completeObservation } from "./observe.js";
+import { checkAgentQuota } from "./quota.js";
 import { listDecisionConcepts } from "./concepts.js";
 import { checkTiers } from "./tiercheck.js";
 
@@ -131,6 +132,7 @@ export interface AgentAccepted { requestId: string; sessionId: string; eventsTok
  */
 export async function postAgentRequest(req: AgentRequest): Promise<AgentAccepted> {
   if (!config.repo2graphUrl) throw new Error("REPO2GRAPH_URL is not configured");
+  checkAgentQuota(`${req.link.kind} run`);
   const body = {
     prompt: req.prompt,
     systemOverride: req.systemOverride,
