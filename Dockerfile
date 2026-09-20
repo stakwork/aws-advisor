@@ -33,6 +33,7 @@ COPY --from=build /src/package.json /src/package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /src/src ./src
 COPY --from=build /src/mod ./mod
+COPY --from=build /src/tasks ./tasks
 COPY --from=build /src/ui/dist ./ui/dist
 COPY --from=build /src/README.md ./README.md
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

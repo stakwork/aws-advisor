@@ -315,6 +315,7 @@ migrateAgentRuns();
 for (const [col, type] of [["acknowledged_by", "text"], ["triage", "text"], ["triage_at", "text"]]) addColumn("alerts", col, type);
 // Tailored resolutions (src/resolve.ts) are a third kind of agent run, linked to a recommendation.
 addColumn("agent_runs", "recommendation_id", "integer");
+for (const [col, type] of [["prompt", "text"], ["score", "real"], ["grade", "text"], ["retry_of", "text"], ["retried_by", "text"]]) addColumn("agent_runs", col, type);
 addColumn("resolutions", "gate_outcome", "text");
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");

@@ -42,3 +42,13 @@ test("attribution context: cluster and beanstalk maps come from the members' tag
   assert.equal(attributeLogGroup("/aws/lambda/fn-a", ctx).owner, "lambda:fn-a");
   assert.equal(attributeLogGroup("/aws/rds/cluster/prod/error", ctx).owner, "rds:prod");
 });
+
+test("lambda cost from 30 days of metrics: GB-seconds at the architecture rate plus requests, scaled to a month", async () => {
+  const { lambdaMonthlyCost } = await import("../graph_knowledge.js");
+  // 1 GB function running 1,000 s a day for 30 days, one million invocations
+  const c = lambdaMonthlyCost({ name: "f", region: "us-east-1", memory_mb: 1024, arm: false, invocations_30d: 1e6, duration_ms_30d: 30 * 1000 * 1000, days: 30 });
+  assert.equal(c.gb_seconds_month, 30000);
+  assert.equal(c.invocations_month, 1e6);
+  assert.equal(c.usd_month, Math.round((30000 * 0.0000166667 + 0.2) * 100) / 100);
+  assert.ok(lambdaMonthlyCost({ name: "f", region: "us-east-1", memory_mb: 1024, arm: true, invocations_30d: 0, duration_ms_30d: 30 * 1000 * 1000, days: 15 }).gb_seconds_month === 60000, "half the days seen: scaled up to a month");
+});

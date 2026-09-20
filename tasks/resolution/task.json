@@ -1,0 +1,57 @@
+{
+  "kind": "resolution",
+  "title": "Tailored resolution",
+  "when": "when Resolve is pressed on a recommendation, with the playbook, the graph context and the resource facts",
+  "tools": [
+    "steampipe_query",
+    "instance_history",
+    "baseline",
+    "cloudtrail_changes",
+    "log_groups",
+    "price_lookup",
+    "cloudwatch_metric",
+    "instance_probe",
+    "recommendation_history",
+    "findings_for_resource",
+    "graph_system",
+    "learn_concept"
+  ],
+  "max_turns": 40,
+  "rubric": [
+    {
+      "check": "required",
+      "path": "summary",
+      "label": "summary present"
+    },
+    {
+      "check": "max_items",
+      "path": "plan[]",
+      "max": 10,
+      "label": "at most ten steps"
+    },
+    {
+      "check": "required",
+      "path": "plan[].verify",
+      "label": "every step says how to verify it"
+    },
+    {
+      "check": "required",
+      "path": "risk",
+      "label": "a risk level is given"
+    },
+    {
+      "check": "numbers",
+      "path": "summary",
+      "label": "the summary carries numbers"
+    },
+    {
+      "check": "no_destructive_auto",
+      "path": "plan[]",
+      "label": "no destructive step marked automatic"
+    }
+  ],
+  "retry": {
+    "on_score_below": 0.7,
+    "max": 1
+  }
+}

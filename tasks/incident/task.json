@@ -1,0 +1,79 @@
+{
+  "kind": "incident",
+  "title": "Incident investigation",
+  "when": "when an alert is investigated, with the alert, its attribution and the resource facts",
+  "tools": [
+    "alert_context",
+    "nat_attribution",
+    "cloudwatch_metric",
+    "steampipe_query",
+    "instance_inventory",
+    "instance_probe",
+    "instance_history",
+    "baseline",
+    "cloudtrail_changes",
+    "log_groups",
+    "resource_cost_history",
+    "findings_for_resource",
+    "graph_system"
+  ],
+  "max_turns": 60,
+  "rubric": [
+    {
+      "check": "required",
+      "path": "cause",
+      "label": "a cause is named"
+    },
+    {
+      "check": "min_items",
+      "path": "evidence[]",
+      "min": 2,
+      "label": "at least two pieces of evidence"
+    },
+    {
+      "check": "numbers",
+      "path": "evidence[]",
+      "label": "every piece of evidence carries numbers"
+    },
+    {
+      "check": "range",
+      "path": "confidence",
+      "min": 0,
+      "max": 1,
+      "label": "confidence between 0 and 1"
+    },
+    {
+      "check": "required",
+      "path": "fixes[].resource",
+      "label": "every fix names its resource"
+    },
+    {
+      "check": "enum",
+      "path": "fixes[].tier",
+      "values": [
+        "auto",
+        "approve",
+        "report"
+      ],
+      "label": "fix tiers are valid"
+    },
+    {
+      "check": "no_destructive_auto",
+      "path": "fixes[]",
+      "label": "no destructive fix at tier auto"
+    },
+    {
+      "check": "unique",
+      "path": "fixes[]",
+      "by": [
+        "action_type",
+        "resource"
+      ],
+      "label": "no duplicate fix"
+    }
+  ],
+  "retry": {
+    "on_score_below": 0.75,
+    "max": 1
+  }
+}

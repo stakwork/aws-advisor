@@ -1,0 +1,81 @@
+{
+  "kind": "findings",
+  "title": "Findings batch",
+  "when": "after a collection run, with the findings summary, the rule drafts as a table, the diff and the team's decisions",
+  "tools": [
+    "open_recommendations",
+    "findings_for_resource",
+    "recommendation_history",
+    "review_findings",
+    "steampipe_query",
+    "price_lookup",
+    "cloudwatch_metric",
+    "instance_inventory",
+    "instance_history",
+    "baseline",
+    "pools",
+    "bill",
+    "graph_systems",
+    "graph_system"
+  ],
+  "max_turns": 60,
+  "rubric": [
+    {
+      "check": "min_items",
+      "path": "recommendations[]",
+      "min": 1,
+      "label": "at least one recommendation"
+    },
+    {
+      "check": "required",
+      "path": "recommendations[].resource",
+      "label": "every recommendation names its resource"
+    },
+    {
+      "check": "numbers",
+      "path": "recommendations[].rationale",
+      "label": "every rationale carries numbers"
+    },
+    {
+      "check": "range",
+      "path": "recommendations[].confidence",
+      "min": 0,
+      "max": 1,
+      "label": "confidence between 0 and 1"
+    },
+    {
+      "check": "enum",
+      "path": "recommendations[].tier",
+      "values": [
+        "auto",
+        "approve",
+        "report"
+      ],
+      "label": "tier is auto, approve or report"
+    },
+    {
+      "check": "no_destructive_auto",
+      "path": "recommendations[]",
+      "label": "no destructive recommendation at tier auto"
+    },
+    {
+      "check": "unique",
+      "path": "recommendations[]",
+      "by": [
+        "action_type",
+        "resource"
+      ],
+      "label": "no duplicate action on a resource"
+    },
+    {
+      "check": "max_items",
+      "path": "recommendations[]",
+      "max": 40,
+      "label": "fewer, larger items: at most 40"
+    }
+  ],
+  "retry": {
+    "on_score_below": 0.7,
+    "max": 1
+  }
+}

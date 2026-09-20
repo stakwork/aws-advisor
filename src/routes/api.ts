@@ -173,7 +173,7 @@ api.get("/runs/:id", (req, res) => {
   const run = db.prepare("select * from runs where id = ?").get(req.params.id);
   if (!run) return res.status(404).json({ error: "not found" });
   const byControl = db.prepare("select source, benchmark, control_id, control_title, status, count(*) as n from findings where run_id = ? group by 1,2,3,4,5 order by n desc").all(req.params.id);
-  const agent = db.prepare("select request_id, session_id, status, error, created_at, finished_at from agent_runs where run_id = ? order by id desc").all(req.params.id);
+  const agent = db.prepare("select request_id, session_id, status, error, created_at, finished_at, score, retry_of, retried_by from agent_runs where run_id = ? order by id desc").all(req.params.id);
   res.json({ ...(run as object), byControl, agent });
 });
 

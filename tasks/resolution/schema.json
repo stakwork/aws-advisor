@@ -1,0 +1,83 @@
+{
+  "type": "object",
+  "properties": {
+    "applies": {
+      "type": "boolean",
+      "description": "whether the playbook applies to this resource after checking the facts"
+    },
+    "summary": {
+      "type": "string",
+      "description": "two or three sentences: what to do and why it is safe (or why not)"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "what stands in the way, verified, one per entry; empty when nothing does"
+    },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string",
+            "description": "what to do, specific to this resource (names, ids, sizes)"
+          },
+          "command": {
+            "type": "string",
+            "description": "the aws CLI / kubectl / shell command when there is one, with the real ids filled in"
+          },
+          "verify": {
+            "type": "string",
+            "description": "how to check the step worked before moving on"
+          }
+        },
+        "required": [
+          "step",
+          "verify"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "risk": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "approve",
+        "report"
+      ],
+      "description": "auto = reversible, approve = needs a human, report = never automate"
+    },
+    "est_monthly_saving": {
+      "type": "number",
+      "description": "USD per month after checking real prices; 0 if unknown"
+    },
+    "needs_from_human": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "decisions or facts only the team can supply (owner confirmation, a maintenance window, a build of a binary)"
+    },
+    "concepts_used": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "ids of the team decision concepts from the prompt that shaped this answer"
+    }
+  },
+  "required": [
+    "applies",
+    "summary",
+    "blockers",
+    "plan",
+    "risk",
+    "est_monthly_saving",
+    "needs_from_human",
+    "concepts_used"
+  ],
+  "additionalProperties": false
+}

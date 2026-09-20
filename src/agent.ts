@@ -8,6 +8,8 @@ import { RecInput } from "./rules.js";
 import { changeSummaryText } from "./changes.js";
 import { completeObservation } from "./observe.js";
 import { checkAgentQuota } from "./quota.js";
+import { taskFor } from "./tasks.js";
+import { critiqueText, gradeByRubric } from "./rubric.js";
 import { listDecisionConcepts } from "./concepts.js";
 import { checkTiers } from "./tiercheck.js";
 
@@ -114,10 +116,12 @@ export function buildPrompt(runId: number): string {
 export interface AgentRequest {
   prompt: string;
   systemOverride: string;
-  jsonSchema: unknown;
+  jsonSchema?: unknown;
   sessionId: string;
   agentName: string;
   metadata?: Record<string, unknown>;
+  /** the request this one retries, with the critique appended to the prompt */
+  retryOf?: string;
   maxTurns?: number;
   /** Which advisor flow owns the answer; the callback routes on it. */
   link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string };
@@ -142,12 +146,12 @@ export async function postAgentRequest(req: AgentRequest): Promise<AgentAccepted
     toolsConfig: { bash: false, create_pr: false, web_search: config.agentWebSearch },
     // The advisor's own read-only fact server; tools arrive at the agent as aws_<tool>.
     mcpServers: [{ name: "aws", url: `${config.publicUrl}/mcp`, ...(config.mcpToken ? { token: config.mcpToken } : {}) }],
-    jsonSchema: req.jsonSchema,
+    jsonSchema: req.jsonSchema ?? taskFor(req.link.kind).schema,
     // Unique per dispatch: repo2graph aborts an in-flight run when a new request reuses its sessionId.
     sessionId: req.sessionId,
     agentName: req.agentName,
     _metadata: req.metadata ?? {},
-    maxTurns: req.maxTurns ?? 60,
+    maxTurns: req.maxTurns ?? taskFor(req.link.kind).max_turns,
     webhookUrl: `${config.publicUrl}/api/agent-callback${config.callbackSecret ? `?key=${encodeURIComponent(config.callbackSecret)}` : ""}`,
   };
   const res = await fetch(`${config.repo2graphUrl}/repo/agent`, {
@@ -157,8 +161,8 @@ export async function postAgentRequest(req: AgentRequest): Promise<AgentAccepted
   });
   if (!res.ok) throw new Error(`repo2graph responded ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = (await res.json()) as { request_id: string; sessionId: string; events_token: string };
-  db.prepare("insert into agent_runs(kind, run_id, alert_id, recommendation_id, request_id, session_id, events_token) values (?, ?, ?, ?, ?, ?, ?)")
-    .run(req.link.kind, req.link.kind === "findings" ? req.link.runId : null, req.link.kind === "incident" ? req.link.alertId : null, req.link.kind === "resolution" ? req.link.recommendationId : null, data.request_id, data.sessionId, data.events_token);
+  db.prepare("insert into agent_runs(kind, run_id, alert_id, recommendation_id, request_id, session_id, events_token, prompt, retry_of) values (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(req.link.kind, req.link.kind === "findings" ? req.link.runId : null, req.link.kind === "incident" ? req.link.alertId : null, req.link.kind === "resolution" ? req.link.recommendationId : null, data.request_id, data.sessionId, data.events_token, req.prompt, req.retryOf ?? null);
   return { requestId: data.request_id, sessionId: data.sessionId, eventsToken: data.events_token };
 }
 
@@ -174,7 +178,6 @@ export async function dispatchToAgent(runId: number): Promise<{ requestId: strin
   const { requestId } = await postAgentRequest({
     prompt,
     systemOverride: getPrompt("findings"),
-    jsonSchema: RECOMMENDATION_SCHEMA,
     sessionId: `aws-advisor-run-${runId}-${Date.now().toString(36)}`,
     agentName: "aws-cost-advisor",
     metadata: { runId },
@@ -229,10 +232,53 @@ export async function handleAgentResult(requestId: string, payload: { status: st
     return { kind: run.kind, imported: 0 };
   }
   db.prepare("update agent_runs set status = 'completed', result = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.result), run.id);
+  await gradeAndMaybeRetry(run, payload);
   if (run.kind === "incident") return { kind: run.kind, imported: (await completeIncident(run, payload)).imported };
   if (run.kind === "resolution") { completeResolution(run, payload); return { kind: run.kind, imported: 0 }; }
   if (run.kind === "observe") { completeObservation(run, payload); return { kind: run.kind, imported: 0 }; }
   return { kind: run.kind, imported: await importFindingsResult(run, payload.result) };
+}
+
+/** Facts a task's rubric checks the answer against (the "covers" check). */
+async function rubricFacts(run: AgentRunRow): Promise<Record<string, any>> {
+  if (run.kind === "observe") {
+    const { buildObserveBrief } = await import("./observe.js");
+    const row = db.prepare("select day from observations where request_id = ? order by id desc limit 1").get(run.request_id) as { day: string } | undefined;
+    if (row) { const f = buildObserveBrief(row.day).facts; return { resources: [...f.review_resources, ...f.alert_resources] }; }
+  }
+  return {};
+}
+
+/**
+ * Grades a completed answer with its task's rubric, stores the score, and when it falls below the task's
+ * threshold sends the same brief back once with the failed checks appended (the retry replaces the original
+ * on the row it belongs to: observation, incident or resolution; a findings retry simply imports again).
+ */
+export async function gradeAndMaybeRetry(run: AgentRunRow & { status?: string }, payload: { result?: any }): Promise<void> {
+  const task = taskFor(run.kind);
+  const content = payload.result?.content ?? payload.result;
+  const grade = gradeByRubric(content, task.rubric, await rubricFacts(run));
+  db.prepare("update agent_runs set score = ?, grade = ? where id = ?").run(grade.score, JSON.stringify(grade), run.id);
+  console.log(`[agent] ${run.kind} ${run.request_id}: rubric ${Math.round(grade.score * 100)} % (${grade.checks.filter((c) => c.pass).length}/${grade.checks.length})`);
+  const original = db.prepare("select prompt, retry_of from agent_runs where id = ?").get(run.id) as { prompt: string | null; retry_of: string | null };
+  if (grade.score >= task.retry.on_score_below || task.retry.max < 1 || original.retry_of || !original.prompt) return;
+  try {
+    const { requestId } = await postAgentRequest({
+      prompt: `${original.prompt}\n\n${critiqueText(grade)}`,
+      systemOverride: getPrompt(run.kind),
+      sessionId: `aws-advisor-${run.kind}-retry-${Date.now().toString(36)}`,
+      agentName: `aws-${run.kind}-retry`,
+      metadata: { retry_of: run.request_id },
+      link: run.kind === "findings" ? { kind: "findings", runId: run.run_id ?? 0 } : run.kind === "incident" ? { kind: "incident", alertId: run.alert_id ?? 0 } : run.kind === "resolution" ? { kind: "resolution", recommendationId: run.recommendation_id ?? 0 } : { kind: "observe", day: new Date().toISOString().slice(0, 10) },
+      retryOf: run.request_id,
+    });
+    db.prepare("update agent_runs set retried_by = ? where id = ?").run(requestId, run.id);
+    // the owning row follows the retry, so its completion overwrites the low-scoring answer
+    db.prepare("update observations set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
+    db.prepare("update incidents set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
+    db.prepare("update resolutions set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
+    console.log(`[agent] ${run.kind} ${run.request_id}: scored ${Math.round(grade.score * 100)} %, retried once as ${requestId} with the critique`);
+  } catch (e: any) { console.warn(`[agent] retry of ${run.request_id} not sent: ${e?.message || e}`); }
 }
 
 /** The agent's recommendations as RecInputs (rule agent:<action_type>, evidence = the item as returned). Exported for the tier check script and tests. */

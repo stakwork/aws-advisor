@@ -1,0 +1,97 @@
+{
+  "type": "object",
+  "properties": {
+    "cause": {
+      "type": "string",
+      "description": "one or two sentences: what most likely caused the alert"
+    },
+    "confidence": {
+      "type": "number",
+      "description": "0 to 1, how sure you are about the cause"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "facts you verified, one per entry, with numbers"
+    },
+    "episode_cost_usd": {
+      "type": "number",
+      "description": "USD this episode cost so far (e.g. extra NAT GB x 0.045)"
+    },
+    "monthly_run_rate_usd": {
+      "type": "number",
+      "description": "USD per month if the observed level persists"
+    },
+    "fixes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "action_type": {
+            "type": "string",
+            "enum": [
+              "enable_flow_logs",
+              "add_vpc_endpoint",
+              "add_pull_through_cache",
+              "move_workload",
+              "reschedule_job",
+              "rightsize_instance",
+              "stop_instance",
+              "other"
+            ]
+          },
+          "resource": {
+            "type": "string",
+            "description": "the id the fix applies to: vpc id, instance id, nat gateway id, nodegroup or repository name"
+          },
+          "resource_name": {
+            "type": "string"
+          },
+          "est_monthly_saving": {
+            "type": "number",
+            "description": "USD per month, 0 if unknown"
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "approve",
+              "report"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "description": "0 to 1"
+          },
+          "rationale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "action_type",
+          "resource",
+          "est_monthly_saving",
+          "tier",
+          "confidence",
+          "rationale"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "cause",
+    "confidence",
+    "evidence",
+    "episode_cost_usd",
+    "monthly_run_rate_usd",
+    "fixes"
+  ],
+  "additionalProperties": false
+}
