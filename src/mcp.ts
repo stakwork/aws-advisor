@@ -402,7 +402,7 @@ export function createFactServer(): McpServer {
   server.registerTool("graph_systems", {
     title: "Our systems, from the knowledge graph",
     description: "The account as a schematic: every system (an autoscaled pool, a standalone instance, an RDS cluster or instance, an ElastiCache group, a NAT gateway) with its archetype, member count, monthly cost at list, and what it moves (transfer and log shipping in USD/month). Start here for any question about what runs and what it costs; then graph_system for one of them.",
-    inputSchema: { kind: z.enum(["pool", "instance", "rds_cluster", "rds_instance", "cache_group", "cache_cluster", "nat"]).optional() },
+    inputSchema: { kind: z.enum(["pool", "instance", "rds_cluster", "rds_instance", "cache_group", "cache_cluster", "nat", "eks_cluster", "lambda"]).optional() },
     annotations: ro,
   }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { return text({ systems: await listSystems(a.kind) }); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
 

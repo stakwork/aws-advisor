@@ -23,7 +23,8 @@ export default function Bill() {
   const [err, setErr] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const [gb, setGb] = useState<any>(null);
-  useEffect(() => { api("/graph/bill").then(setGb).catch(() => setGb(null)); }, []);
+  const [qty, setQty] = useState<any>(null);
+  useEffect(() => { api("/graph/bill").then(setGb).catch(() => setGb(null)); api("/bill/quantities").then(setQty).catch(() => setQty(null)); }, []);
   const load = (m = month) => api(`/bill${m ? `?month=${m}` : ""}`).then((d) => { setData(d); if (!month) setMonth(d.month); }).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [month]);
   const run = async () => {
@@ -108,6 +109,15 @@ export default function Bill() {
                   <tr className="border-t border-zinc-700 font-medium"><Td className="text-zinc-100">Total the graph explains</Td><Td className="text-right">{usd(gb.graph_total_list)}</Td><Td></Td><Td className="text-xs text-zinc-500">{gb.savings_plan ? `Savings Plan overlay: ${usd(gb.savings_plan.fee_usd_month)}/mo buys ${usd(gb.savings_plan.covered_od_usd_month)} of on-demand value (${gb.savings_plan.discount_rate} % off)` : "no Savings Plan overlay yet"}</Td></tr></tbody>
               </table>
               <div className="mt-2 text-xs text-zinc-500">{gb.note}</div>
+            </Card>
+          )}
+          {qty && qty.lines?.length > 0 && (
+            <Card title={<span>Quantities from our own history <span className="font-normal text-zinc-500">· {qty.from} to {qty.to}, {qty.days_with_history} complete day{qty.days_with_history === 1 ? "" : "s"}, the watcher saw {qty.coverage_pct} % of those hours · Cost Explorer for the same days beside it</span></span>}>
+              <table className="w-full border-collapse text-sm">
+                <thead><tr><Th>Line</Th><Th className="text-right">Ours, as sampled</Th><Th className="text-right">Ours, at full coverage</Th><Th className="text-right">Cost Explorer</Th><Th className="text-right">Our price</Th><Th className="text-right">Ours, priced</Th><Th className="text-right">CE cost (net)</Th></tr></thead>
+                <tbody>{qty.lines.slice(0, 16).map((l: any) => <tr key={l.category} className="border-t border-zinc-800"><Td className="text-zinc-100"><span title={l.note}>{l.category}</span></Td><Td className="text-right">{l.history_qty.toLocaleString()} {l.unit}</Td><Td className="text-right">{l.history_qty_scaled != null ? `${l.history_qty_scaled.toLocaleString()} ${l.unit}` : "—"}</Td><Td className="text-right">{l.ce_qty != null ? `${l.ce_qty.toLocaleString()} ${l.unit}` : "—"}</Td><Td className="text-right font-mono text-xs">{l.unit_price ?? "—"}</Td><Td className="text-right">{l.history_usd != null ? usd(l.history_usd, 2) : "—"}</Td><Td className="text-right">{l.ce_usd != null ? usd(l.ce_usd, 2) : "—"}</Td></tr>)}</tbody>
+              </table>
+              <div className="mt-2 text-xs text-zinc-500">Quantities here come from the advisor's own samples (running instances every 30 minutes, attached EBS, NAT bytes per hour, log ingestion per day), not from the bill. Hours the watcher did not see (expired credentials, restarts) count as nothing, so the sampled column undercounts; the full-coverage column scales it by the hours seen. Where they match Cost Explorer's, a reconstruction from the graph alone becomes possible for that line. History starts when the watcher started.{qty.ce_error ? ` Cost Explorer: ${qty.ce_error}` : ""}</div>
             </Card>
           )}
           <Card title="How the numbers are built">

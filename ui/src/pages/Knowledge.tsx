@@ -139,7 +139,7 @@ function SystemsCard() {
           <tbody>{rows.map((s) => (
             <Fragment key={s.id}>
               <tr className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open === s.id ? "bg-zinc-900/40" : ""}`} onClick={() => setOpen(open === s.id ? null : s.id)}>
-                <Td className="text-zinc-100">{s.name}{s.pool_kind ? <span className="ml-1 text-xs text-zinc-500">{s.pool_kind}</span> : null}</Td>
+                <Td className="text-zinc-100">{s.name}{s.pool_kind ? <span className="ml-1 text-xs text-zinc-500">{s.pool_kind}</span> : null}{s.part_of ? <span className="ml-1 text-xs text-zinc-500">in {s.part_of}</span> : null}</Td>
                 <Td className="text-zinc-400">{s.kind}</Td><Td className="text-zinc-400">{s.archetype}</Td>
                 <Td className="text-right">{s.members}</Td><Td className="text-right">{usd(s.monthly_list_usd)}</Td>
                 <Td className="text-right text-zinc-400">{s.transfer_usd_month ? usd(s.transfer_usd_month) : "—"}</Td><Td className="text-right text-zinc-400">{s.logs_usd_month ? usd(s.logs_usd_month) : "—"}</Td>
@@ -152,7 +152,7 @@ function SystemsCard() {
                       <div className="mt-2 mb-1 uppercase tracking-wide text-zinc-500">Members</div>{view.members.slice(0, 12).map((m: any) => <div key={m.id} className="text-zinc-300"><Link to={`/inventory?tab=ec2&id=${m.id}`} className="font-mono hover:underline">{m.id}</Link> {m.name} · {m.type} · {m.state}{m.cpu_30d != null ? ` · CPU ${m.cpu_30d}%` : ""}</div>)}{view.members.length > 12 && <div className="text-zinc-500">and {view.members.length - 12} more</div>}</div>
                     <div><div className="mb-1 uppercase tracking-wide text-zinc-500">Edges</div>
                       {view.transfers.map((t: any, i: number) => <div key={i} className="text-zinc-300">→ {t.to} via {t.mechanism}: {Number(t.gb_day).toFixed(1)} GB/day × {t.price_per_gb} = {usd(t.usd_month)}/mo <span className="text-zinc-500">({t.source})</span></div>)}
-                      {view.logs.map((l: any, i: number) => <div key={i} className="text-zinc-300">→ logs <span className="font-mono">{l.log_group}</span>: {l.gb_day != null ? `${Number(l.gb_day).toFixed(2)} GB/day, ${usd(l.usd_month)}/mo` : "not metered"}, retention {l.retention_days ?? "never"}</div>)}
+                      {view.logs.map((l: any, i: number) => <div key={i} className="text-zinc-300">→ logs <span className="font-mono">{l.log_group}</span>: {l.gb_day != null ? `${Number(l.gb_day).toFixed(2)} GB/day, ${usd(l.usd_month)}/mo` : "not metered"}, retention {l.retention_days ?? "never"}{l.attributed_by ? <span className="text-zinc-500"> · by {l.attributed_by}</span> : null}</div>)}
                       {!view.transfers.length && !view.logs.length && <div className="text-zinc-500">no traffic or log edges attributed</div>}
                       <div className="mt-2 mb-1 uppercase tracking-wide text-zinc-500">Decisions</div>
                       {view.recommendations.length ? view.recommendations.map((r: any) => <div key={r.id} className="text-zinc-300"><Link to={`/recommendations?id=${r.id}`} className="hover:underline">#{r.id}</Link> {r.status} · {r.title} · {usd(r.est_monthly_saving)}/mo{r.verdict ? ` · ${r.verdict}${r.realised_usd_month != null ? ` (${usd(r.realised_usd_month)} realised)` : ""}` : ""}</div>) : <div className="text-zinc-500">none on its members</div>}

@@ -13,6 +13,7 @@ import { buildObserveBrief, dispatchObservation, latestObservation, listObservat
 import { refreshLogs, topLogGroups } from "../logs.js";
 import { refreshTrail, trailSummary } from "../trail.js";
 import { latestVerification, runVerifications, verificationSummary } from "../verify.js";
+import { quantitiesFromHistory } from "../quantities.js";
 
 /** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
@@ -172,4 +173,12 @@ knowledge.post("/verifications/run", async (req, res) => {
   const log: string[] = [];
   const ids = typeof req.query.id === "string" ? [Number(req.query.id)] : undefined;
   try { res.json({ ...(await runVerifications({ force: req.query.force === "1", ids, onLog: (l) => log.push(l) })), log }); } catch (e: any) { res.status(500).json({ error: e.message, log }); }
+});
+
+// ---- usage quantities from our own history, beside Cost Explorer's, for the same days --------------------------
+knowledge.get("/bill/quantities", async (req, res) => {
+  const day = (v: unknown, d: string) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : d);
+  const today = new Date().toISOString().slice(0, 10);
+  const from = day(req.query.from, `${today.slice(0, 7)}-01`); const to = day(req.query.to, today);
+  try { res.json(await quantitiesFromHistory(from, to)); } catch (e: any) { res.status(500).json({ error: e.message }); }
 });

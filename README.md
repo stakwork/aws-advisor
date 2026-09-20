@@ -1021,6 +1021,25 @@ Read it back: `GET /api/graph/systems?kind=`, `GET /api/graph/system/:id` (id su
 Knowledge page (Systems card, click a system for its types, overlays, members, edges and decisions). The
 agent has the same through `graph_systems`, `graph_system` and `graph_bill`, next to the raw `graph_query`.
 
+**Log attribution** (`src/log_attribution.ts`) works from evidence, in order: the AWS naming conventions
+(`/aws/lambda/<function>`, `/aws/rds/cluster|instance/<name>`, `/aws/eks/<cluster>/cluster`,
+`/aws/elasticbeanstalk/<environment>/…`), the cluster and environment names the members' tags carry, then a
+token match between the group's path and the systems' names, pools, member ids and aliases (the members' Name
+tags), where a compute system beats a database or cache on a tie and a tie between compute systems stays
+unattributed. EKS clusters are systems of their own (`eks:<cluster>`, pools `PART_OF` them) and so are the
+Lambda functions the latest run flagged (`lambda:<name>`), so their log groups have somewhere to attach. Each
+`SHIPS_LOGS_TO` edge records how it was attributed. 97 of 123 groups attach to a system on this account; the
+rest stay on the account node.
+
+**Quantities from our own history** (`src/quantities.ts`, `GET /api/bill/quantities?from&to`, a card on the
+Bill page): instance hours per type from the watcher's running counts (each sample stands for the time to the
+next one, capped at an hour, so hours the watcher did not see count as nothing), EBS GB-months from its attached
+total, NAT GB from its hourly gateway bytes, log GB from the metered ingestion, beside Cost Explorer's quantity
+and cost for the same complete days. The card shows the sampled figure, the same scaled to full coverage, and
+Cost Explorer's; on the first complete day the scaled instance hours and EBS GB-months land within a few percent
+of Cost Explorer's, which is the evidence that a reconstruction from the graph alone is within reach once the
+watcher runs uninterrupted.
+
 **The bill from the graph** (`graphBill`, on the Bill page under the reconstruction) prices the current fleet
 for a month at list from `RUNS_ON`, adds EBS, the transfer edges and the log groups, and shows last full
 month's on-demand value beside each category the mapping covers. First build, 2026-09-20: 65 systems, 98 system
