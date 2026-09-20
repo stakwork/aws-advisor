@@ -151,8 +151,8 @@ export default function Overview() {
       {/* Spend: today, last 7 days, month to date with its projection, previous month; from spend_daily (Cost Explorer, at most every 6 h). */}
       <div className="space-y-2">
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Stat label="Spend today" value={spend?.today?.usd == null ? "—" : usd(spend.today.usd, 2)}
-            hint={spend?.today?.usd == null ? "no data yet, Cost Explorer lags about a day" : `${spend.today.day} · partial day`} />
+          <Stat label={spend?.today?.usd != null ? "Spend today" : "Latest day"} value={spend?.today?.usd != null ? usd(spend.today.usd, 2) : spend?.latest ? usd(spend.latest.usd, 2) : "—"}
+            hint={spend?.today?.usd != null ? `${spend.today.day} · partial day, Cost Explorer is still adding to it` : spend?.latest ? `${spend.latest.day}${spend.latest.partial ? " · still filling in; today is not in Cost Explorer yet" : ""}` : "no spend data yet"} />
           <Stat label="Last 7 days" value={usd(spend?.last_7_days?.usd)}
             hint={spend?.last_7_days?.usd != null ? `${spend.last_7_days.from} to ${spend.last_7_days.to}${spend.last_7_days.days < 7 ? ` · ${spend.last_7_days.days} days with data` : ""}` : "net unblended"} />
           <Stat label="Month to date" value={usd(mtd?.usd)}

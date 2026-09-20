@@ -10,6 +10,8 @@ export interface SpendSummary {
   /** The last day with data; Cost Explorer usually lags about a day. */
   as_of: string | null;
   today: { day: string; usd: number | null };
+  /** The most recent day Cost Explorer has anything for: today when it is in, else yesterday (usually still filling in). */
+  latest: { day: string; usd: number; partial: boolean } | null;
   /** The 7 complete days ending on the last complete day with data (yesterday at the latest). */
   last_7_days: { from: string; to: string; usd: number | null; days: number };
   month_to_date: { from: string; to: string; usd: number | null; days: number; projected_month_end: number | null; projection_basis: { days: number; daily_avg: number | null } };
@@ -51,6 +53,7 @@ export function summarizeSpend(rows: SpendRow[], today = localDay(), metric: Spe
     metric,
     as_of: asOf,
     today: { day: today, usd: todayRow ? round(Number(todayRow[metric])) : null },
+    latest: asOf ? { day: asOf, usd: round(Number(withData.find((r) => r.day === asOf)![metric])), partial: asOf >= yesterday } : null,
     last_7_days: { from: from7, to: to7, ...last7 },
     month_to_date: { from: mFrom, to: today, ...mtd, projected_month_end: projected, projection_basis: { days: basis.days, daily_avg: dailyAvg == null ? null : round(dailyAvg) } },
     previous_month: { from: pFrom, to: pTo, ...prev, complete: prev.days === daysInMonth(pFrom) },
