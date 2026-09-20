@@ -10,6 +10,8 @@ import { getReconciliation, lastFullMonth, listReconciliations, reconcileMonth }
 import { ScopeKind, baselineSummary, listBaselines, refreshBaselines } from "../baselines.js";
 import { latestReview, runReview } from "../review.js";
 import { buildObserveBrief, dispatchObservation, latestObservation, listObservations } from "../observe.js";
+import { refreshLogs, topLogGroups } from "../logs.js";
+import { refreshTrail, trailSummary } from "../trail.js";
 
 /** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
@@ -155,3 +157,9 @@ knowledge.get("/observe/brief", (_req, res) => res.type("text/plain; charset=utf
 knowledge.post("/observe/run", async (req, res) => {
   try { res.json(await dispatchObservation(undefined, { force: req.query.force === "1" })); } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
+
+// ---- CloudWatch Logs as a cost source, CloudTrail as the change feed ------------------------------------------
+knowledge.get("/logs", (req, res) => res.json(topLogGroups(Math.max(5, Math.min(200, Number(req.query.limit || 25))))));
+knowledge.post("/logs/refresh", async (_req, res) => { try { res.json(await refreshLogs()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+knowledge.get("/trail", (req, res) => res.json(trailSummary(Math.max(1, Math.min(168, Number(req.query.hours || 24))))));
+knowledge.post("/trail/refresh", async (req, res) => { try { res.json(await refreshTrail(Math.max(1, Math.min(168, Number(req.query.hours || 26))))); } catch (e: any) { res.status(500).json({ error: e.message }); } });

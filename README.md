@@ -418,7 +418,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "application-autoscaling:DescribeScalableTargets",
         "elasticloadbalancing:Describe*",
         "secretsmanager:ListSecrets", "secretsmanager:DescribeSecret",
-        "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags",
+        "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
         "cloudfront:List*", "cloudfront:Get*",
         "route53:List*", "route53:Get*",
         "redshift:Describe*",
@@ -1222,6 +1222,25 @@ The agent's tools grew with it (`/mcp`): `baseline` (what is typical, and a valu
 `instance_history` (a month of daily memory, disk, load and containers per instance), `review_findings`, `bill`
 (the month priced from our own knowledge, per service and per line) and `pools`.
 
+## CloudWatch Logs and CloudTrail
+
+Two more sources, collected daily before the review (`LOGS_CRON`, 06:50) and on demand:
+
+- **CloudWatch Logs as a cost line** (`src/logs.ts`, `GET /api/logs`, `POST /api/logs/refresh`, agent tool
+  `log_groups`): every log group with retention, stored bytes and class (`log_groups`), the account's ingestion
+  per day and, for the groups above 200 MB stored (at most 80), ingestion per day over 14 days from the AWS/Logs
+  `IncomingBytes` metric (`log_ingest_daily`, plus a `loggroup` baseline per group). Cost is derived at the list
+  rates: 0.50 USD/GB ingested, 0.03 USD/GB-month stored. The review raises a warning alert when a group's last
+  three days run above its 14-day median (`log_step`) and notes groups over 5 GB with no retention. The brief
+  carries the top ingesters. In the graph design this is the "ships logs to" edge with its rate and price.
+- **CloudTrail write events as the change feed** (`src/trail.ts`, `GET /api/trail?hours=`, `POST
+  /api/trail/refresh`, agent tool `cloudtrail_changes`): non read-only events of the last 26 hours from
+  `LookupEvents`, stored by event id (`trail_events`, 90 days) and summarised by action, source and user with
+  sample resources, the advisor's own SSM commands filtered out. This needs **`cloudtrail:LookupEvents`**, now
+  in the recommended policy; until it is granted the job records the missing action under Settings > Permissions
+  and the brief says the feed is not available. The observing agent is told to look here first for the cause of
+  a cost move: who changed what, when.
+
 ## The daily review: what the statistics say
 
 Collecting statistics is only worth it if something reads them back. `src/review.ts` runs every morning after
@@ -1331,7 +1350,7 @@ Everything has a working default for a laptop. What each one is for:
 | `PUBLIC_URL` | repo2graph runs in a container and must reach the webhook and `/mcp` | `http://localhost:PORT` |
 | `AGENT_MODEL` | a different model for the agent, in repo2graph's `provider/model` form | `anthropic/claude-opus-5` |
 | `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
-| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15 |
+| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
 | `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
@@ -1356,6 +1375,7 @@ Everything has a working default for a laptop. What each one is for:
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
 - `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `POST /api/inventory/refresh`
+- `GET /api/logs?limit=`, `POST /api/logs/refresh`, `GET /api/trail?hours=`, `POST /api/trail/refresh` (see [CloudWatch Logs and CloudTrail](#cloudwatch-logs-and-cloudtrail))
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
 - `GET /api/baselines?scope_kind&scope_id`, `POST /api/baselines/refresh` (see [Baselines](#baselines-what-is-typical))

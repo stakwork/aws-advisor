@@ -40,3 +40,8 @@ test("memory pressure, idle containers and spend steps", () => {
   assert.equal(spendStep("EC2", [160], { median: 100, mad: 5 }), null, "one day is not enough");
   assert.equal(spendStep("RDS", [155, 91, 94], { median: 86, mad: 4 }), null, "one purchase day does not make a step: the median of the three days rules");
 });
+
+test("log ingestion step reuses the spend-step rule in GB/day", () => {
+  assert.ok(spendStep("/app", [2.1, 2.0, 2.2], { median: 1.0, mad: 0.1 }, 0.5), "double the median is a step");
+  assert.equal(spendStep("/app", [1.1, 1.0, 1.2], { median: 1.0, mad: 0.1 }, 0.5), null);
+});

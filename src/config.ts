@@ -57,6 +57,8 @@ export const config = {
   baselineCron: (process.env.BASELINE_CRON || "40 6 * * *").trim(),
   /** Daily review of the collected statistics (after the baselines). "off" disables it. */
   reviewCron: (process.env.REVIEW_CRON || "0 7 * * *").trim(),
+  /** Daily CloudWatch Logs (groups, ingestion) and CloudTrail (write events) collection, before the review. */
+  logsCron: (process.env.LOGS_CRON || "50 6 * * *").trim(),
   /** The agent's morning observation (after the review; needs REPO2GRAPH_URL). "off" disables it. */
   observeCron: (process.env.OBSERVE_CRON || "15 7 * * *").trim(),
   /** Do not re-probe an instance probed more recently than this (hours). Match it to PROBE_CRON. */

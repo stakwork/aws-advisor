@@ -21,7 +21,7 @@ db.exec(`create table if not exists baselines (
   primary key (scope_kind, scope_id, metric)
 )`);
 
-export type ScopeKind = "nat" | "instance" | "service";
+export type ScopeKind = "nat" | "instance" | "service" | "loggroup";
 export interface StoredBaseline extends Baseline { scope_kind: ScopeKind; scope_id: string; metric: string; days: number; computed_at: string }
 
 const NAT_DAYS = 14, CPU_DAYS = 14, PROBE_DAYS = 30, SPEND_DAYS = 60;

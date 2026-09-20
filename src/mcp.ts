@@ -17,6 +17,8 @@ import { instanceHistory } from "./history.js";
 import { latestReview, reviewForDay } from "./review.js";
 import { getReconciliation, lastFullMonth, listReconciliations } from "./reconcile.js";
 import { poolSummary } from "./inventory.js";
+import { topLogGroups } from "./logs.js";
+import { trailSummary } from "./trail.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 
 /**
@@ -358,6 +360,20 @@ export function createFactServer(): McpServer {
     inputSchema: {},
     annotations: ro,
   }, () => text(poolSummary()));
+
+  server.registerTool("log_groups", {
+    title: "CloudWatch log groups: ingestion, retention, cost",
+    description: "Log groups ordered by ingestion (GB/day from AWS/Logs IncomingBytes over 14 days, cost at 0.50 USD/GB) then by stored GB (0.03 USD/GB-month), with retention in days (null = never expires) and class. Also the account's total ingestion per day and how many groups have no retention. Refreshed daily. Use it for anything about CloudWatch cost, log retention or a service that pushes logs.",
+    inputSchema: { limit: z.number().int().min(5).max(200).default(25) },
+    annotations: ro,
+  }, (a) => { const r = topLogGroups(a.limit); return r.refreshed_at ? text(r) : fail("log groups not collected yet (POST /api/logs/refresh)"); });
+
+  server.registerTool("cloudtrail_changes", {
+    title: "What changed in the account (CloudTrail write events)",
+    description: "Write (non read-only) CloudTrail events of the last N hours grouped by action, source and user, with sample resource names and error counts, plus a per-user count. The advisor's own SSM probe commands are filtered out. Collected daily from LookupEvents; empty with a note when cloudtrail:LookupEvents is not granted. Use it to explain a cost move or a state change: who did what, when.",
+    inputSchema: { hours: z.number().int().min(1).max(168).default(24) },
+    annotations: ro,
+  }, (a) => { const r = trailSummary(a.hours); return r.last_fetch ? text(r) : fail("CloudTrail events not collected yet: the daily job needs cloudtrail:LookupEvents (see Settings > Permissions) and runs at LOGS_CRON; POST /api/trail/refresh runs it now"); });
 
   server.registerTool("instance_probe", {
     title: "Probe an instance over SSM",
