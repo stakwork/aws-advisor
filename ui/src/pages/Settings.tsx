@@ -4,6 +4,7 @@ import { Button, Card, Empty } from "../components/ui";
 import { PermissionsCard } from "../components/permissions";
 import { SetupWizard } from "../components/setup";
 import { AgentPrompts } from "../components/prompts";
+import { RuntimeSettings } from "../components/runtimeSettings";
 
 type Mode = "keys" | "profile" | "chain";
 
@@ -148,9 +149,11 @@ export default function Settings() {
         <p className="mt-2 text-xs text-zinc-500">cloudwatch is off by default: its log-stream check returns hundreds of thousands of rows. Retention is covered by a custom query.</p>
       </Card>
 
+      <RuntimeSettings />
+
       <Card title="Agent (repo2graph)">
         <p className="text-sm text-zinc-400">
-          {s.agent.configured ? <>Findings are handed to <code className="text-zinc-200">{s.agent.url}</code> after each run, model {s.agent.model}.</> : <>Not configured. Set <code className="text-zinc-200">REPO2GRAPH_URL</code> and <code className="text-zinc-200">REPO2GRAPH_TOKEN</code> in the advisor's environment to enable agent ranking; until then recommendations come from the fixed rules only.</>}
+          {s.agent.configured ? <>Findings are handed to <code className="text-zinc-200">{s.agent.url}</code> after each run, model {s.agent.model}.</> : <>Not configured: set the repo2graph URL and token in Settings above.</>}
         </p>
       </Card>
 
@@ -165,7 +168,7 @@ export default function Settings() {
             <li className="text-xs text-zinc-500">Audit every call with <code className="text-zinc-300">GET /api/jev/calls?limit=50</code>.</li>
           </ul>
         ) : (
-          <p className="text-sm text-zinc-400">Not configured. Set <code className="text-zinc-200">TYPESAFE_API_KEY</code> (and optionally <code className="text-zinc-200">JEV_MODEL</code>, default <code className="text-zinc-200">jev-latest</code>) in the advisor's environment to triage alerts, classify resources and safety-check agent recommendations with Jev. Until then alerts stay open, the rules use their name regex and agent tiers are imported as proposed.</p>
+          <p className="text-sm text-zinc-400">Not configured: paste the TypeSafe API key in Settings above.</p>
         )}
       </Card>
 

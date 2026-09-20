@@ -601,7 +601,7 @@ Where the two values come from:
 
 | | inside a swarm | on your laptop against a local swarm | production swarm from outside |
 | --- | --- | --- | --- |
-| `REPO2GRAPH_URL` | `http://repo2graph.sphinx:3355` | `http://localhost:3355` | `https://repo2graph.<swarm host>` |
+| ✎ `REPO2GRAPH_URL` | `http://repo2graph.sphinx:3355` | `http://localhost:3355` | `https://repo2graph.<swarm host>` |
 | `REPO2GRAPH_TOKEN` | boltwall's `stakwork_secret`, injected by the swarm | the `BOLTWALL_API_SECRET` value in `sphinx-swarm/.env` | the boltwall node's `stakwork_secret` in that swarm's `vol/stack/config.yaml` |
 
 `PUBLIC_URL` must be an address repo2graph's container can reach: `http://host.docker.internal:9034` when the
@@ -1045,7 +1045,7 @@ of an ARN (`arn:...:instance/i-abc` → `i-abc`); anything else becomes an `Advi
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `NEO4J_URI` | unset = mirror off | `bolt://neo4j.sphinx:7687` inside the swarm, `bolt://localhost:7687` against a local swarm |
+| ✎ `NEO4J_URI` | unset = mirror off | `bolt://neo4j.sphinx:7687` inside the swarm, `bolt://localhost:7687` against a local swarm |
 | `NEO4J_USER` | `neo4j` | |
 | `NEO4J_PASSWORD` | | the Neo4j node's password in the swarm's `vol/stack/config.yaml` |
 | `NEO4J_DATABASE` | unset = the server's default | only for multi-database servers |
@@ -1374,7 +1374,13 @@ of the command line; a decision hash stored at approval time and checked before 
 
 ## Environment variables
 
-Everything has a working default for a laptop. What each one is for:
+Two kinds. **Bootstrap** settings come from the environment only: the app needs them before its database
+exists, or they gate what a person may change from a browser (port, paths, the Steampipe connection, the three
+shared secrets, the public URL, the probe document). **Runtime** settings (the agent, Jev, the graph mirror,
+every schedule, the probe pass) are edited on the Settings page: a saved value wins over the environment, the
+environment is only the seed a deployment provides, and the default applies when neither is set. Reset on the
+page returns a setting to its environment value or the default. Everything has a working default for a laptop.
+What each one is for (✎ = also editable in Settings):
 
 | variable | needed when | default |
 | --- | --- | --- |
@@ -1383,7 +1389,7 @@ Everything has a working default for a laptop. What each one is for:
 | `MCP_TOKEN` | **required unless `PUBLIC_URL` is localhost**; gates `/mcp`. The advisor passes it to repo2graph with every dispatch, nothing else to configure | unset = open, refused when `PUBLIC_URL` is not local |
 | `CALLBACK_SECRET` | **required unless `PUBLIC_URL` is localhost**; repo2graph echoes it as `?key=` on the webhook; a result is accepted once per dispatch | unset = open, refused when `PUBLIC_URL` is not local |
 | `BIND_ADDR` | listen on one interface only (`127.0.0.1` on a laptop without a swarm) | unset = all interfaces |
-| `AGENT_WEB_SEARCH` | the agent may use web search (off: prices and facts come from the MCP tools; a search query is an exfiltration channel for anything a hostile tag or probe line injects into the prompt) | off |
+| ✎ `AGENT_WEB_SEARCH` | the agent may use web search (off: prices and facts come from the MCP tools; a search query is an exfiltration channel for anything a hostile tag or probe line injects into the prompt) | off |
 | `ALLOW_OPEN_ENDPOINTS` | start with the three secrets unset although `PUBLIC_URL` is not local (isolated machine only) | off |
 | `STEAMPIPE_DATABASE_URL` | always locally; `steampipe service status --show-password` prints it | local service without password |
 | `STEAMPIPE_CONFIG_DIR` | Steampipe's config lives elsewhere (containers) | `~/.steampipe/config` |
@@ -1393,21 +1399,22 @@ Everything has a working default for a laptop. What each one is for:
 | `POWERPIPE_BIN`, `POWERPIPE_MOD_DIR` | non-standard Powerpipe location or mod path | `powerpipe`, `./mod` |
 | `REPO2GRAPH_URL`, `REPO2GRAPH_TOKEN` | you want agent ranking at all; see the table above | unset = rules only |
 | `PUBLIC_URL` | repo2graph runs in a container and must reach the webhook and `/mcp` | `http://localhost:PORT` |
-| `AGENT_MODEL` | a different model for the agent, in repo2graph's `provider/model` form | `anthropic/claude-opus-5` |
-| `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
-| `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
-| `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
+| ✎ `AGENT_MODEL` | a different model for the agent, in repo2graph's `provider/model` form | `anthropic/claude-opus-5` |
+| ✎ `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
+| ✎ `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `SPEND_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
+| ✎ `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
-| `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
-| `ALERT_INVESTIGATE` | NAT alerts should be investigated only on request (`manual`) or never (`off`) | `auto` |
+| ✎ `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
+| ✎ `ALERT_INVESTIGATE` | NAT alerts should be investigated only on request (`manual`) or never (`off`) | `auto` |
 | `CONCEPT_NAMESPACE` | decisions should land in another Concept namespace in repo2graph | `aws/cost-advisor` |
-| `TYPESAFE_API_KEY`, `JEV_MODEL` | you want Jev's alert triage, resource roles and tier checks (see [Typed decisions with Jev](#typed-decisions-with-jev)) | unset = no-op, `jev-latest` |
+| ✎ `TYPESAFE_API_KEY`, `JEV_MODEL` | you want Jev's alert triage, resource roles and tier checks (see [Typed decisions with Jev](#typed-decisions-with-jev)) | unset = no-op, `jev-latest` |
 | `DATA_DIR` | the SQLite database should live elsewhere (a named volume in the swarm) | `./data` |
 | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` | you want the one-way [graph mirror](#graph-mirror) of resources, recommendations, decisions, alerts, incidents and rules in the swarm's Neo4j | unset = off, `neo4j`, unset, the server default |
 
 ## API
 
 - `GET /health`, `GET /busy` public; the swarm's fast updater respects `/busy`.
+- `GET /api/settings/runtime`, `PUT /api/settings/runtime` (`{ key, value }`, `value: null` resets; validated per kind: cron, url, enum, number, bool)
 - `GET /api/settings` (`aws` carries the credential mode meta: `mode`, `label`, masked key or `profile`, `roleArn`, `credentialSource`, `temporary`, `accountId`), `PUT /api/settings/aws` (`{ mode: keys | profile | chain, accessKey, secretKey, sessionToken?, profile, credentialSource?, roleArn?, regions, defaultRegion }`; profile names must match `^[A-Za-z0-9_.-]+$`, role ARNs `^arn:aws:iam::\d{12}:role/.+$`; answers `{ saved, test, sdk }`), `POST /api/settings/aws/test` (Steampipe and SDK identity), `DELETE /api/settings/aws`, `PUT /api/settings/benchmarks`
 - `GET /api/runs`, `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/stream` (SSE), `GET /api/runs/:id/changes`, `POST /api/runs/:id/agent`
 - `GET /api/agent-runs/:requestId`, `POST /api/agent-runs/:requestId/poll`, `GET /api/agent-runs/:requestId/events` (SSE proxy), `POST /api/agent-callback` (repo2graph's webhook)
@@ -1492,12 +1499,12 @@ set to its own container address so the agent's callbacks and tool calls stay on
 private, like neo4j: no Traefik route and no public hostname, because the UI lists the account's instances,
 probes, costs and decisions. Reach it on the host's private IP at port 9034 (over the VPN or a tunnel), and
 sign in with the `API_TOKEN` the swarm generated for the node (in the stack's config.yaml). The swarm
-generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created. Everything else the
-advisor takes from the swarm's `.env` is read under an `ADVISOR_` prefix only, so it never clashes with what
-other images read: `ADVISOR_AGENT_MODEL` and `ADVISOR_AGENT_API_KEY` (the agent still runs through repo2graph,
-but with its own provider, model and key, in repo2graph's `provider/model` form), `ADVISOR_TYPESAFE_API_KEY`,
-`ADVISOR_AGENT_WEB_SEARCH`, the crons, `ADVISOR_PROBE_SCOPE`, `ADVISOR_ALERT_INVESTIGATE` and
-`ADVISOR_AGENT_AUTO_DISPATCH`; the list is `ADVISOR_ENV` in the swarm's `src/images/advisor.rs`. It passes no AWS credentials: the
+generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created. Everything else is
+configured on the advisor's Settings page and stored in its database, so the swarm's `.env` only needs to seed
+what is convenient: `ADVISOR_AGENT_MODEL` and `ADVISOR_AGENT_API_KEY` (the agent runs through repo2graph but
+with its own provider, model and key), `ADVISOR_TYPESAFE_API_KEY`. These arrive as environment defaults under
+an `ADVISOR_` prefix, so they never clash with what other images read, and anything saved in Settings wins over
+them. It passes no AWS credentials: the
 advisor is configured read-only from its Settings page, exactly as documented above, and `advisor` is on the
 stack's auto-update list.
 
