@@ -141,7 +141,7 @@ export default function RunDetail() {
           <div className="space-y-2 text-sm">
             {run.agent.map((a: any) => (
               <div key={a.request_id} className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-xs">{a.request_id}</span><Badge>{a.status}</Badge>{a.score != null && <span className={`text-xs ${a.score >= 0.75 ? "text-emerald-300" : "text-amber-300"}`} title="rubric score (tasks/<kind>/task.json)">rubric {Math.round(a.score * 100)} %</span>}{a.retry_of && <span className="text-xs text-zinc-500">retry with critique</span>}{a.retried_by && <span className="text-xs text-zinc-500">retried as {String(a.retried_by).slice(0, 8)}…</span>}
+                <span className="font-mono text-xs">{a.request_id}</span><Badge>{a.status}</Badge>{a.below_bar && <span className="text-xs text-amber-300" title="the answer failed the task's quality checks (tasks/<kind>/task.json)">quality check failed: {a.below_bar.join(", ")}</span>}{a.retry_of && <span className="text-xs text-zinc-500">retry with critique</span>}{a.retried_by && <span className="text-xs text-zinc-500">retried as {String(a.retried_by).slice(0, 8)}…</span>}
                 <span className="text-xs text-zinc-500">{when(a.created_at)}</span>
                 {a.status === "pending" && <Button variant="ghost" onClick={() => setWatching(a.request_id)}>Watch</Button>}
                 <Button variant="ghost" onClick={() => poll(a.request_id)}>Poll result</Button>

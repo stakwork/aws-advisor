@@ -16,7 +16,7 @@ import { getBaseline } from "./baselines.js";
 import { poolSummary } from "./inventory.js";
 import { changeSummaryText } from "./changes.js";
 import { BriefFacts } from "./observe_grade.js";
-import { gradeByRubric } from "./rubric.js";
+import { gradeByRubric, belowBar } from "./rubric.js";
 import { taskFor } from "./tasks.js";
 import { postAgentRequest, type AgentRunRow } from "./agent.js";
 import { topLogGroups } from "./logs.js";
@@ -144,7 +144,8 @@ export function latestObservation() {
   const row = db.prepare("select * from observations order by id desc limit 1").get() as any;
   if (!row) return null;
   const safe = (s: string | null) => { if (!s) return null; try { return JSON.parse(s); } catch { return s; } };
-  return { ...row, result: safe(row.result), grade: safe(row.grade) };
+  const grade = safe(row.grade);
+  return { ...row, result: safe(row.result), grade, below_bar: belowBar(grade, taskFor("observe").retry.on_score_below) };
 }
 export function listObservations(limit = 30) {
   return (db.prepare("select id, day, status, score, created_at, finished_at from observations order by id desc limit ?").all(limit) as any[]);

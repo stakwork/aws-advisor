@@ -1383,8 +1383,9 @@ kind (an override saved from Settings still wins), and every dispatch takes its 
 task. `src/rubric.ts` grades an answer with the task's rubric, a small declarative language: `required`,
 `numbers`, `range`, `enum`, `min_items`, `max_items`, `max_sentences`, `unique`, `no_destructive_auto`,
 `covers` (a share of the facts in the brief must be mentioned) and `flag_consistent`, over dotted paths that fan
-out across arrays (`fixes[].resource`). Every completed run is scored and the score stored on `agent_runs`
-(shown on the run's page); when it falls below the task's threshold the same brief goes back once with the
+out across arrays (`fixes[].resource`). Every completed run is scored and the score stored on `agent_runs`;
+the UI stays quiet about it unless the answer fell under the bar, in which case the failed checks are named
+next to the run and on the morning note (`belowBar`). When the score falls below the task's threshold the same brief goes back once with the
 failed checks appended under "Your previous answer failed these checks", under the agent quota, and the
 retry's answer replaces the first on the observation, incident or resolution it belongs to. Adding a situation
 is adding a folder; every run has a score; a weak answer gets one concrete second chance.
@@ -1399,7 +1400,8 @@ changes with cause and evidence, attention items with urgency, proposals with ti
 read-only tools, and the answer is graded by a deterministic rubric (`src/observe_grade.ts`): every change cites
 numbers, the review's and the alerts' resources are covered, no destructive proposal at tier auto, every proposal
 names its resource, confidence in range, a summary of three sentences, a consistent nothing-to-report flag. The
-result, the brief and the score are stored in `observations` and shown on the Overview.
+result, the brief and the score are stored in `observations`; the Overview shows the note, and the grade only
+when it failed.
 
 This is the first task of the runner design (a brief, a schema, a rubric, a score per run). The first live
 observation scored 8 of 8 and corrected the review: what the review flagged as an RDS spend step was a one-day

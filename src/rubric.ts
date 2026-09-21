@@ -71,3 +71,9 @@ export function critiqueText(grade: Grade): string {
   if (!failed.length) return "";
   return `## Your previous answer failed these checks; fix them and answer again\n${failed.map((c) => `- ${c.check}: ${c.detail}`).join("\n")}`;
 }
+
+/** The failed checks' labels when the score is under the task's bar, else null: the only rubric output a person sees. */
+export function belowBar(grade: Grade | null | undefined, bar: number): string[] | null {
+  if (!grade || typeof grade.score !== "number" || grade.score >= bar) return null;
+  return grade.checks.filter((c) => !c.pass).map((c) => c.check);
+}
