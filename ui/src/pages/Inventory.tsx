@@ -93,8 +93,13 @@ export default function Inventory() {
   // A tab switch clears the table at once and ignores a slower response from the previous tab, so EC2 rows can
   // never sit under the Lambda header (or stick when a request fails).
   const rowsRequest = useRef(0);
+  // The table's last height: while the next tab loads, the placeholder keeps it, so the page does not get shorter
+  // than the scroll position and jump up.
+  const tableRef = useRef<HTMLDivElement>(null);
+  const tableHeight = useRef(0);
   const loadRows = () => {
     const seq = ++rowsRequest.current;
+    if (tableRef.current) tableHeight.current = tableRef.current.offsetHeight;
     setRows(null);
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
@@ -225,7 +230,7 @@ export default function Inventory() {
         {rows && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
       </div>
 
-      <div>
+      <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
         {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>{s?.refreshed_at ? "Nothing matches." : "No snapshot yet."}</Empty> : (
           <div className="min-w-0 overflow-x-auto self-start">
             <table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
