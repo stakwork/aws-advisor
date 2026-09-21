@@ -23,6 +23,10 @@ export interface ProbePassResult {
 
 let inFlight: Promise<ProbePassResult> | null = null;
 
+/** The skip window in minutes: the configured hours minus a five-minute margin, so "1" means every hourly pass
+ *  (the previous probe finished seconds after its cron minute and would otherwise still be inside a full hour). */
+export function probeWindowMinutes(hours: number): number { return Math.max(1, Math.round(hours * 60) - 5); }
+
 export function probeTargets(limit = config.probeScope === "all" ? Math.max(config.probeMax, 100) : config.probeMax): { instance_id: string; name: string | null; cpu_30d: number | null }[] {
   return db.prepare(`
     select i.instance_id, i.name, i.cpu_30d
@@ -41,7 +45,7 @@ export function probeTargets(limit = config.probeScope === "all" ? Math.max(conf
       -- against datetime('now') sorts every same-day probe as newer and would skip the instance for the rest of the day
       and not exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and datetime(m.collected_at) > datetime('now', ?))
     order by coalesce(i.cpu_30d, 100) asc, i.instance_id
-    limit ?`).all(config.probeScope, config.probeIdleCpu, `-${Math.max(1, Math.round(config.probeMinIntervalHours * 60))} minutes`, limit) as any[];
+    limit ?`).all(config.probeScope, config.probeIdleCpu, `-${probeWindowMinutes(config.probeMinIntervalHours)} minutes`, limit) as any[];
 }
 
 export function probePass(): Promise<ProbePassResult> {

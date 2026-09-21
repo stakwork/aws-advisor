@@ -131,3 +131,10 @@ test("probe pass: an ISO-timestamped probe from earlier today does not hide the 
   assert.ok(!probeTargets(1000).some((t) => t.instance_id === iid), "probed ten minutes ago: skipped");
   for (const t of ["inventory_ec2", "instance_metrics"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
 });
+
+test("probe window: the configured hours minus a five-minute margin, never under a minute", async () => {
+  const { probeWindowMinutes } = await import("../probe_pass.js");
+  assert.equal(probeWindowMinutes(1), 55);
+  assert.equal(probeWindowMinutes(24), 1435);
+  assert.equal(probeWindowMinutes(0.05), 1);
+});
