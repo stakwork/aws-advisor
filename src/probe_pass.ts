@@ -27,6 +27,22 @@ let inFlight: Promise<ProbePassResult> | null = null;
  *  (the previous probe finished seconds after its cron minute and would otherwise still be inside a full hour). */
 export function probeWindowMinutes(hours: number): number { return Math.max(1, Math.round(hours * 60) - 5); }
 
+/** Why running instances were not probed in a pass, as counts per reason, for the log. */
+export function probeExclusions(window = probeWindowMinutes(config.probeMinIntervalHours)): { running: number; not_ssm_online: number; batch: number; just_launched: number; outside_scope: number; probed_recently: number } {
+  const n = (sql: string, ...p: unknown[]) => Number((db.prepare(sql).get(...p) as any)?.n ?? 0);
+  const base = "from inventory_ec2 i where i.gone = 0 and i.state = 'running'";
+  return {
+    running: n(`select count(*) as n ${base}`),
+    not_ssm_online: n(`select count(*) as n ${base} and coalesce(i.ssm_status, '') <> 'Online'`),
+    batch: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') = 'batch'`),
+    just_launched: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch' and i.launch_time is not null and datetime(i.launch_time) >= datetime('now', '-15 minutes')`),
+    outside_scope: config.probeScope === "all" ? 0 : n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
+      and not ((i.cpu_30d is not null and i.cpu_30d < ?) or exists (select 1 from recommendations r where r.resource = i.instance_id and r.rule = 'idle_instance' and r.status in ('open', 'snoozed')))`, config.probeIdleCpu),
+    probed_recently: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
+      and exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and datetime(m.collected_at) > datetime('now', ?))`, `-${window} minutes`),
+  };
+}
+
 export function probeTargets(limit = config.probeScope === "all" ? Math.max(config.probeMax, 100) : config.probeMax): { instance_id: string; name: string | null; cpu_30d: number | null }[] {
   return db.prepare(`
     select i.instance_id, i.name, i.cpu_30d
@@ -57,9 +73,16 @@ export function probePass(): Promise<ProbePassResult> {
 async function run(): Promise<ProbePassResult> {
   const t0 = Date.now();
   const gate = await credentialGate("probe-pass");
+  if (!gate.ok) console.log(`[probe-pass] skipped: ${gate.error || "credentials not working"}`);
   if (!gate.ok) return { started_at: new Date().toISOString(), candidates: 0, probed: [], failed: [{ instance_id: "*", code: "no_credentials", message: gate.error || "credentials not working" }], pruned: 0, took_ms: Date.now() - t0 };
   const targets = probeTargets();
   const result: ProbePassResult = { started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, took_ms: 0 };
+  try {
+    const x = probeExclusions(); const limit = config.probeScope === "all" ? Math.max(config.probeMax, 100) : config.probeMax;
+    const why = [x.not_ssm_online && `${x.not_ssm_online} not SSM online`, x.batch && `${x.batch} Batch worker(s)`, x.just_launched && `${x.just_launched} launched under 15 min ago`,
+      x.outside_scope && `${x.outside_scope} outside scope "idle" (CPU over ${config.probeIdleCpu} % and no idle recommendation)`, x.probed_recently && `${x.probed_recently} probed within ${probeWindowMinutes(config.probeMinIntervalHours)} min`].filter(Boolean);
+    console.log(`[probe-pass] ${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${config.probeScope}, limit ${limit}, interval ${config.probeMinIntervalHours} h`);
+  } catch (e: any) { console.error(`[probe-pass] could not explain the selection: ${e?.message || e}`); }
   // a few at a time: SSM is happy with it and it keeps the pass short
   const queue = [...targets];
   const worker = async () => {
@@ -82,6 +105,7 @@ async function run(): Promise<ProbePassResult> {
   try { checkAllDiskLevels(); } catch (e: any) { console.error(`[probe-pass] disk check failed: ${e?.message || e}`); }
   result.pruned = pruneHistory().probes;
   result.took_ms = Date.now() - t0;
-  console.log(`[probe-pass] ${result.probed.length} probed, ${result.failed.length} failed of ${result.candidates} candidates in ${result.took_ms} ms`);
+  const byCode = new Map<string, number>(); for (const f of result.failed) byCode.set(f.code, (byCode.get(f.code) || 0) + 1);
+  console.log(`[probe-pass] ${result.probed.length} probed, ${result.failed.length} failed of ${result.candidates} candidates in ${result.took_ms} ms${byCode.size ? ` (failures: ${[...byCode].map(([c, n]) => `${n} ${c}`).join(", ")}; first: ${result.failed[0].message})` : ""}`);
   return result;
 }

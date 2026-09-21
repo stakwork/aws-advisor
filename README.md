@@ -656,6 +656,16 @@ change on a scale of days, so the full run is daily; sudden waste (a NAT spike, 
 minutes, so a watcher that costs almost nothing runs every half hour; and the agent runs on change, not on a
 clock, so the model bill follows real activity.
 
+Every firing is logged as `[cron] <job> fired ("<expression>")`, and every job says why it did nothing when it
+did nothing: no AWS credentials yet, a run already in progress, the previous sample still collecting, the spend
+fetch younger than six hours, no repo2graph URL for the observation. The probe pass explains its selection
+(`23 candidate(s) of 62 running: left out 30 outside scope "idle", 5 probed within 55 min, 3 not SSM online`)
+and groups its failures by cause; the watcher says for each NAT alert whether it went to the agent, and if not,
+whether the policy or Jev's triage held it back. The collection run writes the agent-dispatch decision into its
+own log. `docker logs advisor.sphinx` is therefore the answer to "did it run, and why not". Every cron row on the
+Settings page has a **Run now** button that runs the same job immediately, with the same checks, and shows the
+outcome under the row.
+
 - `RUN_CRON` (default `0 6 * * *`, `off` to disable) starts a full run when nothing is running and credentials
   exist.
 - `WATCH_CRON` (default `*/30 * * * *`, `off` to disable) samples with live Steampipe queries only, no
@@ -1612,7 +1622,7 @@ What each one is for (✎ = also editable in Settings):
 ## API
 
 - `GET /health`, `GET /busy` public; the swarm's fast updater respects `/busy`.
-- `GET /api/settings/runtime`, `PUT /api/settings/runtime` (`{ key, value }`, `value: null` resets; validated per kind: cron, url, enum, number, bool)
+- `GET /api/settings/runtime`, `PUT /api/settings/runtime` (`{ key, value }`, `value: null` resets; validated per kind: cron, url, enum, number, bool), `POST /api/settings/runtime/:cronKey/run` (runs that job now, as the cron would; answers with what it did or why it did nothing)
 - `GET /api/settings` (`aws` carries the credential mode meta: `mode`, `label`, masked key or `profile`, `roleArn`, `credentialSource`, `temporary`, `accountId`), `PUT /api/settings/aws` (`{ mode: keys | profile | chain, accessKey, secretKey, sessionToken?, profile, credentialSource?, roleArn?, regions, defaultRegion }`; profile names must match `^[A-Za-z0-9_.-]+$`, role ARNs `^arn:aws:iam::\d{12}:role/.+$`; answers `{ saved, test, sdk }`), `POST /api/settings/aws/test` (Steampipe and SDK identity), `DELETE /api/settings/aws`, `PUT /api/settings/benchmarks`
 - `GET /api/runs`, `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/stream` (SSE), `GET /api/runs/:id/changes`, `POST /api/runs/:id/agent`
 - `GET /api/agent-runs/:requestId`, `POST /api/agent-runs/:requestId/poll`, `GET /api/agent-runs/:requestId/events` (SSE proxy), `POST /api/agent-callback` (repo2graph's webhook)

@@ -25,7 +25,8 @@ const tasks: { stop: () => void }[] = [];
 function schedule(name: string, expr: string, fn: () => void): string | null {
   if (cronOff(expr)) { console.log(`${name} disabled`); return null; }
   if (!cron.validate(expr)) { console.error(`${name}: "${expr}" is not a valid cron expression; disabled`); return null; }
-  tasks.push(cron.schedule(expr, fn));
+  // every firing is logged, so "did the cron run" is always answerable from the log
+  tasks.push(cron.schedule(expr, () => { console.log(`[cron] ${name} fired ("${expr}")`); fn(); }));
   console.log(`${name}: "${expr}"`);
   return expr;
 }
@@ -50,63 +51,71 @@ export async function priceCheckAndForecast(): Promise<void> {
   await runForecast((l) => console.log(`[forecast] ${l}`));
 }
 
-export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null; observe: string | null; logs: string | null; verify: string | null } {
-  const run = schedule("Scheduler (RUN_CRON)", config.runCron, async () => {
-    if (isBusy()) { console.log("[scheduler] skipped: a run is already in progress"); return; }
-    if (!hasConnectionFile()) { console.log("[scheduler] skipped: AWS credentials are not configured"); return; }
-    if (!(await credentialGate("scheduler")).ok) return;
-    try {
-      const id = startRun("schedule");
-      console.log(`[scheduler] started run #${id}`);
-    } catch (e: any) {
-      console.error(`[scheduler] could not start a run: ${e?.message || e}`);
-    }
-  });
-  const watch = schedule("Watcher (WATCH_CRON)", config.watchCron, () => {
-    if (watching) { console.log("[watcher] skipped: previous sample still collecting"); return; }
-    if (!hasConnectionFile()) return;
+/** Every cron job by its settings key: the same function runs on schedule and from "Run now" on the Settings page. */
+export const JOBS: Record<string, { label: string; run: () => Promise<string> }> = {
+  runCron: { label: "Collection run", run: async () => {
+    if (isBusy()) return "skipped: a run is already in progress";
+    if (!(await credentialGate("scheduler")).ok) return "skipped: AWS credentials are not working";
+    const id = startRun("schedule");
+    return `started run #${id}`;
+  } },
+  watchCron: { label: "Watcher", run: async () => {
+    if (watching) return "skipped: previous sample still collecting";
     watching = true;
-    watchOnce()
-      .then((r) => console.log(`[watcher] sample ${r.sample_id}: ${r.samples} values, ${r.alerts} alerts${r.errors.length ? `, errors: ${r.errors.join("; ")}` : ""}`))
-      .catch((e: any) => console.error(`[watcher] failed: ${e?.message || e}`))
-      .finally(() => { watching = false; });
-  });
-  const probe = schedule("Probe pass (PROBE_CRON)", config.probeCron, () => {
-    if (!hasConnectionFile()) return;
-    probePass().catch((e: any) => console.error(`[probe-pass] failed: ${e?.message || e}`));
-  });
-  // refreshSpend runs the credential gate itself and skips when the last fetch is younger than 6 hours.
-  const spend = schedule("Spend refresh (SPEND_CRON)", config.spendCron, () => {
-    if (!hasConnectionFile()) return;
-    refreshSpend()
-      .then((r) => console.log(`[spend] ${r.refreshed ? `${r.days} days stored` : `skipped: ${r.skipped || r.error}`}`))
-      .catch((e: any) => console.error(`[spend] failed: ${e?.message || e}`))
-      .then(() => refreshCommitments((l) => console.log(`[commitments] ${l}`)))
-      .catch((e: any) => console.error(`[commitments] failed: ${e?.message || e}`))
-      .then(() => priceCheckAndForecast())
-      .catch((e: any) => console.error(`[forecast] failed: ${e?.message || e}`));
-  });
-  const baselines = schedule("Baselines (BASELINE_CRON)", config.baselineCron, () => {
-    if (!hasConnectionFile()) return;
-    refreshBaselines((l) => console.log(`[baselines] ${l}`))
-      .then((r) => console.log(`[baselines] nat ${r.nat}, cpu ${r.cpu}, probes ${r.probes}, spend ${r.spend} in ${r.took_ms} ms${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`))
-      .catch((e: any) => console.error(`[baselines] failed: ${e?.message || e}`));
-  });
-  const review = schedule("Daily review (REVIEW_CRON)", config.reviewCron, () => {
-    runReview((l) => console.log(`[review] ${l}`)).catch((e: any) => console.error(`[review] failed: ${e?.message || e}`));
-  });
-  const observe = config.repo2graphUrl ? schedule("Observation (OBSERVE_CRON)", config.observeCron, () => {
-    dispatchObservation().then((r) => console.log(`[observe] dispatched ${r.requestId}`)).catch((e: any) => console.error(`[observe] not dispatched: ${e?.message || e}`));
-  }) : null;
-  const logs = schedule("Logs and CloudTrail (LOGS_CRON)", config.logsCron, () => {
-    if (!hasConnectionFile()) return;
-    refreshLogs((l) => console.log(`[logs] ${l}`)).catch((e: any) => console.error(`[logs] failed: ${e?.message || e}`))
-      .then(() => refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`))).catch((e: any) => console.error(`[cloudtrail] failed: ${e?.message || e}`))
-      .then(() => refreshS3Inventory((l) => console.log(`[s3] ${l}`))).catch((e: any) => console.error(`[s3] failed: ${e?.message || e}`));
-  });
-  const verify = schedule("Saving verification (VERIFY_CRON)", config.verifyCron, () => {
-    if (!hasConnectionFile()) return;
-    runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }).catch((e: any) => console.error(`[verify] failed: ${e?.message || e}`));
-  });
-  return { run, watch, probe, spend, baselines, review, observe, logs, verify };
+    try { const r = await watchOnce(); return `sample ${r.sample_id}: ${r.samples} values, ${r.alerts} alerts${r.errors.length ? `, errors: ${r.errors.join("; ")}` : ""}`; }
+    finally { watching = false; }
+  } },
+  probeCron: { label: "Probe pass", run: async () => { const r = await probePass(); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates`; } },
+  spendCron: { label: "Spend refresh", run: async () => {
+    const r = await refreshSpend();
+    console.log(`[spend] ${r.refreshed ? `${r.days} days stored` : `skipped: ${r.skipped || r.error}`}`);
+    try { await refreshCommitments((l) => console.log(`[commitments] ${l}`)); } catch (e: any) { console.error(`[commitments] failed: ${e?.message || e}`); }
+    try { await priceCheckAndForecast(); } catch (e: any) { console.error(`[forecast] failed: ${e?.message || e}`); }
+    return r.refreshed ? `${r.days} days stored, commitments and forecast refreshed` : `spend skipped: ${r.skipped || r.error}; commitments and forecast refreshed`;
+  } },
+  baselineCron: { label: "Baselines", run: async () => {
+    const r = await refreshBaselines((l) => console.log(`[baselines] ${l}`));
+    return `nat ${r.nat}, cpu ${r.cpu}, probes ${r.probes}, spend ${r.spend} in ${r.took_ms} ms${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
+  } },
+  reviewCron: { label: "Daily review", run: async () => { const r: any = await runReview((l) => console.log(`[review] ${l}`)); return `${r?.instances ?? "?"} instances reviewed, ${r?.recommendations ?? 0} recommendations, ${r?.alerts ?? 0} alerts`; } },
+  observeCron: { label: "Morning observation", run: async () => {
+    if (!config.repo2graphUrl) return "skipped: no repo2graph URL (Settings > Agent)";
+    const r = await dispatchObservation();
+    return `dispatched ${r.requestId}`;
+  } },
+  logsCron: { label: "Logs and CloudTrail", run: async () => {
+    const out: string[] = [];
+    try { await refreshLogs((l) => console.log(`[logs] ${l}`)); out.push("logs"); } catch (e: any) { console.error(`[logs] failed: ${e?.message || e}`); out.push(`logs failed: ${e?.message || e}`); }
+    try { await refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`)); out.push("cloudtrail"); } catch (e: any) { console.error(`[cloudtrail] failed: ${e?.message || e}`); out.push(`cloudtrail failed: ${e?.message || e}`); }
+    try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
+    return out.join(", ");
+  } },
+  verifyCron: { label: "Saving verification", run: async () => { const r: any = await runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }); return typeof r === "object" && r ? JSON.stringify(r).slice(0, 200) : "done"; } },
+};
+
+const tag: Record<string, string> = { runCron: "scheduler", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify" };
+const jobInFlight = new Set<string>();
+
+/** Runs one job now, as the cron would, and reports what it did or why it did nothing. The credential check is the same. */
+export async function runJobNow(key: string, trigger = "manual"): Promise<string> {
+  const job = JOBS[key]; if (!job) throw new Error(`no job for ${key}`);
+  const t = tag[key] || key;
+  if (key !== "reviewCron" && !hasConnectionFile()) { const m = "skipped: AWS credentials are not configured (Settings > AWS access)"; console.log(`[${t}] ${m}`); return m; }
+  if (jobInFlight.has(key)) { const m = "skipped: already running"; console.log(`[${t}] ${m}`); return m; }
+  jobInFlight.add(key);
+  console.log(`[${t}] started (${trigger})`);
+  try { const m = await job.run(); console.log(`[${t}] ${m}`); return m; }
+  catch (e: any) { console.error(`[${t}] failed: ${e?.message || e}`); throw e; }
+  finally { jobInFlight.delete(key); }
+}
+
+export function startScheduler(): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  const crons: Record<string, string> = { runCron: config.runCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron };
+  const names: Record<string, string> = { runCron: "Scheduler (RUN_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)" };
+  for (const key of Object.keys(JOBS)) {
+    if (key === "observeCron" && !config.repo2graphUrl) { console.log("Observation (OBSERVE_CRON) disabled: no repo2graph URL (Settings > Agent)"); out[key] = null; continue; }
+    out[key] = schedule(names[key], crons[key], () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });
+  }
+  return out;
 }

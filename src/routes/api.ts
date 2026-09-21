@@ -1,3 +1,4 @@
+import { JOBS, runJobNow } from "../scheduler.js";
 import { belowBar } from "../rubric.js";
 import { taskFor } from "../tasks.js";
 import { Router, type Request } from "express";
@@ -150,6 +151,12 @@ api.delete("/settings/aws", (_req, res) => { clearConnection(); res.json({ ok: t
 // Runtime settings: the agent, Jev, the graph, the schedules, the probe pass. Saved values win over the env.
 api.get("/settings/runtime", (_req, res) => res.json({ settings: listRuntimeSettings() }));
 api.get("/quotas", (_req, res) => res.json({ quotas: quotaStatus() }));
+api.post("/settings/runtime/:key/run", async (req, res) => {
+  const key = String(req.params.key);
+  if (!JOBS[key]) return res.status(404).json({ error: `no job for ${key}` });
+  try { res.json({ key, label: JOBS[key].label, result: await runJobNow(key) }); }
+  catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
+});
 api.put("/settings/runtime", (req, res) => {
   const { key, value } = req.body || {};
   if (typeof key !== "string") return res.status(400).json({ error: "key required" });

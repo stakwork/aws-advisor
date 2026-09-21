@@ -11,6 +11,8 @@ export function RuntimeSettings() {
   const [edit, setEdit] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>("");
   const [err, setErr] = useState<Record<string, string>>({});
+  const [ran, setRan] = useState<Record<string, string>>({});
+  const runNow = async (key: string) => { setBusy(key); setRan((x) => ({ ...x, [key]: "running…" })); try { const r = await api(`/settings/runtime/${key}/run`, { method: "POST", body: "{}" }); setRan((x) => ({ ...x, [key]: r.result })); } catch (e: any) { setRan((x) => ({ ...x, [key]: `failed: ${e.message}` })); } finally { setBusy(""); } };
   const load = () => { api("/settings/runtime").then((d) => setRows(d.settings)).catch(() => setRows([])); api("/quotas").then((d) => setQuotas(d.quotas)).catch(() => setQuotas(null)); };
   useEffect(() => { load(); }, []);
   const save = async (key: string, value: string | null) => {
@@ -42,10 +44,10 @@ export function RuntimeSettings() {
                 return (
                   <tr key={r.key} className="border-t border-zinc-800/70 align-top">
                     <td className="w-56 py-1.5 pr-3"><div className="text-zinc-200">{r.label}</div><div className="font-mono text-[10px] text-zinc-600">{r.env}</div></td>
-                    <td className="py-1.5 pr-3">{input}{r.help && <div className="mt-0.5 text-xs text-zinc-500">{r.help}</div>}{err[r.key] && <div className="mt-0.5 text-xs text-red-300">{err[r.key]}</div>}</td>
+                    <td className="py-1.5 pr-3">{input}{r.help && <div className="mt-0.5 text-xs text-zinc-500">{r.help}</div>}{err[r.key] && <div className="mt-0.5 text-xs text-red-300">{err[r.key]}</div>}{ran[r.key] && <div className="mt-0.5 text-xs text-zinc-400">{ran[r.key]}</div>}</td>
                     <td className="w-40 py-1.5 text-right whitespace-nowrap">
                       {editing ? <><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => save(r.key, edit[r.key])} disabled={busy === r.key}>Save</Button> <button className="text-xs text-zinc-500" onClick={() => setEdit((x) => { const n = { ...x }; delete n[r.key]; return n; })}>cancel</button></>
-                        : <><Badge>{r.source === "setting" ? "saved" : r.source === "env" ? "env" : "default"}</Badge>{r.source === "setting" && <button className="ml-2 text-xs text-zinc-500 hover:text-zinc-300" title={r.env_set ? `back to the environment value` : "back to the default"} onClick={() => save(r.key, null)}>reset</button>}</>}
+                        : <>{r.kind === "cron" && <Button variant="ghost" className="mr-2 !px-2 !py-1 !text-xs" onClick={() => runNow(r.key)} disabled={busy === r.key} title="run this job now, exactly as the cron would">{busy === r.key ? "Running…" : "Run now"}</Button>}<Badge>{r.source === "setting" ? "saved" : r.source === "env" ? "env" : "default"}</Badge>{r.source === "setting" && <button className="ml-2 text-xs text-zinc-500 hover:text-zinc-300" title={r.env_set ? `back to the environment value` : "back to the default"} onClick={() => save(r.key, null)}>reset</button>}</>}
                     </td>
                   </tr>
                 );

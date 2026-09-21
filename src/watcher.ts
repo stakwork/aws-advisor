@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import { db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { refreshInventory } from "./inventory.js";
@@ -218,7 +219,9 @@ export async function watchOnce(): Promise<WatchResult> {
   // goes to the agent only when Jev found it unexpected or severe; without a triage the existing policy applies.
   for (const a of natAlerts) {
     const t = triaged.get(a.id);
-    if (shouldAutoInvestigate("nat_traffic") && (!t || t.decision === "investigate")) investigateAlertInBackground(a.id);
+    if (!shouldAutoInvestigate("nat_traffic")) console.log(`[watcher] alert #${a.id} not investigated: ${config.repo2graphUrl ? 'ALERT_INVESTIGATE is not "auto"' : "no repo2graph URL"} (Settings > Agent)`);
+    else if (t && t.decision !== "investigate") console.log(`[watcher] alert #${a.id} not investigated: Jev triaged it as ${t.decision}`);
+    else { console.log(`[watcher] alert #${a.id} sent to the agent for investigation${t ? " (Jev: unexpected)" : ""}`); investigateAlertInBackground(a.id); }
   }
   // New or auto-acknowledged alerts go to the Neo4j mirror (src/graph_mirror.ts); fire-and-forget.
   if (alerts > 0 || triaged.size > 0) mirrorAlertsInBackground();

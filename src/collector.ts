@@ -181,6 +181,10 @@ async function execute(runId: number) {
     }
 
     const policy = config.agentAutoDispatch;
+    if (!config.repo2graphUrl) console.log(`[run #${runId}] agent dispatch skipped: no repo2graph URL (Settings > Agent)`);
+    else if (policy === "never") console.log(`[run #${runId}] agent dispatch skipped: AGENT_AUTO_DISPATCH=never`);
+    else if (policy === "changes" && !material) console.log(`[run #${runId}] agent dispatch skipped: nothing material changed (AGENT_AUTO_DISPATCH=changes)`);
+    else console.log(`[run #${runId}] handing findings to the agent`);
     if (config.repo2graphUrl && policy === "never") {
       log(runId, "Agent dispatch skipped (AGENT_AUTO_DISPATCH=never); use \"Send findings to agent\" to run it by hand");
     } else if (config.repo2graphUrl && policy === "changes" && !material) {
