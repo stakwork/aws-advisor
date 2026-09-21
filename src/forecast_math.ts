@@ -9,7 +9,7 @@
  *   - fixed: the Savings Plan fee, reservations and support, known in advance.
  */
 import type { PricedLine, RecordTotals } from "./reconcile.js";
-import { businessSupport } from "./pricebook.js";
+import { supportCharge } from "./pricebook.js";
 
 export type Basis = "inventory" | "run_rate" | "fixed" | "mixed";
 export interface InventoryNow {
@@ -30,6 +30,8 @@ export interface ForecastInput {
   /** the Savings Plan's discount on the on-demand value it covers (0.27 = 27 %), from the last full month */
   sp_discount_rate: number;
   now: InventoryNow;
+  /** the account's support plan (Support API); "unknown" keeps support at what was billed */
+  support_plan: "basic" | "developer" | "business" | "enterprise" | "unknown";
   /** last full month's billed net per service and in total, for the comparison */
   last_month: { total: number; services: Record<string, number> } | null;
 }
@@ -109,9 +111,14 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   const usageRemaining = categories.filter((c) => c.key !== "sp_fee" && c.key !== "reservations").reduce((s, c) => s + c.remaining, 0);
   const chargesMtd = input.lines.reduce((s, l) => s + l.net, 0) + r.sp_fee;
   const chargesForecast = chargesMtd + usageRemaining + spFeeRemaining;
-  const supportForecast = r.support > 0 ? round2(businessSupport(chargesForecast)) : 0;
+  // support is posted on the 1st as a placeholder and trued up at month end from the final charges, so the plan decides it
+  const planCharge = supportCharge(input.support_plan, chargesForecast);
+  const supportForecast = round2(Math.max(planCharge ?? 0, r.support));
   const supportRemaining = Math.max(0, supportForecast - r.support);
-  categories.push({ key: "support", label: "Support", basis: "fixed", mtd: round2(r.support), mtd_per_day: round2(r.support / elapsed), per_day: round2(supportRemaining / Math.max(1, remaining)), remaining: round2(supportRemaining), detail: r.support > 0 ? "Business Support tiers on the month's charges" : "no support plan" });
+  const supportDetail = input.support_plan === "basic" ? (r.support > 0 ? "Basic plan: no more support charges; what was posted stays (a cancelled plan is billed to the day)" : "Basic plan: no support charge")
+    : input.support_plan === "unknown" ? "plan unknown (grant support:DescribeSeverityLevels), taken as billed so far"
+    : `${input.support_plan[0].toUpperCase()}${input.support_plan.slice(1)} Support on the month's charges`;
+  categories.push({ key: "support", label: "Support", basis: "fixed", mtd: round2(r.support), mtd_per_day: round2(r.support / elapsed), per_day: round2(supportRemaining / Math.max(1, remaining)), remaining: round2(supportRemaining), detail: supportDetail });
   const taxPerDay = r.tax / elapsed;
   categories.push({ key: "tax", label: "Tax", basis: "run_rate", mtd: round2(r.tax), mtd_per_day: round2(taxPerDay), per_day: round2(taxPerDay), remaining: round2(taxPerDay * remaining), detail: "as billed so far, pro rata" });
   const remainingNet = categories.reduce((s, c) => s + c.remaining, 0);
@@ -157,7 +164,7 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
       `Month to date is what Cost Explorer has for ${elapsed} complete day${elapsed === 1 ? "" : "s"}; the remaining ${remaining} are priced from the inventory as it is now (instances, databases, cache nodes, volumes, buckets, functions), usage-based lines at their month-to-date daily average, and the commitments and support as fixed.`,
       `The Savings Plan fee is fixed (${round2(spHourly)} USD/h); at its ${Math.round(rate * 100)} % discount it covers ${round2(coveredCapHourly)} USD/h of on-demand compute, and only compute above that is paid on demand. Reservations are taken at their month-to-date amortized rate and the instances and nodes they cover cost nothing more; what is left is priced on demand.`,
       "Spot instances are billed at market price and stay in the usage-based leg; Batch workers count while they run, so the compute leg moves with the queue.",
-      "Support is the Business Support tier formula on the forecast charges; tax is pro rata of what was billed so far.",
+      `Support: the account is on the ${input.support_plan === "unknown" ? "unknown" : input.support_plan[0].toUpperCase() + input.support_plan.slice(1)} plan (Support API); AWS posts support on the 1st as a placeholder and trues it up at month end, so the plan's formula on the forecast charges is used${input.support_plan === "basic" ? ", which is nothing" : ""}. Tax is pro rata of what was billed so far.`,
     ],
   };
 }
