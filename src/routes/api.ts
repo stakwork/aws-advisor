@@ -1,3 +1,5 @@
+import { belowBar } from "../rubric.js";
+import { taskFor } from "../tasks.js";
 import { Router, type Request } from "express";
 import { authMiddleware, signToken } from "../auth.js";
 import { config } from "../config.js";
@@ -176,7 +178,8 @@ api.get("/runs/:id", (req, res) => {
   const run = db.prepare("select * from runs where id = ?").get(req.params.id);
   if (!run) return res.status(404).json({ error: "not found" });
   const byControl = db.prepare("select source, benchmark, control_id, control_title, status, count(*) as n from findings where run_id = ? group by 1,2,3,4,5 order by n desc").all(req.params.id);
-  const agent = db.prepare("select request_id, session_id, status, error, created_at, finished_at, score, retry_of, retried_by from agent_runs where run_id = ? order by id desc").all(req.params.id);
+  const agent = (db.prepare("select request_id, session_id, status, error, created_at, finished_at, kind, grade, retry_of, retried_by from agent_runs where run_id = ? order by id desc").all(req.params.id) as any[])
+    .map(({ grade, kind, ...a }) => { let g = null; try { g = grade ? JSON.parse(grade) : null; } catch { g = null; } return { ...a, below_bar: belowBar(g, taskFor(kind || "findings").retry.on_score_below) }; });
   res.json({ ...(run as object), byControl, agent });
 });
 

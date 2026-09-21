@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { critiqueText, gradeByRubric, valuesAt } from "../rubric.js";
+import { belowBar, critiqueText, gradeByRubric, valuesAt } from "../rubric.js";
 import { loadTasks, taskFor } from "../tasks.js";
 
 test("rubric paths fan out over arrays", () => {
@@ -27,4 +27,11 @@ test("task files load, register the prompts and carry rubrics the grader underst
   assert.match(critiqueText(b), /destructive/);
   const inc = gradeByRubric({ cause: "c", confidence: 0.8, evidence: ["5 GB at 02:30", "baseline 2 GB"], fixes: [{ title: "t", action_type: "enable_flow_logs", resource: "vpc-1", tier: "approve", rationale: "r" }, { title: "t2", action_type: "enable_flow_logs", resource: "vpc-1", tier: "approve", rationale: "r" }] }, taskFor("incident").rubric);
   assert.ok(inc.checks.find((c) => c.check.startsWith("no duplicate"))!.pass === false);
+});
+
+test("belowBar names the failed checks only under the task's bar", () => {
+  const g = { score: 0.875, checks: [{ check: "a", pass: true, detail: "" }, { check: "summary is three sentences or fewer", pass: false, detail: "4 sentences" }] };
+  assert.equal(belowBar(g, 0.75), null);
+  assert.deepEqual(belowBar({ ...g, score: 0.5 }, 0.75), ["summary is three sentences or fewer"]);
+  assert.equal(belowBar(null, 0.75), null);
 });

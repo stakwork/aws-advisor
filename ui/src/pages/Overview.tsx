@@ -77,7 +77,7 @@ function DailyCostChart({ series, today, asOf }: { series: any[]; today: string;
   );
 }
 
-/** The agent's morning note: what changed, what deserves attention, what it proposes, with its rubric score. */
+/** The agent's morning note: what changed, what deserves attention, what it proposes. Its quality grade shows only when it failed. */
 function ObservationCard() {
   const [d, setD] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -89,7 +89,7 @@ function ObservationCard() {
   const r = o?.result;
   return (
     <div className="space-y-1 text-sm">
-      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{o ? `${o.day} · ${o.status}${o.score != null ? ` · rubric ${Math.round(o.score * 100)} %` : ""}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Dispatching…" : "Observe now"}</Button></div>
+      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{o ? `${o.day} · ${o.status}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Dispatching…" : "Observe now"}</Button></div>
       {msg && <div className="text-xs text-red-300">{msg}</div>}
       {o?.status === "pending" && <div className="text-xs text-zinc-500">The agent is reading the brief and checking facts; a few minutes.</div>}
       {o?.status === "failed" && <div className="text-xs text-red-300">{String(o.error).slice(0, 200)}</div>}
@@ -99,7 +99,7 @@ function ObservationCard() {
           {r.attention?.length > 0 && <ul className="space-y-0.5 text-xs">{r.attention.map((a: any, i: number) => <li key={i} className="flex items-start gap-2"><Badge>{a.urgency}</Badge><span className="text-zinc-300">{a.item}{a.reason ? <span className="text-zinc-500"> — {a.reason}</span> : null}</span></li>)}</ul>}
           {r.changes?.length > 0 && <details className="text-xs"><summary className="cursor-pointer text-zinc-500">{r.changes.length} change{r.changes.length === 1 ? "" : "s"} explained</summary><ul className="mt-1 space-y-1 pl-3">{r.changes.map((c: any, i: number) => <li key={i} className="text-zinc-300">{c.what} <span className="text-zinc-500">· {c.why} · {c.evidence}{c.expected ? " · expected" : ""}</span></li>)}</ul></details>}
           {r.proposals?.length > 0 && <details className="text-xs"><summary className="cursor-pointer text-zinc-500">{r.proposals.length} proposal{r.proposals.length === 1 ? "" : "s"}</summary><ul className="mt-1 space-y-1 pl-3">{r.proposals.map((p: any, i: number) => <li key={i} className="text-zinc-300"><Badge>{p.tier}</Badge> {p.action}{p.resource ? <span className="font-mono text-zinc-500"> {p.resource}</span> : null}{p.est_monthly_saving ? <span className="text-zinc-500"> · ≈ {usd(p.est_monthly_saving)}/mo</span> : null}<div className="text-zinc-500">{p.rationale}</div></li>)}</ul></details>}
-          {o.grade?.checks && <details className="text-xs"><summary className="cursor-pointer text-zinc-500">rubric</summary><ul className="mt-1 space-y-0.5 pl-3">{o.grade.checks.map((c: any) => <li key={c.check}><Badge>{c.pass ? "pass" : "fail"}</Badge> <span className="text-zinc-300">{c.check}</span> <span className="text-zinc-500">{c.detail}</span></li>)}</ul></details>}
+          {o.below_bar && <div className="text-xs text-amber-300">Quality check failed ({o.below_bar.join(", ")}); read this note with care.</div>}
         </>
       )}
     </div>
