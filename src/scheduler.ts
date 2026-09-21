@@ -6,6 +6,9 @@ import { watchOnce } from "./watcher.js";
 import { probePass } from "./probe_pass.js";
 import { credentialGate } from "./gate.js";
 import { refreshSpend } from "./spend.js";
+import { getReconciliation, lastFullMonth, reconcileMonth } from "./reconcile.js";
+import { runForecast } from "./forecast.js";
+import { localDay } from "./localdate.js";
 import { refreshBaselines } from "./baselines.js";
 import { runReview } from "./review.js";
 import { dispatchObservation } from "./observe.js";
@@ -37,6 +40,16 @@ export function restartScheduler(): ReturnType<typeof startScheduler> {
 let watching = false;
 
 /** Starts the scheduled full run (RUN_CRON) and the lightweight watcher (WATCH_CRON). */
+/** The month's forecast after every spend refresh; the last full month's price check once, from the 3rd, when it is missing. */
+export async function priceCheckAndForecast(): Promise<void> {
+  const last = lastFullMonth();
+  if (!getReconciliation(last) && Number(localDay().slice(8, 10)) >= 3) {
+    try { const r = await reconcileMonth(last, (l) => console.log(`[price-check] ${l}`)); if (!r.eval.every((e) => e.pass)) console.warn(`[price-check] ${last}: ${r.eval.filter((e) => !e.pass).map((e) => e.criterion).join("; ")}`); }
+    catch (e: any) { console.error(`[price-check] failed: ${e?.message || e}`); }
+  }
+  await runForecast((l) => console.log(`[forecast] ${l}`));
+}
+
 export function startScheduler(): { run: string | null; watch: string | null; probe: string | null; spend: string | null; baselines: string | null; review: string | null; observe: string | null; logs: string | null; verify: string | null } {
   const run = schedule("Scheduler (RUN_CRON)", config.runCron, async () => {
     if (isBusy()) { console.log("[scheduler] skipped: a run is already in progress"); return; }
@@ -69,7 +82,9 @@ export function startScheduler(): { run: string | null; watch: string | null; pr
       .then((r) => console.log(`[spend] ${r.refreshed ? `${r.days} days stored` : `skipped: ${r.skipped || r.error}`}`))
       .catch((e: any) => console.error(`[spend] failed: ${e?.message || e}`))
       .then(() => refreshCommitments((l) => console.log(`[commitments] ${l}`)))
-      .catch((e: any) => console.error(`[commitments] failed: ${e?.message || e}`));
+      .catch((e: any) => console.error(`[commitments] failed: ${e?.message || e}`))
+      .then(() => priceCheckAndForecast())
+      .catch((e: any) => console.error(`[forecast] failed: ${e?.message || e}`));
   });
   const baselines = schedule("Baselines (BASELINE_CRON)", config.baselineCron, () => {
     if (!hasConnectionFile()) return;

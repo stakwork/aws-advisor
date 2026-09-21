@@ -7,6 +7,7 @@ import { S, query } from "../steampipe.js";
 import { credentialGate } from "../gate.js";
 import { instanceHistory, rollupDaily } from "../history.js";
 import { getReconciliation, lastFullMonth, listReconciliations, reconcileMonth } from "../reconcile.js";
+import { forecastHistory, latestForecast, runForecast } from "../forecast.js";
 import { ScopeKind, baselineSummary, listBaselines, refreshBaselines } from "../baselines.js";
 import { latestReview, runReview } from "../review.js";
 import { buildObserveBrief, dispatchObservation, latestObservation, listObservations } from "../observe.js";
@@ -134,6 +135,17 @@ knowledge.post("/bill/reconcile", async (req, res) => {
   const log: string[] = [];
   try { res.json({ reconciliation: await reconcileMonth(month, (l) => log.push(l)), log }); }
   catch (e: any) { res.status(500).json({ error: e.message, log }); }
+});
+
+// ---- this month, forecast from what is running now -------------------------------------------------------------
+knowledge.get("/forecast", (_req, res) => {
+  const f = latestForecast();
+  res.json({ forecast: f, history: f ? forecastHistory(f.month) : [], price_check: { month: lastFullMonth(), reconciliation: getReconciliation(lastFullMonth()) } });
+});
+knowledge.post("/forecast/run", async (_req, res) => {
+  const log: string[] = [];
+  try { res.json({ forecast: await runForecast((l) => log.push(l)), log }); }
+  catch (e: any) { res.status(e?.message?.includes("credentials") ? 503 : 500).json({ error: e.message, log }); }
 });
 
 // ---- baselines: what is typical per gateway, instance and service ---------------------------------------------

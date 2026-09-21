@@ -22,7 +22,7 @@ const nav = [
   { to: "/inventory", label: "Inventory", icon: Server },
   { to: "/recommendations", label: "Recommendations", icon: ListChecks },
   { to: "/changes", label: "Changes", icon: History },
-  { to: "/bill", label: "Bill", icon: Receipt },
+  { to: "/bill", label: "This month", icon: Receipt },
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];

@@ -174,20 +174,21 @@ function ReviewSummary() {
   );
 }
 
-/** Last month priced from our own knowledge against the bill: the eval of the pricing side of the graph. */
-function BillSummary() {
-  const [b, setB] = useState<any>(null);
-  useEffect(() => { api("/bill").then(setB).catch(() => setB(null)); }, []);
-  const r = b?.reconciliation;
-  if (!b) return <Empty>Loading…</Empty>;
-  if (!r) return <div className="text-sm text-zinc-500">Not computed yet for {b.month}. <Link to="/bill" className="underline">Compute it</Link> to see how well our prices explain the bill.</div>;
-  const t = r.totals;
+/** This month so far and where it is heading, priced from what runs now; the price check surfaces only when it fails. */
+function ForecastSummary() {
+  const [d, setD] = useState<any>(null);
+  useEffect(() => { api("/forecast").then(setD).catch(() => setD(null)); }, []);
+  if (!d) return <Empty>Loading…</Empty>;
+  const f = d.forecast; const pc = d.price_check?.reconciliation;
+  const pcFailed = pc && !pc.eval.every((e: any) => e.pass);
+  if (!f) return <div className="text-sm text-zinc-500">Not computed yet. <Link to="/bill" className="underline">Open This month</Link> to run it.</div>;
   return (
     <div className="space-y-1 text-sm">
-      <div className="flex justify-between"><span className="text-zinc-400">{r.month} billed</span><span className="text-zinc-100">{usd(t.actual_net)}</span></div>
-      <div className="flex justify-between"><span className="text-zinc-400">modelled from our prices</span><span className="text-zinc-100">{usd(t.modelled_net)} <span className={Math.abs(t.strict_gap_pct) <= 5 ? "text-emerald-300" : "text-amber-300"}>({t.strict_gap_pct > 0 ? "+" : ""}{t.strict_gap_pct.toFixed(1)} %)</span></span></div>
-      <div className="flex justify-between"><span className="text-zinc-400">usage value priced by a rule</span><span>{t.priced_share_pct.toFixed(1)} %</span></div>
-      <div className="flex justify-between"><span className="text-zinc-400">eval</span><span>{r.eval.filter((e: any) => e.pass).length} of {r.eval.length} criteria pass</span></div>
+      <div className="flex justify-between"><span className="text-zinc-400">spent so far, {f.elapsed_days} days</span><span className="text-zinc-100">{usd(f.mtd_net)}</span></div>
+      <div className="flex justify-between"><span className="text-zinc-400">on track for</span><span className="text-zinc-100">{usd(f.forecast_net)}{f.delta_pct != null && <span className={`ml-1 ${f.delta_pct > 5 ? "text-amber-300" : f.delta_pct < -5 ? "text-emerald-300" : "text-zinc-500"}`}>({f.delta_pct > 0 ? "+" : ""}{f.delta_pct.toFixed(1)} % vs last month)</span>}</span></div>
+      <div className="flex justify-between"><span className="text-zinc-400">locked in</span><span>{usd(f.locked_in)}</span></div>
+      {f.movers?.length > 0 && <div className="text-xs text-zinc-500">moved most: {f.movers.slice(0, 3).map((m: any) => `${m.service.replace(/^Amazon |^AWS /, "")} ${m.delta > 0 ? "+" : "−"}${usd(Math.abs(m.delta))}`).join(" · ")}</div>}
+      {pcFailed && <div className="text-xs text-amber-300">Price check failed for {d.price_check.month}: saving estimates may be off. <Link to="/bill" className="underline">See why</Link></div>}
     </div>
   );
 }
@@ -367,8 +368,8 @@ export default function Overview() {
         <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
           <ReviewSummary />
         </Card>
-        <Card title={<span className="flex items-center justify-between">Bill reconstruction <Link to="/bill" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">open →</Link></span>}>
-          <BillSummary />
+        <Card title={<span className="flex items-center justify-between">This month <Link to="/bill" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">open →</Link></span>}>
+          <ForecastSummary />
         </Card>
         <Card title="Commitments">
           <CommitmentsList fallback={d.commitments} />
