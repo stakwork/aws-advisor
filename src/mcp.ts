@@ -16,6 +16,7 @@ import { ScopeKind, getBaseline, listBaselines, scoreValue } from "./baselines.j
 import { instanceHistory } from "./history.js";
 import { latestReview, reviewForDay } from "./review.js";
 import { getReconciliation, lastFullMonth, listReconciliations } from "./reconcile.js";
+import { latestForecast } from "./forecast.js";
 import { poolSummary } from "./inventory.js";
 import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
@@ -362,6 +363,17 @@ export function createFactServer(): McpServer {
     const r = a.day ? reviewForDay(a.day) : latestReview();
     if (!r.day) return fail("the review has not run yet (POST /api/review/run)");
     return text({ day: r.day, count: r.findings.length, findings: r.findings.map((f: any) => ({ kind: f.kind, severity: f.severity, resource: f.resource, resource_name: f.resource_name, message: f.message, details: f.details })), days_available: r.days.map((d: any) => d.day) });
+  });
+
+  server.registerTool("forecast", {
+    title: "This month's bill, forecast from what is running now",
+    description: "Month to date from Cost Explorer plus the remaining days priced from the inventory as it is now (fleet under the Savings Plan, reservations, volumes, buckets, functions), usage lines at their run rate, and the commitments and support (per the account's support plan) as fixed. Per service against last month, the biggest movers, and the resources that launched or disappeared this month.",
+    inputSchema: {},
+    annotations: ro,
+  }, () => {
+    const f = latestForecast();
+    if (!f) return fail("no forecast yet (POST /api/forecast/run)");
+    return text({ month: f.month, computed_at: f.computed_at, elapsed_days: f.elapsed_days, remaining_days: f.remaining_days, spent_so_far: f.mtd_net, on_track_for: f.forecast_net, locked_in: f.locked_in, last_month: f.last_month_total, delta_pct: f.delta_pct, support_plan: f.support_plan, basis_share: f.basis_share, legs: f.categories, services: f.services.slice(0, 25), movers: f.movers, new_resources: f.new_resources.slice(0, 20), gone_resources: f.gone_resources.slice(0, 20), assumptions: f.assumptions });
   });
 
   server.registerTool("bill", {

@@ -154,6 +154,22 @@ export function businessSupport(base: number): number {
   return Math.max(100, total);
 }
 
+/** The month's support charge for a plan on a base of charges: Developer 3 % (min 29), Business the tiers above
+ *  (min 100), Enterprise 10/7/5/3 % on larger tiers (min 15,000), Basic nothing. Unknown plans use what was billed. */
+export function supportCharge(plan: "basic" | "developer" | "business" | "enterprise" | "unknown", base: number): number | null {
+  if (plan === "basic") return 0;
+  if (plan === "developer") return base <= 0 ? 0 : Math.max(29, base * 0.03);
+  if (plan === "business") return businessSupport(base);
+  if (plan === "enterprise") {
+    if (base <= 0) return 0;
+    const tiers: [number, number][] = [[150_000, 0.10], [350_000, 0.07], [500_000, 0.05], [Infinity, 0.03]];
+    let left = base, total = 0;
+    for (const [size, rate] of tiers) { const slice = Math.min(left, size); total += slice * rate; left -= slice; if (left <= 0) break; }
+    return Math.max(15_000, total);
+  }
+  return null;
+}
+
 /** Hours in a calendar month, for the Savings Plan fee (commitment is per hour). */
 export function hoursInMonth(month: string): number {
   const [y, m] = month.split("-").map(Number);

@@ -410,6 +410,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
+        "support:DescribeSeverityLevels",
         "ssm:DescribeInstanceInformation",
         "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
         "lambda:ListFunctions", "lambda:GetFunction*", "lambda:GetPolicy", "lambda:ListTags",
@@ -1481,8 +1482,12 @@ is pure and tested in `src/forecast_math.ts`.
   estimates: what the month's own billed share says is left to pay (this catches reservations the list misses)
   and the reservation list against the inventory (this catches ones bought late in the month). *Run rate*: the
   usage-based lines (transfer, NAT, CloudWatch, requests, snapshots, spot) at their month-to-date daily average.
-  *Fixed*: the Savings Plan fee, the reservations' amortized cost and support (the Business Support tiers on the
-  forecast charges, which Cost Explorer only accrues in part during the month).
+  *Fixed*: the Savings Plan fee, the reservations' amortized cost and support. AWS posts support on the 1st as a
+  placeholder and trues it up at month end, so the forecast asks the Support API which plan the account is on
+  (`src/support_plan.ts`, `support:DescribeSeverityLevels`: Basic fails with a subscription error, the severity
+  codes tell Developer, Business and Enterprise apart) and applies that plan's formula to the forecast charges;
+  a cancelled plan adds nothing beyond what was posted. The plan is cached as the account fact
+  `fact:support_plan`, refreshed with every forecast, and the agent sees it in the `forecast` MCP tool.
 - **On track for** is the sum, against last month's bill, with the services that moved by more than 20 USD and
   the resources that launched or disappeared this month (with their list price), so a moved forecast has names
   behind it. **Locked in** is the part already committed for the whole month.

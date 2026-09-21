@@ -9,11 +9,12 @@ import { computeReconciliation, getReconciliation, lastFullMonth, loadMonthInput
 import { Forecast, ForecastInput, computeForecast } from "./forecast_math.js";
 import { daysInMonth, localDay } from "./localdate.js";
 import { listCommitments } from "./commitments.js";
+import { refreshSupportPlan } from "./support_plan.js";
 
 db.exec(`create table if not exists forecasts (day text primary key, month text not null, computed_at text not null, json text not null)`);
 
 export interface ResourceChange { kind: string; id: string; name: string | null; type: string | null; monthly_usd: number | null; at: string | null }
-export type StoredForecast = Forecast & { new_resources: ResourceChange[]; gone_resources: ResourceChange[] };
+export type StoredForecast = Forecast & { new_resources: ResourceChange[]; gone_resources: ResourceChange[]; support_plan: string };
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 export const currentMonth = (today = localDay()) => today.slice(0, 7);
@@ -85,8 +86,9 @@ export async function runForecast(onLog: (s: string) => void = () => {}, today =
     total: lastMonth.totals.actual_net,
     services: { ...Object.fromEntries(lastMonth.services.map((s) => [s.service, s.actual_net])), "Savings Plans for AWS Compute usage": lastMonth.totals.sp_fee_actual, "AWS Support": lastMonth.totals.support_actual, Tax: lastMonth.totals.tax_actual },
   } : null;
-  const f = computeForecast({ month, elapsed_days: elapsedDays(month, today), days_in_month: daysInMonth(`${month}-01`), lines: priced.lines, records: input.records, sp_hourly: input.sp_hourly, sp_discount_rate: rate, now: inventoryNow(), last_month: last });
-  const stored: StoredForecast = { ...f, ...resourceChanges(month) };
+  const plan = (await refreshSupportPlan(onLog)).plan;
+  const f = computeForecast({ month, elapsed_days: elapsedDays(month, today), days_in_month: daysInMonth(`${month}-01`), lines: priced.lines, records: input.records, sp_hourly: input.sp_hourly, sp_discount_rate: rate, now: inventoryNow(), support_plan: plan, last_month: last });
+  const stored: StoredForecast = { ...f, ...resourceChanges(month), support_plan: plan };
   db.prepare("insert into forecasts(day, month, computed_at, json) values (?, ?, ?, ?) on conflict(day) do update set month = excluded.month, computed_at = excluded.computed_at, json = excluded.json").run(today, month, f.computed_at, JSON.stringify(stored));
   onLog(`${month}: ${f.mtd_net} so far over ${f.elapsed_days} days, on track for ${f.forecast_net}${f.last_month_total != null ? ` (last month ${f.last_month_total}, ${f.delta_pct! >= 0 ? "+" : ""}${f.delta_pct} %)` : ""}`);
   return stored;

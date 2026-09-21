@@ -29,7 +29,7 @@ test("computeForecast: month to date plus inventory, run rate and fixed legs", (
   const f = computeForecast({
     month: "2026-09", elapsed_days: 10, days_in_month: 30, lines,
     records: { usage_net: 470, sp_fee: 1752, sp_covered_od: 2400, ri_amortized: 100, support: 200, tax: 10, other: 0, net_total: 2532 },
-    sp_hourly: 7.3, sp_discount_rate: 0.27,
+    sp_hourly: 7.3, sp_discount_rate: 0.27, support_plan: "business",
     now: { ec2_od_hourly: 10, ec2_running: 5, rds_od_hourly: 1, cache_od_hourly: 0, rds_reserved_hourly: 0.5, cache_reserved_hourly: null, ebs_month: 300, s3_month: 0, lambda_month: 0 },
     last_month: { total: 8000, services: { "EC2 - Other": 500, AmazonCloudWatch: 300, "Savings Plans for AWS Compute usage": 5431, "AWS Support": 600 } },
   }, new Date("2026-09-11T00:00:00Z"));
@@ -50,4 +50,32 @@ test("computeForecast: month to date plus inventory, run rate and fixed legs", (
   assert.ok(f.movers.some((m) => m.service === "AmazonCloudWatch"), "CloudWatch grew");
   assert.equal(f.basis_share.inventory_pct + f.basis_share.run_rate_pct + f.basis_share.fixed_pct > 99, true);
   assert.equal(f.delta_pct, Math.round(((f.forecast_net - 8000) / 8000) * 10000) / 100);
+});
+
+test("computeForecast: a cancelled support plan adds nothing after what was posted", () => {
+  const base = {
+    month: "2026-09", elapsed_days: 10, days_in_month: 30, lines: [line("AmazonCloudWatch", "DataProcessing-Bytes", 2000)],
+    records: { usage_net: 2000, sp_fee: 0, sp_covered_od: 0, ri_amortized: 0, support: 426, tax: 0, other: 0, net_total: 2426 },
+    sp_hourly: null, sp_discount_rate: 0, now: { ec2_od_hourly: 0, ec2_running: 0, rds_od_hourly: 0, cache_od_hourly: 0, rds_reserved_hourly: null, cache_reserved_hourly: null, ebs_month: 0, s3_month: 0, lambda_month: 0 }, last_month: null,
+  };
+  const basic = computeForecast({ ...base, support_plan: "basic" });
+  assert.equal(basic.categories.find((c) => c.key === "support")!.remaining, 0);
+  assert.equal(basic.support_forecast, 426);
+  const business = computeForecast({ ...base, support_plan: "business" });
+  assert.ok(business.categories.find((c) => c.key === "support")!.remaining > 0);
+  const unknown = computeForecast({ ...base, support_plan: "unknown" });
+  assert.equal(unknown.support_forecast, 426);
+});
+
+test("support plan from severity codes and the charge per plan", async () => {
+  const { planFromSeverityCodes } = await import("../support_plan.js");
+  const { supportCharge } = await import("../pricebook.js");
+  assert.equal(planFromSeverityCodes(["low", "normal"]), "developer");
+  assert.equal(planFromSeverityCodes(["low", "normal", "high", "urgent"]), "business");
+  assert.equal(planFromSeverityCodes(["low", "normal", "high", "urgent", "critical"]), "enterprise");
+  assert.equal(supportCharge("basic", 20_000), 0);
+  assert.equal(supportCharge("developer", 500), 29);
+  assert.equal(supportCharge("business", 20_000), 1000 + 700);
+  assert.equal(supportCharge("enterprise", 20_000), 15_000);
+  assert.equal(supportCharge("unknown", 20_000), null);
 });
