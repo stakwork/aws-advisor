@@ -19,7 +19,7 @@ const cache = [{ cache_cluster_id: "sidekiq-001", replication_group: "sidekiq", 
 test("systems: pools, clusters and groups collapse into one system each; standalone boxes stand alone; stopped instances are not members", () => {
   const systems = systemsFromInventory(ec2, rds, cache, new Map([["i-b1", "blockchain_node"]]), [{ id: "nat-1", region: "us-east-1" }]);
   const byId = Object.fromEntries(systems.map((s) => [s.id, s]));
-  assert.deepEqual(Object.keys(byId).sort(), ["cache:sidekiq", "ec2:i-b1", "nat:nat-1", "pool:web-asg", "rds:prod", "rds:orion"]);
+  assert.deepEqual(Object.keys(byId).sort(), ["cache:sidekiq", "ec2:i-b1", "nat:nat-1", "pool:web-asg", "rds:orion", "rds:prod"]);
   assert.equal(byId["pool:web-asg"].members.length, 2);
   assert.equal(byId["pool:web-asg"].types[0].count, 2);
   assert.equal(byId["pool:web-asg"].archetype, "web_or_api");
