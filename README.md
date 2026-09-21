@@ -1698,12 +1698,10 @@ set to its own container address so the agent's callbacks and tool calls stay on
 private, like neo4j: no Traefik route and no public hostname, because the UI lists the account's instances,
 probes, costs and decisions. Reach it on the host's private IP at port 9034 (over the VPN or a tunnel), and
 sign in with the `API_TOKEN` the swarm generated for the node (in the stack's config.yaml). The swarm
-generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created. Everything else is
-configured on the advisor's Settings page and stored in its database, so the swarm's `.env` only needs to seed
-what is convenient: `ADVISOR_AGENT_MODEL` and `ADVISOR_AGENT_API_KEY` (the agent runs through repo2graph but
-with its own provider, model and key), `ADVISOR_TYPESAFE_API_KEY`. These arrive as environment defaults under
-an `ADVISOR_` prefix, so they never clash with what other images read, and anything saved in Settings wins over
-them. It passes no AWS credentials: the
+generates `API_TOKEN`, `MCP_TOKEN` and `CALLBACK_SECRET` when the stack is created, and links the node to
+repo2graph, boltwall and neo4j. Everything else, the agent's model and key, the TypeSafe key, every schedule
+and threshold, is set on the advisor's Settings page and stored in its database; the swarm's `.env` seeds
+nothing. Without a key of its own the advisor's agent runs on repo2graph's key. It passes no AWS credentials: the
 advisor is configured read-only from its Settings page, exactly as documented above, and `advisor` is on the
 stack's auto-update list.
 
