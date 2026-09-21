@@ -336,7 +336,12 @@ export const hasOpenIssues = () => openIssues.size > 0;
  */
 export function describeError(err: unknown, context: string, maxLen = 400): string {
   const e = err as any;
-  const message = String(typeof err === "string" ? err : e?.message || err).slice(0, maxLen);
+  const raw = String(typeof err === "string" ? err : e?.message || err);
+  // the Steampipe service is down: a plugin panic or memory pressure; in the image a watchdog restarts it within 30 s
+  if (/ECONNREFUSED [0-9.]+:9193|connect ECONNREFUSED/.test(raw) && /9193|steampipe/i.test(raw + context)) {
+    return `Steampipe service is not running (${raw.slice(0, 80)}): it restarts by itself within 30 seconds in the image; locally run \`steampipe service start\`. Its log is ~/.steampipe/logs/steampipe-<date>.log.`;
+  }
+  const message = raw.slice(0, maxLen);
   const issue = explainPermissionError(err, context);
   if (!issue) return message;
   recordPermissionIssue(issue);

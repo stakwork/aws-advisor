@@ -13,5 +13,17 @@ export STEAMPIPE_UPDATE_CHECK=false
 gosu advisor steampipe service start --database-listen local --database-port 9193 >/dev/null 2>&1 || {
   echo "steampipe service failed to start" >&2; gosu advisor steampipe service status || true; }
 trap 'gosu advisor steampipe service stop >/dev/null 2>&1 || true' EXIT
+# Watchdog: the service (its Postgres and the AWS plugin) can die on a plugin panic or under memory pressure,
+# and nothing else would bring it back. Every 30 s, when the port stops answering, start it again and say so.
+(
+  while sleep 30; do
+    if ! (exec 3<>/dev/tcp/127.0.0.1/9193) 2>/dev/null; then
+      echo "[steampipe] service not answering on 9193, restarting" >&2
+      gosu advisor steampipe service stop >/dev/null 2>&1 || true
+      gosu advisor steampipe service start --database-listen local --database-port 9193 >/dev/null 2>&1 \
+        && echo "[steampipe] service restarted" >&2 || echo "[steampipe] restart failed" >&2
+    fi
+  done
+) &
 cd /usr/src/app
 exec gosu advisor "$@"

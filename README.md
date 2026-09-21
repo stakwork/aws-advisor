@@ -1675,6 +1675,12 @@ service with the AWS plugin, and Powerpipe with the Thrifty mod, all fetched at 
 starts without network access to Turbot. Steampipe refuses to run as root, so everything runs as the
 `advisor` user; the entrypoint starts the service on 9193 and then the app. About 1.3 GB.
 
+The entrypoint starts the Steampipe service once and then watches it: every 30 seconds, if port 9193 stops
+answering (a plugin panic, memory pressure), it starts the service again and logs `[steampipe] service
+restarted` to the container's output. The app reports the gap as "Steampipe service is not running" instead of
+a bare connection refusal. `docker logs advisor.sphinx` shows the restarts; the service's own log is at
+`/home/advisor/.steampipe/logs/` inside the container.
+
 ```
 docker build -t aws-advisor .
 docker run -d -p 9034:9034 -v aws-advisor-data:/data \
