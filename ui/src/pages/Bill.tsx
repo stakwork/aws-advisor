@@ -15,8 +15,117 @@ const StatusBadge = ({ s }: { s: Service["status"] | boolean }) => {
 const fmtQty = (q: number, unit: string | null) => `${q >= 1e6 ? `${(q / 1e6).toFixed(1)}M` : q >= 1e4 ? Math.round(q).toLocaleString() : q.toFixed(q < 10 ? 2 : 0)} ${unit || ""}`.trim();
 const fmtPrice = (p: number | null) => (p == null ? "—" : p < 0.001 ? p.toExponential(2) : p < 1 ? p.toFixed(4) : p.toFixed(3));
 
+type Basis = "inventory" | "run_rate" | "fixed" | "mixed";
+type FService = { service: string; mtd: number; per_day: number; remaining: number; forecast: number; basis: Basis; last_month: number | null; delta: number | null };
+type FCategory = { key: string; label: string; basis: Basis; mtd: number; mtd_per_day: number; per_day: number; remaining: number; detail: string };
+type Change = { kind: string; id: string; name: string | null; type: string | null; monthly_usd: number | null; at: string | null };
+type Forecast = {
+  month: string; computed_at: string; elapsed_days: number; remaining_days: number; days_in_month: number;
+  mtd_net: number; remaining_net: number; forecast_net: number; locked_in: number; support_forecast: number;
+  basis_share: { inventory_pct: number; run_rate_pct: number; fixed_pct: number };
+  last_month_total: number | null; delta_pct: number | null;
+  services: FService[]; categories: FCategory[]; movers: { service: string; delta: number; forecast: number; last_month: number }[];
+  assumptions: string[]; new_resources: Change[]; gone_resources: Change[];
+};
+const BASIS_LABEL: Record<Basis, string> = { inventory: "what runs now", run_rate: "run rate", fixed: "fixed", mixed: "mixed" };
+const delta = (v: number | null | undefined) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${usd(Math.abs(v))}`);
+
+/** This month's bill: spent so far, and what the rest of the month costs from what is running now. */
+export default function ThisMonth() {
+  const [d, setD] = useState<{ forecast: Forecast | null; history: { day: string; forecast_net: number; mtd_net: number }[]; price_check: { month: string; reconciliation: Recon | null } } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [tab, setTab] = useState<"services" | "legs">("services");
+  const load = () => api("/forecast").then(setD).catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const run = async () => { setBusy(true); setErr(""); try { await api("/forecast/run", { method: "POST" }); await load(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
+  const f = d?.forecast;
+  const pc = d?.price_check;
+  const pcFailed = pc?.reconciliation && !pc.reconciliation.eval.every((e) => e.pass);
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="text-xl font-semibold text-zinc-100">This month</h1>
+          <div className="text-sm text-zinc-500">{f ? <>{f.month} · {f.elapsed_days} of {f.days_in_month} days billed · computed {when(f.computed_at)}</> : "Not computed yet"}</div>
+        </div>
+        <Button onClick={run} disabled={busy}>{busy ? "Pricing the month…" : "Recompute"}</Button>
+      </div>
+      {err && <div className="text-sm text-red-300">{err}</div>}
+      {!d ? <Empty>Loading…</Empty> : !f ? <Empty>No forecast yet. It is computed after every spend refresh; Recompute runs it now (three Cost Explorer queries, about 30 s).</Empty> : (
+        <>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <Card><div className="text-xs text-zinc-500">Spent so far</div><div className="text-2xl font-semibold text-zinc-100">{usd(f.mtd_net)}</div><div className="text-xs text-zinc-500">{f.elapsed_days} day{f.elapsed_days === 1 ? "" : "s"} · {usd(f.mtd_net / f.elapsed_days)} a day</div></Card>
+            <Card><div className="text-xs text-zinc-500">On track for</div><div className="text-2xl font-semibold text-zinc-100">{usd(f.forecast_net)}</div><div className="text-xs text-zinc-500">{f.last_month_total != null ? <>last month {usd(f.last_month_total)} · <span className={f.delta_pct! > 5 ? "text-amber-300" : f.delta_pct! < -5 ? "text-emerald-300" : "text-zinc-300"}>{pct(f.delta_pct)}</span></> : "no full month to compare with yet"}</div></Card>
+            <Card><div className="text-xs text-zinc-500">Locked in</div><div className="text-2xl font-semibold text-zinc-100">{usd(f.locked_in)}</div><div className="text-xs text-zinc-500">Savings Plan, reservations and support for the whole month</div></Card>
+            <Card><div className="text-xs text-zinc-500">The remaining {f.remaining_days} days</div><div className="text-2xl font-semibold text-zinc-100">{usd(f.remaining_net)}</div><div className="text-xs text-zinc-500">{f.basis_share.fixed_pct.toFixed(0)} % fixed · {f.basis_share.inventory_pct.toFixed(0)} % from what runs now · {f.basis_share.run_rate_pct.toFixed(0)} % run rate</div></Card>
+          </div>
+          {f.movers.length > 0 && (
+            <Card title={<span>Against last month <span className="font-normal text-zinc-500">· services that moved more than 20 USD</span></span>}>
+              <ul className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">{f.movers.map((m) => <li key={m.service} className="flex justify-between gap-2"><span className="truncate text-zinc-300">{m.service}</span><span className="whitespace-nowrap"><span className={m.delta > 0 ? "text-amber-300" : "text-emerald-300"}>{delta(m.delta)}</span> <span className="text-zinc-500">→ {usd(m.forecast)}</span></span></li>)}</ul>
+            </Card>
+          )}
+          <Card title={<span className="flex flex-wrap items-center gap-3">Where it goes <span className="flex gap-1 text-xs font-normal">{(["services", "legs"] as const).map((t) => <button key={t} onClick={() => setTab(t)} className={`rounded px-2 py-0.5 ${tab === t ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>{t === "services" ? "by service" : "how the rest is priced"}</button>)}</span></span>}>
+            {tab === "services" ? (
+              <table className="w-full border-collapse text-sm">
+                <thead><tr><Th>Service</Th><Th className="text-right">So far</Th><Th className="text-right">Rest of month</Th><Th className="text-right">Forecast</Th><Th className="text-right">Last month</Th><Th className="text-right">Change</Th><Th>Priced from</Th></tr></thead>
+                <tbody>{f.services.filter((s) => s.forecast >= 1 || (s.last_month ?? 0) >= 1).map((s) => (
+                  <tr key={s.service} className="border-t border-zinc-800">
+                    <Td className="text-zinc-100">{s.service}</Td>
+                    <Td className="text-right">{usd(s.mtd)}</Td>
+                    <Td className="text-right text-zinc-400">{usd(s.remaining)}</Td>
+                    <Td className="text-right text-zinc-100">{usd(s.forecast)}</Td>
+                    <Td className="text-right text-zinc-400">{s.last_month != null ? usd(s.last_month) : "—"}</Td>
+                    <Td className={`text-right ${s.delta != null && Math.abs(s.delta) >= 20 ? (s.delta > 0 ? "text-amber-300" : "text-emerald-300") : "text-zinc-500"}`}>{delta(s.delta)}</Td>
+                    <Td className="text-zinc-500">{BASIS_LABEL[s.basis]}</Td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            ) : (
+              <table className="w-full border-collapse text-sm">
+                <thead><tr><Th>Leg</Th><Th className="text-right">So far</Th><Th className="text-right">So far / day</Th><Th className="text-right">Rest / day</Th><Th className="text-right">Rest of month</Th><Th>Basis</Th><Th>How</Th></tr></thead>
+                <tbody>{f.categories.map((c) => (
+                  <tr key={c.key} className="border-t border-zinc-800">
+                    <Td className="text-zinc-100">{c.label}</Td>
+                    <Td className="text-right">{usd(c.mtd)}</Td>
+                    <Td className="text-right text-zinc-400">{usd(c.mtd_per_day)}</Td>
+                    <Td className={`text-right ${Math.abs(c.per_day - c.mtd_per_day) > Math.max(5, 0.25 * c.mtd_per_day) ? "text-amber-300" : ""}`}>{usd(c.per_day)}</Td>
+                    <Td className="text-right text-zinc-100">{usd(c.remaining)}</Td>
+                    <Td className="text-zinc-500">{BASIS_LABEL[c.basis]}</Td>
+                    <Td className="max-w-0 text-zinc-500"><span className="block truncate" title={c.detail}>{c.detail}</span></Td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
+          </Card>
+          {(f.new_resources.length > 0 || f.gone_resources.length > 0) && (
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Card title={<span>New this month <span className="font-normal text-zinc-500">· {f.new_resources.length}, {usd(f.new_resources.reduce((s, r) => s + (r.monthly_usd || 0), 0))}/mo at list</span></span>}>
+                {f.new_resources.length === 0 ? <div className="text-sm text-zinc-500">Nothing launched this month.</div> : <ul className="space-y-0.5 text-sm">{f.new_resources.slice(0, 12).map((r) => <li key={r.id} className="flex justify-between gap-2"><span className="truncate"><span className="font-mono text-zinc-300">{r.id}</span>{r.name ? <span className="text-zinc-400"> {r.name}</span> : null} <Badge>{r.type || "?"}</Badge></span><span className="whitespace-nowrap text-zinc-400">{r.monthly_usd != null ? `${usd(r.monthly_usd)}/mo` : "—"}</span></li>)}{f.new_resources.length > 12 && <li className="text-xs text-zinc-500">and {f.new_resources.length - 12} more</li>}</ul>}
+              </Card>
+              <Card title={<span>Gone this month <span className="font-normal text-zinc-500">· {f.gone_resources.length}, {usd(f.gone_resources.reduce((s, r) => s + (r.monthly_usd || 0), 0))}/mo at list</span></span>}>
+                {f.gone_resources.length === 0 ? <div className="text-sm text-zinc-500">Nothing terminated this month.</div> : <ul className="space-y-0.5 text-sm">{f.gone_resources.slice(0, 12).map((r) => <li key={r.id} className="flex justify-between gap-2"><span className="truncate"><span className="font-mono text-zinc-300">{r.id}</span>{r.name ? <span className="text-zinc-400"> {r.name}</span> : null} <Badge>{r.type || "?"}</Badge></span><span className="whitespace-nowrap text-zinc-400">{r.monthly_usd != null ? `${usd(r.monthly_usd)}/mo` : "—"}</span></li>)}{f.gone_resources.length > 12 && <li className="text-xs text-zinc-500">and {f.gone_resources.length - 12} more</li>}</ul>}
+              </Card>
+            </div>
+          )}
+          <details className="text-sm">
+            <summary className="cursor-pointer text-zinc-500">How the forecast is built</summary>
+            <ul className="mt-2 list-disc space-y-1 pl-4 text-zinc-400">{f.assumptions.map((a) => <li key={a}>{a}</li>)}</ul>
+          </details>
+        </>
+      )}
+      <details className="text-sm">
+        <summary className="cursor-pointer text-zinc-500">
+          Price check{pc ? <> · {pc.month}: {pc.reconciliation ? <span className={pcFailed ? "text-amber-300" : "text-emerald-300"}>{pcFailed ? `${pc.reconciliation.eval.filter((e) => !e.pass).length} of ${pc.reconciliation.eval.length} checks failed` : `our prices explain the bill within ${Math.abs(pc.reconciliation.totals.strict_gap_pct).toFixed(1)} %, ${pc.reconciliation.totals.priced_share_pct.toFixed(1)} % of usage priced`}</span> : "not run yet (runs from the 3rd of the month)"}</> : null}
+        </summary>
+        <div className="mt-3"><PriceCheck /></div>
+      </details>
+    </div>
+  );
+}
+
 /** Last month's bill rebuilt from our own prices, line by line against Cost Explorer: the eval of the pricing knowledge. */
-export default function Bill() {
+function PriceCheck() {
   const [month, setMonth] = useState<string>("");
   const [data, setData] = useState<{ month: string; reconciliation: Recon | null; months: { month: string }[] } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -38,7 +147,7 @@ export default function Bill() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-zinc-100">Bill reconstruction</h1>
+        <span className="text-sm text-zinc-400">Last full month rebuilt from our own prices, line by line against Cost Explorer. It proves the prices behind every saving estimate and every forecast leg.</span>
         <span className="flex items-center gap-2 text-sm">
           <select value={month} onChange={(e) => setMonth(e.target.value)}>{months.map((m) => <option key={m} value={m}>{m}</option>)}</select>
           <Button onClick={run} disabled={busy}>{busy ? "Pricing the month…" : r ? "Recompute" : "Compute"}</Button>

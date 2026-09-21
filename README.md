@@ -1465,7 +1465,34 @@ Every observation is stored per day in `review_findings` (90 days) and listed on
 instance. Review recommendations are refreshed by the review itself and never resolved by the collection run.
 Next: pool growth over weeks, and the same observations offered to the agent as facts.
 
-## Bill reconstruction: the pricing eval
+## This month: the bill, forecast from what is running now
+
+The page called This month (`ui/src/pages/Bill.tsx`, `GET /api/forecast`, `POST /api/forecast/run`) answers the
+question the previous month cannot: what will this month cost, and why. `src/forecast.ts` runs after every spend
+refresh (six-hourly) and stores one row per day in `forecasts`, so the projection has a history; the arithmetic
+is pure and tested in `src/forecast_math.ts`.
+
+- **Spent so far** is what Cost Explorer has for the month's complete days (the same three queries the price
+  check uses, so every usage line is already classified and priced).
+- **The remaining days** are priced three ways, and every service says which. *What runs now*: the EC2 fleet,
+  RDS instances, ElastiCache nodes, EBS volumes, S3 buckets and Lambda functions as the inventory holds them at
+  this moment, at our prices. The Savings Plan fee is fixed and, at its implied discount, covers a known amount
+  of on-demand compute per hour; only compute above that is paid on demand. Reservations are the lower of two
+  estimates: what the month's own billed share says is left to pay (this catches reservations the list misses)
+  and the reservation list against the inventory (this catches ones bought late in the month). *Run rate*: the
+  usage-based lines (transfer, NAT, CloudWatch, requests, snapshots, spot) at their month-to-date daily average.
+  *Fixed*: the Savings Plan fee, the reservations' amortized cost and support (the Business Support tiers on the
+  forecast charges, which Cost Explorer only accrues in part during the month).
+- **On track for** is the sum, against last month's bill, with the services that moved by more than 20 USD and
+  the resources that launched or disappeared this month (with their list price), so a moved forecast has names
+  behind it. **Locked in** is the part already committed for the whole month.
+
+The Overview card shows spent so far, on track for, locked in and the three biggest movers. When a Batch pool
+scales up, the compute leg moves with it while the workers run; the Savings Plan's spare capacity absorbs the
+first few dollars an hour of that.
+
+### Price check: the previous month rebuilt from our own prices
+
 
 The Bill page (`/bill`, `GET /api/bill?month=`, `POST /api/bill/reconcile?month=`) prices a month's usage from the
 advisor's own knowledge and compares it, line by line and per service, with what Cost Explorer says was billed.
@@ -1597,7 +1624,7 @@ What each one is for (✎ = also editable in Settings):
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
 - `GET /api/baselines?scope_kind&scope_id`, `POST /api/baselines/refresh` (see [Baselines](#baselines-what-is-typical))
-- `GET /api/bill?month=YYYY-MM`, `POST /api/bill/reconcile?month=` (the bill reconstruction, see [Bill reconstruction](#bill-reconstruction-the-pricing-eval))
+- `GET /api/forecast` (this month's forecast, its history and the last price check), `POST /api/forecast/run`; `GET /api/bill?month=YYYY-MM`, `POST /api/bill/reconcile?month=` (the price check, see [This month](#this-month-the-bill-forecast-from-what-is-running-now))
 - `GET /api/graph/systems?kind=`, `GET /api/graph/system/:id`, `GET /api/graph/bill`, `POST /api/graph/knowledge` (see [the knowledge graph](#graph-mirror-and-the-knowledge-graph))
 - `GET /api/graph`, `POST /api/graph/sync?wipe=1`, `GET /api/graph/resource/:id` (the Neo4j mirror, see [Graph mirror](#graph-mirror))
 - `POST /mcp` the MCP fact server

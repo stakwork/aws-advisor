@@ -175,6 +175,15 @@ function skuEngines(): Map<string, string> {
 
 /** Pulls the month from Cost Explorer, prices it and stores the result. One Cost Explorer call per table (3). */
 export async function reconcileMonth(month = lastFullMonth(), onLog: (s: string) => void = () => {}): Promise<Reconciliation> {
+  const input = await loadMonthInput(month, onLog);
+  const result = computeReconciliation(input);
+  db.prepare("insert into reconciliations(month, computed_at, json) values (?, ?, ?) on conflict(month) do update set computed_at = excluded.computed_at, json = excluded.json").run(month, result.computed_at, JSON.stringify(result));
+  onLog(`${month}: modelled ${result.totals.modelled_net} vs billed ${result.totals.actual_net} (${result.totals.strict_gap_pct} %), ${result.totals.priced_share_pct} % priced`);
+  return result;
+}
+
+/** The month's usage lines and record totals from Cost Explorer plus our overlays: what both the reconstruction and the forecast price. */
+export async function loadMonthInput(month: string, onLog: (s: string) => void = () => {}): Promise<ReconcileInput> {
   const { from, to } = monthBounds(month);
   const num = (v: unknown) => Number(v ?? 0) || 0;
   let lineRows: any[]; let recRows: any[];
@@ -225,10 +234,7 @@ export async function reconcileMonth(month = lastFullMonth(), onLog: (s: string)
     if (fetched) onLog(`fetched ${fetched} instance prices`);
     for (const w of wants) skuPrices.set(priceKey(w), prices.get(priceKey(w))?.hourly ?? getCachedPrice(w.kind, w.sku, w.region, w.engine)?.hourly ?? null);
   } catch (e: any) { onLog(`price lookup failed: ${e?.message || e}`); for (const w of wants) skuPrices.set(priceKey(w), getCachedPrice(w.kind, w.sku, w.region, w.engine)?.hourly ?? null); }
-  const result = computeReconciliation({ month, lines, records, sp_hourly: spHourly, sku_prices: skuPrices, sku_engines: engines });
-  db.prepare("insert into reconciliations(month, computed_at, json) values (?, ?, ?) on conflict(month) do update set computed_at = excluded.computed_at, json = excluded.json").run(month, result.computed_at, JSON.stringify(result));
-  onLog(`${month}: modelled ${result.totals.modelled_net} vs billed ${result.totals.actual_net} (${result.totals.strict_gap_pct} %), ${result.totals.priced_share_pct} % priced`);
-  return result;
+  return { month, lines, records, sp_hourly: spHourly, sku_prices: skuPrices, sku_engines: engines };
 }
 
 export function getReconciliation(month: string): Reconciliation | null {
