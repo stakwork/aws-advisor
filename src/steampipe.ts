@@ -14,6 +14,9 @@ import {
 export const S = config.schema;
 
 const pool = new pg.Pool({ connectionString: config.steampipeUrl, max: 4, statement_timeout: 600_000 });
+// An idle connection the Steampipe service drops (a plugin panic, a restart) surfaces here; without a listener
+// Node treats it as fatal and the daemon dies. The pool discards the client and the next query reconnects.
+pool.on("error", (e) => console.error(`[steampipe] connection dropped: ${e.message}`));
 
 export async function query<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
   const res = await pool.query(sql, params);

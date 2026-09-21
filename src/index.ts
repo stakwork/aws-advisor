@@ -26,6 +26,12 @@ app.get("/busy", async (_req, res) => {
 
 // Paginated browsing routes (alerts, findings, recommendations, spend) take precedence for the paths they define.
 import { callback } from "./routes/callback.js";
+
+// Last resort: a background job's stray rejection or a library's unhandled error event must not take the daemon
+// down with every scheduler, watcher and probe in it. Log it loudly; the job that failed reports its own error.
+process.on("unhandledRejection", (reason) => console.error(`[fatal-avoided] unhandled rejection: ${(reason as any)?.stack || reason}`));
+process.on("uncaughtException", (err) => console.error(`[fatal-avoided] uncaught exception: ${err?.stack || err}`));
+
 app.use("/api", callback); // the agent webhook: before every authenticated router
 app.use("/api", browse);
 app.use("/api", knowledge);
