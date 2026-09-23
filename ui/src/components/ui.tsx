@@ -42,6 +42,13 @@ const tone: Record<string, string> = {
   Inactive: "bg-red-500/15 text-red-300 border-red-500/30",
   unmanaged: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
   gone: "bg-zinc-500/10 text-zinc-500 border-zinc-700",
+  // route 53: where a record leads
+  linked: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+  unmatched: "bg-red-500/15 text-red-300 border-red-500/30",
+  external: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",
+  none: "bg-zinc-500/10 text-zinc-500 border-zinc-700",
+  alias: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+  private: "bg-violet-500/15 text-violet-300 border-violet-500/30",
   // permission check
   ok: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
   missing: "bg-red-500/15 text-red-300 border-red-500/30",

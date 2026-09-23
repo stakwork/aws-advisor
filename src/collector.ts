@@ -145,8 +145,8 @@ async function execute(runId: number) {
 
     log(runId, "Inventory refresh…");
     try {
-      const inv = await refreshInventory();
-      log(runId, `  ${inv.ec2} EC2 instances, ${inv.rds} RDS instances, ${inv.elasticache} ElastiCache clusters, ${inv.prices_fetched} prices fetched, ${inv.took_ms} ms${inv.errors.length ? `; errors: ${inv.errors.join("; ")}` : ""}`);
+      const inv = await refreshInventory({ dns: true });
+      log(runId, `  ${inv.ec2} EC2 instances, ${inv.rds} RDS instances, ${inv.elasticache} ElastiCache clusters, ${inv.prices_fetched} prices fetched${inv.route53 ? `, ${inv.route53.zones} hosted zones with ${inv.route53.records} records (${inv.route53.linked} linked to resources here, ${inv.route53.unmatched} unmatched)` : ""}, ${inv.took_ms} ms${inv.errors.length ? `; errors: ${inv.errors.join("; ")}` : ""}`);
     } catch (e: any) {
       log(runId, `  failed: ${e.message}`);
     }

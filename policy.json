@@ -54,6 +54,7 @@
         "cloudfront:Get*",
         "route53:List*",
         "route53:Get*",
+        "elasticbeanstalk:DescribeEnvironments",
         "redshift:Describe*",
         "elasticmapreduce:List*",
         "elasticmapreduce:Describe*",

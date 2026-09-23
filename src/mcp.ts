@@ -9,6 +9,7 @@ import { S, query, queryReadOnly } from "./steampipe.js";
 import { ProbeError, probeInstance, summarizeProbe } from "./ssm.js";
 import { PriceSpec, fetchPrices } from "./prices.js";
 import { inventoryRefreshedAt, listEc2 } from "./inventory.js";
+import { domainsFor, listRoute53 } from "./route53_inventory.js";
 import { attributeNatTraffic } from "./watcher.js";
 import { alertContext } from "./investigate.js";
 import { describeError, tablesIn } from "./permissions.js";
@@ -302,6 +303,24 @@ export function createFactServer(): McpServer {
     },
     annotations: ro,
   }, (a) => instanceInventory(a));
+
+  server.registerTool("domain_inventory", {
+    title: "Route 53 records and what they point at",
+    description: "The advisor's Route 53 snapshot (refreshed with the inventory): every record in the account's hosted zones with where it leads inside this account. link_state linked = the alias, CNAME or address was followed to a resource here (links lists them: an ALB and the instances behind it, a CloudFront distribution and its origins, an Elastic IP's instance, an RDS or ElastiCache endpoint, an S3 website bucket, a Lambda URL); unmatched = an AWS-hosted name this account does not have (deleted, so dangling, or another account's); external = outside AWS; none = NS, SOA, TXT, MX and other records that name no resource. Filter by search string, zone, link_state or type, or ask for one resource's domains with resource_kind (ec2, rds, elasticache, s3, lambda, alb, nlb, clb, cloudfront, nat) and resource_id.",
+    inputSchema: {
+      q: z.string().max(200).optional().describe("substring of the record name, its target or its summary"),
+      zone: z.string().max(200).optional().describe("hosted zone name or id"),
+      link_state: z.enum(["linked", "external", "unmatched", "none"]).optional(),
+      type: z.string().max(10).optional().describe("A, AAAA, CNAME, MX, TXT, ..."),
+      resource_kind: z.string().max(30).optional(), resource_id: z.string().max(200).optional(),
+      limit: z.number().int().min(1).max(QUERY_ROW_CAP).default(QUERY_ROW_CAP),
+    },
+    annotations: ro,
+  }, (a) => {
+    if (a.resource_kind && a.resource_id) return text({ resource: { kind: a.resource_kind, id: a.resource_id }, domains: domainsFor(a.resource_kind, a.resource_id) });
+    const rows = listRoute53({ q: a.q, zone: a.zone, link: a.link_state, type: a.type, limit: a.limit });
+    return text({ count: rows.length, truncated: rows.length >= a.limit, note: "summary is the chain in words; links are the resources reached (hop 1 direct, hop 2 behind a load balancer or distribution); an unmatched record that names an S3 website bucket or an ELB no longer here can be claimed by a stranger and should be deleted", records: rows.map((r) => ({ name: r.name, type: r.type, zone: r.zone_name, ttl: r.ttl, alias: Boolean(r.alias), values: r.values, alias_target: r.alias_target, link_state: r.link_state, target: r.target, summary: r.summary, links: r.links, routing: r.routing })) });
+  });
 
   server.registerTool("open_recommendations", {
     title: "Open recommendations with their full rationale",
