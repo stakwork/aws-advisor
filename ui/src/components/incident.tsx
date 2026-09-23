@@ -27,8 +27,8 @@ export function paragraphs(text: string, sentencesPer = 2): string[] {
   const blocks = text.split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
   if (blocks.length > 1 || text.length < 320) return blocks;
   // Lossless: split only on whitespace that follows a sentence end and precedes a capital, digit or bracket,
-  // so "m6g.xlarge", "2.1 GB" and "e.g." stay whole.
-  const sentences = text.split(/(?<=[.!?])\s+(?=[A-Z0-9("'\[])/).map((x) => x.trim()).filter(Boolean);
+  // so "m6g.xlarge" and "2.1 GB" stay whole; "i.e. Aurora", "e.g. RDS" and "vs. 0.12" are not sentence ends.
+  const sentences = text.split(/(?<=[.!?])(?<!\b(?:i\.e|e\.g|vs|etc|cf|approx|no)\.)\s+(?=[A-Z0-9("'\[])/).map((x) => x.trim()).filter(Boolean);
   const out: string[] = [];
   for (let i = 0; i < sentences.length; i += sentencesPer) out.push(sentences.slice(i, i + sentencesPer).join(" "));
   return out;

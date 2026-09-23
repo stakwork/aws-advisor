@@ -387,7 +387,8 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
       Effect: "Allow",
       Action: [
         "ec2:Describe*",
-        "rds:Describe*", "rds:ListTagsForResource",
+        "rds:Describe*", "rds:ListTagsForResource", "rds:DownloadDBLogFilePortion",
+        "pi:DescribeDimensionKeys", "pi:GetResourceMetadata",
         "elasticache:Describe*", "elasticache:ListTagsForResource",
         "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData", "cloudwatch:ListMetrics",
         "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource",

@@ -11,6 +11,7 @@ import { AgentRunRow, postAgentRequest } from "./agent.js";
 import { latestProbe } from "./ssm.js";
 import { shortResourceId } from "./resource_id.js";
 import { Tier } from "./rules.js";
+import { RdsLoadSummary, ensureRdsLoad, latestRdsLoad, loadSummary } from "./rds_load.js";
 
 /**
  * Tailored resolutions. A playbook (src/playbooks.ts) says how a kind of finding is acted on in general; a
@@ -57,7 +58,12 @@ export interface ResourceFacts {
   probe_at: string | null;
   volumes: { volume_id: string; size_gb: number | null; type: string | null; device: string | null }[];
   engine: string | null;
+  /** RDS and Aurora only: the load profile from the hourly pass (src/rds_load.ts) with Jev's read of it. */
+  load?: RdsLoadSummary | null;
+  cluster?: { id: string; members: string[]; storage_type: string | null } | null;
 }
+
+const clusterMembers = (cluster: string) => (db.prepare("select db_instance_identifier from inventory_rds where cluster = ? and gone = 0 order by db_instance_identifier").all(cluster) as { db_instance_identifier: string }[]).map((m) => m.db_instance_identifier);
 
 /** What the inventory, the roles cache and the latest probe know about the recommendation's resource. */
 export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "rule">): ResourceFacts {
@@ -82,7 +88,19 @@ export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "
   if (rds) {
     const snap = safeJson(rds.snapshot) || {};
     return { ...base, kind: "rds", name: id, type: rds.class, state: rds.status, region: rds.region, launched: rds.created, monthly_usd: rds.monthly_usd, cpu_30d: rds.cpu_30d, engine: `${rds.engine} ${rds.engine_version || ""}`.trim(),
-      tags: (snap.tags || {}) as Record<string, string>, volumes: rds.storage_gb ? [{ volume_id: "storage", size_gb: rds.storage_gb, type: rds.storage_type, device: null }] : [] };
+      tags: (snap.tags || {}) as Record<string, string>, volumes: rds.storage_gb ? [{ volume_id: "storage", size_gb: rds.storage_gb, type: rds.storage_type, device: null }] : [],
+      cluster: rds.cluster ? { id: rds.cluster, members: clusterMembers(rds.cluster), storage_type: rds.storage_type } : null, load: loadSummary(latestRdsLoad(id)) };
+  }
+  // An Aurora recommendation names the cluster; its facts are the writer's inventory row plus the cluster's load profile.
+  const members = db.prepare("select * from inventory_rds where cluster = ? and gone = 0 order by db_instance_identifier").all(id) as any[];
+  if (members.length) {
+    const w = members[0];
+    const snap = safeJson(w.snapshot) || {};
+    const tags = Object.assign({}, ...members.map((m) => (safeJson(m.snapshot) || {}).tags || {}), snap.tags || {}) as Record<string, string>;
+    return { ...base, kind: "rds", name: id, type: members.map((m) => m.class).join(", "), state: w.status, region: w.region, launched: w.created,
+      monthly_usd: members.reduce((s, m) => s + (m.monthly_usd || 0), 0) || null, cpu_30d: w.cpu_30d, engine: `${w.engine} ${w.engine_version || ""}`.trim(), tags,
+      volumes: w.storage_gb ? [{ volume_id: "cluster volume", size_gb: w.storage_gb, type: w.storage_type, device: null }] : [],
+      cluster: { id, members: members.map((m) => m.db_instance_identifier), storage_type: w.storage_type }, load: loadSummary(latestRdsLoad(id)) };
   }
   const cache = db.prepare("select * from inventory_elasticache where cache_cluster_id = ?").get(id) as any;
   if (cache) return { ...base, kind: "elasticache", name: id, type: cache.node_type, state: cache.status, region: cache.region, launched: cache.created, monthly_usd: cache.monthly_usd, engine: `${cache.engine} ${cache.engine_version || ""}`.trim() };
@@ -232,14 +250,14 @@ export const RESOLUTION_SCHEMA = {
   type: "object",
   properties: {
     applies: { type: "boolean", description: "whether the playbook applies to this resource after checking the facts" },
-    summary: { type: "string", description: "two or three sentences: what to do and why it is safe (or why not)" },
-    blockers: { type: "array", items: { type: "string" }, description: "what stands in the way, verified, one per entry; empty when nothing does" },
+    summary: { type: "string", description: "what to do and why it is safe (or why not): two to four short sentences, in short paragraphs separated by a blank line (one idea per paragraph, never one long block)" },
+    blockers: { type: "array", items: { type: "string" }, description: "what stands in the way, verified, one per entry, each a short paragraph; empty when nothing does" },
     plan: {
       type: "array",
       items: {
         type: "object",
         properties: {
-          step: { type: "string", description: "what to do, specific to this resource (names, ids, sizes)" },
+          step: { type: "string", description: "what to do, specific to this resource (names, ids, sizes); a blank line between paragraphs when a step needs more than one" },
           command: { type: "string", description: "the aws CLI / kubectl / shell command when there is one, with the real ids filled in" },
           verify: { type: "string", description: "how to check the step worked before moving on" },
         },
@@ -268,10 +286,20 @@ for who touched the resource recently (a plan must not fight an ongoing change),
 about logs, aws_price_lookup for the real on-demand prices of the current and the
 target SKU, aws_instance_probe or aws_instance_inventory for what runs on an instance, aws_resource_cost_history and
 aws_findings_for_resource and aws_recommendation_history for history, learn_concept for the full text of a concept id.
+For an RDS or Aurora resource the facts carry "load": fourteen days of I/O, capacity (ACU floor, ceiling, time at
+the ceiling, bursts and their cadence, whether the database fits in the buffer cache), the top statements from
+Performance Insights, the slow statements from the log and Jev's classification (shape, what drives the I/O,
+throttled by the cap, structural, first lever); aws_rds_load returns the full profile. Reason from it: a storage
+tier change is about the I/O charge, a capacity change is about the buffer cache and the bursts, and a query fix
+is about the statements; say which of these the plan is and why the others are not it (or are a separate task).
+Aurora storage: a cluster can switch to I/O-Optimized once every 30 days and back to Standard at any time.
 Write the plan for THIS resource: real ids, names, sizes and regions in every step and command; one verify line per
 step; the rollback where a step is not reversible. Respect the team's decisions: a generic rule for this role applies
 unless the facts say otherwise; a rejection on this resource means say why this time is different or set applies to
 false. Be honest about what only a human can decide and list it under needs_from_human. Keep the plan under ten steps.
+Write for a screen, not a report: in summary, steps, blockers and needs_from_human keep paragraphs short (one idea,
+one to three sentences) and separate them with a blank line; the UI keeps the blank lines and shows nothing else as
+a paragraph break. Never run several ideas together into one long block.
 Emit the JSON object first, then any commentary.`;
 registerDefaultPrompt("resolution", `${RESOLUTION_SYSTEM}\n${OPERATIONAL_PATTERNS}`);
 
@@ -343,6 +371,9 @@ export async function resolveRecommendation(recId: number, opts: { force?: boole
   if (!(await credentialGate("resolve")).ok) throw new Error("AWS credentials are not working; fix them in Settings before resolving");
 
   const concepts = await listDecisionConcepts(200);
+  // A database's facts are only as good as its load profile: refresh one older than a day before the gate reads it.
+  const pre = resourceFacts(rec);
+  if (pre.kind === "rds" && pre.id) await ensureRdsLoad(pre.id, 24, (l) => console.log(`[resolve] ${l}`));
   const ctx = assembleContext(rec, concepts);
   const resolutionId = Number(db.prepare("insert into resolutions(recommendation_id, context) values (?, ?)").run(recId, JSON.stringify(ctx)).lastInsertRowid);
   try {

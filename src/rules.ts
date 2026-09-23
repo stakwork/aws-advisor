@@ -5,6 +5,7 @@
 import { EC2_GRAVITON_CONTROL, GravitonEc2Fact, GravitonFacts, LAMBDA_ARM_DISCOUNT, LAMBDA_GRAVITON_CONTROL, RDS_GRAVITON_CONTROL, ec2ArmEquivalent, gravitonPriceKey, gravitonSaving, k8sPoolOf, rdsArmEquivalent } from "./graviton.js";
 import { playbookFor, stepsSentence } from "./playbooks.js";
 import { poolOf } from "./pools.js";
+import type { RdsLoadSummary } from "./rds_load.js";
 
 export type Tier = "auto" | "approve" | "report";
 
@@ -78,10 +79,33 @@ const num = (v: unknown) => (v == null ? 0 : Number(v));
 export interface RulesContext {
   queryRows: Record<string, any[]>;
   aurora: AuroraStat[];
+  /** The load profile per Aurora cluster (src/rds_load.ts), when the hourly pass has one. */
+  loads?: Record<string, RdsLoadSummary>;
   probes?: Record<string, ProbeFacts>;
   roles?: Record<string, RoleFacts>;
   /** The Thrifty graviton alarms with their types, prices and Lambda facts (src/graviton_facts.ts); optional. */
   graviton?: GravitonFacts;
+}
+
+/**
+ * What the load profile adds to an Aurora storage-tier recommendation: the shape, the cache picture and Jev's
+ * read, and a confidence that rises when Jev finds the pattern structural and falls when it does not.
+ */
+export function auroraLoadNote(load: RdsLoadSummary | undefined, base: number): { note: string; confidence: number } {
+  if (!load) return { note: "", confidence: base };
+  const parts: string[] = [];
+  const c = load.capacity;
+  if (load.io.reads_per_day != null) parts.push(`${(load.io.reads_per_day / 1e6).toFixed(1)}M reads and ${((load.io.writes_per_day || 0) / 1e6).toFixed(2)}M writes a day over ${load.window_days} days`);
+  if (c) parts.push(`${c.configured ? `${c.configured}, ` : ""}${c.avg_acu} ACU on average, at the ceiling ${Math.round(c.pct_time_at_cap * 100)}% of the time, ${c.bursts_per_day} bursts a day${c.cadence ? ` (${c.cadence})` : ""}${c.db_fits_in_cache_at_avg === false ? `; the database does not fit in the buffer cache at that capacity (about ${c.cache_gib_avg} GiB)` : ""}`);
+  if (load.io.buffer_cache_hit_pct_avg != null) parts.push(`buffer cache hit ${load.io.buffer_cache_hit_pct_avg}%`);
+  let confidence = base;
+  const j = load.jev;
+  if (j) {
+    parts.push(`Jev: ${j.shape.replace(/_/g, " ")}, I/O from ${j.io_cause.replace(/_/g, " ")} (${Math.round(j.io_cause_confidence * 100)}%), structural ${Math.round(j.structural * 100)}%, first lever ${j.lever.replace(/_/g, " ")}`);
+    if (j.structural >= 0.7) confidence = Math.round(Math.min(0.9, base + 0.2) * 100) / 100;
+    else if (j.structural <= 0.3) confidence = Math.round(Math.max(0.3, base - 0.2) * 100) / 100;
+  }
+  return { note: parts.length ? ` Load profile: ${parts.join("; ")}.` : "", confidence };
 }
 
 export function buildRecommendations(ctx: RulesContext): RecInput[] {
@@ -215,6 +239,8 @@ export function buildRecommendations(ctx: RulesContext): RecInput[] {
         evidence: a,
       });
     } else if (a.storageType !== "aurora-iopt1" && ioCost > 0.3 * (stdStorage + 50)) {
+      const load = ctx.loads?.[a.cluster];
+      const { note, confidence } = auroraLoadNote(load, 0.6);
       out.push({
         rule: "aurora_storage_tier",
         title: `Move Aurora cluster ${a.cluster} to I/O-Optimized storage`,
@@ -223,9 +249,9 @@ export function buildRecommendations(ctx: RulesContext): RecInput[] {
         actionType: "aurora_set_storage_iopt",
         estMonthlySaving: ioCost * 0.7,
         tier: "approve",
-        confidence: 0.6,
-        rationale: `${(a.ios30d / 1e6).toFixed(0)} million I/Os in 30 days cost about ${ioCost.toFixed(0)} USD/month on Standard storage. I/O-Optimized removes that charge for roughly 30% more on storage and instance hours. Can only be switched on once every 30 days.`,
-        evidence: a,
+        confidence,
+        rationale: `${(a.ios30d / 1e6).toFixed(0)} million I/Os in 30 days cost about ${ioCost.toFixed(0)} USD/month on Standard storage. I/O-Optimized removes that charge for roughly 30% more on storage and instance hours. Switching to I/O-Optimized is allowed once every 30 days; switching back to Standard at any time.${note}`,
+        evidence: load ? { ...a, load } : a,
       });
     }
   }

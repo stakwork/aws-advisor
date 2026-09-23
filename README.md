@@ -641,6 +641,7 @@ bearer token (unset = open, like `API_TOKEN`). All tools are read-only:
 | `steampipe_query` | one `SELECT`/`WITH` statement against this app's Steampipe schema; bare `aws_*` names are qualified, runs in a read-only transaction with a 60 s timeout, 200-row cap |
 | `cloudwatch_metric` | hourly series and summary of one metric (namespace, metric, exact dimensions, statistic, days, region) |
 | `price_lookup` | on-demand hourly and monthly price of an EC2 type, RDS class or ElastiCache node type in a region |
+| `rds_load` | the load profile of an RDS or Aurora database (cluster or instance id): 14 days of I/O and capacity, the bursts and their cadence, the buffer cache picture, the top statements from Performance Insights, the slow statements from the log tail, and Jev's classification; `refresh` collects it again now |
 | `resource_cost_history` | daily cost of one resource id over up to 14 days (needs resource-level data enabled on the payer account; the error says so otherwise) |
 | `recommendation_history` | earlier recommendations and decisions for a resource or rule |
 | `findings_for_resource` | findings that mention a resource, and which earlier runs saw it |
@@ -892,6 +893,44 @@ read the raw probes for the 24h / 48h / 7d windows and the daily tables for 30d 
 line = daily max), and list the containers seen in the window with their running share and their average and
 peak CPU and memory (`GET /api/instances/:id/history?days=`). Before the first roll-up the containers table
 falls back to the latest probe. Container images also feed Jev's resource-role guess.
+
+
+### RDS load profiles
+
+Every probe pass also profiles every database in the inventory (`src/rds_load.ts`): each Aurora cluster once, each
+standalone RDS instance by id, skipping any profiled within `PROBE_MIN_INTERVAL_HOURS`. A profile is fourteen days of
+CloudWatch at five-minute resolution (I/O per day and what it costs on Standard storage, volume size, CPU,
+connections, buffer cache hit ratio) plus three days of the Serverless v2 ACU curve at one minute, reduced to the
+numbers that decide: the floor and the ceiling, the share of time at each, the bursts (count per day, length,
+cadence: hourly, daily or irregular), the buffer cache at the average capacity and at the cap and whether the
+database fits in it. Where Performance Insights is on, the top statements by load over seven days come with it;
+the tail of the newest engine log gives the slow statements (Postgres `duration:` lines, MySQL slow-log blocks) and
+the temp-file and checkpoint counts, with a note on the parameter to set when the log has none. Jev then classifies
+the whole picture (purpose `rds_load`): the shape, what drives the I/O (cache-starved reads, writes, scans,
+checkpoints), whether the capacity ceiling throttles it, whether the pattern is structural, and the first lever
+(I/O-Optimized storage, a higher minimum capacity, a higher maximum, a query fix, an application cache, nothing).
+The hourly pass re-asks Jev only when the profile's coarse hash changes or the answer is a day old.
+
+The profile is what an RDS recommendation is judged against: `resourceFacts` in `src/resolve.ts` finds a cluster by
+its id (the writer's inventory row plus the members) and carries the profile summary into the Jev gate and the
+agent's prompt, the Aurora storage-tier rule cites it in its rationale and raises its confidence when Jev finds the
+pattern structural, the MCP tool `rds_load` returns it, and the Inventory RDS detail and the recommendation detail
+show it with a Refresh button (`GET /api/inventory/rds/:id/load`, `POST …/load/refresh`). It needs
+`cloudwatch:GetMetricData`, `rds:DescribeDBClusters`, `rds:DescribeDBLogFiles`, `rds:DownloadDBLogFilePortion` and,
+for the statements, `pi:DescribeDimensionKeys`; all in the recommended policy.
+
+### The effect of a decision on the bill
+
+Every actioned recommendation (approved, or marked done) is verified against Cost Explorer from seven days after
+the decision (`VERIFY_CRON`, `src/verify.ts`): the daily cost of the lines the action moves (`costScopeFor` in
+`src/verify_math.ts`), the median of the fourteen days before against the median of the days after (the decision
+day and the next are mixed and skipped), scaled to a month and compared with the estimate. The daily series is
+stored with the verdict, so the recommendation detail shows the bill's shape around the decision: the scope's cost
+per day as bars, the decision day marked, the two medians as dashed lines and the whole bill as a thin line on its
+own scale, with a Check now button for an early read (`GET /api/verifications/:id/impact`). The Overview's
+"Impact of your decisions" card lists every actioned recommendation with what it claimed and what the bill did.
+Where the scope is account-wide (Aurora lines, EBS volumes, NAT bytes: resource-level cost data is off by default)
+the chart says so; another change on the same lines moves it too.
 
 ## Inventory
 

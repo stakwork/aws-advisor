@@ -11,6 +11,7 @@ import { credentialGate } from "./gate.js";
 import { pruneHistory, rollupDaily } from "./history.js";
 import { checkAllDiskLevels } from "./disk_alerts.js";
 import { checkAllHostLevels } from "./host_alerts.js";
+import { RdsLoadPassResult, rdsLoadPass } from "./rds_load.js";
 
 export interface ProbePassResult {
   started_at: string;
@@ -18,6 +19,8 @@ export interface ProbePassResult {
   probed: string[];
   failed: { instance_id: string; code: string; message: string }[];
   pruned: number;
+  /** The database half of the pass (src/rds_load.ts): load profiles refreshed for every RDS cluster and instance. */
+  databases: RdsLoadPassResult | null;
   took_ms: number;
 }
 
@@ -74,9 +77,9 @@ async function run(): Promise<ProbePassResult> {
   const t0 = Date.now();
   const gate = await credentialGate("probe-pass");
   if (!gate.ok) console.log(`[probe-pass] skipped: ${gate.error || "credentials not working"}`);
-  if (!gate.ok) return { started_at: new Date().toISOString(), candidates: 0, probed: [], failed: [{ instance_id: "*", code: "no_credentials", message: gate.error || "credentials not working" }], pruned: 0, took_ms: Date.now() - t0 };
+  if (!gate.ok) return { started_at: new Date().toISOString(), candidates: 0, probed: [], failed: [{ instance_id: "*", code: "no_credentials", message: gate.error || "credentials not working" }], pruned: 0, databases: null, took_ms: Date.now() - t0 };
   const targets = probeTargets();
-  const result: ProbePassResult = { started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, took_ms: 0 };
+  const result: ProbePassResult = { started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, databases: null, took_ms: 0 };
   try {
     const x = probeExclusions(); const limit = config.probeScope === "all" ? Math.max(config.probeMax, 100) : config.probeMax;
     const why = [x.not_ssm_online && `${x.not_ssm_online} not SSM online`, x.batch && `${x.batch} Batch worker(s)`, x.just_launched && `${x.just_launched} launched under 15 min ago`,
@@ -103,6 +106,8 @@ async function run(): Promise<ProbePassResult> {
   try { const r = rollupDaily(); console.log(`[probe-pass] rolled up ${r.instance_days} instance-days, ${r.container_days} container-days`); } catch (e: any) { console.error(`[probe-pass] rollup failed: ${e?.message || e}`); }
   try { checkAllHostLevels(); } catch (e: any) { console.error(`[probe-pass] host check failed: ${e?.message || e}`); }
   try { checkAllDiskLevels(); } catch (e: any) { console.error(`[probe-pass] disk check failed: ${e?.message || e}`); }
+  // the databases: the same hourly cadence, so the load profile behind an RDS recommendation is never older than the last pass
+  try { result.databases = await rdsLoadPass(); } catch (e: any) { console.error(`[probe-pass] rds load pass failed: ${e?.message || e}`); }
   result.pruned = pruneHistory().probes;
   result.took_ms = Date.now() - t0;
   const byCode = new Map<string, number>(); for (const f of result.failed) byCode.set(f.code, (byCode.get(f.code) || 0) + 1);

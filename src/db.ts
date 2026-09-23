@@ -288,6 +288,21 @@ create table if not exists resolutions (
 );
 create index if not exists resolutions_rec on resolutions(recommendation_id, id);
 
+create table if not exists rds_load_profiles (
+  id integer primary key autoincrement,
+  target_id text not null,
+  kind text not null,
+  region text,
+  collected_at text not null default (datetime('now')),
+  profile text not null,
+  statements text,
+  slow_log text,
+  jev text,
+  profile_hash text,
+  error text
+);
+create index if not exists rds_load_profiles_target on rds_load_profiles(target_id, id);
+
 create table if not exists inventory_elasticache (
   cache_cluster_id text primary key,
   node_type text,

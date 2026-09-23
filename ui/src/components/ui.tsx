@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export const Card = ({ title, children, className = "" }: { title?: ReactNode; children: ReactNode; className?: string }) => (
   <section className={`rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 ${className}`}>
@@ -109,3 +109,24 @@ export const Pager = ({ page, pageSize, total, onPage, className = "", always = 
     </div>
   );
 };
+
+/**
+ * The detail that opens under the row you clicked, full width, inside a colSpan cell. Clicking the row again (or
+ * "close") closes it. Scrolls only when its top is out of view (above, or in the bottom third): a tall detail must
+ * never be bottom-aligned by "nearest", which pushes the row you clicked off the screen.
+ */
+export function DetailCell({ id, onClose, title = "Detail", children }: { id: string; onClose: () => void; title?: ReactNode; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    if (top < 0 || top > window.innerHeight * 0.66) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [id]);
+  return (
+    <div ref={ref} className="min-w-0 break-words" onClick={(e) => e.stopPropagation()}>
+      <Card title={<span className="flex items-center justify-between">{title} <button className="text-zinc-500" onClick={onClose}>close</button></span>}>
+        {children}
+      </Card>
+    </div>
+  );
+}
