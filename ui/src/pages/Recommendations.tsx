@@ -27,6 +27,17 @@ function progressLine(raw: unknown): { text: string; due: boolean } | null {
   return parts.length ? { text: parts.join(" · "), due } : null;
 }
 
+/** One affected resource: a link into its Inventory tab in a new tab when there is one, the bare id otherwise. */
+function ResourceLink({ r }: { r: { id: string; name: string | null; kind: string; tab: string | null; found: boolean } }) {
+  const label = <><span className="font-mono">{r.id}</span>{r.name && r.name !== r.id ? <span className="text-zinc-400"> {r.name}</span> : null}</>;
+  return (
+    <span className="break-all">
+      {r.tab && r.found ? <a className="text-sky-300 hover:underline" href={`/inventory?tab=${r.tab}&id=${encodeURIComponent(r.id)}`} target="_blank" rel="noreferrer" title="Open in the inventory (new tab)">{label} ↗</a> : label}
+      <span className="text-zinc-600"> · {r.kind}{!r.found && r.kind !== "other" ? ", not in the inventory" : ""}</span>
+    </span>
+  );
+}
+
 export default function Recommendations() {
   const [params, setParams] = useSearchParams();
   const status = params.get("status") || "open";
@@ -165,7 +176,16 @@ export default function Recommendations() {
               : verification.verdict === "not_verifiable" ? <span className="text-zinc-500">{verification.note}</span>
               : <><span className={verification.verdict === "realised" ? "text-emerald-300" : verification.verdict === "increase" ? "text-red-300" : "text-amber-300"}>{verification.verdict}</span> · {usd(verification.realised_usd_month)} / month{verification.ratio != null ? ` (${Math.round(verification.ratio * 100)} % of the estimate)` : ""} <span className="text-zinc-500">· {verification.note}{verification.scope_note ? ` · measured on ${verification.scope_note}` : ""}</span></>}
               {verification?.applied && <div className="text-zinc-500">inventory: applied {verification.applied}</div>}</dd></>}
-            <dt className="text-zinc-500">Resource</dt><dd className="break-all font-mono text-xs">{sel.resource}</dd>
+            <dt className="text-zinc-500">Affected resources</dt>
+            <dd className="text-xs">
+              {sel.affected?.resources?.length ? <ul className="space-y-0.5">{sel.affected.resources.map((r: any) => <li key={r.id}><ResourceLink r={r} /></li>)}</ul> : <span className="break-all font-mono">{sel.resource || "—"}</span>}
+              {sel.affected?.mentioned?.length > 0 && (
+                <div className="mt-1.5">
+                  <div className="text-zinc-500">Also named in the title or rationale <span className="text-zinc-600">· includes what the agent ruled out, so read the text</span></div>
+                  <ul className="mt-0.5 space-y-0.5">{sel.affected.mentioned.map((r: any) => <li key={r.id}><ResourceLink r={r} /></li>)}</ul>
+                </div>
+              )}
+            </dd>
             <dt className="text-zinc-500">Last seen in run</dt><dd>#{sel.run_id} · {when(sel.updated_at)}</dd>
             {sel.decided_at && <><dt className="text-zinc-500">Decision</dt><dd>{sel.status} by {sel.decided_by} at {when(sel.decided_at)}{sel.decision_scope && <span className="text-zinc-400"> · {sel.decision_scope === "generic" ? "generic: all resources of this kind" : "internal: this resource only"}</span>}{sel.decision_reason && <div className="text-zinc-400">“{sel.decision_reason}”</div>}</dd></>}
             {origin && <><dt className="text-zinc-500">Origin</dt><dd><Link className="underline" to={`/alerts?status=all&id=${origin.alert_id}`}>incident #{origin.incident_id} on alert #{origin.alert_id}</Link></dd></>}

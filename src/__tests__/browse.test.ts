@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { addDays, daysInMonth, localDay } from "../localdate.js";
-import { alertDay, dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate } from "../paging.js";
+import { alertDay, dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, shortResourceId } from "../paging.js";
 import { SpendRow, summarizeSpend } from "../spend_math.js";
 
 // ---- spend --------------------------------------------------------------------------------------------------
@@ -149,6 +149,19 @@ test("findings: one row per fingerprint and per (control, resource), first by id
 
 // ---- recommendations -----------------------------------------------------------------------------------------
 
+test("resource ids: ARNs, paths and kind-prefixed ids reduce to the bare identifier", () => {
+  assert.equal(shortResourceId("arn:aws:rds:us-east-1:123456789012:cluster:foo"), "foo");
+  assert.equal(shortResourceId("arn:aws:rds:us-east-1:123456789012:db:foo"), "foo");
+  assert.equal(shortResourceId("arn:aws:ec2:us-east-1:123456789012:instance/i-1"), "i-1");
+  assert.equal(shortResourceId("arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/x"), "x");   // last path segment, as before
+  assert.equal(shortResourceId("rds:foo"), "foo");
+  assert.equal(shortResourceId("cluster:foo"), "foo");
+  assert.equal(shortResourceId(" i-1 "), "i-1");
+  assert.equal(shortResourceId("pool:karpenter/default"), "pool:karpenter/default");   // a pool is its own kind of id
+  assert.equal(shortResourceId(null), null);
+  assert.equal(shortResourceId(""), null);
+});
+
 test("recommendations: same (resource, action) merge into the highest estimate, sorted by saving with nulls last", () => {
   const rec = (id: number, o: Partial<{ source: string; rule: string; resource: string | null; action_type: string; status: string; est_monthly_saving: number | null; confidence: number | null; updated_at: string }>) =>
     ({ id, source: "rules", rule: "idle_instance", resource: "i-1", action_type: "stop_instance", status: "open", est_monthly_saving: 10, confidence: 0.8, updated_at: "2026-09-18 00:00:00", ...o });
@@ -161,9 +174,14 @@ test("recommendations: same (resource, action) merge into the highest estimate, 
     rec(6, { resource: null, est_monthly_saving: 100 }),
     rec(7, { resource: null, est_monthly_saving: 90 }),
     rec(8, { status: "approved", est_monthly_saving: 50 }),   // same resource/action, other status: its own entry
+    // One Aurora cluster named three ways by three answers: one decision, one impact row.
+    rec(9, { source: "agent", rule: "agent:iopt", resource: "sphinx-hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 470 }),
+    rec(10, { source: "agent", rule: "agent:iopt", resource: "rds:sphinx-hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 465 }),
+    rec(11, { source: "rules", rule: "aurora_storage_tier", resource: "arn:aws:rds:us-east-1:123456789012:cluster:sphinx-hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 351 }),
   ];
   const merged = mergeRecommendations(rows);
-  assert.deepEqual(merged.map((r) => r.id), [6, 7, 8, 2, 5, 3]);
+  assert.deepEqual(merged.map((r) => r.id), [9, 6, 7, 8, 2, 5, 3]);
+  assert.deepEqual(merged.find((r) => r.id === 9)!.merged_ids, [9, 10, 11]);
   const stop = merged.find((r) => r.id === 2)!;
   assert.deepEqual(stop.merged, [{ id: 1, source: "rules", rule: "idle_instance", est_monthly_saving: 10, confidence: 0.8 }]);
   assert.deepEqual(stop.sources, ["rules", "agent"]);
