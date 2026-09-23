@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { Badge, Card } from "./ui";
 import { paragraphs } from "./incident";
@@ -58,8 +58,24 @@ export const EffortBadge = ({ effort }: { effort: string }) => (
   <span className={`inline-block rounded border px-1.5 py-0.5 text-[11px] font-medium ${effort === "low" ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-300" : effort === "medium" ? "border-amber-500/30 bg-amber-500/15 text-amber-300" : "border-red-500/30 bg-red-500/15 text-red-300"}`}>effort {effort}</span>
 );
 
-/** The playbook's body: meaning, act / ignore, numbered steps, saving formula, references. */
-export function PlaybookBody({ pb, compact = false }: { pb: Playbook; compact?: boolean }) {
+/** A step checklist: which steps are ticked and how to tick one (see the progress panel on Recommendations). */
+export interface StepChecks { done: Set<number>; toggle: (i: number) => void; busy?: boolean }
+
+/** One step of a plan, with a checkbox when it is being tracked. Ticked steps are struck through so the next one stands out. */
+export function Step({ i, checks, children }: { i: number; checks?: StepChecks; children: ReactNode }) {
+  const done = checks?.done.has(i) ?? false;
+  return (
+    <li className={done ? "text-zinc-500" : ""}>
+      <div className="flex items-start gap-2">
+        {checks && <input type="checkbox" className="!mt-1 !w-auto" checked={done} disabled={checks.busy} onChange={() => checks.toggle(i)} title={done ? "Untick this step" : "Tick this step as done"} />}
+        <div className={`min-w-0 flex-1 ${done ? "line-through decoration-zinc-600" : ""}`}>{children}</div>
+      </div>
+    </li>
+  );
+}
+
+/** The playbook's body: meaning, act / ignore, numbered steps (with checkboxes when `checks` is given), saving formula, references. */
+export function PlaybookBody({ pb, compact = false, checks }: { pb: Playbook; compact?: boolean; checks?: StepChecks }) {
   const cls = compact ? "text-xs" : "text-sm";
   return (
     <div className={`space-y-3 ${cls} text-zinc-300`}>
@@ -70,7 +86,7 @@ export function PlaybookBody({ pb, compact = false }: { pb: Playbook; compact?: 
       </div>
       <div>
         <div className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">Steps</div>
-        <ol className="list-decimal space-y-1 pl-5">{pb.steps.map((s, i) => <li key={i}><Prose text={s} /></li>)}</ol>
+        <ol className="list-decimal space-y-1 pl-5">{pb.steps.map((s, i) => <Step key={i} i={i} checks={checks}><Prose text={s} /></Step>)}</ol>
       </div>
       <div><span className="text-[11px] uppercase tracking-wide text-zinc-500">Saving</span> <span className="text-zinc-400"><Prose text={pb.saving} /></span></div>
       {pb.references?.length ? <div className="text-xs text-zinc-500">{pb.references.map((r) => <a key={r} href={r} target="_blank" rel="noreferrer" className="mr-2 underline">{r.replace(/^https?:\/\//, "")}</a>)}</div> : null}

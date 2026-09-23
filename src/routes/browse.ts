@@ -7,7 +7,8 @@ import { listAlerts } from "../investigate.js";
 import { postRejectionLearning } from "../learnings.js";
 import { ConceptScope, suggestDecisionScope, syncDecisionConceptInBackground } from "../concepts.js";
 import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendRows, spendSummary } from "../spend.js";
-import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate } from "../paging.js";
+import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
+import { statusAfterProgress, validateProgress } from "../progress.js";
 import { listPlaybooks, playbookFor, playbookSummary } from "../playbooks.js";
 import { resolutionFor, resolveRecommendation } from "../resolve.js";
 import { mirrorRecommendationsInBackground } from "../graph_mirror.js";
@@ -105,15 +106,17 @@ browse.get("/playbooks/:controlId", auth, (req, res) => {
 });
 
 // ---- recommendations ------------------------------------------------------------------------------------------
-// ?status=open (default) | approved | ... | all, ?q (title, resource, resource name), ?page, ?page_size (default 50, max 200).
-// Rows proposing the same action on the same resource are one entry: the highest estimate is primary, the rest under `merged`.
+// ?status=open (default) | pending | approved | ... | all, ?q (title, resource, resource name, or "#123" for an id),
+// ?page, ?page_size (default 50, max 200). An id query looks across every status, so "#123" always finds the row
+// whatever list is showing; the row carries its own status for the UI to flag. Rows proposing the same action on
+// the same resource are one entry: the highest estimate is primary, the rest under `merged`.
 browse.get("/recommendations", auth, (req, res) => {
   const status = str(req.query.status) || "open";
-  const q = (str(req.query.q) || "").toLowerCase();
-  const rows = (status === "all"
+  const q = parseRecQuery(str(req.query.q) || "");
+  const rows = (status === "all" || q.id != null
     ? db.prepare("select * from recommendations order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all()
     : db.prepare("select * from recommendations where status = ? order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all(status)) as any[];
-  const shown = q ? rows.filter((r) => [r.title, r.resource, r.resource_name].some((v) => String(v || "").toLowerCase().includes(q))) : rows;
+  const shown = q.text ? rows.filter((r) => recMatches(r, q) && (status === "all" || r.status === status || r.id === q.id)) : rows;
   const merged = mergeRecommendations(shown);
   const p = paginate(merged, pageParams(req.query as Record<string, unknown>, { size: 50, max: 200 }));
   const totalSaving = merged.reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0);
@@ -150,7 +153,9 @@ browse.get("/recommendations/:id/resolution", auth, (req, res) => {
   res.json(r);
 });
 
-const DECISIONS = ["approved", "rejected", "snoozed", "open", "done"];
+// "pending" is work in progress: someone started the steps and is waiting on something (a week of flow logs, a
+// change window) before the rest; the step checklist below keeps where they got to.
+const DECISIONS = ["approved", "rejected", "snoozed", "pending", "open", "done"];
 const parseScope = (v: unknown): ConceptScope | null => (v === undefined || v === null || v === "" || v === "internal" ? "internal" : v === "generic" ? "generic" : null);
 
 /**
@@ -187,6 +192,23 @@ browse.post("/recommendations/:id/decision", auth, (req, res) => {
   if (!rec) return res.status(404).json({ error: "not found" });
   // The decision also lands in the Neo4j mirror (status, decided_by, scope); fire-and-forget like the concept sync.
   mirrorRecommendationsInBackground([rec.id]);
+  res.json(rec);
+});
+
+// Body: { plan: "resolution:<id>" | "playbook:<control id>", total, done: number[], follow_up?: "YYYY-MM-DD" }.
+// The whole checklist every time. Ticking the first step of an open or snoozed item moves it to "pending".
+browse.post("/recommendations/:id/progress", auth, (req, res) => {
+  const v = validateProgress(req.body);
+  if ("error" in v) return res.status(400).json({ error: v.error });
+  const id = Number(req.params.id);
+  const row = db.prepare("select id, status from recommendations where id = ?").get(id) as { id: number; status: string } | undefined;
+  if (!row) return res.status(404).json({ error: "not found" });
+  const next = statusAfterProgress(row.status, v.progress);
+  if (next) db.prepare("update recommendations set status = ?, decided_at = datetime('now'), decided_by = ?, progress = ?, updated_at = datetime('now') where id = ?")
+    .run(next, typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui", JSON.stringify(v.progress), id);
+  else db.prepare("update recommendations set progress = ?, updated_at = datetime('now') where id = ?").run(JSON.stringify(v.progress), id);
+  const rec = db.prepare("select * from recommendations where id = ?").get(id) as any;
+  if (next) { syncDecisionConceptInBackground(id); mirrorRecommendationsInBackground([id]); }
   res.json(rec);
 });
 

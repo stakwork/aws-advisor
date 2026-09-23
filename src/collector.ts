@@ -285,8 +285,9 @@ export function upsertRecommendations(runId: number, recs: RecInput[], source: "
         insert.run(fp, runId, source, r.rule, r.title, r.resource, r.resourceName || null, r.actionType, r.estMonthlySaving, r.tier,
           r.confidence, r.rationale, JSON.stringify(r.evidence), agentRequestId || null);
       } else if (["open", "snoozed", "resolved"].includes(existing.status)) {
-        // approved rows are deliberately left alone: what a human approved must stay what it says (title, tier,
-        // saving), or a later agent answer could rewrite an approval into something else under the same decision
+        // approved, pending, rejected and done rows are deliberately left alone: what a human decided (or is in
+        // the middle of) must stay what it says (title, tier, saving), or a later agent answer could rewrite an
+        // approval into something else under the same decision
         refresh.run(runId, r.title, r.estMonthlySaving, r.tier, r.confidence, r.rationale, JSON.stringify(r.evidence), existing.id);
         if (existing.status === "resolved") db.prepare("update recommendations set status = 'open' where id = ?").run(existing.id);
       }

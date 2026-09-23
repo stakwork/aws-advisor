@@ -280,7 +280,7 @@ export function createFactServer(): McpServer {
 
   server.registerTool("recommendation_history", {
     title: "Past recommendations and decisions",
-    description: "Earlier recommendations for a resource or rule and what the team decided (approved, rejected with reason, snoozed, done), from the advisor's database.",
+    description: "Earlier recommendations for a resource or rule and what the team decided (approved, rejected with reason, snoozed, pending = being worked on, done), from the advisor's database.",
     inputSchema: { resource: z.string().optional(), rule: z.string().optional().describe("rule name or action_type, e.g. idle_instance, rightsize_instance"), limit: z.number().int().default(30) },
     annotations: ro,
   }, (a) => recommendationHistory(a));
@@ -329,7 +329,7 @@ export function createFactServer(): McpServer {
     inputSchema: {
       rule: z.string().max(60).optional(), resource: z.string().max(200).optional(),
       ids: z.array(z.number().int()).max(50).optional(), min_saving: z.number().optional(),
-      status: z.enum(["open", "approved", "rejected", "snoozed", "resolved", "any"]).default("open"),
+      status: z.enum(["open", "pending", "approved", "rejected", "snoozed", "resolved", "any"]).default("open"),
       limit: z.number().int().min(1).max(100).default(20),
     },
     annotations: ro,

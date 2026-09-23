@@ -4,13 +4,28 @@ import { api, usd, when } from "../api";
 import { Badge, Button, DetailCell, Empty, Pager, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { pct } from "../components/incident";
-import { EffortBadge, PlaybookBody, Prose, usePlaybook } from "../components/playbook";
+import { EffortBadge, PlaybookBody, Prose, Step, StepChecks, usePlaybook } from "../components/playbook";
 import { RdsLoadPanel } from "../components/rdsLoad";
 import { ImpactChart } from "../components/impact";
 
-const STATUSES = ["open", "approved", "rejected", "snoozed", "resolved", "done", "all"];
+const STATUSES = ["open", "pending", "approved", "rejected", "snoozed", "resolved", "done", "all"];
 const PAGE_SIZE = 50;
 type Scope = "internal" | "generic";
+
+/** recommendations.progress (src/progress.ts): the ticked steps of one plan and the day to look again. */
+interface Progress { plan: string; total: number; done: number[]; follow_up: string | null; updated_at: string }
+const parseProgress = (raw: unknown): Progress | null => { try { const p = typeof raw === "string" && raw ? JSON.parse(raw) : null; return p && typeof p.plan === "string" && Array.isArray(p.done) ? { ...p, follow_up: p.follow_up || null } : null; } catch { return null; } };
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+/** "2 of 6 steps · check again 2026-09-30" for a list row; due once the day has come. */
+function progressLine(raw: unknown): { text: string; due: boolean } | null {
+  const p = parseProgress(raw);
+  if (!p) return null;
+  const parts: string[] = [];
+  if (p.total > 0) parts.push(`${p.done.length} of ${p.total} steps`);
+  const due = Boolean(p.follow_up && p.follow_up <= today());
+  if (p.follow_up) parts.push(due ? `check again: due ${p.follow_up}` : `check again ${p.follow_up}`);
+  return parts.length ? { text: parts.join(" · "), due } : null;
+}
 
 export default function Recommendations() {
   const [params, setParams] = useSearchParams();
@@ -30,6 +45,7 @@ export default function Recommendations() {
   const [resolution, setResolution] = useState<any>(null);
   const [verification, setVerification] = useState<any>(null);
   const [resolving, setResolving] = useState(false);
+  const [progressBusy, setProgressBusy] = useState(false);
   const rows = data?.recommendations ?? [];
 
   const load = () => api(`/recommendations?status=${status}&q=${encodeURIComponent(q)}&page=${page}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => setErr(e.message));
@@ -59,6 +75,24 @@ export default function Recommendations() {
   const evidenceObj = (() => { try { return JSON.parse(sel?.evidence || "{}"); } catch { return {}; } })();
   const playbookId: string | null = evidenceObj.playbook || resolution?.context?.control_id || null;
   const playbook = usePlaybook(playbookId);
+  // Step progress: the checklist follows the tailored plan when there is one, else the playbook's generic steps.
+  // The stored progress names the plan it was ticked on, so a new resolution does not inherit ticks from the old one.
+  const progress = parseProgress(sel?.progress);
+  const planKey = resolution?.plan?.plan?.length ? `resolution:${resolution.id}` : playbook?.steps?.length ? `playbook:${playbook.control_id}` : null;
+  const planTotal = resolution?.plan?.plan?.length ? resolution.plan.plan.length : playbook?.steps?.length || 0;
+  const onThisPlan = progress?.plan === planKey;
+  const doneSet = new Set<number>(onThisPlan ? progress!.done : []);
+  const saveProgress = async (done: Set<number>, followUp: string | null) => {
+    if (!sel || !planKey) return;
+    setProgressBusy(true); setErr("");
+    try {
+      const r = await api(`/recommendations/${sel.id}/progress`, { method: "POST", body: JSON.stringify({ plan: planKey, total: planTotal, done: [...done], follow_up: followUp }) });
+      setSel((prev: any) => ({ ...prev, ...r })); load();
+    } catch (e: any) { setErr(e.message); }
+    finally { setProgressBusy(false); }
+  };
+  const checks: StepChecks | undefined = planKey ? { done: doneSet, busy: progressBusy, toggle: (i) => { const next = new Set(doneSet); next.has(i) ? next.delete(i) : next.add(i); saveProgress(next, onThisPlan ? progress!.follow_up : null); } } : undefined;
+  const followUp = onThisPlan ? progress!.follow_up : null;
   // Idle-instance recommendations can be probed over SSM; show the latest probe if there is one.
   useEffect(() => {
     setProbe({ busy: false, result: null, error: "" });
@@ -172,7 +206,7 @@ export default function Recommendations() {
           {dbResource && <div className="mt-3"><RdsLoadPanel id={dbResource} compact /></div>}
           <details className="mt-3 text-xs"><summary className="cursor-pointer text-zinc-500">Evidence</summary><pre className="mt-1 max-h-64 overflow-auto rounded bg-zinc-950 p-2">{JSON.stringify(JSON.parse(sel.evidence || "{}"), null, 2)}</pre></details>
           <div className="mt-4 space-y-2 border-t border-zinc-800 pt-3">
-            <input className="w-full" placeholder="reason (required to reject; it teaches the agent)" value={reason} onChange={(e) => setReason(e.target.value)} />
+            <input className="w-full" placeholder="reason (required to reject; it teaches the agent; for pending: what you are waiting on)" value={reason} onChange={(e) => setReason(e.target.value)} />
             <div className="text-xs text-zinc-400">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="text-zinc-500">This decision applies to</span>
@@ -185,6 +219,7 @@ export default function Recommendations() {
             <div className="flex flex-wrap gap-2">
               <Button onClick={() => decide("approved")} disabled={sel.status === "approved"}>Approve{mergedIds.length ? ` (${mergedIds.length})` : ""}</Button>
               <Button variant="ghost" onClick={() => decide("rejected")} disabled={!reason}>Reject{mergedIds.length ? ` (${mergedIds.length})` : ""}</Button>
+              <Button variant="ghost" onClick={() => decide("pending")} disabled={sel.status === "pending"} title="Work in progress: some steps done, the rest waiting on something">Mark pending</Button>
               <Button variant="ghost" onClick={() => decide("snoozed")}>Snooze</Button>
               <Button variant="ghost" onClick={() => decide("done")}>Mark done</Button>
               {sel.status !== "open" && <Button variant="ghost" onClick={() => decide("open")}>Reopen</Button>}
@@ -192,6 +227,24 @@ export default function Recommendations() {
           </div>
         </div>
         <div className="min-w-0">
+          {planKey && (
+            <div className={`mb-3 rounded border p-3 text-xs ${progressLine(sel.progress)?.due ? "border-amber-500/40 bg-amber-500/5" : "border-zinc-800 bg-zinc-950/60"}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-medium text-zinc-200">Progress <span className="font-normal text-zinc-500">· {doneSet.size} of {planTotal} steps{planKey.startsWith("playbook:") ? " of the playbook" : " of the tailored plan"}</span></span>
+                <label className="flex items-center gap-2 text-zinc-400">check again on
+                  <input type="date" className="!py-1 !text-xs" value={followUp || ""} min={today()} disabled={progressBusy} onChange={(e) => saveProgress(doneSet, e.target.value || null)} />
+                  {followUp && <button className="text-zinc-500 hover:text-zinc-300" onClick={() => saveProgress(doneSet, null)} disabled={progressBusy}>clear</button>}
+                </label>
+              </div>
+              <div className="mt-1 text-zinc-500">
+                {planTotal > 0 && doneSet.size === 0 && !followUp && <>Tick the steps below as you do them; the first tick moves an open item to <Badge>pending</Badge> so it sits in that list until you mark it done.</>}
+                {doneSet.size > 0 && doneSet.size < planTotal && <>Next: step {([...Array(planTotal).keys()].find((i) => !doneSet.has(i)) ?? 0) + 1}.{sel.status === "pending" && sel.decision_reason ? <> Waiting on: “{sel.decision_reason}”.</> : null}</>}
+                {planTotal > 0 && doneSet.size === planTotal && <>Every step is ticked{sel.status !== "done" ? <>; mark it done when the saving is in place.</> : "."}</>}
+                {followUp && progressLine(sel.progress)?.due && <span className="text-amber-300"> The follow-up day has come.</span>}
+                {progress && !onThisPlan && <div className="mt-0.5 text-amber-300">Earlier progress ({progress.done.length} of {progress.total} steps{progress.follow_up ? `, check again ${progress.follow_up}` : ""}) was on {progress.plan.startsWith("playbook:") ? "the playbook" : "an earlier tailored plan"}; ticking here starts over on this one.</div>}
+              </div>
+            </div>
+          )}
           <div className="rounded border border-zinc-800 bg-zinc-950/60 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-medium text-zinc-200">Tailored resolution</span>
@@ -226,11 +279,11 @@ export default function Recommendations() {
                     <div className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">Plan</div>
                     <ol className="list-decimal space-y-3 pl-5">
                       {resolution.plan.plan.map((s: any, i: number) => (
-                        <li key={i}>
+                        <Step key={i} i={i} checks={planKey?.startsWith("resolution:") ? checks : undefined}>
                           <div><Prose text={s.step} /></div>
                           {s.command && <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5 text-zinc-200">{s.command}</pre>}
                           {s.verify && <div className="mt-1 text-xs text-emerald-300/90">verify: <Prose text={s.verify} /></div>}
-                        </li>
+                        </Step>
                       ))}
                     </ol>
                   </div>
@@ -255,7 +308,7 @@ export default function Recommendations() {
           {playbook ? (
             <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/40 p-3 text-sm" open={!resolution?.plan}>
               <summary className="cursor-pointer text-zinc-200">How to do it <span className="text-zinc-500">· playbook: {playbook.title}</span> <Badge>{playbook.tier}</Badge> <EffortBadge effort={playbook.effort} /></summary>
-              <div className="mt-2"><PlaybookBody pb={playbook} compact /></div>
+              <div className="mt-2"><PlaybookBody pb={playbook} compact checks={planKey?.startsWith("playbook:") ? checks : undefined} /></div>
               <div className="mt-2 text-xs">
                 <Link className="text-sky-300 hover:underline" to={`/findings?howto=${encodeURIComponent(playbook.control_id)}`}>Open the full playbook and the findings it covers →</Link>
               </div>
@@ -273,7 +326,7 @@ export default function Recommendations() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-zinc-100">Recommendations <span className="text-sm font-normal text-zinc-500">{data ? <>{data.total} · ≈ {usd(data.total_saving)} / month</> : "…"}</span></h1>
         <div className="flex gap-2">
-          <input placeholder="search title or resource" value={q} onChange={(e) => setParam("q", e.target.value)} className="w-56" />
+          <input placeholder="search title, resource or #id" value={q} onChange={(e) => setParam("q", e.target.value)} className="w-56" />
           <select value={status} onChange={(e) => setParam("status", e.target.value)}>
             {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
@@ -294,7 +347,8 @@ export default function Recommendations() {
                     <tr onClick={() => toggle(r)} className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${isOpen ? "bg-zinc-900" : ""}`}>
                       <Td>
                         <div>{r.title}</div>
-                        <div className="text-xs text-zinc-500"><span className="font-mono text-zinc-400">#{r.id}</span> · {r.action_type} · {r.resource}</div>
+                        <div className="text-xs text-zinc-500"><span className="font-mono text-zinc-400">#{r.id}</span>{r.status !== status && <> · <Badge>{r.status}</Badge></>} · {r.action_type} · {r.resource}</div>
+                        {(() => { const p = progressLine(r.progress); return p ? <div className={`text-xs ${p.due ? "text-amber-300" : "text-indigo-300"}`}>{p.text}</div> : null; })()}
                         {r.merged?.length > 0 && <div className="text-xs text-violet-300">also proposed by {otherSources(r).length ? otherSources(r).join(", ") : r.source} ({r.merged.length} more)</div>}
                       </Td>
                       <Td><Badge>{r.tier}</Badge></Td><Td><Badge>{r.source}</Badge></Td>

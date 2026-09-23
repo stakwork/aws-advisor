@@ -332,6 +332,8 @@ for (const [col, type] of [["acknowledged_by", "text"], ["triage", "text"], ["tr
 addColumn("agent_runs", "recommendation_id", "integer");
 for (const [col, type] of [["prompt", "text"], ["score", "real"], ["grade", "text"], ["retry_of", "text"], ["retried_by", "text"]]) addColumn("agent_runs", col, type);
 addColumn("resolutions", "gate_outcome", "text");
+// Step progress on a recommendation's plan and the day to look at it again (src/progress.ts).
+addColumn("recommendations", "progress", "text");
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");
 

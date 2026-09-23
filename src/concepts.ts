@@ -109,7 +109,7 @@ function genericDocumentation(rec: RecRow): string {
     `## Guidance for future runs`,
     rec.status === "rejected"
       ? `Do not propose ${rec.action_type} for ${role} workloads on these grounds again, in this account or any other, unless the facts differ from the rule above.`
-      : `Treat ${rec.action_type} on ${role} workloads as ${rec.status === "approved" || rec.status === "done" ? "acceptable when the same conditions hold" : "case by case"}.`,
+      : `Treat ${rec.action_type} on ${role} workloads as ${rec.status === "approved" || rec.status === "pending" || rec.status === "done" ? "acceptable when the same conditions hold" : "case by case"}.`,
   ].join("\n");
 }
 
@@ -148,6 +148,7 @@ function guidanceFor(rec: RecRow): string {
     case "rejected": return `Do not propose this again for this resource unless the facts changed. The team's reason: ${rec.decision_reason || "not given"}. Apply the same reasoning to similar resources.`;
     case "approved": return `The team wants this done. If it still shows up in findings, it is pending execution, not a new discovery.`;
     case "done": return `This was carried out. If the resource reappears in findings, treat it as a regression worth flagging.`;
+    case "pending": return `Being worked on: some steps are done and the rest wait on something (data to accumulate, a change window). If it still shows up in findings, it is in progress, not a new discovery.`;
     case "snoozed": return `Deferred, not refused. It can be proposed again later, ideally with new evidence.`;
     case "resolved": return `The finding disappeared on its own (resource gone or fixed outside the advisor).`;
     default: return `Open, no decision yet.`;
