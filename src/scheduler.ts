@@ -65,7 +65,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     try { const r = await watchOnce(); return `sample ${r.sample_id}: ${r.samples} values, ${r.alerts} alerts${r.errors.length ? `, errors: ${r.errors.join("; ")}` : ""}`; }
     finally { watching = false; }
   } },
-  probeCron: { label: "Probe pass", run: async () => { const r = await probePass(); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates`; } },
+  probeCron: { label: "Probe pass", run: async () => { const r = await probePass(); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates${r.databases ? `; ${r.databases.refreshed.length} database(s) profiled${r.databases.failed.length ? `, ${r.databases.failed.length} failed` : ""}` : ""}`; } },
   spendCron: { label: "Spend refresh", run: async () => {
     const r = await refreshSpend();
     console.log(`[spend] ${r.refreshed ? `${r.days} days stored` : `skipped: ${r.skipped || r.error}`}`);

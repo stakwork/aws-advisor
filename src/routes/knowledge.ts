@@ -13,7 +13,7 @@ import { latestReview, runReview } from "../review.js";
 import { buildObserveBrief, dispatchObservation, latestObservation, listObservations } from "../observe.js";
 import { refreshLogs, topLogGroups } from "../logs.js";
 import { refreshTrail, trailSummary } from "../trail.js";
-import { latestVerification, runVerifications, verificationSummary } from "../verify.js";
+import { impactFor, latestVerification, runVerifications, verificationSummary } from "../verify.js";
 import { quantitiesFromHistory } from "../quantities.js";
 import { listCommitments, refreshCommitments } from "../commitments.js";
 
@@ -182,6 +182,8 @@ knowledge.post("/trail/refresh", async (req, res) => { try { res.json(await refr
 // ---- realised savings: approved recommendations checked against the bill ---------------------------------------
 knowledge.get("/verifications", (_req, res) => res.json(verificationSummary()));
 knowledge.get("/verifications/:id", (req, res) => res.json({ verification: latestVerification(Number(req.params.id)) }));
+// The bill around the decision: the scope's daily cost before and after, the medians, and the account total for context.
+knowledge.get("/verifications/:id/impact", (req, res) => { const i = impactFor(Number(req.params.id)); if (!i) return res.status(404).json({ error: "not found" }); res.json(i); });
 knowledge.post("/verifications/run", async (req, res) => {
   const log: string[] = [];
   const ids = typeof req.query.id === "string" ? [Number(req.query.id)] : undefined;

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { Badge, Card } from "./ui";
+import { paragraphs } from "./incident";
 
 /** GET /api/playbooks/:controlId (see src/playbooks.ts). */
 export interface Playbook {
@@ -33,9 +34,24 @@ export function usePlaybook(controlId: string | null | undefined): Playbook | nu
 }
 
 /** Inline code spans for the `backticked` commands in playbook text. */
-export function Prose({ text }: { text: string }) {
+function Inline({ text }: { text: string }) {
   const parts = text.split(/(`[^`]+`)/g);
   return <>{parts.map((p, i) => (p.startsWith("`") && p.endsWith("`") ? <code key={i} className="rounded bg-zinc-950 px-1 py-0.5 font-mono text-[11px] text-zinc-200">{p.slice(1, -1)}</code> : <span key={i}>{p}</span>))}</>;
+}
+
+/**
+ * Agent and playbook text as readable paragraphs with inline code. Blank lines split paragraphs; a single long
+ * block is cut every two sentences (see paragraphs in incident.tsx). Rendered as block spans so it is valid inside
+ * a <p> or an <li>, with a gap between paragraphs and single newlines kept as line breaks.
+ */
+export function Prose({ text }: { text: string }) {
+  const paras = paragraphs(text || "");
+  if (paras.length <= 1 && !/\n/.test(text || "")) return <Inline text={text || ""} />;
+  return <>{paras.map((para, i) => (
+    <span key={i} className={`block ${i ? "mt-2" : ""}`}>
+      {para.split(/\n/).map((line, j) => <Fragment key={j}>{j > 0 && <br />}<Inline text={line} /></Fragment>)}
+    </span>
+  ))}</>;
 }
 
 export const EffortBadge = ({ effort }: { effort: string }) => (

@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
-import { Badge, Button, Card, CopyButton, Empty, Stat, Td, Th } from "../components/ui";
+import { Badge, Button, Card, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
+import { RdsLoadPanel } from "../components/rdsLoad";
 import { metricLabel } from "./Knowledge";
 
 const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3", "route53"] as const;
@@ -111,6 +112,8 @@ export default function Inventory() {
     for (const [k, v] of Object.entries(patch)) v ? p.set(k, v) : p.delete(k);
     setParams(p);
   };
+  // A row opens its detail under itself; clicking the open row again closes it.
+  const pick = (id: string) => set({ id: selectedId === id ? null : id });
 
   const loadSummary = () => api("/inventory/summary").then(setSummary).catch((e) => setErr(e.message));
   // A tab switch clears the table at once and ignores a slower response from the previous tab, so EC2 rows can
@@ -327,7 +330,7 @@ export default function Inventory() {
                   const cls = `cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${selectedId === id ? "bg-zinc-900" : ""} ${r.gone ? "text-zinc-500" : ""}`;
                   // The detail expands full width right under the selected row (same pattern as alerts and playbooks).
                   const detailRow = selectedId === id ? (
-                    <tr className="border-t border-zinc-800 bg-zinc-950/40"><td colSpan={COLUMNS[tab]} className="max-w-0 p-3"><DetailCell onClose={() => set({ id: null })} id={id}>
+                    <tr className="border-t border-zinc-800 bg-zinc-950/40"><td colSpan={COLUMNS[tab]} className="max-w-0 p-3"><DetailCell onClose={() => set({ id: null })} id={id}><div className="lg:columns-2 lg:gap-8">
                       {!detail ? <div className="text-sm text-zinc-500">{rows ? "Not in the snapshot." : "Loading…"}</div>
                         : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={() => runProbe(detail.instance_id)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
@@ -336,10 +339,10 @@ export default function Inventory() {
                         : tab === "s3" ? <S3Detail d={detail} />
                         : tab === "route53" ? <Route53Detail d={detail} />
                         : <CacheDetail d={detail} />}
-                    </DetailCell></td></tr>
+                    </div></DetailCell></td></tr>
                   ) : null;
                   if (tab === "ec2") return (<Fragment key={id}>
-                    <tr key={id} onClick={() => set({ id })} className={cls}>
+                    <tr key={id} onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name || <span className="text-zinc-500">(no name)</span>}</span>{r.pool_kind ? <PoolBadge kind={r.pool_kind} name={r.pool} /> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{id}{r.private_ip ? ` · ${r.private_ip}` : ""}</div></Td>
                       <Td className="whitespace-nowrap">{r.instance_type}</Td>
                       <Td><Badge>{r.state}</Badge></Td>
@@ -354,7 +357,7 @@ export default function Inventory() {
                     </tr>{detailRow}
                   </Fragment>);
                   if (tab === "rds") return (<Fragment key={id}>
-                    <tr onClick={() => set({ id })} className={cls}>
+                    <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}</div>{r.cluster && <div className="text-xs text-zinc-500">cluster {r.cluster}</div>}</Td>
                       <Td className="whitespace-nowrap">{r.class}{r.multi_az ? <span className="text-xs text-zinc-500"> multi-AZ</span> : null}</Td>
                       <Td>{r.engine} <span className="text-xs text-zinc-500">{r.engine_version}</span></Td>
@@ -368,7 +371,7 @@ export default function Inventory() {
                     </tr>{detailRow}
                   </Fragment>);
                   if (tab === "ebs") return (<Fragment key={id}>
-                    <tr onClick={() => set({ id })} className={cls}>
+                    <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-mono text-xs text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}</div>{r.name && <div className="text-xs text-zinc-500">{r.name}</div>}</Td>
                       <Td>{r.volume_type}{r.encrypted ? " 🔒" : ""}</Td>
                       <Td className="text-right">{r.size_gb} GB</Td>
@@ -381,7 +384,7 @@ export default function Inventory() {
                     </tr>{detailRow}
                   </Fragment>);
                   if (tab === "s3") return (<Fragment key={id}>
-                    <tr onClick={() => set({ id })} className={cls}>
+                    <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.public ? <Badge>public</Badge> : null}{r.versioning ? <Badge>versioned</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div></Td>
                       <Td className="text-zinc-400">{r.region}</Td>
                       <Td className="text-right">{r.total_gb >= 1 ? `${Number(r.total_gb).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB` : r.total_gb > 0 ? `${Math.round(r.total_gb * 1000)} MB` : <span className="text-zinc-600">empty</span>}</Td>
@@ -395,7 +398,7 @@ export default function Inventory() {
                   if (tab === "route53") {
                     const first = (r.links || []).find((l: any) => l.hop === 1) || r.links?.[0];
                     return (<Fragment key={id}>
-                      <tr onClick={() => set({ id })} className={cls}>
+                      <tr onClick={() => pick(id)} className={cls}>
                         <Td><div className="flex items-center gap-2"><span className="font-mono text-xs text-zinc-100">{r.name}</span>{r.gone ? <Badge>gone</Badge> : null}{r.routing?.set_identifier ? <span className="text-xs text-zinc-500">{r.routing.set_identifier}</span> : null}</div></Td>
                         <Td className="whitespace-nowrap text-xs">{r.type}{r.alias ? <span className="text-zinc-500"> alias</span> : null}</Td>
                         <Td className="max-w-xs"><div className="truncate font-mono text-xs text-zinc-400" title={r.alias ? r.alias_target : (r.values || []).join("\n")}>{r.alias ? r.alias_target : (r.values || []).slice(0, 2).join(", ")}{!r.alias && (r.values || []).length > 2 ? ` +${r.values.length - 2}` : ""}</div></Td>
@@ -406,7 +409,7 @@ export default function Inventory() {
                     </Fragment>);
                   }
                   if (tab === "lambda") return (<Fragment key={id}>
-                    <tr onClick={() => set({ id })} className={cls}>
+                    <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.arm ? <Badge>arm64</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{r.region}</div></Td>
                       <Td className="whitespace-nowrap text-zinc-400">{r.runtime || "—"}</Td>
                       <Td className="text-right">{r.memory_mb} MB</Td>
@@ -420,7 +423,7 @@ export default function Inventory() {
                     </tr>{detailRow}
                   </Fragment>);
                   return (<Fragment key={id}>
-                    <tr onClick={() => set({ id })} className={cls}>
+                    <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}</div>{r.replication_group && <div className="text-xs text-zinc-500">group {r.replication_group}</div>}</Td>
                       <Td className="whitespace-nowrap">{r.node_type}</Td>
                       <Td>{r.engine} <span className="text-xs text-zinc-500">{r.engine_version}</span></Td>
@@ -445,24 +448,6 @@ export default function Inventory() {
 const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 9, s3: 8, route53: 6 };
 
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
-function DetailCell({ id, onClose, children }: { id: string; onClose: () => void; children: ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  // Scroll only when the top of the detail is out of view (above, or in the bottom third): a tall detail must never
-  // be bottom-aligned by "nearest", which pushes the row you clicked off the screen.
-  useEffect(() => {
-    const el = ref.current; if (!el) return;
-    const top = el.getBoundingClientRect().top;
-    if (top < 0 || top > window.innerHeight * 0.66) el.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [id]);
-  return (
-    <div ref={ref} className="min-w-0 break-words" onClick={(e) => e.stopPropagation()}>
-      <Card title={<span className="flex items-center justify-between">Detail <button className="text-zinc-500" onClick={onClose}>close</button></span>}>
-        <div className="lg:columns-2 lg:gap-8">{children}</div>
-      </Card>
-    </div>
-  );
-}
-
 /** The instance's baselines: median and p95 per metric, from 14 days of CloudWatch CPU and the probe history. */
 function TypicalLine({ instanceId }: { instanceId: string }) {
   const [b, setB] = useState<any[] | null>(null);
@@ -674,6 +659,7 @@ function RdsDetail({ d }: { d: any }) {
       </Group>
       <Group title="Tags"><Tags tags={s.tags} /></Group>
       <Domains list={d.domains} empty="No Route 53 record names this endpoint (applications use the RDS endpoint directly)." />
+      <Group title={`Load${id.cluster ? ` · cluster ${id.cluster}` : ""}`}><RdsLoadPanel id={id.cluster || d.db_instance_identifier} compact /></Group>
       <Related id={d.db_instance_identifier} recs={d.open_recs} findings={d.findings} />
     </>
   );

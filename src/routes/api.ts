@@ -31,6 +31,8 @@ import { jevStats, listJevCalls } from "../jev.js";
 import { reopenAlert } from "../triage.js";
 import { mirrorAlertsInBackground } from "../graph_mirror.js";
 import { resourceRole } from "../roles.js";
+import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
+import { describeError } from "../permissions.js";
 
 export const api = Router();
 
@@ -368,6 +370,22 @@ const withDomains = <T extends Record<string, any>>(rows: T[], ...by: Array<[kin
   return rows.map((r) => ({ ...r, domains: maps.flatMap(([m, idCol]) => (r[idCol] ? m.get(String(r[idCol])) || [] : [])) }));
 };
 api.get("/inventory/rds", (req, res) => res.json(withDomains(listRds({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }).map((r: any) => ({ ...r, role: resourceRole(String(r.db_instance_identifier)) })), ["rds", "db_instance_identifier"], ["rds_cluster", "cluster"])));
+// The load profile behind a database (cluster or instance id): the hourly pass keeps it; refresh collects it again now.
+api.get("/inventory/rds/:id/load", (req, res) => {
+  const row = latestRdsLoad(String(req.params.id));
+  if (!row) return res.status(404).json({ error: "no load profile yet: the hourly probe pass collects one for every database; use Refresh to collect it now" });
+  res.json(row);
+});
+const loadInFlight = new Set<string>();
+api.post("/inventory/rds/:id/load/refresh", async (req, res) => {
+  const id = String(req.params.id);
+  if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  if (loadInFlight.has(id)) return res.status(409).json({ error: `a load profile of ${id} is already being collected` });
+  loadInFlight.add(id);
+  try { res.json(await refreshRdsLoad(id, { jev: true })); }
+  catch (e: any) { res.status(e?.code === "not_found" ? 404 : 502).json({ error: describeError(e, `rds load ${id} (cloudwatch:GetMetricData, rds:DescribeDBClusters)`) }); }
+  finally { loadInFlight.delete(id); }
+});
 api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
 api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
 api.get("/inventory/ebs", (req, res) => res.json(listEbs({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));

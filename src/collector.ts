@@ -17,6 +17,7 @@ import { flowLogRecommendations } from "./flowlogs.js";
 import { describeError, tablesIn } from "./permissions.js";
 import { classifyResources, ec2Facts, rdsFacts } from "./roles.js";
 import { jevEnabled } from "./jev.js";
+import { ensureRdsLoad, loadSummary } from "./rds_load.js";
 import { refreshSpend } from "./spend.js";
 import { mirrorAfterRunInBackground } from "./graph_mirror.js";
 
@@ -120,6 +121,13 @@ async function execute(runId: number) {
 
     log(runId, "Aurora storage tiers…");
     const aurora = await auroraStats((l) => log(runId, `  ${l}`));
+    // The load profile behind each cluster (the hourly pass keeps it fresh; a run older than six hours refreshes it here).
+    const loads: Record<string, NonNullable<ReturnType<typeof loadSummary>>> = {};
+    for (const a of aurora) {
+      const row = await ensureRdsLoad(a.cluster, 6, (l) => log(runId, `  ${l}`));
+      const sum = loadSummary(row);
+      if (sum) loads[a.cluster] = sum;
+    }
 
     const probes = latestProbeSummaries();
     // The Thrifty graviton alarms of this run with their types and prices (src/graviton_facts.ts), for the graviton rule.
@@ -132,7 +140,7 @@ async function execute(runId: number) {
     }
     // Jev classifies the instances the rules look at (stopped, idle, graviton) and every RDS instance; cached 7 days per resource.
     const roles = await classifyBatch(queryRows, graviton, (l) => log(runId, l));
-    const recs = buildRecommendations({ queryRows, aurora, probes, roles, graviton });
+    const recs = buildRecommendations({ queryRows, aurora, loads, probes, roles, graviton });
     if (graviton) {
       const g = gravitonRecommendations(graviton, roles);
       log(runId, `Graviton: ${g.recs.length} recommendation(s)${g.skipped.length ? `, ${g.skipped.length} skipped` : ""}`);

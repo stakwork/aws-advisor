@@ -15,6 +15,7 @@ import { alertContext } from "./investigate.js";
 import { describeError, tablesIn } from "./permissions.js";
 import { ScopeKind, getBaseline, listBaselines, scoreValue } from "./baselines.js";
 import { instanceHistory } from "./history.js";
+import { latestRdsLoad, refreshRdsLoad } from "./rds_load.js";
 import { latestReview, reviewForDay } from "./review.js";
 import { getReconciliation, lastFullMonth, listReconciliations } from "./reconcile.js";
 import { latestForecast } from "./forecast.js";
@@ -371,6 +372,19 @@ export function createFactServer(): McpServer {
     const h = instanceHistory(a.instance_id, a.days);
     if (!h.daily.length && !h.containers_now.length) return fail(`no probe history for ${a.instance_id}: it is not probed (not SSM-online, a Batch worker, or younger than the hourly pass)`);
     return text(h);
+  });
+
+  server.registerTool("rds_load", {
+    title: "Load profile of an RDS or Aurora database",
+    description: "Fourteen days of a database's load as the hourly pass collected it: I/O per day and its cost on Standard storage, volume size, CPU, connections, buffer cache hit ratio; for Serverless v2 the ACU floor, ceiling, time at the ceiling, the bursts (count, length, cadence) and whether the database fits in the buffer cache; the top statements from Performance Insights (when enabled); the slow statements, temp-file and checkpoint counts from the engine log tail; and Jev's classification (shape, what drives the I/O, throttled by the cap, structural, first lever). Takes a cluster id or an instance id. refresh collects it again now (CloudWatch, Performance Insights, the log; 10 to 30 s).",
+    inputSchema: { id: z.string().regex(/^[A-Za-z][A-Za-z0-9-]{0,62}$/), refresh: z.boolean().default(false) },
+    annotations: { ...ro, openWorldHint: true },
+  }, async (a) => {
+    try {
+      const row = a.refresh ? await refreshRdsLoad(a.id, { jev: true }) : latestRdsLoad(a.id);
+      if (!row) return fail(`no load profile for ${a.id} yet: it is not in the RDS inventory, or the hourly pass has not run; call again with refresh=true`);
+      return text(row);
+    } catch (e: any) { return fail(describeError(e, `rds load ${a.id} (cloudwatch:GetMetricData, rds:DescribeDBClusters, pi:DescribeDimensionKeys, rds:DownloadDBLogFilePortion)`)); }
   });
 
   server.registerTool("review_findings", {

@@ -5,6 +5,7 @@ import { Badge, Button, Card, Empty, Pager, Stat } from "../components/ui";
 import { IncidentView, InvestigateButton, incidentOfAlertRow } from "../components/incident";
 import { TriageLine, triageOfAlertRow } from "../components/jev";
 import { alertLevel } from "../alertLevel";
+import { ImpactList } from "../components/impact";
 
 const PREVIEW = 5;
 const PAGE = 10;
@@ -373,6 +374,9 @@ export default function Overview() {
         </Card>
         <Card title="Commitments">
           <CommitmentsList fallback={d.commitments} />
+        </Card>
+        <Card className="lg:col-span-2" title={<span className="flex items-center justify-between">Impact of your decisions <span className="text-xs font-normal text-zinc-500">what the bill did after each approval, measured from seven days on</span></span>}>
+          <ImpactList />
         </Card>
       </div>
     </div>

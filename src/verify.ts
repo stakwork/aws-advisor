@@ -1,14 +1,15 @@
 /**
- * Seven days after an approval, was the saving real? For every approved recommendation the job pulls the daily
- * cost of the lines its action moves (src/verify_math.ts) from Cost Explorer, compares before and after, and
- * stores the verdict. It also asks the inventory whether the action was applied where that is observable (an
+ * Seven days after a decision, was the saving real? For every actioned recommendation (approved, or marked done)
+ * the job pulls the daily cost of the lines its action moves (src/verify_math.ts) from Cost Explorer, compares
+ * before and after, and stores the verdict together with the daily series, so the bill's shape around the
+ * decision can be shown (impactFor). It also asks the inventory whether the action was applied where that is observable (an
  * instance gone, a type changed). Re-checked daily until 30 days after the decision; the latest row wins.
  */
 import { db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
-import { DailyCost, MIN_DAYS_AFTER, Verification, addDays, costScopeFor, verify } from "./verify_math.js";
+import { DAYS_BEFORE, DailyCost, MIN_DAYS_AFTER, SKIP_DAYS_AFTER_DECISION, Verification, addDays, costScopeFor, verify } from "./verify_math.js";
 
 db.exec(`create table if not exists verifications (
   id integer primary key autoincrement,
@@ -20,6 +21,11 @@ db.exec(`create table if not exists verifications (
   applied text, note text
 );
 create index if not exists verifications_rec on verifications(recommendation_id, id)`);
+// the daily series behind the verdict arrived with the impact chart; older databases get the column here
+if (!(db.pragma("table_info(verifications)") as { name: string }[]).some((c) => c.name === "series")) db.exec("alter table verifications add column series text");
+
+/** Statuses that mean the team acted on the recommendation, so the bill should show it. */
+export const ACTIONED = ["approved", "done"] as const;
 
 const MAX_DAYS_AFTER = 30;
 const lit = (s: string) => `'${String(s).replace(/'/g, "''")}'`;
@@ -49,9 +55,9 @@ export async function runVerifications(opts: { force?: boolean; ids?: number[]; 
   if (!gate.ok) { out.errors.push(gate.error || "credentials not working"); out.took_ms = Date.now() - t0; return out; }
   const today = new Date().toISOString().slice(0, 10);
   const recs = db.prepare(`select r.*, i.instance_type as inv_type, i.region as inv_region from recommendations r left join inventory_ec2 i on i.instance_id = r.resource
-    where r.status = 'approved' and r.decided_at is not null ${opts.ids?.length ? `and r.id in (${opts.ids.map(() => "?").join(",")})` : ""} order by r.decided_at`).all(...(opts.ids || [])) as any[];
-  const ins = db.prepare(`insert into verifications(recommendation_id, decided_day, days_after, scope_service, scope_usage, scope_note, verdict, before_usd_day, after_usd_day, realised_usd_month, estimate_usd_month, ratio, applied, note)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    where r.status in ('approved', 'done') and r.decided_at is not null ${opts.ids?.length ? `and r.id in (${opts.ids.map(() => "?").join(",")})` : ""} order by r.decided_at`).all(...(opts.ids || [])) as any[];
+  const ins = db.prepare(`insert into verifications(recommendation_id, decided_day, days_after, scope_service, scope_usage, scope_note, verdict, before_usd_day, after_usd_day, realised_usd_month, estimate_usd_month, ratio, applied, note, series)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const cache = new Map<string, DailyCost[]>();
   for (const rec of recs) {
     const decidedDay = String(rec.decided_at).slice(0, 10);
@@ -61,7 +67,7 @@ export async function runVerifications(opts: { force?: boolean; ids?: number[]; 
     const scope = costScopeFor(rec.action_type, { instance_type: rec.inv_type });
     const applied = appliedFromInventory(rec);
     if (!scope) {
-      ins.run(rec.id, decidedDay, daysAfter, null, null, null, "not_verifiable", null, null, null, rec.est_monthly_saving, null, applied, `no cost line moves for ${rec.action_type}`);
+      ins.run(rec.id, decidedDay, daysAfter, null, null, null, "not_verifiable", null, null, null, rec.est_monthly_saving, null, applied, `no cost line moves for ${rec.action_type}`, null);
       out.skipped++; continue;
     }
     const key = `${scope.service}|${scope.usage_like.join(",")}`;
@@ -76,7 +82,8 @@ export async function runVerifications(opts: { force?: boolean; ids?: number[]; 
       } catch (e) { out.errors.push(describeError(e, `verification of #${rec.id} (aws_cost_by_service_usage_type_daily)`)); continue; }
     }
     const v: Verification = verify(rows, decidedDay, rec.est_monthly_saving, today, { early: opts.force });
-    ins.run(rec.id, decidedDay, daysAfter, scope.service, scope.usage_like.join(","), scope.note, v.verdict, v.before_usd_day, v.after_usd_day, v.realised_usd_month, v.estimate_usd_month, v.ratio, applied, v.note);
+    const series = rows.filter((r) => r.day >= addDays(decidedDay, -DAYS_BEFORE));
+    ins.run(rec.id, decidedDay, daysAfter, scope.service, scope.usage_like.join(","), scope.note, v.verdict, v.before_usd_day, v.after_usd_day, v.realised_usd_month, v.estimate_usd_month, v.ratio, applied, v.note, JSON.stringify(series));
     if (v.verdict === "too_early") out.too_early++; else out.verified++;
     log(`#${rec.id} ${rec.action_type} ${rec.resource}: ${v.verdict}${v.realised_usd_month != null ? ` ${v.realised_usd_month} USD/mo of ${rec.est_monthly_saving ?? "?"}` : ""}${applied ? ` · applied ${applied}` : ""}`);
   }
@@ -88,16 +95,37 @@ export async function runVerifications(opts: { force?: boolean; ids?: number[]; 
 }
 
 export function latestVerification(recommendationId: number) {
-  return db.prepare("select * from verifications where recommendation_id = ? order by id desc limit 1").get(recommendationId) as any | null;
+  const row = db.prepare("select * from verifications where recommendation_id = ? order by id desc limit 1").get(recommendationId) as any | null;
+  if (row) { const { series, ...rest } = row; return rest; }
+  return row;
 }
-/** Every approved recommendation with its latest verdict, plus totals of claimed vs realised. */
+
+/**
+ * The bill around one decision: the daily cost of the lines the action moves (the verification's scope) from
+ * fourteen days before the decision to the latest complete day, with the before and after medians the verdict
+ * came from, and the account's total daily spend over the same days for context. Null until the verification
+ * has run; a scope-less action (a permission, a flow log) carries no series.
+ */
+export function impactFor(recommendationId: number) {
+  const rec = db.prepare("select id, title, status, action_type, resource, resource_name, est_monthly_saving, decided_at, decided_by from recommendations where id = ?").get(recommendationId) as any;
+  if (!rec) return null;
+  const v = db.prepare("select * from verifications where recommendation_id = ? order by id desc limit 1").get(recommendationId) as any | null;
+  if (!v) return { recommendation: rec, verification: null, series: [], total: [], decided_day: rec.decided_at ? String(rec.decided_at).slice(0, 10) : null, after_from: null, actioned: (ACTIONED as readonly string[]).includes(rec.status) };
+  let series: DailyCost[] = []; try { series = JSON.parse(v.series || "[]"); } catch { /* an older row without a series */ }
+  const from = addDays(v.decided_day, -DAYS_BEFORE);
+  const total = db.prepare("select day, net_unblended as usd from spend_daily where day >= ? order by day").all(from) as DailyCost[];
+  const { series: _s, ...verification } = v;
+  return { recommendation: rec, verification, series, total, decided_day: v.decided_day, after_from: addDays(v.decided_day, SKIP_DAYS_AFTER_DECISION), actioned: (ACTIONED as readonly string[]).includes(rec.status) };
+}
+
+/** Every actioned recommendation (approved or done) with its latest verdict, plus totals of claimed vs realised. */
 export function verificationSummary() {
-  const rows = db.prepare(`select r.id, r.title, r.action_type, r.resource, r.resource_name, r.est_monthly_saving, r.decided_at, v.verdict, v.realised_usd_month, v.ratio, v.applied, v.days_after, v.note, v.checked_at, v.scope_note
+  const rows = db.prepare(`select r.id, r.title, r.status, r.action_type, r.resource, r.resource_name, r.est_monthly_saving, r.decided_at, v.verdict, v.realised_usd_month, v.before_usd_day, v.after_usd_day, v.ratio, v.applied, v.days_after, v.note, v.checked_at, v.scope_note
     from recommendations r left join verifications v on v.id = (select max(id) from verifications where recommendation_id = r.id)
-    where r.status = 'approved' order by r.decided_at desc`).all() as any[];
+    where r.status in ('approved', 'done') order by r.decided_at desc`).all() as any[];
   const claimed = rows.reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0);
   const realised = rows.filter((r) => ["realised", "partial", "none", "increase"].includes(r.verdict)).reduce((s, r) => s + (Number(r.realised_usd_month) || 0), 0);
   const verified = rows.filter((r) => ["realised", "partial", "none", "increase"].includes(r.verdict)).length;
-  return { approved: rows.length, verified, pending: rows.filter((r) => !r.verdict || r.verdict === "too_early").length, claimed_usd_month: Math.round(claimed), realised_usd_month: Math.round(realised), rows, min_days_after: MIN_DAYS_AFTER };
+  return { approved: rows.length, actioned: rows.length, verified, pending: rows.filter((r) => !r.verdict || r.verdict === "too_early").length, claimed_usd_month: Math.round(claimed), realised_usd_month: Math.round(realised), rows, min_days_after: MIN_DAYS_AFTER };
 }
 export { addDays };
