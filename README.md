@@ -63,6 +63,13 @@ you mark it done when the saving is in place. The checklist remembers which plan
 than inheriting ticks from the old plan. The search box takes an id (`#123` or `123`) and finds the row in any
 status, so a recommendation from a link or an agent answer opens even when the list is on another filter.
 
+The detail's "Affected resources" lists every resource the item touches as a link into its Inventory tab
+(opened in a new tab): the resource column split up when the agent grouped several ids, each resolved
+against the inventory for its name and kind (`src/affected.ts`, returned as `affected` by
+`GET /api/recommendations/:id`). Ids and inventory names that appear only in the title or the rationale
+("Right-size two boxes: Hive and swarmPExsmg" with one id in the resource column) are listed apart as "also
+named", because the rationale also names what the agent ruled out.
+
 ## Local run
 
 Prerequisites: Node 22, the `steampipe` service running with the `aws` plugin installed, `powerpipe` on PATH.

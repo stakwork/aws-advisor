@@ -81,6 +81,21 @@ export function recMatches(r: { id: number; title: string | null; resource: stri
   return [r.title, r.resource, r.resource_name].some((v) => String(v || "").toLowerCase().includes(q.text));
 }
 
+/**
+ * ARN, path or prefixed id → the bare identifier every source can agree on: `arn:aws:rds:…:cluster:foo`,
+ * `rds:foo`, `cluster:foo` and `foo` are all `foo`. The agent writes ARNs and `kind:id` forms, the rules use the
+ * short Steampipe identifier; they must meet in one recommendation, one decision and one impact row.
+ */
+const KIND_PREFIX = /^(db|cluster|instance|volume|snapshot|function|log-group|rds|ec2|elasticache|lambda):/;
+export function shortResourceId(resource: string | null | undefined): string | null {
+  if (!resource) return null;
+  const r = resource.trim();
+  if (!r.startsWith("arn:")) return r.replace(KIND_PREFIX, "") || r;
+  const tail = r.split(":").slice(5).join(":");
+  const seg = tail.split("/").pop() || tail;
+  return seg.replace(KIND_PREFIX, "") || r;
+}
+
 export interface RecLike { id: number; source: string; rule: string; resource: string | null; action_type: string; status: string; est_monthly_saving: number | null; confidence: number | null; updated_at: string }
 export interface MergedRef { id: number; source: string; rule: string; est_monthly_saving: number | null; confidence: number | null }
 export type MergedRec<T extends RecLike> = T & { merged: MergedRef[]; sources: string[]; merged_ids: number[] };
@@ -96,8 +111,8 @@ const bySource = (a: string, b: string) => (SOURCE_ORDER.indexOf(a) + 1 || 99) -
 export function mergeRecommendations<T extends RecLike>(rows: T[]): MergedRec<T>[] {
   const groups = new Map<string, T[]>();
   for (const r of rows) {
-    // Sources name the same thing differently (ARN vs id); merge on the last segment so they meet.
-    const rid = r.resource ? (r.resource.startsWith("arn:") ? (r.resource.split(":").slice(5).join(":").split("/").pop() || r.resource).replace(/^(db|cluster|instance|volume|snapshot|function):/, "") : r.resource) : null;
+    // Sources name the same thing differently (ARN, `rds:id`, bare id); merge on the bare id so they meet.
+    const rid = shortResourceId(r.resource);
     const key = rid ? `${r.status}|${r.action_type}|${rid}` : `id:${r.id}`;
     const g = groups.get(key);
     if (g) g.push(r); else groups.set(key, [r]);

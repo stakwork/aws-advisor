@@ -3,16 +3,10 @@
  * the rules use the short identifier the Steampipe tables expose; both must merge into one recommendation.
  */
 import { db } from "./db.js";
+import { shortResourceId } from "./paging.js";
 
-/** ARN or path → the last segment (`arn:aws:rds:us-east-1:1234:db:foo` → `foo`, `arn:...:instance/i-1` → `i-1`). */
-export function shortResourceId(resource: string | null | undefined): string | null {
-  if (!resource) return null;
-  const r = resource.trim();
-  if (!r.startsWith("arn:")) return r;
-  const tail = r.split(":").slice(5).join(":");
-  const seg = tail.split("/").pop() || tail;
-  return seg.replace(/^(db|cluster|instance|volume|snapshot|function|log-group):/, "") || r;
-}
+/** ARN, path or `kind:id` → the bare id; the pure helper lives in src/paging.ts so the list merge uses the same one. */
+export { shortResourceId };
 
 /** Cluster-level actions must be keyed by the cluster even when the source named a member instance. */
 export function canonicalResource(resource: string | null | undefined, actionType: string): string | null {

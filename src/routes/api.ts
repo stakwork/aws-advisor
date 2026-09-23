@@ -31,6 +31,7 @@ import { jevStats, listJevCalls } from "../jev.js";
 import { reopenAlert } from "../triage.js";
 import { mirrorAlertsInBackground } from "../graph_mirror.js";
 import { resourceRole } from "../roles.js";
+import { affectedResources } from "../affected.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
 import { describeError } from "../permissions.js";
 
@@ -293,10 +294,11 @@ api.get("/recommendations", (req, res) => {
 });
 
 api.get("/recommendations/:id", (req, res) => {
-  const row = db.prepare("select * from recommendations where id = ?").get(req.params.id) as { resource: string | null } | undefined;
+  const row = db.prepare("select * from recommendations where id = ?").get(req.params.id) as { resource: string | null; resource_name: string | null; title: string | null; rationale: string | null } | undefined;
   if (!row) return res.status(404).json({ error: "not found" });
-  // Jev's role for the resource (see src/roles.ts), when it has one on file.
-  res.json({ ...row, resource_role: row.resource ? resourceRole(row.resource) : null });
+  // Jev's role for the resource (see src/roles.ts), when it has one on file; the resources it touches as
+  // inventory links (src/affected.ts): the resource column split up, and what the text names besides.
+  res.json({ ...row, resource_role: row.resource ? resourceRole(row.resource) : null, affected: affectedResources(row) });
 });
 
 api.post("/recommendations/:id/decision", (req, res) => {
