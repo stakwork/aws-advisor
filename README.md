@@ -88,7 +88,7 @@ advisor (or mount the same files into its container).
 | Alerts | every watcher alert (open, acknowledged or all) with Jev's triage (kind, severity, expected probability, auto-acknowledged by Jev), expandable to its details (top receivers table for NAT alerts) and its incident: cause, confidence, episode cost, run-rate, evidence, fixes linking to their recommendations | investigate, poll result, retry, acknowledge, reopen (undo) |
 | Run detail | live log, findings by control, what changed vs the previous run, agent runs for this collection with a live event stream | send findings to agent, watch, poll result |
 | Findings | every alarm from the benchmarks and custom queries, filterable by control, searchable | |
-| Inventory | EC2 / RDS / ElastiCache / Lambda / EBS / S3 tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, and links to the resource's findings and recommendations; gone resources on request | refresh now, probe (SSM-online Linux instances) |
+| Inventory | EC2 / RDS / ElastiCache / Lambda / EBS / S3 / Route 53 tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, the domains that reach the resource, and links to the resource's findings and recommendations; gone resources on request. The Route 53 tab lists every record with what it leads to in this account (or that it is dangling, or outside AWS) | refresh now, probe (SSM-online Linux instances) |
 | Recommendations | ranked list with saving, tier, confidence and source; sticky detail panel with rationale, evidence and probe data | approve, reject with reason, snooze, mark done, reopen, probe (idle instances) |
 | Settings | AWS credentials (mode picker: access keys, AWS profile, instance / default chain, each with an optional role to assume; save and test checks Steampipe and the SDK side), permissions (what the credentials should be, the SSM probe document and its commands, per-capability check results, missing actions seen anywhere in the app with when and where, the IAM policy JSON that fixes them), benchmark toggles, agent configuration, Jev (enabled, calls and tokens today, last error), dev API token | save and test, remove, check permissions |
 
@@ -424,6 +424,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
         "cloudfront:List*", "cloudfront:Get*",
         "route53:List*", "route53:Get*",
+        "elasticbeanstalk:DescribeEnvironments",
         "redshift:Describe*",
         "elasticmapreduce:List*", "elasticmapreduce:Describe*",
         "apigateway:GET",
@@ -644,6 +645,7 @@ bearer token (unset = open, like `API_TOKEN`). All tools are read-only:
 | `recommendation_history` | earlier recommendations and decisions for a resource or rule |
 | `findings_for_resource` | findings that mention a resource, and which earlier runs saw it |
 | `instance_inventory` | the EC2 inventory snapshot (name, type, state, SSM status, 30-day CPU, probe memory, EBS GB, list price, open recs, findings), filterable by state / SSM status / search, 200-row cap |
+| `domain_inventory` | the Route 53 snapshot: every record with where it leads in this account (`linked` with the resources reached, `unmatched` for AWS names the account does not have, `external`, `none`), filterable by search, zone, state or type; or one resource's domains by kind and id |
 | `instance_probe` | runs the SSM probe below and returns the parsed JSON |
 | `nat_attribution` | instances in a NAT gateway's VPC ranked by NetworkIn/NetworkOut over the last 1 to 24 hours (what the watcher attaches to a NAT alert as `top_receivers`) |
 | `alert_context` | one watcher alert with its parsed details, the watcher samples for the same resource over the last N hours, and the incidents already investigated for it |
@@ -914,7 +916,8 @@ Each row keeps the denormalised columns used for filtering and sorting plus a `s
 `first_seen` / `last_seen`. A resource the refresh no longer sees keeps its `last_seen` and gets `gone = 1`, so
 terminated instances remain visible as history ("include gone" on the page). The refresh runs at the end of every
 collection run and after every watcher sample (it is a few cheap queries; the SSM status is therefore never older
-than `WATCH_CRON`), and by hand with `POST /api/inventory/refresh` or the "Refresh now" button.
+than `WATCH_CRON`), and by hand with `POST /api/inventory/refresh` or the "Refresh now" button. The Route 53 links
+(below) ride along with the run and the button only: they read every zone's records and one URL config per Lambda function.
 
 Prices come from the same pricing SQL the MCP `price_lookup` tool uses (`src/prices.ts`) and are cached in the
 `prices` table by kind, SKU, region and engine (Linux / Windows for EC2, engine plus Multi-AZ or I/O-Optimized for
@@ -962,6 +965,55 @@ part to IA would save. Every hydrated column of `aws_s3_bucket` is a separate S3
 so a denied one (`s3:GetBucketVersioning`, `s3:GetBucketPolicyStatus`, `s3:GetLifecycleConfiguration`) drops
 that column and the refresh continues, reporting the missing action; the affected fields show as unknown rather
 than as zero.
+
+### Route 53: domains linked to resources
+
+The Route 53 tab (`src/route53_inventory.ts`, `GET /api/inventory/route53?q&sort&gone&zone&link&type`,
+`GET /api/inventory/route53/zones`, `POST /api/inventory/route53/refresh`; refreshed at the end of every
+collection run and by the Refresh button, not by the half-hourly watcher) lists every hosted zone and every
+record in it, and follows each record to what serves it inside this account:
+
+- an **alias or CNAME** to a load balancer (`aws_ec2_application_load_balancer`, `..._network_...`, `..._classic_...`)
+  links the balancer *and the instances behind it* (target groups' instance and IP targets, the classic balancer's
+  instance list); to a CloudFront distribution, the distribution and its origins, resolved one hop further (an S3
+  bucket, a balancer and its instances); to an RDS instance or Aurora cluster endpoint, an ElastiCache node,
+  configuration or replication-group endpoint, an EC2 public or private DNS name, a Lambda function URL, an API
+  Gateway custom domain, an S3 website endpoint (the bucket in the host, or the record's own name for the plain
+  `s3-website-<region>.amazonaws.com` alias), or another record in the account's zones (an apex alias to `www`,
+  a CNAME chain), which is followed in turn;
+- an **A / AAAA address** is matched against Elastic IPs (to their instance, or through the network interface to a
+  NAT gateway or a balancer), instance public and private addresses, and every network interface's addresses
+  (an RDS, ElastiCache, Lambda, container or VPC endpoint interface is named by its description). An address
+  nothing here holds is checked against AWS's published EC2 ranges (`ip-ranges.amazonaws.com`, fetched once a
+  day and kept in `settings`): inside them it is **unmatched**, a terminated instance's or a released Elastic
+  IP's address that the record still serves, with the region; outside them it is external;
+- an alias to an **Elastic Beanstalk** environment's CNAME (`aws_elastic_beanstalk_environment`, needs
+  `elasticbeanstalk:DescribeEnvironments`) links the environment and follows its endpoint to the balancer and
+  instances behind it;
+- **NS, SOA, MX, TXT, CAA** and the other records that name no resource are classified for what they are: zone
+  delegation, mail (SES inbound, or the provider), SPF, DMARC, ACM certificate validation, SES DKIM and
+  verification, ACME challenges, ownership verification.
+
+Record names come back from Route 53 with octal escapes (`\052` for `*`); they are decoded, so a wildcard
+shows as `*.example.com`. Each record gets a `link_state`: **linked** (a resource here, with `links` listing them, hop 1 the direct target,
+hop 2 what it fronts), **unmatched** (an AWS-hosted name this account does not have, `*.elb.amazonaws.com`,
+`*.cloudfront.net`, an S3 website bucket that does not exist...: deleted, so a dangling record that an S3 or ELB
+name lets a stranger claim, or a resource in another account, which the advisor cannot see), **external**
+(outside AWS, with well-known providers named: Cloudflare, Netlify, Vercel, Heroku, Google, Shopify...), or
+**none**. The tiles count them; the filters pick a zone or a state; the detail shows the values, routing policy
+(weight, failover, geolocation, latency, set identifier), health check and the chain of resources, each linked to
+its inventory row. The other way round, every EC2, RDS, ElastiCache, Lambda and S3 detail has a **Domains** group
+with the records that reach it, directly or via a balancer or distribution (`GET /api/inventory/route53/resource/:kind/:id`;
+the list endpoints carry `domains` per row). The agent gets the same through the `domain_inventory` MCP tool.
+
+Zones are priced at list: 0.50 USD a month each for the first 25, 0.10 after, plus 0.40 USD per million queries
+from 30 days of the `DNSQueries` metric (us-east-1; alias queries to AWS resources are free, so the figure is a
+ceiling). The index is built from the inventory tables already refreshed (EC2, RDS, S3, Lambda) plus a dozen
+Steampipe lookups (`aws_vpc_eip`, `aws_ec2_network_interface`, the balancer and target group tables,
+`aws_cloudfront_distribution`, `aws_rds_db_cluster`, `aws_elasticache_cluster` and `_replication_group`,
+`aws_lambda_function` URL configs, `aws_api_gateway_domain_name` and `_v2_`); each lookup fails on its own, so a
+missing permission drops one kind of link and reports the action, never the refresh. The resolver is pure
+(`resolveRecord`, `makeResolver`) and `src/__tests__/route53.test.ts` walks every kind of target.
 
 ### Playbooks and the Graviton rule
 
@@ -1634,7 +1686,7 @@ What each one is for (✎ = also editable in Settings):
 - `POST /api/instances/:id/probe`, `GET /api/instances/:id/metrics`, `GET /api/instances/:id/timeseries?hours=`, `GET /api/instances/:id/history?days=`, `POST /api/history/rollup?days=`, `GET /api/probe/document` (the SSM document for `aws ssm create-document`)
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
-- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`
+- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `GET /api/inventory/route53?q&sort&gone&zone&link&type`, `GET /api/inventory/route53/zones`, `GET /api/inventory/route53/resource/:kind/:id`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`, `POST /api/inventory/route53/refresh`
 - `GET /api/logs?limit=`, `POST /api/logs/refresh`, `GET /api/trail?hours=`, `POST /api/trail/refresh` (see [CloudWatch Logs and CloudTrail](#cloudwatch-logs-and-cloudtrail))
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
@@ -1650,7 +1702,7 @@ SQLite (`DATA_DIR/advisor.db`): `settings`, `runs`, `findings`, `metrics`, `reco
 (`kind` findings or incident, linked to a run or an alert), `run_changes`, `watch_samples`, `alerts`,
 `incidents` (alert id, request id, status pending | completed | failed, cause, confidence, evidence, episode
 and run-rate cost, fixes with their recommendation ids, raw result, error), `learnings`, `instance_metrics`,
-`inventory_ec2`, `inventory_rds`, `inventory_elasticache`, `prices`, `concepts`, `permission_issues` (one row per
+`inventory_ec2`, `inventory_rds`, `inventory_elasticache`, `inventory_route53_zone`, `inventory_route53_record` and `inventory_route53_link` (one row per resource a record leads to, with the hop), `prices`, `concepts`, `permission_issues` (one row per
 missing IAM action: service, the contexts it was seen in, first and last seen, count, last message; cleared for an
 action once a check proves it granted), `jev_calls` (every Jev call: purpose, state hash, questions, answers, model,
 tokens, latency, error), `resolutions` (tailored resolutions per recommendation, see above) and `resource_roles` (Jev's role, confidence and protected probability per resource, with the

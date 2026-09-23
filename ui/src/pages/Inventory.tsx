@@ -6,10 +6,10 @@ import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3", "route53"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", ebs: "EBS", s3: "S3" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", ebs: "EBS", s3: "S3", route53: "Route 53" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name", route53: "id" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const gb = (v: number | null | undefined) => (v == null ? "—" : `${Number(v).toLocaleString()} GB`);
@@ -52,6 +52,26 @@ const Tags = ({ tags }: { tags: Record<string, string> | null | undefined }) => 
   );
 };
 
+/** Where a Route 53 link lands in the inventory: the tab and id, or nothing for kinds the inventory does not hold (load balancers, distributions, NAT gateways). */
+const LINK_TAB: Record<string, Tab> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", s3: "s3", lambda: "lambda" };
+const LINK_KIND: Record<string, string> = { ec2: "instance", rds: "RDS", rds_cluster: "RDS cluster", elasticache: "ElastiCache", elasticache_group: "ElastiCache group", s3: "S3 bucket", lambda: "Lambda", alb: "ALB", nlb: "NLB", clb: "classic LB", lb: "load balancer", cloudfront: "CloudFront", nat: "NAT gateway", eip: "Elastic IP", eni: "interface", apigw: "API Gateway", beanstalk: "Beanstalk" };
+const ResourceLink = ({ l }: { l: { kind: string; id: string; name?: string | null; state?: string | null } }) => {
+  const tab = LINK_TAB[l.kind]; const label = l.name && l.name !== l.id ? `${l.name} (${l.id})` : l.id;
+  const stateNote = l.state && !["running", "available", "active", "Deployed", "in-use"].includes(l.state) ? <span className="ml-1 text-amber-300">{l.state}</span> : null;
+  return <span className="inline-flex items-center gap-1 text-sm"><span className="text-xs text-zinc-500">{LINK_KIND[l.kind] || l.kind}</span>{tab ? <Link className="hover:underline" to={`/inventory?tab=${tab}&id=${encodeURIComponent(l.id)}`}>{label}</Link> : <span>{label}</span>}{stateNote}</span>;
+};
+
+/** The Route 53 records that reach one resource, directly (hop 1) or through a load balancer or distribution (hop 2+). */
+const Domains = ({ list, empty = "No Route 53 record in this account points here." }: { list: any[] | null | undefined; empty?: string }) => (
+  <Group title="Domains">
+    {!list?.length ? <div className="text-sm text-zinc-500">{empty}</div> : (
+      <ul className="space-y-0.5 text-sm">
+        {list.map((d: any, i: number) => <li key={`${d.name}-${d.type}-${i}`} className="flex flex-wrap items-center gap-2"><Link className="font-mono text-xs hover:underline" to={`/inventory?tab=route53&zone=${encodeURIComponent(d.zone_id || d.zone_name)}&id=${encodeURIComponent(d.id)}`}>{d.name}</Link><span className="text-xs text-zinc-500">{d.type}{d.alias ? " alias" : ""}</span>{d.hop > 1 ? <span className="text-xs text-zinc-500">via {d.summary?.split(" → ")[0] || "a load balancer"}</span> : null}</li>)}
+      </ul>
+    )}
+  </Group>
+);
+
 /** Links to the Findings and Recommendations pages filtered on one resource, with the counts the inventory stored. */
 const Related = ({ id, recs, findings, list }: { id: string; recs: number; findings: number; list?: any[] }) => (
   <Group title="Findings and recommendations">
@@ -75,7 +95,10 @@ export default function Inventory() {
   const ssm = params.get("ssm") || "";
   const sort = params.get("sort") || "";
   const gone = params.get("gone") === "1";
+  const zone = params.get("zone") || "";
+  const link = params.get("link") || "";
   const [q, setQ] = useState(params.get("q") || "");
+  const [zones, setZones] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [rows, setRows] = useState<any[] | null>(null);
   const [detail, setDetail] = useState<any>(null);
@@ -103,6 +126,7 @@ export default function Inventory() {
     setRows(null);
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
+    if (tab === "route53") { if (zone) qs.set("zone", zone); if (link) qs.set("link", link); }
     if (params.get("q")) qs.set("q", params.get("q")!);
     if (sort) qs.set("sort", sort);
     if (gone) qs.set("gone", "1");
@@ -116,7 +140,8 @@ export default function Inventory() {
   };
 
   useEffect(() => { loadSummary(); }, []);
-  useEffect(() => { loadRows(); }, [tab, state, ssm, sort, gone, params.get("q")]);
+  useEffect(() => { if (tab === "route53") api("/inventory/route53/zones").then(setZones).catch(() => setZones([])); }, [tab, summary?.refreshed_at]);
+  useEffect(() => { loadRows(); }, [tab, state, ssm, sort, gone, zone, link, params.get("q")]);
   useEffect(() => { loadDetail(); setProbe({ busy: false, error: "" }); }, [tab, selectedId, rows]);
 
   const refresh = async () => {
@@ -149,7 +174,7 @@ export default function Inventory() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">Inventory</h1>
-          <div className="text-sm text-zinc-500">{s?.refreshed_at ? <>Snapshot from {when(s.refreshed_at)} · refreshed after every run and every watcher sample</> : "No snapshot yet: start a run, or refresh now."}</div>
+          <div className="text-sm text-zinc-500">{s?.refreshed_at ? <>Snapshot from {when(s.refreshed_at)} · {tab === "route53" ? "DNS links refreshed after every run and by Refresh now (not by the watcher)" : "refreshed after every run and every watcher sample"}</> : "No snapshot yet: start a run, or refresh now."}</div>
         </div>
         <Button variant="ghost" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</Button>
       </div>
@@ -205,6 +230,15 @@ export default function Inventory() {
           <Stat label="Public" value={inv.public_unknown && !inv.public ? "?" : inv.public} hint={inv.public ? "bucket policy allows public access" : inv.public_unknown ? "unknown: grant s3:GetBucketPolicyStatus" : "none"} />
         </div>
       )}
+      {tab === "route53" && inv && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <Stat label="Hosted zones" value={inv.zones} hint={`${inv.private_zones ? `${inv.private_zones} private · ` : ""}${inv.total} records${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
+          <Stat label="Linked" value={inv.linked} hint="lead to a resource in this account" />
+          <Stat label="Unmatched" value={inv.unmatched} hint={inv.unmatched ? "AWS-hosted names this account does not have: deleted (dangling) or another account's" : "no dangling records"} />
+          <Stat label="Outside AWS" value={inv.external} hint={`${inv.none} name nothing (NS, SOA, TXT, MX…)`} />
+          <Stat label="At list / month" value={usd(inv.monthly_usd, 2)} hint={`0.50 per zone${inv.queries_30d ? ` · ${(Number(inv.queries_30d) / 1e6).toFixed(2)}M queries in 30 days` : ""}${inv.empty_zones ? ` · ${inv.empty_zones} zone${inv.empty_zones === 1 ? "" : "s"} with no records` : ""}`} />
+        </div>
+      )}
       {tab === "lambda" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Stat label="Functions" value={inv.total} hint={`${inv.active} invoked in 30 days${inv.gone ? ` · ${inv.gone} gone` : ""} · ${inv.arm} on arm64`} />
@@ -225,7 +259,17 @@ export default function Inventory() {
             </select>
           </>
         )}
-        <form onSubmit={(e) => { e.preventDefault(); set({ q }); }}><input placeholder={tab === "ec2" ? "search name, id, type or IP" : "search"} value={q} onChange={(e) => setQ(e.target.value)} className="w-64" /></form>
+        {tab === "route53" && (
+          <>
+            <select value={zone} onChange={(e) => set({ zone: e.target.value, id: null })}>
+              <option value="">All zones</option>{zones.map((z: any) => <option key={z.zone_id} value={z.zone_id}>{z.name}{z.private ? " (private)" : ""} · {z.records}</option>)}
+            </select>
+            <select value={link} onChange={(e) => set({ link: e.target.value, id: null })}>
+              <option value="">Any target</option><option value="linked">linked to a resource here</option><option value="unmatched">unmatched (dangling?)</option><option value="external">outside AWS</option><option value="none">names nothing</option>
+            </select>
+          </>
+        )}
+        <form onSubmit={(e) => { e.preventDefault(); set({ q }); }}><input placeholder={tab === "ec2" ? "search name, id, type or IP" : tab === "route53" ? "search name, target or resource" : "search"} value={q} onChange={(e) => setQ(e.target.value)} className="w-64" /></form>
         <label className="flex items-center gap-1 text-sm text-zinc-400"><input type="checkbox" checked={gone} onChange={(e) => set({ gone: e.target.checked ? "1" : null })} /> include gone</label>
         {rows && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
       </div>
@@ -260,6 +304,11 @@ export default function Inventory() {
                   <SortTh col="objects" className="text-right">Objects</SortTh><SortTh col="lifecycle_rules" className="text-right">Lifecycle</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="created">Created</SortTh>
                 </tr></thead>
               )}
+              {tab === "route53" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="name">Record</SortTh><SortTh col="type">Type</SortTh><SortTh col="target">Value</SortTh><SortTh col="link_state">Leads to</SortTh><SortTh col="zone_name">Zone</SortTh><SortTh col="ttl" className="text-right">TTL</SortTh>
+                </tr></thead>
+              )}
               {tab === "lambda" && (
                 <thead className="bg-zinc-900"><tr>
                   <SortTh col="name">Function</SortTh><SortTh col="runtime">Runtime</SortTh><SortTh col="memory_mb" className="text-right">Memory</SortTh><SortTh col="invocations_month" className="text-right">Invocations / mo</SortTh>
@@ -285,6 +334,7 @@ export default function Inventory() {
                         : tab === "lambda" ? <LambdaDetail d={detail} />
                         : tab === "ebs" ? <EbsDetail d={detail} />
                         : tab === "s3" ? <S3Detail d={detail} />
+                        : tab === "route53" ? <Route53Detail d={detail} />
                         : <CacheDetail d={detail} />}
                     </DetailCell></td></tr>
                   ) : null;
@@ -342,6 +392,19 @@ export default function Inventory() {
                       <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
                     </tr>{detailRow}
                   </Fragment>);
+                  if (tab === "route53") {
+                    const first = (r.links || []).find((l: any) => l.hop === 1) || r.links?.[0];
+                    return (<Fragment key={id}>
+                      <tr onClick={() => set({ id })} className={cls}>
+                        <Td><div className="flex items-center gap-2"><span className="font-mono text-xs text-zinc-100">{r.name}</span>{r.gone ? <Badge>gone</Badge> : null}{r.routing?.set_identifier ? <span className="text-xs text-zinc-500">{r.routing.set_identifier}</span> : null}</div></Td>
+                        <Td className="whitespace-nowrap text-xs">{r.type}{r.alias ? <span className="text-zinc-500"> alias</span> : null}</Td>
+                        <Td className="max-w-xs"><div className="truncate font-mono text-xs text-zinc-400" title={r.alias ? r.alias_target : (r.values || []).join("\n")}>{r.alias ? r.alias_target : (r.values || []).slice(0, 2).join(", ")}{!r.alias && (r.values || []).length > 2 ? ` +${r.values.length - 2}` : ""}</div></Td>
+                        <Td className="max-w-md"><div className="flex items-center gap-2"><Badge>{r.link_state}</Badge><span className={`min-w-0 truncate text-xs ${r.link_state === "unmatched" ? "text-red-300" : r.link_state === "linked" ? "text-zinc-200" : "text-zinc-500"}`} title={r.summary}>{first && LINK_TAB[first.kind] ? <Link className="hover:underline" onClick={(e) => e.stopPropagation()} to={`/inventory?tab=${LINK_TAB[first.kind]}&id=${encodeURIComponent(first.id)}`}>{r.summary}</Link> : r.summary}</span></div></Td>
+                        <Td className="whitespace-nowrap text-xs text-zinc-400">{r.zone_name}</Td>
+                        <Td className="text-right text-xs text-zinc-400">{r.alias ? "—" : r.ttl}</Td>
+                      </tr>{detailRow}
+                    </Fragment>);
+                  }
                   if (tab === "lambda") return (<Fragment key={id}>
                     <tr onClick={() => set({ id })} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.arm ? <Badge>arm64</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{r.region}</div></Td>
@@ -379,7 +442,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 9, s3: 8 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 9, s3: 8, route53: 6 };
 
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
 function DetailCell({ id, onClose, children }: { id: string; onClose: () => void; children: ReactNode }) {
@@ -550,6 +613,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
 
       <Group title="Tags"><Tags tags={s.tags} /></Group>
 
+      <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
       <Related id={d.instance_id} recs={d.open_recs} findings={d.findings_count ?? 0} list={d.recommendations} />
       {d.findings_run_id && d.findings?.length > 0 && (
         <ul className="mt-1 space-y-0.5 text-sm">{d.findings.map((f: any) => <li key={f.id} className="flex gap-2"><Badge>{f.status}</Badge><span className="min-w-0 truncate" title={f.reason || ""}>{f.control_title || f.control_id}{f.reason ? `: ${f.reason}` : ""}</span></li>)}</ul>
@@ -609,6 +673,7 @@ function RdsDetail({ d }: { d: any }) {
         <div className="text-sm"><RoleLine role={d.role} />{d.role?.updated_at && <span className="ml-2 text-xs text-zinc-500">classified {when(d.role.updated_at)}</span>}</div>
       </Group>
       <Group title="Tags"><Tags tags={s.tags} /></Group>
+      <Domains list={d.domains} empty="No Route 53 record names this endpoint (applications use the RDS endpoint directly)." />
       <Related id={d.db_instance_identifier} recs={d.open_recs} findings={d.findings} />
     </>
   );
@@ -646,8 +711,40 @@ function S3Detail({ d }: { d: any }) {
             <tbody>{Object.entries(sizes).sort((a, b) => b[1] - a[1]).map(([c, gb]) => <tr key={c} className="border-t border-zinc-800/60"><td className="py-0.5">{c.replace(/Storage$/, "")}</td><td className="text-right">{gb.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td><td className="text-right font-mono text-xs">{PRICE[c] ?? "—"}</td><td className="text-right">{usd(gb * (PRICE[c] ?? 0.023), 2)}</td></tr>)}</tbody></table>
         )}
       </Group>
+      <Domains list={d.domains} empty="No Route 53 record serves this bucket as a website or a CloudFront origin." />
       <Group title="Lifecycle">
         <Dl rows={[["Rules", d.lifecycle_rules ? `${d.lifecycle_rules}` : <span className={d.standard_gb > 20 ? "text-amber-300" : ""}>none{d.standard_gb > 20 ? `: ${Number(d.standard_gb).toFixed(0)} GB sit in Standard; a transition to Infrequent Access after 30 days would save about ${usd(d.standard_gb * (0.023 - 0.0125))}/month if rarely read` : ""}</span>], ["Objects", d.objects != null ? Number(d.objects).toLocaleString() : null], ["Metrics day", d.metric_day]]} />
+      </Group>
+    </>
+  );
+}
+
+function Route53Detail({ d }: { d: any }) {
+  const links: any[] = d.links || []; const routing = d.routing || {};
+  const routingRows: [string, ReactNode][] = Object.entries(routing).map(([k, v]) => [k.replace(/_/g, " "), typeof v === "object" ? JSON.stringify(v) : String(v)]);
+  return (
+    <>
+      <h2 className="break-all font-mono text-base font-medium text-zinc-100">{d.name}</h2>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.type}</Badge>{d.alias ? <Badge>alias</Badge> : null}<Badge>{d.link_state}</Badge>{d.gone ? <Badge>gone</Badge> : null}<span className="text-zinc-500">zone {d.zone_name}</span></div>
+      <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <Group title="Record">
+        <Dl rows={[
+          ["Alias target", d.alias ? <Mono>{d.alias_target}</Mono> : null],
+          ["Values", !d.alias && d.values?.length ? <ul className="space-y-0.5">{d.values.map((v: string, i: number) => <li key={i} className="break-all font-mono text-xs">{v}</li>)}</ul> : null],
+          ["TTL", d.alias ? "alias records take the target's TTL" : d.ttl != null ? `${d.ttl} s` : null],
+          ["Health check", d.health_check_id && <Mono>{d.health_check_id}</Mono>],
+          ...routingRows,
+        ]} />
+      </Group>
+      <Group title="Leads to">
+        <div className={`text-sm ${d.link_state === "unmatched" ? "text-red-300" : "text-zinc-200"}`}>{d.summary}</div>
+        {d.link_state === "unmatched" && <div className="mt-1 text-xs text-zinc-400">A record that names an AWS resource this account no longer has serves nothing, and an S3 website or ELB name can be claimed by a stranger (subdomain takeover). Delete the record, or recreate the resource. If the target lives in another AWS account, that is fine: the advisor only sees this one.</div>}
+        {d.link_state === "external" && <div className="mt-1 text-xs text-zinc-400">Points outside AWS: nothing in this account serves it, so no AWS cost follows from it beyond the zone.</div>}
+        {links.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {links.map((l: any, i: number) => <li key={`${l.kind}:${l.id}:${i}`} className={l.hop > 1 ? "ml-4" : ""}><ResourceLink l={l} />{l.via && l.hop > 1 ? <span className="ml-2 text-xs text-zinc-500">via {l.via}</span> : null}</li>)}
+          </ul>
+        )}
       </Group>
     </>
   );
@@ -678,6 +775,7 @@ function LambdaDetail({ d }: { d: any }) {
           ["Graviton", d.arm ? "already on arm64" : `arm64 would cost ${usd(Number(d.gb_seconds_month) * 0.0000133334 + Number(d.invocations_month) * 0.0000002, 2)} / month at list (20 % less on compute); needs an arm64 build of the function`],
         ]} />
       </Group>
+      <Domains list={d.domains} empty="No Route 53 record reaches this function (a function URL, an API Gateway domain or a load balancer target would)." />
       <Group title="Findings and recommendations">
         <div className="text-sm text-zinc-400">{d.findings ? <Link className="underline" to={`/findings?q=${encodeURIComponent(d.name)}`}>{d.findings} finding{d.findings === 1 ? "" : "s"}</Link> : "no findings"} · {d.open_recs ? <Link className="underline" to={`/recommendations?q=${encodeURIComponent(d.name)}`}>{d.open_recs} open recommendation{d.open_recs === 1 ? "" : "s"}</Link> : "no open recommendations"}</div>
       </Group>
@@ -719,6 +817,7 @@ function CacheDetail({ d }: { d: any }) {
           : <div className="text-sm text-zinc-500">No on-demand price found for {d.node_type} ({d.engine}).</div>}
       </Group>
       <Group title="Tags"><Tags tags={s.tags} /></Group>
+      <Domains list={d.domains} empty="No Route 53 record names this cluster's endpoints." />
       <Related id={d.cache_cluster_id} recs={d.open_recs} findings={d.findings} />
     </>
   );

@@ -24,6 +24,7 @@ import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refresh
 import { listLambda } from "../lambda_inventory.js";
 import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
+import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
 import { jevStats, listJevCalls } from "../jev.js";
@@ -344,7 +345,7 @@ const flag = (v: unknown) => v === "1" || v === "true";
 
 api.post("/inventory/refresh", async (_req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
-  try { res.json(await refreshInventory()); }
+  try { res.json(await refreshInventory({ dns: true })); }
   catch (e: any) { res.status(502).json({ error: e.message }); }
 });
 
@@ -357,15 +358,28 @@ api.get("/inventory/ec2", (req, res) => {
 api.get("/inventory/ec2/:id", (req, res) => {
   const d = ec2Detail(String(req.params.id));
   if (!d) return res.status(404).json({ error: "not found" });
-  res.json({ ...d, role: resourceRole(String(req.params.id)) });
+  res.json({ ...d, role: resourceRole(String(req.params.id)), domains: domainsFor("ec2", String(req.params.id)) });
 });
 
-api.get("/inventory/rds", (req, res) => res.json(listRds({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }).map((r: any) => ({ ...r, role: resourceRole(String(r.db_instance_identifier)) }))));
-api.get("/inventory/elasticache", (req, res) => res.json(listElasticache({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
-api.get("/inventory/lambda", (req, res) => res.json(listLambda({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
+// Every list row carries the Route 53 records that lead to it (directly, or through a load balancer or distribution).
+// A second (kind, column) pair adds the records that name the row's parent: an RDS instance's cluster, a cache node's replication group.
+const withDomains = <T extends Record<string, any>>(rows: T[], ...by: Array<[kind: string, idCol: string]>) => {
+  const maps = by.map(([kind, idCol]) => [domainsByResource(kind), idCol] as const);
+  return rows.map((r) => ({ ...r, domains: maps.flatMap(([m, idCol]) => (r[idCol] ? m.get(String(r[idCol])) || [] : [])) }));
+};
+api.get("/inventory/rds", (req, res) => res.json(withDomains(listRds({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }).map((r: any) => ({ ...r, role: resourceRole(String(r.db_instance_identifier)) })), ["rds", "db_instance_identifier"], ["rds_cluster", "cluster"])));
+api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
+api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
 api.get("/inventory/ebs", (req, res) => res.json(listEbs({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));
-api.get("/inventory/s3", (req, res) => res.json(listS3({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
+api.get("/inventory/s3", (req, res) => res.json(withDomains(listS3({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["s3", "name"])));
 api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await refreshS3Inventory()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+api.get("/inventory/route53", (req, res) => res.json(listRoute53({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), zone: str(req.query.zone), link: str(req.query.link), type: str(req.query.type) })));
+api.get("/inventory/route53/zones", (req, res) => res.json(listRoute53Zones(flag(req.query.gone))));
+api.get("/inventory/route53/resource/:kind/:id", (req, res) => res.json(domainsFor(String(req.params.kind), String(req.params.id))));
+api.post("/inventory/route53/refresh", async (_req, res) => {
+  if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  try { res.json(await refreshRoute53Inventory()); } catch (e: any) { res.status(502).json({ error: e.message }); }
+});
 
 // ---- watcher and alerts -----------------------------------------------------
 let watchInFlight = false;
