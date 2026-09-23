@@ -45,6 +45,8 @@ test("impactFor: the stored series and the medians for an actioned recommendatio
   const ins = db.prepare("insert into recommendations(fingerprint, run_id, source, rule, title, resource, action_type, est_monthly_saving, tier, confidence, rationale, evidence, status, decided_at, decided_by) values (?, 1, 'rules', ?, ?, ?, ?, ?, 'approve', 0.8, '', '{}', ?, ?, 'ui')");
   ins.run("aurora_storage_tier:c1", "aurora_storage_tier", "Move c1 to I/O-Optimized", "c1", "aurora_set_storage_iopt", 467, "done", "2026-09-10 12:00:00");
   ins.run("release_eip:e1", "eip_unattached", "Release 1.2.3.4", "e1", "release_eip", 3.65, "approved", "2026-09-20 12:00:00");
+  // the agent proposed the same switch on the same cluster; one decision covered both
+  ins.run("agent:aurora:c1", "aurora_storage_tier", "Switch c1 to I/O-Optimized storage", "arn:aws:rds:us-east-1:1:cluster:c1", "aurora_set_storage_iopt", 470, "done", "2026-09-10 12:00:00");
   const rows = [...series("2026-08-27", 14, () => 18), ...series("2026-09-10", 12, (i) => (i < 2 ? 12 : 1.4))];
   db.prepare(`insert into verifications(recommendation_id, decided_day, days_after, scope_service, scope_usage, scope_note, verdict, before_usd_day, after_usd_day, realised_usd_month, estimate_usd_month, ratio, applied, note, series)
     values (1, '2026-09-10', 12, 'Amazon Relational Database Service', '%Aurora:%', 'Aurora lines of the whole account', 'realised', 18, 1.4, 498, 467, 1.07, null, '14 days before at 18.00', ?)`).run(JSON.stringify(rows));
@@ -71,8 +73,14 @@ test("impactFor: the stored series and the medians for an actioned recommendatio
   assert.equal(impactFor(99), null);
 
   const sum = verificationSummary();
-  assert.equal(sum.actioned, 2);
+  assert.equal(sum.actioned, 2, "the duplicate is the same decision");
   assert.equal(sum.rows.map((r: any) => r.status).join(","), "approved,done");
-  assert.equal(sum.realised_usd_month, 498);
+  const aurora = sum.rows.find((r: any) => r.action_type === "aurora_set_storage_iopt");
+  assert.equal(aurora.id, 3, "the higher estimate is primary");
+  assert.deepEqual(aurora.merged_ids, [3, 1]);
+  assert.equal(sum.claimed_usd_month, 474, "470 + 3.65, not 470 + 467 + 3.65");
+  assert.equal(aurora.verdict, "realised", "the member that was checked lends the decision its verdict");
+  assert.equal(aurora.verified_id, 1);
+  assert.equal(sum.realised_usd_month, 498, "counted once");
   assert.equal(sum.pending, 1);
 });

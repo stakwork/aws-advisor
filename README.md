@@ -32,7 +32,7 @@ approved items is on the roadmap and will run under its own IAM role, never thro
    go to repo2graph's agent, together with the advisor's MCP fact server so the agent can verify facts, look
    up real prices and read history before answering. It returns schema-shaped recommendations that are imported
    with source `agent`.
-5. **Decide.** In the UI you approve, reject with a reason, snooze or mark done. Every decision is mirrored into
+5. **Decide.** In the UI you approve, reject with a reason, snooze, mark pending (in progress) or mark done. Every decision is mirrored into
    repo2graph's Concept graph (one concept per recommendation under `aws/cost-advisor`) and a rejection is also
    posted to its learnings store, so the agent consults past decisions natively on the next run.
 6. **Watch.** Every 30 minutes a cheap watcher samples instance states, NAT traffic, Savings Plans and EBS
@@ -48,6 +48,20 @@ It records the decision (status, who, when) and moves the item to the approved l
 Approved items are the queue the future executor will read from, restricted to a catalog of tiered actions:
 `auto` (reversible: retention policies, tags, snapshots), `approve` (stop, resize, storage tier changes,
 deletions after a snapshot), `report` (never automated).
+
+### Pending: work in progress, step by step
+
+Many fixes cannot be done in one sitting: a NAT investigation needs VPC flow logs enabled and a week of data
+before the next step, a resize waits for a change window. The detail panel therefore has a step checklist on
+whichever plan it shows (the tailored resolution's plan when there is one, else the playbook's generic steps),
+with a "check again on" date. Ticking the first step of an open or snoozed item moves it to **pending**, its own
+list in the status filter; the row says how far it got ("2 of 6 steps · check again 2026-09-30") and turns amber
+once the follow-up day has come. "Mark pending" does the same without a tick, with the reason field holding what
+you are waiting on. A pending item is left alone by later runs (like an approved one) and is never auto-resolved;
+you mark it done when the saving is in place. The checklist remembers which plan it was ticked on
+(`recommendations.progress`, `src/progress.ts`): running a new tailored resolution starts a fresh checklist rather
+than inheriting ticks from the old plan. The search box takes an id (`#123` or `123`) and finds the row in any
+status, so a recommendation from a link or an agent answer opens even when the list is on another filter.
 
 ## Local run
 
@@ -89,7 +103,7 @@ advisor (or mount the same files into its container).
 | Run detail | live log, findings by control, what changed vs the previous run, agent runs for this collection with a live event stream | send findings to agent, watch, poll result |
 | Findings | every alarm from the benchmarks and custom queries, filterable by control, searchable | |
 | Inventory | EC2 / RDS / ElastiCache / Lambda / EBS / S3 / Route 53 tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, the domains that reach the resource, and links to the resource's findings and recommendations; gone resources on request. The Route 53 tab lists every record with what it leads to in this account (or that it is dangling, or outside AWS) | refresh now, probe (SSM-online Linux instances) |
-| Recommendations | ranked list with saving, tier, confidence and source; sticky detail panel with rationale, evidence and probe data | approve, reject with reason, snooze, mark done, reopen, probe (idle instances) |
+| Recommendations | ranked list with saving, tier, confidence and source, searchable by text or `#id`; sticky detail panel with rationale, evidence, probe data and a step checklist with a follow-up day | approve, reject with reason, snooze, mark pending, mark done, reopen, tick steps, probe (idle instances) |
 | Settings | AWS credentials (mode picker: access keys, AWS profile, instance / default chain, each with an optional role to assume; save and test checks Steampipe and the SDK side), permissions (what the credentials should be, the SSM probe document and its commands, per-capability check results, missing actions seen anywhere in the app with when and where, the IAM policy JSON that fixes them), benchmark toggles, agent configuration, Jev (enabled, calls and tokens today, last error), dev API token | save and test, remove, check permissions |
 
 ## Onboarding: set up AWS access in 10 minutes
@@ -1356,11 +1370,15 @@ for disks. All thresholds are runtime settings under Probe pass.
   `{ total, page, page_size, status, total_saving, recommendations }`. Rows with the same (`resource`, `action_type`)
   in the same status are one entry: the highest `est_monthly_saving` is primary, the others are listed in
   `merged: [{ id, source, rule, est_monthly_saving, confidence }]`, `sources` (`["rules", "agent"]`) and
-  `merged_ids` (all ids, primary first). Sorted by saving desc, nulls last. `q` matches title, resource and name.
+  `merged_ids` (all ids, primary first). Sorted by saving desc, nulls last. `q` matches title, resource and name;
+  `#123` or `123` is an id, matched exactly and across every status (the row's own `status` says which).
 - `POST /api/recommendations/:id/decision` body `{ status, reason?, by?, scope?: "internal" | "generic" }`
   (default internal): same rules as before (a reason is required to reject), stores `decision_scope` next to the
   other decision columns and mirrors the decision into repo2graph's concepts (generic ones under "AWS Cost
   Knowledge" with role-based names, see `src/concepts.ts`).
+- `POST /api/recommendations/:id/progress` body `{ plan: "resolution:<id>" | "playbook:<control id>", total, done: number[], follow_up?: "YYYY-MM-DD" }`
+  stores the step checklist (the whole list every time) and the follow-up day; the first tick on an open or
+  snoozed item sets `status = pending`. `status` accepts `pending` in the decision routes too. → the row.
 - `POST /api/recommendations/decision-batch` body `{ ids, status, reason?, by?, scope? }` applies one decision
   to every id (up to 100) → `{ updated, missing, recommendations }`. The UI uses it for merged entries.
 - `GET /api/recommendations/:id/scope-suggestion?reason=` → `{ suggestion: { scope, confidence } | null }`,
@@ -1718,7 +1736,7 @@ What each one is for (✎ = also editable in Settings):
 - `GET /api/runs`, `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/stream` (SSE), `GET /api/runs/:id/changes`, `POST /api/runs/:id/agent`
 - `GET /api/agent-runs/:requestId`, `POST /api/agent-runs/:requestId/poll`, `GET /api/agent-runs/:requestId/events` (SSE proxy), `POST /api/agent-callback` (repo2graph's webhook)
 - `GET /api/findings?run_id&control_id&status&q`, `GET /api/playbooks?run_id`, `GET /api/playbooks/:controlId`
-- `GET /api/recommendations?status`, `GET /api/recommendations/:id`, `POST /api/recommendations/:id/decision`, `POST /api/recommendations/:id/resolve`, `GET /api/recommendations/:id/resolution`
+- `GET /api/recommendations?status`, `GET /api/recommendations/:id`, `POST /api/recommendations/:id/decision`, `POST /api/recommendations/:id/progress`, `POST /api/recommendations/:id/resolve`, `GET /api/recommendations/:id/resolution`
 - `GET /api/overview`, `GET /api/alerts?status=open|acknowledged|all` (rows carry `triage`, `acknowledged_by`), `POST /api/alerts/:id/ack`, `POST /api/alerts/:id/reopen` (undo an acknowledgement, Jev's or a person's), `POST|GET /api/watch`, `GET /api/learnings`
 - `GET /api/jev/calls?limit&purpose` (Jev audit trail); `GET /api/inventory/ec2/:id` and `GET /api/recommendations/:id` carry the resource's `role` / `resource_role`
 - `POST /api/alerts/:id/investigate`, `GET /api/alerts/:id/incident`, `GET /api/incidents`, `GET /api/nat/:id/attribution?hours&limit`

@@ -9,6 +9,7 @@ import { db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
+import { mergeRecommendations } from "./paging.js";
 import { DAYS_BEFORE, DailyCost, MIN_DAYS_AFTER, SKIP_DAYS_AFTER_DECISION, Verification, addDays, costScopeFor, verify } from "./verify_math.js";
 
 db.exec(`create table if not exists verifications (
@@ -118,11 +119,23 @@ export function impactFor(recommendationId: number) {
   return { recommendation: rec, verification, series, total, decided_day: v.decided_day, after_from: addDays(v.decided_day, SKIP_DAYS_AFTER_DECISION), actioned: (ACTIONED as readonly string[]).includes(rec.status) };
 }
 
-/** Every actioned recommendation (approved or done) with its latest verdict, plus totals of claimed vs realised. */
+/**
+ * Every decision (approved or done) with its latest verdict, plus totals of claimed vs realised. Rows that propose
+ * the same action on the same resource were one decision (the list merges them and Approve covers all of them),
+ * so they are one row here too, with the primary's estimate; the others are listed under `merged`.
+ */
 export function verificationSummary() {
-  const rows = db.prepare(`select r.id, r.title, r.status, r.action_type, r.resource, r.resource_name, r.est_monthly_saving, r.decided_at, v.verdict, v.realised_usd_month, v.before_usd_day, v.after_usd_day, v.ratio, v.applied, v.days_after, v.note, v.checked_at, v.scope_note
+  const all = db.prepare(`select r.id, r.title, r.status, r.source, r.rule, r.action_type, r.resource, r.resource_name, r.est_monthly_saving, r.confidence, r.updated_at, r.decided_at, v.verdict, v.realised_usd_month, v.before_usd_day, v.after_usd_day, v.ratio, v.applied, v.days_after, v.note, v.checked_at, v.scope_note
     from recommendations r left join verifications v on v.id = (select max(id) from verifications where recommendation_id = r.id)
     where r.status in ('approved', 'done') order by r.decided_at desc`).all() as any[];
+  const VERDICT_FIELDS = ["verdict", "realised_usd_month", "before_usd_day", "after_usd_day", "ratio", "applied", "days_after", "note", "checked_at", "scope_note"] as const;
+  const byId = new Map(all.map((r) => [r.id, r]));
+  // The members share one cost scope, so any member's verdict is the decision's verdict; prefer the primary's when it has one.
+  const rows = mergeRecommendations(all).map((r) => {
+    if (r.verdict) return r;
+    const checked = r.merged_ids.map((id: number) => byId.get(id)).find((m: any) => m?.verdict);
+    return checked ? { ...r, ...Object.fromEntries(VERDICT_FIELDS.map((f) => [f, checked[f]])), verified_id: checked.id } : r;
+  }).sort((a, b) => String(b.decided_at).localeCompare(String(a.decided_at)));
   const claimed = rows.reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0);
   const realised = rows.filter((r) => ["realised", "partial", "none", "increase"].includes(r.verdict)).reduce((s, r) => s + (Number(r.realised_usd_month) || 0), 0);
   const verified = rows.filter((r) => ["realised", "partial", "none", "increase"].includes(r.verdict)).length;

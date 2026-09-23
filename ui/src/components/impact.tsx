@@ -118,7 +118,7 @@ export function ImpactList({ limit = 8 }: { limit?: number }) {
           <li key={r.id} className="flex items-center justify-between gap-3 py-2 text-sm">
             <div className="min-w-0">
               <Link to={`/recommendations?status=${r.status}&id=${r.id}`} className="block truncate hover:underline">{r.title}</Link>
-              <div className="text-xs text-zinc-500">{r.status} {when(r.decided_at)}{r.verdict && r.verdict !== "too_early" && r.verdict !== "not_verifiable" && r.before_usd_day != null ? ` · ${r.before_usd_day.toFixed(2)} → ${r.after_usd_day?.toFixed(2)} USD/day` : r.verdict === "too_early" ? ` · ${r.days_after} of ${v.min_days_after} days` : r.verdict === "not_verifiable" ? " · not measurable on the bill" : " · not checked yet"}</div>
+              <div className="text-xs text-zinc-500">{r.status} {when(r.decided_at)}{r.merged?.length ? ` · one decision for #${r.merged_ids.join(", #")}` : ""}{r.verdict && r.verdict !== "too_early" && r.verdict !== "not_verifiable" && r.before_usd_day != null ? ` · ${r.before_usd_day.toFixed(2)} → ${r.after_usd_day?.toFixed(2)} USD/day` : r.verdict === "too_early" ? ` · ${r.days_after} of ${v.min_days_after} days` : r.verdict === "not_verifiable" ? " · not measurable on the bill" : " · not checked yet"}</div>
             </div>
             <span className="flex shrink-0 items-center gap-2 text-right">
               {r.verdict && !["too_early", "not_verifiable", "no_data"].includes(r.verdict) && <span className={`w-20 font-medium ${verdictTone[r.verdict] || "text-zinc-300"}`}>{r.realised_usd_month != null ? `${r.realised_usd_month < 0 ? "+" : ""}${usd(Math.abs(r.realised_usd_month))}` : "—"}</span>}

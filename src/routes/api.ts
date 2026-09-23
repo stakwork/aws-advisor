@@ -301,7 +301,7 @@ api.get("/recommendations/:id", (req, res) => {
 
 api.post("/recommendations/:id/decision", (req, res) => {
   const { status, reason, by } = req.body || {};
-  if (!["approved", "rejected", "snoozed", "open", "done"].includes(status)) return res.status(400).json({ error: "bad status" });
+  if (!["approved", "rejected", "snoozed", "pending", "open", "done"].includes(status)) return res.status(400).json({ error: "bad status" });
   if (status === "rejected" && !reason) return res.status(400).json({ error: "a reason is required to reject; it feeds the agent's memory" });
   const r = db.prepare("update recommendations set status = ?, decided_at = datetime('now'), decided_by = ?, decision_reason = ?, updated_at = datetime('now') where id = ?")
     .run(status, by || "ui", reason || null, req.params.id);

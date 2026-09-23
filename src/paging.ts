@@ -65,6 +65,22 @@ export function dedupeFindings<T extends FindingLike>(rows: T[]): T[] {
 
 // ---- recommendations --------------------------------------------------------------------------------------
 
+/**
+ * The recommendations search box: "#123" or "123" is an id (the row itself or one merged into it), anything else
+ * is matched against title, resource and resource name. An id query is exact: "12" does not match "#120".
+ */
+export function parseRecQuery(q: string): { id: number | null; text: string } {
+  const t = q.trim();
+  const m = /^#?(\d{1,12})$/.exec(t);
+  return { id: m ? Number(m[1]) : null, text: t.toLowerCase() };
+}
+
+export function recMatches(r: { id: number; title: string | null; resource: string | null; resource_name: string | null }, q: { id: number | null; text: string }): boolean {
+  if (!q.text) return true;
+  if (q.id != null && r.id === q.id) return true;
+  return [r.title, r.resource, r.resource_name].some((v) => String(v || "").toLowerCase().includes(q.text));
+}
+
 export interface RecLike { id: number; source: string; rule: string; resource: string | null; action_type: string; status: string; est_monthly_saving: number | null; confidence: number | null; updated_at: string }
 export interface MergedRef { id: number; source: string; rule: string; est_monthly_saving: number | null; confidence: number | null }
 export type MergedRec<T extends RecLike> = T & { merged: MergedRef[]; sources: string[]; merged_ids: number[] };

@@ -18,6 +18,7 @@ export const Stat = ({ label, value, hint }: { label: string; value: ReactNode; 
 const tone: Record<string, string> = {
   open: "bg-amber-500/15 text-amber-300 border-amber-500/30",
   approved: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+  pending: "bg-indigo-500/15 text-indigo-300 border-indigo-500/30",
   rejected: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
   snoozed: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
   resolved: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
