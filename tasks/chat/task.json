@@ -1,0 +1,24 @@
+{
+  "kind": "chat",
+  "title": "Recommendation chat",
+  "when": "when someone writes in a recommendation's thread, with the recommendation, its latest plan, what happened to each step and the conversation so far",
+  "tools": [
+    "steampipe_query",
+    "instance_history",
+    "baseline",
+    "cloudtrail_changes",
+    "log_groups",
+    "price_lookup",
+    "cloudwatch_metric",
+    "instance_probe",
+    "recommendation_history",
+    "findings_for_resource",
+    "graph_system",
+    "learn_concept"
+  ],
+  "max_turns": 25,
+  "rubric": [
+    { "check": "required", "path": "reply", "label": "a reply is given" }
+  ],
+  "retry": { "on_score_below": 0, "max": 0 }
+}

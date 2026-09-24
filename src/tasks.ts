@@ -17,7 +17,7 @@ const loaded = new Map<PromptKind, TaskDef>();
 
 export function loadTasks(): TaskDef[] {
   if (loaded.size) return [...loaded.values()];
-  for (const kind of ["findings", "incident", "resolution", "observe"] as PromptKind[]) {
+  for (const kind of ["findings", "incident", "resolution", "observe", "chat"] as PromptKind[]) {
     const dir = path.join(TASKS_DIR, kind);
     const meta = JSON.parse(fs.readFileSync(path.join(dir, "task.json"), "utf8"));
     const schema = JSON.parse(fs.readFileSync(path.join(dir, "schema.json"), "utf8"));

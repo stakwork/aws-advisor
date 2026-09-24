@@ -58,18 +58,40 @@ export const EffortBadge = ({ effort }: { effort: string }) => (
   <span className={`inline-block rounded border px-1.5 py-0.5 text-[11px] font-medium ${effort === "low" ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-300" : effort === "medium" ? "border-amber-500/30 bg-amber-500/15 text-amber-300" : "border-red-500/30 bg-red-500/15 text-red-300"}`}>effort {effort}</span>
 );
 
-/** A step checklist: which steps are ticked and how to tick one (see the progress panel on Recommendations). */
-export interface StepChecks { done: Set<number>; toggle: (i: number) => void; busy?: boolean }
+/** What happened to a step (src/progress.ts StepOutcome): it worked, or it failed with the output pasted in. */
+export interface StepOutcome { step: number; state: "worked" | "failed"; note: string; at: string }
+
+/**
+ * A step checklist: which steps are ticked and how to tick one, plus (when outcomes are tracked) what happened to
+ * each and how to record it. A tick means the step worked; "failed" opens a box for the output, which the
+ * re-plan and the thread hand back to the agent (see the progress panel on Recommendations).
+ */
+export interface StepChecks { done: Set<number>; toggle: (i: number) => void; busy?: boolean; outcomes?: Map<number, StepOutcome>; setOutcome?: (i: number, state: "worked" | "failed" | null, note: string) => void }
 
 /** One step of a plan, with a checkbox when it is being tracked. Ticked steps are struck through so the next one stands out. */
 export function Step({ i, checks, children }: { i: number; checks?: StepChecks; children: ReactNode }) {
   const done = checks?.done.has(i) ?? false;
+  const outcome = checks?.outcomes?.get(i) ?? null;
+  const failed = outcome?.state === "failed";
+  const [draft, setDraft] = useState<string | null>(null);
+  const note = draft ?? outcome?.note ?? "";
+  const save = () => { if (checks?.setOutcome && draft !== null && draft !== (outcome?.note ?? "")) checks.setOutcome(i, "failed", draft); setDraft(null); };
   return (
-    <li className={done ? "text-zinc-500" : ""}>
+    <li className={done ? "text-zinc-500" : failed ? "text-zinc-200" : ""}>
       <div className="flex items-start gap-2">
         {checks && <input type="checkbox" className="!mt-1 !w-auto" checked={done} disabled={checks.busy} onChange={() => checks.toggle(i)} title={done ? "Untick this step" : "Tick this step as done"} />}
         <div className={`min-w-0 flex-1 ${done ? "line-through decoration-zinc-600" : ""}`}>{children}</div>
+        {checks?.setOutcome && !done && (
+          <button className={`shrink-0 rounded border px-1.5 py-0.5 text-[11px] ${failed ? "border-red-500/40 bg-red-500/15 text-red-300" : "border-zinc-700 text-zinc-500 hover:text-zinc-300"}`} disabled={checks.busy}
+            title={failed ? "Clear the failure" : "This step failed: record what happened, so the agent can re-plan from it"} onClick={() => checks.setOutcome!(i, failed ? null : "failed", failed ? "" : note)}>{failed ? "failed ✕" : "failed?"}</button>
+        )}
       </div>
+      {failed && checks?.setOutcome && (
+        <div className="mt-1.5 ml-6">
+          <textarea className="!text-[11px] !leading-4 font-mono w-full" rows={Math.min(8, Math.max(2, note.split("\n").length))} placeholder="Paste the output or say what went wrong. Saved when you click away." value={note} disabled={checks.busy} onChange={(e) => setDraft(e.target.value)} onBlur={save} />
+          {outcome?.at && draft === null && <div className="text-[11px] text-zinc-600">recorded {outcome.at}</div>}
+        </div>
+      )}
     </li>
   );
 }

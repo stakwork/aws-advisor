@@ -63,6 +63,18 @@ you mark it done when the saving is in place. The checklist remembers which plan
 than inheriting ticks from the old plan. The search box takes an id (`#123` or `123`) and finds the row in any
 status, so a recommendation from a link or an agent answer opens even when the list is on another filter.
 
+The checklist also records **what happened** to each step: a tick means it worked, "failed?" opens a box for the
+output or the reason (`progress.outcomes`, one per step). Those outcomes are what makes the plan interactive.
+**Re-plan from here** (`POST /api/recommendations/:id/replan`, body `{ note? }`) asks the agent for a new tailored
+plan with the previous plan, each step's outcome and your note in the brief (`src/resolve.ts buildFeedbackSection`):
+what worked stays, what failed is replaced with steps that fix the cause shown in the output. The new resolution
+shows the feedback it was written from. **Chat about this** (`src/chat.ts`, `GET|POST /api/recommendations/:id/messages`)
+is a thread under the plan: each message you write becomes one agent request (task `chat`, `tasks/chat/`) whose brief
+is the recommendation, the current plan, the step outcomes and the last twelve messages; the answer arrives through
+the webhook (the thread polls every 5 s meanwhile). The agent can hand back corrected steps with commands and verify
+lines (`step_fixes`, shown as cards) and say the plan needs rewriting (`suggest_replan`, which offers the re-plan
+button). Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
+
 The detail's "Affected resources" lists every resource the item touches as a link into its Inventory tab
 (opened in a new tab): the resource column split up when the agent grouped several ids, each resolved
 against the inventory for its name and kind (`src/affected.ts`, returned as `affected` by
