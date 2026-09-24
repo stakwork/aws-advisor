@@ -124,7 +124,7 @@ export interface AgentRequest {
   retryOf?: string;
   maxTurns?: number;
   /** Which advisor flow owns the answer; the callback routes on it. */
-  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string } | { kind: "chat"; recommendationId: number };
+  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string } | { kind: "chat"; recommendationId: number | null };
 }
 
 export interface AgentAccepted { requestId: string; sessionId: string; eventsToken: string }
@@ -271,7 +271,7 @@ export async function gradeAndMaybeRetry(run: AgentRunRow & { status?: string },
       sessionId: `aws-advisor-${run.kind}-retry-${Date.now().toString(36)}`,
       agentName: `aws-${run.kind}-retry`,
       metadata: { retry_of: run.request_id },
-      link: run.kind === "findings" ? { kind: "findings", runId: run.run_id ?? 0 } : run.kind === "incident" ? { kind: "incident", alertId: run.alert_id ?? 0 } : run.kind === "resolution" ? { kind: "resolution", recommendationId: run.recommendation_id ?? 0 } : run.kind === "chat" ? { kind: "chat", recommendationId: run.recommendation_id ?? 0 } : { kind: "observe", day: new Date().toISOString().slice(0, 10) },
+      link: run.kind === "findings" ? { kind: "findings", runId: run.run_id ?? 0 } : run.kind === "incident" ? { kind: "incident", alertId: run.alert_id ?? 0 } : run.kind === "resolution" ? { kind: "resolution", recommendationId: run.recommendation_id ?? 0 } : run.kind === "chat" ? { kind: "chat", recommendationId: run.recommendation_id ?? null } : { kind: "observe", day: new Date().toISOString().slice(0, 10) },
       retryOf: run.request_id,
     });
     db.prepare("update agent_runs set retried_by = ? where id = ?").run(requestId, run.id);

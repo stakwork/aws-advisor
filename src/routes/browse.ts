@@ -250,6 +250,15 @@ browse.post("/recommendations/:id/messages", auth, async (req, res) => {
   } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
 });
 
+// The account-wide thread (src/chat.ts, recommendation_id null): the team and the agent about the account as a whole.
+browse.get("/chat/messages", auth, (_req, res) => res.json(listMessages(null)));
+browse.post("/chat/messages", auth, async (req, res) => {
+  try {
+    const r = await askAboutRecommendation(null, String(req.body?.message ?? ""), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
+    res.status(202).json(r);
+  } catch (e: any) { res.status(e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
+});
+
 // Body: { id: number | null }: what this item waits on (another recommendation), or nothing. Refuses self and loops.
 browse.post("/recommendations/:id/blocked-by", auth, (req, res) => {
   const id = Number(req.params.id);

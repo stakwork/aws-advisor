@@ -120,3 +120,18 @@ test("chat: the brief carries the recommendation, the plan, the outcomes, the la
   assert.match(buildChatPrompt(rec, {}, null, null, [], "hi"), /No tailored plan has been written yet/);
   assert.match(buildChatPrompt(rec, {}, null, null, [], "hi"), /- this is the first message/);
 });
+
+import { buildAccountPrompt } from "../chat.js";
+
+test("chat: the account-wide brief carries the observation, the open recommendations and the thread, and asks for a reply only", () => {
+  const observation = "# Morning observation for 2026-09-24\n\n## Spend (Cost Explorer, net)\n- latest day with data 2026-09-23: 812 USD";
+  const open = [{ id: 317, title: "Attribute the NAT line", status: "pending", est_monthly_saving: 400, resource: "nat-1" }, { id: 306, title: "Interface endpoint", status: "open", est_monthly_saving: null, resource: null }];
+  const text = buildAccountPrompt(observation, open, [{ role: "user", author: "gonzalo", content: "what is the NAT costing us?", status: "completed" }], "and the workspace VPC?");
+  assert.match(text, /^# Thread with the team about this AWS account\n\n## What the advisor knows today\n## Spend \(Cost Explorer, net\)\n- latest day with data 2026-09-23: 812 USD/);
+  assert.match(text, /## Open recommendations \(2\)\n- #317 \[pending\] Attribute the NAT line \(≈ 400 USD\/month\) on nat-1\n- #306 \[open\] Interface endpoint\n/);
+  assert.match(text, /\*\*gonzalo:\*\* what is the NAT costing us\?/);
+  assert.match(text, /## The new message to answer\nand the workspace VPC\?/);
+  assert.match(text, /step_fixes and suggest_replan stay empty here/);
+  assert.match(buildAccountPrompt("", [], [], "hi"), /\(no observation yet: no collection run has completed\)/);
+  assert.match(buildAccountPrompt("", [], [], "hi"), /## Open recommendations \(0\)\n- none/);
+});
