@@ -10,7 +10,7 @@ import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendR
 import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
 import { statusAfterProgress, validateProgress } from "../progress.js";
 import { noteDecision } from "../notify.js";
-import { askAboutRecommendation, listMessages } from "../chat.js";
+import { ask, askAboutRecommendation, createThread, deleteThread, getThread, listMessages, listThreads, renameThread, threadForRecommendation } from "../chat.js";
 import { Conflict, blockerLinks, blockersFor, distinctSaving, findConflicts, liveRows, makesCycle, systemMap } from "../related.js";
 import { listPlaybooks, playbookFor, playbookSummary } from "../playbooks.js";
 import { resolutionFor, resolveRecommendation } from "../resolve.js";
@@ -240,8 +240,8 @@ browse.post("/recommendations/:id/replan", auth, async (req, res) => {
   } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : 500).json({ error: e.message }); }
 });
 
-// The thread on a recommendation (src/chat.ts): every message, oldest first.
-browse.get("/recommendations/:id/messages", auth, (req, res) => res.json(listMessages(Number(req.params.id))));
+// The thread on a recommendation (src/chat.ts): every message, oldest first; none until the first message.
+browse.get("/recommendations/:id/messages", auth, (req, res) => { const t = threadForRecommendation(Number(req.params.id), false); res.json(t ? listMessages(t.id) : []); });
 // Body: { message, by? }. Records the message and asks the agent; the answer lands through the webhook (202 while pending).
 browse.post("/recommendations/:id/messages", auth, async (req, res) => {
   try {
@@ -250,13 +250,22 @@ browse.post("/recommendations/:id/messages", auth, async (req, res) => {
   } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
 });
 
-// The account-wide thread (src/chat.ts, recommendation_id null): the team and the agent about the account as a whole.
-browse.get("/chat/messages", auth, (_req, res) => res.json(listMessages(null)));
-browse.post("/chat/messages", auth, async (req, res) => {
+// General threads with the agent (src/chat.ts, the Chat page): as many as the team opens.
+browse.get("/chat/threads", auth, (_req, res) => res.json(listThreads()));
+browse.post("/chat/threads", auth, (req, res) => res.status(201).json(createThread(typeof req.body?.title === "string" ? req.body.title : null, typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui")));
+browse.patch("/chat/threads/:id", auth, (req, res) => {
+  if (typeof req.body?.title !== "string") return res.status(400).json({ error: "title is text" });
+  const t = renameThread(Number(req.params.id), req.body.title);
+  return t ? res.json(t) : res.status(404).json({ error: "not found" });
+});
+browse.delete("/chat/threads/:id", auth, (req, res) => (deleteThread(Number(req.params.id)) ? res.status(204).end() : res.status(404).json({ error: "not found, or a recommendation's thread (those go with the recommendation)" })));
+browse.get("/chat/threads/:id/messages", auth, (req, res) => (getThread(Number(req.params.id)) ? res.json(listMessages(Number(req.params.id))) : res.status(404).json({ error: "not found" })));
+// Body: { message, by? }. Records the message and asks the agent; the answer lands through the webhook (202 while pending).
+browse.post("/chat/threads/:id/messages", auth, async (req, res) => {
   try {
-    const r = await askAboutRecommendation(null, String(req.body?.message ?? ""), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
+    const r = await ask(Number(req.params.id), String(req.body?.message ?? ""), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
     res.status(202).json(r);
-  } catch (e: any) { res.status(e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
+  } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
 });
 
 // Body: { id: number | null }: what this item waits on (another recommendation), or nothing. Refuses self and loops.

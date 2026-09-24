@@ -453,7 +453,7 @@ api.post("/alerts/:id/notify", async (req, res) => {
 // ---- notifications (src/notify.ts) ------------------------------------------
 api.get("/notify/status", (_req, res) => res.json(notifyStatus()));
 api.post("/notify/test", async (_req, res) => {
-  const r = await sendSphinx(`✅ aws-advisor test message · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · ${config.publicUrl}`);
+  const r = await sendSphinx(`✅ aws-advisor test message · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · ${config.notifyLinkUrl}`);
   res.status(r.ok ? 200 : 502).json(r);
 });
 api.post("/notify/dispatch", async (_req, res) => res.json(await dispatchNotifications()));

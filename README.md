@@ -75,11 +75,13 @@ the webhook (the thread polls every 5 s meanwhile). The agent can hand back corr
 lines (`step_fixes`, shown as cards) and say the plan needs rewriting (`suggest_replan`, which offers the re-plan
 button). Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
 
-**Chat** in the sidebar is the same thread for the account as a whole (`GET|POST /api/chat/messages`, the rows
-with no recommendation): each message goes to the agent with today's observation brief (spend against baseline,
-the review's findings, open alerts, pools, changes, logs, the same text the morning observation is written from),
-the open recommendations by saving and the last twelve messages. One thread for the team; questions about one
-recommendation's plan belong in that recommendation's own thread.
+**Chat** in the sidebar holds general threads with the agent, as many as the team opens (`/api/chat/threads`,
+`src/chat.ts`; a thread without a name takes its first message as its title). The brief is deliberately small: a
+few account numbers (spend last 7 days, month to date and projection, unacknowledged alerts, open recommendations
+and their claimed saving), the index of the advisor's fact tools (bill, forecast, baselines, inventory, pools, RDS
+load, NAT attribution, CloudTrail, the graph, Steampipe SQL, …) and the last twelve messages. The agent pulls what
+the question needs with those tools and says what it fetched, instead of being handed a dump it may not need. A
+recommendation's plan has its own thread under that recommendation, where the brief is the plan and the outcomes.
 
 The detail's "Affected resources" lists every resource the item touches as a link into its Inventory tab
 (opened in a new tab): the resource column split up when the agent grouped several ids, each resolved
@@ -106,7 +108,9 @@ chat pubkey, the level to send from, the scope and the quiet hours, with a "send
   Each alert is sent once. `POST /api/notify/dispatch` runs it by hand; `GET /api/notify/status` says what is
   in force.
 - **The message.** Level and the alert's text, the resource with its name and region, the Route 53 records that
-  reach it, the open recommendations on it, and a link to the alert in the advisor (`PUBLIC_URL`).
+  reach it, the open recommendations on it, and a link to the alert in the advisor. The link base is
+  `NOTIFY_LINK_URL` when set (the address people actually open, e.g. the instance's private IP over the VPN),
+  else `PUBLIC_URL`; the latter is also what repo2graph calls back to, so it stays the swarm-internal address.
 - **Receipts.** Every considered alert gets `notified_at` and `notify_result` ("sent", "failed: …" or
   "skipped: <rule>"), shown on the Alerts page; "Send to Sphinx" on a row sends it now whatever the rules say
   (`POST /api/alerts/:id/notify`), and "Resend" repeats it.
