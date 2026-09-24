@@ -17,6 +17,7 @@ import { refreshTrail } from "./trail.js";
 import { runVerifications } from "./verify.js";
 import { refreshCommitments } from "./commitments.js";
 import { refreshS3Inventory } from "./s3_inventory.js";
+import { dispatchNotifications } from "./notify.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -106,7 +107,11 @@ export async function runJobNow(key: string, trigger = "manual"): Promise<string
   console.log(`[${t}] started (${trigger})`);
   try { const m = await job.run(); console.log(`[${t}] ${m}`); return m; }
   catch (e: any) { console.error(`[${t}] failed: ${e?.message || e}`); throw e; }
-  finally { jobInFlight.delete(key); }
+  finally {
+    jobInFlight.delete(key);
+    // Whatever the job raised goes out now (src/notify.ts); a failure there is logged, never the job's.
+    dispatchNotifications().catch((e: any) => console.error(`[notify] dispatch failed: ${e?.message || e}`));
+  }
 }
 
 export function startScheduler(): Record<string, string | null> {

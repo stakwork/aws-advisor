@@ -336,12 +336,19 @@ addColumn("resolutions", "gate_outcome", "text");
 addColumn("recommendations", "progress", "text");
 // What an item waits on: another recommendation's id (src/related.ts).
 addColumn("recommendations", "blocked_by", "integer");
+// Notifications (src/notify.ts): the receipt on the alert, and the per-resource watch override (1 watch, 0 ignore, null auto).
+addColumn("alerts", "notified_at", "text");
+addColumn("alerts", "notify_result", "text");
+for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache"]) addColumn(t, "watch", "integer");
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");
 
 function addColumn(table: string, column: string, type: string) {
   const cols = db.pragma(`table_info(${table})`) as { name: string }[];
-  if (!cols.some((c) => c.name === column)) db.exec(`alter table ${table} add column ${column} ${type}`);
+  if (cols.some((c) => c.name === column)) return;
+  // Two processes on one file (the test runner) can both pass the check; the second alter is then a no-op.
+  try { db.exec(`alter table ${table} add column ${column} ${type}`); }
+  catch (e: any) { if (!/duplicate column/i.test(String(e?.message))) throw e; }
 }
 
 function migrateAgentRuns() {
