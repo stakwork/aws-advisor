@@ -9,6 +9,7 @@ import { ConceptScope, suggestDecisionScope, syncDecisionConceptInBackground } f
 import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendRows, spendSummary } from "../spend.js";
 import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
 import { statusAfterProgress, validateProgress } from "../progress.js";
+import { Conflict, blockerLinks, blockersFor, distinctSaving, findConflicts, liveRows, makesCycle, systemMap } from "../related.js";
 import { listPlaybooks, playbookFor, playbookSummary } from "../playbooks.js";
 import { resolutionFor, resolveRecommendation } from "../resolve.js";
 import { mirrorRecommendationsInBackground } from "../graph_mirror.js";
@@ -106,6 +107,13 @@ browse.get("/playbooks/:controlId", auth, (req, res) => {
 });
 
 // ---- recommendations ------------------------------------------------------------------------------------------
+/** The conflicts of a merged entry: those of any member, once each, never a member of the entry itself. */
+function conflictsOf(memberIds: number[], conflicts: Map<number, Conflict[]>): Conflict[] {
+  const out: Conflict[] = [];
+  for (const id of memberIds) for (const c of conflicts.get(id) || []) if (!memberIds.includes(c.id) && !out.some((x) => x.id === c.id)) out.push(c);
+  return out;
+}
+
 // ?status=open (default) | pending | approved | ... | all, ?q (title, resource, resource name, or "#123" for an id),
 // ?page, ?page_size (default 50, max 200). An id query looks across every status, so "#123" always finds the row
 // whatever list is showing; the row carries its own status for the UI to flag. Rows proposing the same action on
@@ -117,10 +125,16 @@ browse.get("/recommendations", auth, (req, res) => {
     ? db.prepare("select * from recommendations order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all()
     : db.prepare("select * from recommendations where status = ? order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all(status)) as any[];
   const shown = q.text ? rows.filter((r) => recMatches(r, q) && (status === "all" || r.status === status || r.id === q.id)) : rows;
-  const merged = mergeRecommendations(shown);
+  // Members of a pool, an RDS cluster or a cache group are one entry per (system, action): the decision is about the system.
+  const systems = systemMap();
+  const merged = mergeRecommendations(shown, (rid) => systems.get(rid));
+  // Conflicts are found among every live row, not just this page or status: an approved stop conflicts with an open Graviton move.
+  const conflicts = findConflicts(liveRows());
+  const blockers = blockersFor(merged.map((r) => r.blocked_by));
   const p = paginate(merged, pageParams(req.query as Record<string, unknown>, { size: 50, max: 200 }));
-  const totalSaving = merged.reduce((s, r) => s + (Number(r.est_monthly_saving) || 0), 0);
-  res.json({ total: p.total, page: p.page, page_size: p.page_size, status, total_saving: Math.round(totalSaving * 100) / 100, recommendations: p.items });
+  const saving = distinctSaving(merged);
+  res.json({ total: p.total, page: p.page, page_size: p.page_size, status, total_saving: saving.total, total_saving_distinct: saving.distinct, overlap_usd: saving.overlap,
+    recommendations: p.items.map((r) => ({ ...r, conflicts: conflictsOf(r.merged_ids, conflicts), blocker: r.blocked_by ? blockers.get(r.blocked_by) ?? null : null })) });
 });
 
 // Jev's view of whether a reason is reusable knowledge ("generic") or about this one resource ("internal").
@@ -210,6 +224,25 @@ browse.post("/recommendations/:id/progress", auth, (req, res) => {
   const rec = db.prepare("select * from recommendations where id = ?").get(id) as any;
   if (next) { syncDecisionConceptInBackground(id); mirrorRecommendationsInBackground([id]); }
   res.json(rec);
+});
+
+// Body: { id: number | null }: what this item waits on (another recommendation), or nothing. Refuses self and loops.
+browse.post("/recommendations/:id/blocked-by", auth, (req, res) => {
+  const id = Number(req.params.id);
+  const raw = req.body?.id;
+  const blocker = raw === null || raw === undefined || raw === "" ? null : Number(raw);
+  if (blocker !== null && (!Number.isInteger(blocker) || blocker <= 0)) return res.status(400).json({ error: "id must be a recommendation id or null" });
+  const row = db.prepare("select id from recommendations where id = ?").get(id);
+  if (!row) return res.status(404).json({ error: "not found" });
+  if (blocker !== null) {
+    if (blocker === id) return res.status(400).json({ error: "an item cannot block itself" });
+    if (!db.prepare("select id from recommendations where id = ?").get(blocker)) return res.status(404).json({ error: `no recommendation #${blocker}` });
+    const blockedByOf = (x: number) => (db.prepare("select blocked_by from recommendations where id = ?").get(x) as { blocked_by: number | null } | undefined)?.blocked_by ?? null;
+    if (makesCycle(id, blocker, blockedByOf)) return res.status(400).json({ error: `#${blocker} already waits on #${id} (directly or through others)` });
+  }
+  db.prepare("update recommendations set blocked_by = ?, updated_at = datetime('now') where id = ?").run(blocker, id);
+  const rec = db.prepare("select * from recommendations where id = ?").get(id) as any;
+  res.json({ ...rec, ...blockerLinks(id, rec.blocked_by) });
 });
 
 // Body: { ids: number[], status, reason?, by?, scope? }. One decision for every id of a merged entry (up to 100).

@@ -70,6 +70,34 @@ against the inventory for its name and kind (`src/affected.ts`, returned as `aff
 ("Right-size two boxes: Hive and swarmPExsmg" with one id in the resource column) are listed apart as "also
 named", because the rationale also names what the agent ruled out.
 
+### Resources are intertwined: conflicts, blockers, systems, exposure, history
+
+- **Conflicts.** Two live items (open, pending, approved, snoozed) proposing different resource-changing actions
+  on one resource cannot both be worth doing: "stop this instance" and "move it to Graviton". The list row says
+  "conflicts with #N" and the detail lists the pair with "close as superseded by this one", which rejects the
+  other with the reason `superseded by #id (action): title` on record, so the agent learns not to propose both.
+  Report-only actions do not conflict. `src/related.ts`.
+- **Distinct savings.** The list header and the Overview tile count one claim per resource, the largest, and say
+  how much more is "claimed twice"; the raw sum is still returned as `total_saving`. Grouped items that name
+  several resources count when any of them is not yet claimed by a larger item.
+- **Blocked by.** An item can wait on another (`recommendations.blocked_by`; the NAT attribution waits on the flow
+  logs item). The detail takes an id, refuses self and loops, and shows the blocker's status and follow-up day;
+  the row says "blocked by #N" or "unblocked: #N is done" once the blocker is done. The blocker's detail lists
+  what it blocks.
+- **Systems, not members.** Instances of an autoscaled pool (Karpenter, EKS node group, ASG, Batch), instances of
+  an RDS cluster and nodes of an ElastiCache replication group are one entry per (system, action) in the list,
+  with the members listed and one decision for all of them (`mergeRecommendations` takes a system map from the
+  inventory). A standalone resource is unchanged.
+- **Before you act.** The detail shows, per affected resource, the Route 53 records that still reach it, the
+  volumes attached, the open alerts on it and the pool or cluster it belongs to (`src/exposure.ts`). For a
+  disruptive action (stop, terminate, resize, migrate, delete, storage change) records and alerts turn amber.
+  The same records reach Jev's gate and the plan through the resource facts (`domains` in `resourceFacts`), and
+  the plan prompt asks for a step or a blocker per record.
+- **History.** Every inventory detail ends with the resource's timeline (`src/timeline.ts`,
+  `GET /api/inventory/:kind/:id/timeline`): first and last seen, the controls that flagged it and in how many
+  runs, recommendations and decisions with reasons, tailored resolutions, bill checks, alerts (folded per day)
+  and incidents, probes. Each line links to the page that holds the rest.
+
 ## Local run
 
 Prerequisites: Node 22, the `steampipe` service running with the `aws` plugin installed, `powerpipe` on PATH.
@@ -1383,6 +1411,11 @@ for disks. All thresholds are runtime settings under Probe pass.
   (default internal): same rules as before (a reason is required to reject), stores `decision_scope` next to the
   other decision columns and mirrors the decision into repo2graph's concepts (generic ones under "AWS Cost
   Knowledge" with role-based names, see `src/concepts.ts`).
+- `GET /api/recommendations/:id` also returns `affected` (resources and mentioned), `exposure` (domains, volumes,
+  open alerts, pool, cluster per resource, and `disruptive`), `conflicts` and `blocker` / `blocks`. The list rows
+  carry `system`, `conflicts` and `blocker`; the list answer carries `total_saving_distinct` and `overlap_usd`.
+- `POST /api/recommendations/:id/blocked-by` body `{ id: number | null }` → the row with `blocker` and `blocks`;
+  400 on self or a loop, 404 when the blocker does not exist.
 - `POST /api/recommendations/:id/progress` body `{ plan: "resolution:<id>" | "playbook:<control id>", total, done: number[], follow_up?: "YYYY-MM-DD" }`
   stores the step checklist (the whole list every time) and the follow-up day; the first tick on an open or
   snoozed item sets `status = pending`. `status` accepts `pending` in the decision routes too. → the row.
@@ -1743,14 +1776,14 @@ What each one is for (✎ = also editable in Settings):
 - `GET /api/runs`, `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs/:id/stream` (SSE), `GET /api/runs/:id/changes`, `POST /api/runs/:id/agent`
 - `GET /api/agent-runs/:requestId`, `POST /api/agent-runs/:requestId/poll`, `GET /api/agent-runs/:requestId/events` (SSE proxy), `POST /api/agent-callback` (repo2graph's webhook)
 - `GET /api/findings?run_id&control_id&status&q`, `GET /api/playbooks?run_id`, `GET /api/playbooks/:controlId`
-- `GET /api/recommendations?status`, `GET /api/recommendations/:id`, `POST /api/recommendations/:id/decision`, `POST /api/recommendations/:id/progress`, `POST /api/recommendations/:id/resolve`, `GET /api/recommendations/:id/resolution`
+- `GET /api/recommendations?status`, `GET /api/recommendations/:id`, `POST /api/recommendations/:id/decision`, `POST /api/recommendations/:id/progress`, `POST /api/recommendations/:id/blocked-by`, `POST /api/recommendations/:id/resolve`, `GET /api/recommendations/:id/resolution`
 - `GET /api/overview`, `GET /api/alerts?status=open|acknowledged|all` (rows carry `triage`, `acknowledged_by`), `POST /api/alerts/:id/ack`, `POST /api/alerts/:id/reopen` (undo an acknowledgement, Jev's or a person's), `POST|GET /api/watch`, `GET /api/learnings`
 - `GET /api/jev/calls?limit&purpose` (Jev audit trail); `GET /api/inventory/ec2/:id` and `GET /api/recommendations/:id` carry the resource's `role` / `resource_role`
 - `POST /api/alerts/:id/investigate`, `GET /api/alerts/:id/incident`, `GET /api/incidents`, `GET /api/nat/:id/attribution?hours&limit`
 - `POST /api/instances/:id/probe`, `GET /api/instances/:id/metrics`, `GET /api/instances/:id/timeseries?hours=`, `GET /api/instances/:id/history?days=`, `POST /api/history/rollup?days=`, `GET /api/probe/document` (the SSM document for `aws ssm create-document`)
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
-- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `GET /api/inventory/route53?q&sort&gone&zone&link&type`, `GET /api/inventory/route53/zones`, `GET /api/inventory/route53/resource/:kind/:id`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`, `POST /api/inventory/route53/refresh`
+- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `GET /api/inventory/route53?q&sort&gone&zone&link&type`, `GET /api/inventory/route53/zones`, `GET /api/inventory/route53/resource/:kind/:id`, `GET /api/inventory/:kind/:id/timeline`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`, `POST /api/inventory/route53/refresh`
 - `GET /api/logs?limit=`, `POST /api/logs/refresh`, `GET /api/trail?hours=`, `POST /api/trail/refresh` (see [CloudWatch Logs and CloudTrail](#cloudwatch-logs-and-cloudtrail))
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))

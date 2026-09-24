@@ -311,7 +311,7 @@ export default function Overview() {
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Stat label="Last full month invoice" value={usd(invoice)} hint="net unblended" />
           <Stat label="On-demand usage" value={usd(rt.Usage?.value)} hint={`Savings Plan covered ${usd(rt.SavingsPlanCoveredUsage?.value)} · reserved ${usd(rt.DiscountedUsage?.value)}`} />
-          <Stat label="Open recommendations" value={recs.open?.n || 0} hint={<>≈ {usd(recs.open?.saving)} / month if all applied{recs.pending?.n ? <> · <Link className="underline" to="/recommendations?status=pending">{recs.pending.n} in progress</Link></> : null}</>} />
+          <Stat label="Open recommendations" value={recs.open?.n || 0} hint={<>≈ {usd(d.open_saving?.distinct ?? recs.open?.saving)} / month if all applied{d.open_saving?.overlap > 0 ? <span title="Several actions claim the same resource; only the largest claim per resource is counted"> ({usd(d.open_saving.overlap)} more is claimed twice)</span> : null}{recs.pending?.n ? <> · <Link className="underline" to="/recommendations?status=pending">{recs.pending.n} in progress</Link></> : null}</>} />
           <Stat label="Findings in last run" value={d.latestRun.findings_count} hint={<Link className="underline" to="/findings">browse</Link>} />
         </div>
       )}
