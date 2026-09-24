@@ -98,7 +98,9 @@ export function shortResourceId(resource: string | null | undefined): string | n
 
 export interface RecLike { id: number; source: string; rule: string; resource: string | null; action_type: string; status: string; est_monthly_saving: number | null; confidence: number | null; updated_at: string }
 export interface MergedRef { id: number; source: string; rule: string; est_monthly_saving: number | null; confidence: number | null }
-export type MergedRec<T extends RecLike> = T & { merged: MergedRef[]; sources: string[]; merged_ids: number[] };
+export interface SystemRef { kind: "pool" | "rds_cluster" | "cache_group"; id: string; members: string[] }
+export type MergedRec<T extends RecLike> = T & { merged: MergedRef[]; sources: string[]; merged_ids: number[]; system: SystemRef | null };
+export type SystemOf = (resourceId: string) => { kind: SystemRef["kind"]; id: string } | null | undefined;
 
 const saving = (r: { est_monthly_saving: number | null }) => (r.est_monthly_saving == null ? -Infinity : Number(r.est_monthly_saving));
 const SOURCE_ORDER = ["rules", "agent"];
@@ -108,17 +110,25 @@ const bySource = (a: string, b: string) => (SOURCE_ORDER.indexOf(a) + 1 || 99) -
  * Rows that propose the same action on the same resource (in the same status) become one entry: the one with the
  * highest saving estimate is primary, the others are listed under `merged`. Sorted by saving desc, nulls last.
  */
-export function mergeRecommendations<T extends RecLike>(rows: T[]): MergedRec<T>[] {
+export function mergeRecommendations<T extends RecLike>(rows: T[], systemOf?: SystemOf): MergedRec<T>[] {
   const groups = new Map<string, T[]>();
+  const systems = new Map<string, SystemRef>();
   for (const r of rows) {
     // Sources name the same thing differently (ARN, `rds:id`, bare id); merge on the bare id so they meet.
     const rid = shortResourceId(r.resource);
-    const key = rid ? `${r.status}|${r.action_type}|${rid}` : `id:${r.id}`;
+    // A member of an autoscaled pool, an RDS cluster or a cache group is decided with its system: one entry per (system, action).
+    const sys = rid ? systemOf?.(rid) : null;
+    const key = sys ? `${r.status}|${r.action_type}|${sys.kind}:${sys.id}` : rid ? `${r.status}|${r.action_type}|${rid}` : `id:${r.id}`;
+    if (sys) {
+      const s = systems.get(key) || { kind: sys.kind, id: sys.id, members: [] };
+      if (rid && !s.members.includes(rid)) s.members.push(rid);
+      systems.set(key, s);
+    }
     const g = groups.get(key);
     if (g) g.push(r); else groups.set(key, [r]);
   }
   const out: MergedRec<T>[] = [];
-  for (const g of groups.values()) {
+  for (const [key, g] of groups) {
     g.sort((a, b) => saving(b) - saving(a) || b.updated_at.localeCompare(a.updated_at) || a.id - b.id);
     const [primary, ...rest] = g;
     const sources = [...new Set(g.map((r) => r.source))].sort(bySource);
@@ -127,6 +137,7 @@ export function mergeRecommendations<T extends RecLike>(rows: T[]): MergedRec<T>
       merged: rest.map((r) => ({ id: r.id, source: r.source, rule: r.rule, est_monthly_saving: r.est_monthly_saving, confidence: r.confidence })),
       sources,
       merged_ids: g.map((r) => r.id),
+      system: systems.get(key) ?? null,
     });
   }
   return out.sort((a, b) => saving(b) - saving(a) || b.updated_at.localeCompare(a.updated_at) || a.id - b.id);

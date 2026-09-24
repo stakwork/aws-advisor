@@ -10,6 +10,7 @@ import { Playbook, controlForRecommendation, playbookFor } from "./playbooks.js"
 import { AgentRunRow, postAgentRequest } from "./agent.js";
 import { latestProbe } from "./ssm.js";
 import { shortResourceId } from "./resource_id.js";
+import { domainsReaching } from "./exposure.js";
 import { Tier } from "./rules.js";
 import { RdsLoadSummary, ensureRdsLoad, latestRdsLoad, loadSummary } from "./rds_load.js";
 
@@ -57,6 +58,8 @@ export interface ResourceFacts {
   top_processes: string[];
   probe_at: string | null;
   volumes: { volume_id: string; size_gb: number | null; type: string | null; device: string | null }[];
+  /** Route 53 records that reach the resource ("api.example.com (A via ALB)"): a stop, a new address or a replacement breaks them unless they move. */
+  domains: string[];
   engine: string | null;
   /** RDS and Aurora only: the load profile from the hourly pass (src/rds_load.ts) with Jev's read of it. */
   load?: RdsLoadSummary | null;
@@ -68,8 +71,9 @@ const clusterMembers = (cluster: string) => (db.prepare("select db_instance_iden
 /** What the inventory, the roles cache and the latest probe know about the recommendation's resource. */
 export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "rule">): ResourceFacts {
   const id = shortResourceId(rec.resource);
-  const base: ResourceFacts = { id, kind: "other", name: rec.resource_name ?? null, type: null, state: null, region: null, launched: null, monthly_usd: null, cpu_30d: null, ssm_status: null, tags: {}, role: null, top_processes: [], probe_at: null, volumes: [], engine: null };
+  const base: ResourceFacts = { id, kind: "other", name: rec.resource_name ?? null, type: null, state: null, region: null, launched: null, monthly_usd: null, cpu_30d: null, ssm_status: null, tags: {}, role: null, top_processes: [], probe_at: null, volumes: [], domains: [], engine: null };
   if (!id) return base;
+  const domains = (kind: string) => domainsReaching(kind, id).map((d) => `${d.name} (${d.type}${d.hop > 1 ? " via a load balancer" : ""})`);
   const role = db.prepare("select role, role_confidence, protected_prob, updated_at from resource_roles where resource_id = ?").get(id) as ResourceFacts["role"] | undefined;
   if (role) base.role = role;
   const ec2 = db.prepare("select * from inventory_ec2 where instance_id = ?").get(id) as any;
@@ -81,14 +85,14 @@ export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "
     const procs = probe ? [...new Set([...(probe.data.top_cpu || []), ...(probe.data.top_mem || [])].map((p: any) => String(p.command)))].filter((c) => !kernel.test(c)).slice(0, 8) : [];
     return { ...base, kind: "ec2", name: ec2.name ?? base.name, type: ec2.instance_type, state: ec2.state, region: ec2.region, launched: ec2.launch_time, monthly_usd: ec2.monthly_usd, cpu_30d: ec2.cpu_30d, ssm_status: ec2.ssm_status,
       tags: Object.fromEntries(Object.entries(snap.tags || {}).filter(([k]) => !/^aws:/.test(k)).slice(0, 20)) as Record<string, string>,
-      top_processes: procs, probe_at: probe?.collected_at ?? null,
+      top_processes: procs, probe_at: probe?.collected_at ?? null, domains: domains("ec2"),
       volumes: ((snap.storage?.volumes || []) as any[]).map((v) => ({ volume_id: v.volume_id, size_gb: v.size != null ? Number(v.size) : null, type: v.volume_type ?? v.type ?? null, device: v.device ?? null })) };
   }
   const rds = db.prepare("select * from inventory_rds where db_instance_identifier = ?").get(id) as any;
   if (rds) {
     const snap = safeJson(rds.snapshot) || {};
     return { ...base, kind: "rds", name: id, type: rds.class, state: rds.status, region: rds.region, launched: rds.created, monthly_usd: rds.monthly_usd, cpu_30d: rds.cpu_30d, engine: `${rds.engine} ${rds.engine_version || ""}`.trim(),
-      tags: (snap.tags || {}) as Record<string, string>, volumes: rds.storage_gb ? [{ volume_id: "storage", size_gb: rds.storage_gb, type: rds.storage_type, device: null }] : [],
+      tags: (snap.tags || {}) as Record<string, string>, volumes: rds.storage_gb ? [{ volume_id: "storage", size_gb: rds.storage_gb, type: rds.storage_type, device: null }] : [], domains: domains("rds"),
       cluster: rds.cluster ? { id: rds.cluster, members: clusterMembers(rds.cluster), storage_type: rds.storage_type } : null, load: loadSummary(latestRdsLoad(id)) };
   }
   // An Aurora recommendation names the cluster; its facts are the writer's inventory row plus the cluster's load profile.
@@ -99,11 +103,12 @@ export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "
     const tags = Object.assign({}, ...members.map((m) => (safeJson(m.snapshot) || {}).tags || {}), snap.tags || {}) as Record<string, string>;
     return { ...base, kind: "rds", name: id, type: members.map((m) => m.class).join(", "), state: w.status, region: w.region, launched: w.created,
       monthly_usd: members.reduce((s, m) => s + (m.monthly_usd || 0), 0) || null, cpu_30d: w.cpu_30d, engine: `${w.engine} ${w.engine_version || ""}`.trim(), tags,
+      domains: [...new Set(members.flatMap((m) => domainsReaching("rds", m.db_instance_identifier).map((d) => `${d.name} (${d.type})`)))],
       volumes: w.storage_gb ? [{ volume_id: "cluster volume", size_gb: w.storage_gb, type: w.storage_type, device: null }] : [],
       cluster: { id, members: members.map((m) => m.db_instance_identifier), storage_type: w.storage_type }, load: loadSummary(latestRdsLoad(id)) };
   }
   const cache = db.prepare("select * from inventory_elasticache where cache_cluster_id = ?").get(id) as any;
-  if (cache) return { ...base, kind: "elasticache", name: id, type: cache.node_type, state: cache.status, region: cache.region, launched: cache.created, monthly_usd: cache.monthly_usd, engine: `${cache.engine} ${cache.engine_version || ""}`.trim() };
+  if (cache) return { ...base, kind: "elasticache", name: id, type: cache.node_type, state: cache.status, region: cache.region, launched: cache.created, monthly_usd: cache.monthly_usd, engine: `${cache.engine} ${cache.engine_version || ""}`.trim(), domains: domains("elasticache") };
   if (/^arn:aws:lambda:/.test(rec.resource || "") || /lambda/i.test(rec.rule)) return { ...base, kind: "lambda", name: id, region: rec.resource?.split(":")[3] ?? null };
   return base;
 }
@@ -276,7 +281,7 @@ export const RESOLUTION_SCHEMA = {
 
 const RESOLUTION_SYSTEM = `You are a senior AWS engineer writing the resolution for one cost recommendation in a single AWS account, for a
 colleague who will carry it out by hand. You get the recommendation, the generic playbook for its kind of finding, the
-facts the advisor holds about the resource (inventory, role, probe, volumes), the team's earlier decisions from the
+facts the advisor holds about the resource (inventory, role, probe, volumes, the Route 53 records that reach it), the team's earlier decisions from the
 knowledge graph (Concepts: generic rules and internal decisions, each with an id), the resource's history in the
 advisor, and a first opinion from Jev (a classifier) on whether the playbook applies and what blocks it.
 Verify before you write: aws_steampipe_query for the resource's current state (type, AMI, architecture, tags, attached
@@ -297,6 +302,8 @@ Write the plan for THIS resource: real ids, names, sizes and regions in every st
 step; the rollback where a step is not reversible. Respect the team's decisions: a generic rule for this role applies
 unless the facts say otherwise; a rejection on this resource means say why this time is different or set applies to
 false. Be honest about what only a human can decide and list it under needs_from_human. Keep the plan under ten steps.
+When "domains" lists Route 53 records that reach the resource, a stop, a replacement or a new address breaks them:
+name each record and where it must point afterwards as a step, or as a blocker if nothing can take it over.
 Write for a screen, not a report: in summary, steps, blockers and needs_from_human keep paragraphs short (one idea,
 one to three sentences) and separate them with a blank line; the UI keeps the blank lines and shows nothing else as
 a paragraph break. Never run several ideas together into one long block.

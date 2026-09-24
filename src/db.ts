@@ -334,6 +334,8 @@ for (const [col, type] of [["prompt", "text"], ["score", "real"], ["grade", "tex
 addColumn("resolutions", "gate_outcome", "text");
 // Step progress on a recommendation's plan and the day to look at it again (src/progress.ts).
 addColumn("recommendations", "progress", "text");
+// What an item waits on: another recommendation's id (src/related.ts).
+addColumn("recommendations", "blocked_by", "integer");
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");
 

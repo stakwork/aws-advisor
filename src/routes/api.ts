@@ -32,6 +32,9 @@ import { reopenAlert } from "../triage.js";
 import { mirrorAlertsInBackground } from "../graph_mirror.js";
 import { resourceRole } from "../roles.js";
 import { affectedResources } from "../affected.js";
+import { blockerLinks, distinctSaving, findConflicts, liveRows } from "../related.js";
+import { exposureFor } from "../exposure.js";
+import { TIMELINE_KINDS, timelineFor } from "../timeline.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
 import { describeError } from "../permissions.js";
 
@@ -298,7 +301,8 @@ api.get("/recommendations/:id", (req, res) => {
   if (!row) return res.status(404).json({ error: "not found" });
   // Jev's role for the resource (see src/roles.ts), when it has one on file; the resources it touches as
   // inventory links (src/affected.ts): the resource column split up, and what the text names besides.
-  res.json({ ...row, resource_role: row.resource ? resourceRole(row.resource) : null, affected: affectedResources(row) });
+  const id = Number(req.params.id);
+  res.json({ ...row, resource_role: row.resource ? resourceRole(row.resource) : null, affected: affectedResources(row), exposure: exposureFor(row as any), conflicts: findConflicts(liveRows()).get(id) || [], ...blockerLinks(id, (row as any).blocked_by ?? null) });
 });
 
 api.post("/recommendations/:id/decision", (req, res) => {
@@ -396,6 +400,14 @@ api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await re
 api.get("/inventory/route53", (req, res) => res.json(listRoute53({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), zone: str(req.query.zone), link: str(req.query.link), type: str(req.query.type) })));
 api.get("/inventory/route53/zones", (req, res) => res.json(listRoute53Zones(flag(req.query.gone))));
 api.get("/inventory/route53/resource/:kind/:id", (req, res) => res.json(domainsFor(String(req.params.kind), String(req.params.id))));
+
+// Everything recorded about one resource, newest first (src/timeline.ts): seen, findings, recommendations and
+// decisions, resolutions, verifications, alerts, incidents, probes.
+api.get("/inventory/:kind/:id/timeline", (req, res) => {
+  const kind = String(req.params.kind);
+  if (!TIMELINE_KINDS.includes(kind)) return res.status(400).json({ error: `kind must be one of ${TIMELINE_KINDS.join(", ")}` });
+  res.json(timelineFor(kind, String(req.params.id)));
+});
 api.post("/inventory/route53/refresh", async (_req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
   try { res.json(await refreshRoute53Inventory()); } catch (e: any) { res.status(502).json({ error: e.message }); }
@@ -462,9 +474,11 @@ api.get("/overview", (_req, res) => {
   const running = db.prepare("select id, started_at from runs where status = 'running' order by id desc limit 1").get() as any;
   const metrics = latest ? db.prepare("select key, label, value, dims from metrics where run_id = ? order by key, value desc").all(latest.id) as any[] : [];
   const recs = db.prepare("select status, count(*) as n, coalesce(sum(est_monthly_saving), 0) as saving from recommendations group by status").all();
+  // The open total counted once per resource (src/related.ts): two actions on one box do not both happen.
+  const openSaving = distinctSaving(db.prepare("select resource, resource_name, est_monthly_saving from recommendations where status = 'open'").all() as any[]);
   const top = db.prepare("select id, title, est_monthly_saving, tier, confidence, source from recommendations where status = 'open' order by coalesce(est_monthly_saving, -1) desc limit 8").all();
   const commitments = latest ? db.prepare("select reason, dimensions from findings where run_id = ? and control_id = 'query.commitments' order by id").all(latest.id) : [];
   const alerts = listAlerts("open", 50);
-  res.json({ latestRun: latest || null, running: running || null, busy: isBusy(), awsConfigured: hasConnectionFile(), aws: credentialsMeta(), metrics, recommendations: recs, top, commitments, alerts,
+  res.json({ latestRun: latest || null, running: running || null, busy: isBusy(), awsConfigured: hasConnectionFile(), aws: credentialsMeta(), metrics, recommendations: recs, open_saving: openSaving, top, commitments, alerts,
     agentConfigured: Boolean(config.repo2graphUrl), alertInvestigate: config.alertInvestigate, inventory: inventorySummary() });
 });

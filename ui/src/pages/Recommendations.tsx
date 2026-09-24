@@ -44,7 +44,7 @@ export default function Recommendations() {
   const q = params.get("q") || "";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const selectedId = params.get("id");
-  const [data, setData] = useState<{ total: number; page: number; page_size: number; total_saving: number; recommendations: any[] } | null>(null);
+  const [data, setData] = useState<{ total: number; page: number; page_size: number; total_saving: number; total_saving_distinct?: number; overlap_usd?: number; recommendations: any[] } | null>(null);
   const [sel, setSel] = useState<any>(null);
   const [reason, setReason] = useState("");
   const [scope, setScope] = useState<Scope>("internal");
@@ -57,6 +57,8 @@ export default function Recommendations() {
   const [verification, setVerification] = useState<any>(null);
   const [resolving, setResolving] = useState(false);
   const [progressBusy, setProgressBusy] = useState(false);
+  const [blockerInput, setBlockerInput] = useState("");
+  const [linkBusy, setLinkBusy] = useState(false);
   const rows = data?.recommendations ?? [];
 
   const load = () => api(`/recommendations?status=${status}&q=${encodeURIComponent(q)}&page=${page}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => setErr(e.message));
@@ -104,6 +106,24 @@ export default function Recommendations() {
   };
   const checks: StepChecks | undefined = planKey ? { done: doneSet, busy: progressBusy, toggle: (i) => { const next = new Set(doneSet); next.has(i) ? next.delete(i) : next.add(i); saveProgress(next, onThisPlan ? progress!.follow_up : null); } } : undefined;
   const followUp = onThisPlan ? progress!.follow_up : null;
+  const reloadSel = () => sel && api(`/recommendations/${sel.id}`).then(setSel).catch(() => {});
+  // What this item waits on: another recommendation by id; the server refuses self and loops.
+  const setBlockedBy = async (id: number | null) => {
+    if (!sel) return;
+    setLinkBusy(true); setErr("");
+    try { const r = await api(`/recommendations/${sel.id}/blocked-by`, { method: "POST", body: JSON.stringify({ id }) }); setSel((prev: any) => ({ ...prev, ...r })); setBlockerInput(""); load(); }
+    catch (e: any) { setErr(e.message); }
+    finally { setLinkBusy(false); }
+  };
+  // A conflicting item is closed as a rejection with the reason on record: the agent learns not to propose both.
+  const supersede = async (c: any) => {
+    if (!sel) return;
+    setLinkBusy(true); setErr("");
+    try { await api(`/recommendations/${c.id}/decision`, { method: "POST", body: JSON.stringify({ status: "rejected", reason: `superseded by #${sel.id} (${sel.action_type}): ${sel.title}`, scope: "internal" }) }); await reloadSel(); load(); }
+    catch (e: any) { setErr(e.message); }
+    finally { setLinkBusy(false); }
+  };
+  useEffect(() => { setBlockerInput(""); }, [sel?.id]);
   // Idle-instance recommendations can be probed over SSM; show the latest probe if there is one.
   useEffect(() => {
     setProbe({ busy: false, result: null, error: "" });
@@ -188,6 +208,39 @@ export default function Recommendations() {
             </dd>
             <dt className="text-zinc-500">Last seen in run</dt><dd>#{sel.run_id} · {when(sel.updated_at)}</dd>
             {sel.decided_at && <><dt className="text-zinc-500">Decision</dt><dd>{sel.status} by {sel.decided_by} at {when(sel.decided_at)}{sel.decision_scope && <span className="text-zinc-400"> · {sel.decision_scope === "generic" ? "generic: all resources of this kind" : "internal: this resource only"}</span>}{sel.decision_reason && <div className="text-zinc-400">“{sel.decision_reason}”</div>}</dd></>}
+            {entry?.system && <><dt className="text-zinc-500">System</dt><dd className="text-xs">{entry.system.members.length} member{entry.system.members.length === 1 ? "" : "s"} of {entry.system.kind.replace("_", " ")} <span className="font-mono">{entry.system.id}</span> <span className="text-zinc-500">· members are managed by their controller; one decision covers all {entry.merged_ids.length}</span></dd></>}
+            {sel.conflicts?.length > 0 && <>
+              <dt className="text-amber-300">Conflicts with</dt>
+              <dd className="text-xs">
+                <div className="text-zinc-500">another action on the same resource; both cannot be worth doing</div>
+                <ul className="mt-0.5 space-y-0.5">
+                  {sel.conflicts.map((c: any) => (
+                    <li key={c.id} className="flex flex-wrap items-center gap-2">
+                      <button className="underline" onClick={() => open(c.id)}>#{c.id}</button><Badge>{c.status}</Badge><span className="text-zinc-300">{c.action_type}</span><span className="text-zinc-500">on {c.on} · {usd(c.est_monthly_saving)}</span>
+                      {/^(open|snoozed|pending)$/.test(c.status) && <button className="text-zinc-400 hover:text-zinc-200" disabled={linkBusy} title={`Reject #${c.id} with the reason "superseded by #${sel.id}"`} onClick={() => supersede(c)}>close as superseded by this one</button>}
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </>}
+            <dt className="text-zinc-500">Blocked by</dt>
+            <dd className="text-xs">
+              {sel.blocker ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button className="underline" onClick={() => open(sel.blocker.id)}>#{sel.blocker.id}</button><Badge>{sel.blocker.status}</Badge>
+                  <span className={sel.blocker.done ? "text-emerald-300" : "text-zinc-300"}>{sel.blocker.title}</span>
+                  {sel.blocker.done ? <span className="text-emerald-300">· done, this one is unblocked</span> : sel.blocker.follow_up ? <span className="text-zinc-500">· check again {sel.blocker.follow_up}</span> : null}
+                  <button className="text-zinc-500 hover:text-zinc-300" disabled={linkBusy} onClick={() => setBlockedBy(null)}>clear</button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-zinc-500">nothing; waiting on another recommendation?</span>
+                  <input className="w-24 !py-0.5 !text-xs" placeholder="#id" value={blockerInput} onChange={(e) => setBlockerInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && /^#?\d+$/.test(blockerInput.trim())) setBlockedBy(Number(blockerInput.trim().replace("#", ""))); }} />
+                  <button className="text-zinc-400 hover:text-zinc-200" disabled={linkBusy || !/^#?\d+$/.test(blockerInput.trim())} onClick={() => setBlockedBy(Number(blockerInput.trim().replace("#", "")))}>link</button>
+                </div>
+              )}
+              {sel.blocks?.length > 0 && <div className="mt-0.5 text-zinc-500">Blocks {sel.blocks.map((b: any, i: number) => <span key={b.id}>{i > 0 ? ", " : ""}<button className="underline" onClick={() => open(b.id)}>#{b.id}</button> ({b.status})</span>)}</div>}
+            </dd>
             {origin && <><dt className="text-zinc-500">Origin</dt><dd><Link className="underline" to={`/alerts?status=all&id=${origin.alert_id}`}>incident #{origin.incident_id} on alert #{origin.alert_id}</Link></dd></>}
             {(sel.resource_role || /^(idle_instance|stopped_instance_ebs)$/.test(sel.rule)) && <><dt className="text-zinc-500">Role (Jev)</dt><dd className="text-xs"><RoleLine role={sel.resource_role} /></dd></>}
             {tierCheck && <><dt className="text-zinc-500">Tier check (Jev)</dt><dd className="text-xs">irreversible <span className="text-zinc-200">{pct(tierCheck.irreversible)}</span> · service impact <span className="text-zinc-200">{tierCheck.service_impact_label}</span> ({Number(tierCheck.service_impact).toFixed(1)}){tierCheck.tier_before !== tierCheck.tier_after ? <span className="text-amber-300"> · tightened {tierCheck.tier_before} → {tierCheck.tier_after}</span> : <span className="text-zinc-500"> · tier {tierCheck.tier_after} kept</span>}</dd></>}
@@ -225,6 +278,23 @@ export default function Recommendations() {
           )}
           {dbResource && <div className="mt-3"><RdsLoadPanel id={dbResource} compact /></div>}
           <details className="mt-3 text-xs"><summary className="cursor-pointer text-zinc-500">Evidence</summary><pre className="mt-1 max-h-64 overflow-auto rounded bg-zinc-950 p-2">{JSON.stringify(JSON.parse(sel.evidence || "{}"), null, 2)}</pre></details>
+          {sel.exposure?.resources?.some((r: any) => r.domains.length || r.volumes.length || r.open_alerts.length || r.pool || r.cluster) && (
+            <div className={`mt-3 rounded border p-2 text-xs ${sel.exposure.disruptive && sel.exposure.resources.some((r: any) => r.domains.length || r.open_alerts.length) ? "border-amber-500/40 bg-amber-500/5" : "border-zinc-800 bg-zinc-950/60"}`}>
+              <div className="mb-1 text-[11px] uppercase tracking-wide text-zinc-400">Before you act</div>
+              <ul className="space-y-1.5">
+                {sel.exposure.resources.map((r: any) => (
+                  <li key={r.id}>
+                    <div className="font-mono text-zinc-300">{r.id}{r.name && r.name !== r.id ? <span className="font-sans text-zinc-500"> {r.name}</span> : null}</div>
+                    {r.domains.length > 0 && <div className={sel.exposure.disruptive ? "text-amber-300" : "text-zinc-400"}>{r.domains.length} Route 53 record{r.domains.length === 1 ? "" : "s"} still point{r.domains.length === 1 ? "s" : ""} here{sel.exposure.disruptive ? "; a stop, a replacement or a new address breaks them unless they move" : ""}: {r.domains.map((d: any) => <span key={`${d.name}-${d.type}`} className="mr-1.5 font-mono text-[11px]">{d.name} <span className="text-zinc-500">({d.type}{d.hop > 1 ? " via LB" : ""})</span></span>)}</div>}
+                    {r.open_alerts.length > 0 && <div className="text-amber-300">{r.open_alerts.length} open alert{r.open_alerts.length === 1 ? "" : "s"}: {r.open_alerts.slice(0, 3).map((a: any) => <Link key={a.id} className="mr-1.5 underline" to={`/alerts?status=all&id=${a.id}`}>{a.kind}</Link>)}</div>}
+                    {r.volumes.length > 0 && <div className="text-zinc-400">{r.volumes.length} volume{r.volumes.length === 1 ? "" : "s"} attached ({r.volumes.reduce((s: number, v: any) => s + (Number(v.size_gb) || 0), 0)} GB){/terminate|delete/i.test(sel.action_type) ? "; they go with the instance unless kept or snapshotted" : ""}</div>}
+                    {r.pool && <div className="text-zinc-400">member of {r.pool.kind} pool <span className="font-mono">{r.pool.name}</span>: its controller replaces it; act on the pool, not the member</div>}
+                    {r.cluster && <div className="text-zinc-400">member of RDS cluster <span className="font-mono">{r.cluster}</span></div>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="mt-4 space-y-2 border-t border-zinc-800 pt-3">
             <input className="w-full" placeholder="reason (required to reject; it teaches the agent; for pending: what you are waiting on)" value={reason} onChange={(e) => setReason(e.target.value)} />
             <div className="text-xs text-zinc-400">
@@ -344,7 +414,7 @@ export default function Recommendations() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-zinc-100">Recommendations <span className="text-sm font-normal text-zinc-500">{data ? <>{data.total} · ≈ {usd(data.total_saving)} / month</> : "…"}</span></h1>
+        <h1 className="text-xl font-semibold text-zinc-100">Recommendations <span className="text-sm font-normal text-zinc-500">{data ? <>{data.total} · ≈ {usd(data.total_saving_distinct ?? data.total_saving)} / month{(data.overlap_usd ?? 0) > 0 && <span className="text-zinc-600" title="Several entries claim the same resource: only the largest claim per resource is counted here"> · {usd(data.overlap_usd)} claimed twice</span>}</> : "…"}</span></h1>
         <div className="flex gap-2">
           <input placeholder="search title, resource or #id" value={q} onChange={(e) => setParam("q", e.target.value)} className="w-56" />
           <select value={status} onChange={(e) => setParam("status", e.target.value)}>
@@ -369,6 +439,9 @@ export default function Recommendations() {
                         <div>{r.title}</div>
                         <div className="text-xs text-zinc-500"><span className="font-mono text-zinc-400">#{r.id}</span>{r.status !== status && <> · <Badge>{r.status}</Badge></>} · {r.action_type} · {r.resource}</div>
                         {(() => { const p = progressLine(r.progress); return p ? <div className={`text-xs ${p.due ? "text-amber-300" : "text-indigo-300"}`}>{p.text}</div> : null; })()}
+                        {r.system && <div className="text-xs text-sky-300">{r.system.members.length} member{r.system.members.length === 1 ? "" : "s"} of {r.system.kind.replace("_", " ")} {r.system.id} · one decision for all {r.merged_ids.length}</div>}
+                        {r.conflicts?.length > 0 && <div className="text-xs text-amber-300">conflicts with {r.conflicts.map((c: any, i: number) => <span key={c.id}>{i > 0 ? ", " : ""}#{c.id} ({c.action_type}{c.status !== r.status ? `, ${c.status}` : ""})</span>)}</div>}
+                        {r.blocker && <div className={`text-xs ${r.blocker.done ? "text-emerald-300" : "text-zinc-400"}`}>{r.blocker.done ? `unblocked: #${r.blocker.id} is ${r.blocker.status}` : `blocked by #${r.blocker.id} (${r.blocker.status}${r.blocker.follow_up ? `, check again ${r.blocker.follow_up}` : ""})`}</div>}
                         {r.merged?.length > 0 && <div className="text-xs text-violet-300">also proposed by {otherSources(r).length ? otherSources(r).join(", ") : r.source} ({r.merged.length} more)</div>}
                       </Td>
                       <Td><Badge>{r.tier}</Badge></Td><Td><Badge>{r.source}</Badge></Td>

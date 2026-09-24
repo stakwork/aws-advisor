@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
+import { Timeline } from "../components/timeline";
 import { Badge, Button, Card, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
@@ -605,6 +606,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
       )}
 
       <GraphLine id={d.instance_id} />
+      <Timeline kind="ec2" id={d.instance_id} />
     </>
   );
 }
@@ -661,6 +663,7 @@ function RdsDetail({ d }: { d: any }) {
       <Domains list={d.domains} empty="No Route 53 record names this endpoint (applications use the RDS endpoint directly)." />
       <Group title={`Load${id.cluster ? ` · cluster ${id.cluster}` : ""}`}><RdsLoadPanel id={id.cluster || d.db_instance_identifier} compact /></Group>
       <Related id={d.db_instance_identifier} recs={d.open_recs} findings={d.findings} />
+      <Timeline kind="rds" id={d.db_instance_identifier} />
     </>
   );
 }
@@ -680,6 +683,7 @@ function EbsDetail({ d }: { d: any }) {
       <Group title="Price">
         <Dl rows={[["At list", `${usd(d.monthly_usd, 2)} / month`], ["gp3 instead", d.volume_type === "gp2" ? `${usd(d.size_gb * 0.08, 2)} / month for the same size and 3,000 IOPS included` : null]]} />
       </Group>
+      <Timeline kind="ebs" id={d.volume_id} />
     </>
   );
 }
@@ -701,6 +705,7 @@ function S3Detail({ d }: { d: any }) {
       <Group title="Lifecycle">
         <Dl rows={[["Rules", d.lifecycle_rules ? `${d.lifecycle_rules}` : <span className={d.standard_gb > 20 ? "text-amber-300" : ""}>none{d.standard_gb > 20 ? `: ${Number(d.standard_gb).toFixed(0)} GB sit in Standard; a transition to Infrequent Access after 30 days would save about ${usd(d.standard_gb * (0.023 - 0.0125))}/month if rarely read` : ""}</span>], ["Objects", d.objects != null ? Number(d.objects).toLocaleString() : null], ["Metrics day", d.metric_day]]} />
       </Group>
+      <Timeline kind="s3" id={d.name} />
     </>
   );
 }
@@ -765,6 +770,7 @@ function LambdaDetail({ d }: { d: any }) {
       <Group title="Findings and recommendations">
         <div className="text-sm text-zinc-400">{d.findings ? <Link className="underline" to={`/findings?q=${encodeURIComponent(d.name)}`}>{d.findings} finding{d.findings === 1 ? "" : "s"}</Link> : "no findings"} · {d.open_recs ? <Link className="underline" to={`/recommendations?q=${encodeURIComponent(d.name)}`}>{d.open_recs} open recommendation{d.open_recs === 1 ? "" : "s"}</Link> : "no open recommendations"}</div>
       </Group>
+      <Timeline kind="lambda" id={d.name} />
     </>
   );
 }
@@ -805,6 +811,7 @@ function CacheDetail({ d }: { d: any }) {
       <Group title="Tags"><Tags tags={s.tags} /></Group>
       <Domains list={d.domains} empty="No Route 53 record names this cluster's endpoints." />
       <Related id={d.cache_cluster_id} recs={d.open_recs} findings={d.findings} />
+      <Timeline kind="elasticache" id={d.cache_cluster_id} />
     </>
   );
 }
