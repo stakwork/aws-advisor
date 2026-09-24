@@ -75,6 +75,25 @@ the webhook (the thread polls every 5 s meanwhile). The agent can hand back corr
 lines (`step_fixes`, shown as cards) and say the plan needs rewriting (`suggest_replan`, which offers the re-plan
 button). Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
 
+**Run** on a step executes its check from the app (`src/step_runner.ts`,
+`POST /api/recommendations/:id/steps/:index/run`), Steampipe first. The agent is asked to give each step a
+`verify_sql`, one SELECT against the `aws_*` tables that shows whether the step worked, whenever a table covers the
+check; the runner executes it through the advisor's own Steampipe connection, in a read-only transaction with the
+cache switched off for that session, and the rows become the step's outcome ("Run · SQL"). When there is no SQL,
+or a table does not cover the check (an Athena query's state, Logs Insights, listing a bucket), the step's command
+runs through the aws CLI instead ("Run · CLI"), under a strict rule: every part of the command must be an `aws`
+call whose operation reads (describe, get, list, lookup, search, batch-get, head, query, scan, the CloudWatch Logs
+query calls; for `aws s3` only `ls`), optionally piped through a text filter (head, tail, grep, sort, uniq, wc, cut,
+tr, awk, sed without -i, jq, column, nl), joined by `&&` or `;`. Anything a shell would interpret (substitution,
+redirection, `||`, background jobs), any write verb, any `--profile` / `--endpoint-url`, any `file://` argument, and
+the read calls that hand out credentials, secrets or objects (ecr get-login-password, sts assume-role, secretsmanager
+get-secret-value, ssm get-parameter, s3api get-object, …) are refused and the step shows "copy to run" instead.
+The CLI runs with the advisor's own credentials, whatever the mode, as environment variables for that one process,
+with a 90 s limit. The image installs AWS CLI v2 for this; on a host without it the app says so at startup and on
+every step (`GET /api/run/status`). The transcript becomes the step's outcome (worked or failed by exit code), so the re-plan and the
+thread see real output, and every run is kept in `step_runs` (`GET /api/recommendations/:id/runs`). Nothing that
+changes AWS ever runs from the app: that is the executor on the roadmap, under its own role.
+
 **Chat** in the sidebar holds general threads with the agent, as many as the team opens (`/api/chat/threads`,
 `src/chat.ts`; a thread without a name takes its first message as its title). The brief is deliberately small: a
 few account numbers (spend last 7 days, month to date and projection, unacknowledged alerts, open recommendations

@@ -32,6 +32,10 @@
           "verify": {
             "type": "string",
             "description": "how to check the step worked before moving on"
+          },
+          "verify_sql": {
+            "type": "string",
+            "description": "when a Steampipe table covers the check: one SELECT against the aws_* tables (no schema prefix) that shows whether the step worked, e.g. select flow_log_id, flow_log_status from aws_vpc_flow_log where resource_id in ('subnet-1'). Omit when no table covers it (Athena query state, Logs Insights, S3 listings)."
           }
         },
         "required": [

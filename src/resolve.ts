@@ -14,6 +14,7 @@ import { domainsReaching } from "./exposure.js";
 import { Tier } from "./rules.js";
 import { RdsLoadSummary, ensureRdsLoad, latestRdsLoad, loadSummary } from "./rds_load.js";
 import { outcomesText, parseProgress } from "./progress.js";
+import { verdictHere } from "./step_runner.js";
 
 /**
  * Tailored resolutions. A playbook (src/playbooks.ts) says how a kind of finding is acted on in general; a
@@ -342,7 +343,7 @@ export function buildResolutionPrompt(ctx: ResolutionContext, gate: GateAnswer |
   return lines.join("\n");
 }
 
-export interface ResolutionPlan { applies: boolean; summary: string; blockers: string[]; plan: { step: string; command?: string; verify: string }[]; risk: Tier; est_monthly_saving: number | null; needs_from_human: string[]; concepts_used: string[] }
+export interface ResolutionPlan { applies: boolean; summary: string; blockers: string[]; plan: { step: string; command?: string; verify: string; verify_sql?: string }[]; risk: Tier; est_monthly_saving: number | null; needs_from_human: string[]; concepts_used: string[] }
 
 /** Validates the agent's answer into the stored plan; null when it is not a resolution object. */
 export function parseResolutionResult(content: unknown): ResolutionPlan | null {
@@ -354,7 +355,7 @@ export function parseResolutionResult(content: unknown): ResolutionPlan | null {
     applies: c.applies !== false,
     summary: c.summary,
     blockers: strs(c.blockers),
-    plan: c.plan.filter((s: any) => s && typeof s === "object" && typeof s.step === "string").map((s: any) => ({ step: String(s.step), ...(s.command ? { command: String(s.command) } : {}), verify: String(s.verify || "") })),
+    plan: c.plan.filter((s: any) => s && typeof s === "object" && typeof s.step === "string").map((s: any) => ({ step: String(s.step), ...(s.command ? { command: String(s.command) } : {}), verify: String(s.verify || ""), ...(typeof s.verify_sql === "string" && s.verify_sql.trim() ? { verify_sql: s.verify_sql.trim() } : {}) })),
     risk: (["auto", "approve", "report"].includes(c.risk) ? c.risk : "approve") as Tier,
     est_monthly_saving: Number.isFinite(n) ? n : null,
     needs_from_human: strs(c.needs_from_human),
@@ -474,7 +475,7 @@ export function resolutionFor(recId: number) {
   return {
     id: row.id, recommendation_id: row.recommendation_id, request_id: row.request_id, status: row.status, gate_outcome: row.gate_outcome ?? null, error: row.error, created_at: row.created_at, finished_at: row.finished_at,
     gate: safeJson(row.gate),
-    plan: plan ? { ...plan, concepts_used: plan.concepts_used.map(conceptLink) } : null,
+    plan: plan ? { ...plan, plan: plan.plan.map((st) => ({ ...st, ...verdictHere(st) })), concepts_used: plan.concepts_used.map(conceptLink) } : null,
     context: ctx ? { control_id: ctx.control_id, playbook: ctx.playbook, resource: ctx.resource, concepts: ctx.concepts.map((c) => conceptLink(c.id)), history: ctx.history, feedback: (ctx as any).feedback ?? null } : null,
   };
 }

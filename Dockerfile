@@ -23,10 +23,15 @@ FROM node:22-bookworm-slim
 ARG STEAMPIPE_VERSION=latest
 ARG POWERPIPE_VERSION=latest
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gosu tar && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gosu tar unzip && rm -rf /var/lib/apt/lists/* \
  && /bin/sh -c "$(curl -fsSL https://steampipe.io/install/steampipe.sh)" \
  && /bin/sh -c "$(curl -fsSL https://powerpipe.io/install/powerpipe.sh)" \
  && useradd --create-home --shell /bin/bash advisor
+# The AWS CLI v2, for the read-only step runner (src/step_runner.ts): the official installer, per architecture
+# (uname -m is x86_64 or aarch64, which is how the archives are named). About 230 MB.
+RUN arch="$(uname -m)" && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${arch}.zip" -o /tmp/awscliv2.zip \
+ && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli \
+ && rm -rf /tmp/aws /tmp/awscliv2.zip && aws --version
 
 WORKDIR /usr/src/app
 COPY --from=build /src/package.json /src/package-lock.json ./

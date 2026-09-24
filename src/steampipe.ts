@@ -28,8 +28,12 @@ export async function query<T = any>(sql: string, params: unknown[] = []): Promi
  * Runs one statement inside a READ ONLY transaction with its own statement timeout, for SQL that
  * does not come from this codebase (the MCP steampipe_query tool). Returns column names and rows.
  */
-export async function queryReadOnly<T = any>(sql: string, opts: { timeoutMs: number }): Promise<{ rows: T[]; columns: string[] }> {
+export async function queryReadOnly<T = any>(sql: string, opts: { timeoutMs: number; freshData?: boolean }): Promise<{ rows: T[]; columns: string[] }> {
   const client = await pool.connect();
+  // A verify right after a change must not read Steampipe's cache: the cache switch is per session, so it is turned
+  // off on this connection before the transaction and back on after (a failure to switch is logged, not fatal).
+  const cache = async (op: "cache_off" | "cache_on") => { try { await client.query("insert into steampipe_command.cache (operation) values ($1)", [op]); } catch (e: any) { console.warn(`[steampipe] ${op} not applied: ${e?.message || e}`); } };
+  if (opts.freshData) await cache("cache_off");
   try {
     await client.query("begin read only");
     // the transaction sees only this app's connection: an unqualified aws_* name can never resolve to another one
@@ -43,6 +47,7 @@ export async function queryReadOnly<T = any>(sql: string, opts: { timeoutMs: num
     try { await client.query("rollback"); } catch { /* connection may be gone */ }
     throw e;
   } finally {
+    if (opts.freshData) await cache("cache_on");
     client.release();
   }
 }

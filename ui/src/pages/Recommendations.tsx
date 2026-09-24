@@ -119,11 +119,21 @@ export default function Recommendations() {
     } catch (e: any) { setErr(e.message); }
     finally { setProgressBusy(false); }
   };
+  // Runs a read-only step from the app (POST /recommendations/:id/steps/:i/run); the output lands as the step's outcome.
+  const [runningStep, setRunningStep] = useState<number | null>(null);
+  const runStep = async (i: number) => {
+    if (!sel) return;
+    setRunningStep(i); setErr("");
+    try { const r = await api(`/recommendations/${sel.id}/steps/${i}/run`, { method: "POST", body: "{}" }); setSel((prev: any) => ({ ...prev, ...r.recommendation })); load(); }
+    catch (e: any) { setErr(e.message); }
+    finally { setRunningStep(null); }
+  };
   // A tick means the step worked; "failed" records the outcome with what was seen. Either replaces the other.
   const checks: StepChecks | undefined = planKey ? {
     done: doneSet, busy: progressBusy, outcomes: outcomeMap,
     toggle: (i) => { const next = new Set(doneSet); const outs = new Map(outcomeMap); if (next.has(i)) { next.delete(i); outs.delete(i); } else { next.add(i); outs.set(i, { step: i, state: "worked", note: "", at: "" }); } saveProgress(next, onThisPlan ? progress!.follow_up : null, outs); },
     setOutcome: (i, state, note) => { const outs = new Map(outcomeMap); const next = new Set(doneSet); if (!state) outs.delete(i); else { outs.set(i, { step: i, state, note, at: "" }); if (state === "failed") next.delete(i); } saveProgress(next, onThisPlan ? progress!.follow_up : null, outs); },
+    ...(planKey.startsWith("resolution:") ? { runnable: (i: number) => resolution?.plan?.plan?.[i] ? { runnable: Boolean(resolution.plan.plan[i].runnable), reason: String(resolution.plan.plan[i].reason || ""), via: resolution.plan.plan[i].via } : null, run: runStep, running: runningStep } : {}),
   } : undefined;
   const failedSteps = [...outcomeMap.values()].filter((o) => o.state === "failed").length;
   // A new plan written from what happened to this one (POST /recommendations/:id/replan); the note goes to the agent with the outcomes.
@@ -413,6 +423,7 @@ export default function Recommendations() {
                           <div><Prose text={s.step} /></div>
                           {s.command && <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5 text-zinc-200">{s.command}</pre>}
                           {s.verify && <div className="mt-1 text-xs text-emerald-300/90">verify: <Prose text={s.verify} /></div>}
+                          {s.verify_sql && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-5 text-emerald-200/80" title="The advisor runs this itself, read-only, through Steampipe">{s.verify_sql}</pre>}
                         </Step>
                       ))}
                     </ol>
