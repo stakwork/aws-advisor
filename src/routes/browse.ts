@@ -9,6 +9,7 @@ import { ConceptScope, suggestDecisionScope, syncDecisionConceptInBackground } f
 import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendRows, spendSummary } from "../spend.js";
 import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
 import { statusAfterProgress, validateProgress } from "../progress.js";
+import { noteDecision } from "../notify.js";
 import { Conflict, blockerLinks, blockersFor, distinctSaving, findConflicts, liveRows, makesCycle, systemMap } from "../related.js";
 import { listPlaybooks, playbookFor, playbookSummary } from "../playbooks.js";
 import { resolutionFor, resolveRecommendation } from "../resolve.js";
@@ -186,6 +187,8 @@ function decide(id: number, status: string, reason: string | undefined, by: stri
   if (status === "rejected" && config.repo2graphUrl) postRejectionLearning({ id: rec.id, fingerprint: rec.fingerprint, title: rec.title, rule: rec.rule, resource: rec.resource, decision_reason: String(reason) });
   // Every decision is mirrored into repo2graph's Concept graph (see src/concepts.ts); also fire-and-forget.
   syncDecisionConceptInBackground(id);
+  // Approvals, rejections and done land in the Sphinx chat (src/notify.ts); queued here, posted in the background.
+  noteDecision(id, status, by);
   return rec;
 }
 

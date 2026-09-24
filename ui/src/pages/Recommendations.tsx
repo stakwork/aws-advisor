@@ -51,6 +51,19 @@ export default function Recommendations() {
   const [scopeTouched, setScopeTouched] = useState(false);
   const [suggestion, setSuggestion] = useState<{ scope: Scope; confidence: number } | null>(null);
   const [err, setErr] = useState("");
+  // Whether the Sphinx bot is set up (src/notify.ts); the "Send to Sphinx" button shows only then.
+  const [notify, setNotify] = useState<any>(null);
+  useEffect(() => { api("/notify/status").then(setNotify).catch(() => setNotify(null)); }, []);
+  const [shareResult, setShareResult] = useState<{ id: number; result: string } | null>(null);
+  const [sharing, setSharing] = useState(false);
+  // Posts the selected recommendation to the Sphinx chat now, whatever the rules say (POST /api/recommendations/:id/notify).
+  const share = async () => {
+    if (!sel) return;
+    setSharing(true); setShareResult(null);
+    try { const r = await api(`/recommendations/${sel.id}/notify`, { method: "POST", body: "{}" }); setShareResult({ id: sel.id, result: r.result }); }
+    catch (e: any) { setShareResult({ id: sel.id, result: e.message }); }
+    finally { setSharing(false); }
+  };
   const [probe, setProbe] = useState<{ busy: boolean; result: any; error: string }>({ busy: false, result: null, error: "" });
   // Tailored resolution (src/resolve.ts): the latest one for the selected recommendation, polled while pending.
   const [resolution, setResolution] = useState<any>(null);
@@ -313,7 +326,9 @@ export default function Recommendations() {
               <Button variant="ghost" onClick={() => decide("snoozed")}>Snooze</Button>
               <Button variant="ghost" onClick={() => decide("done")}>Mark done</Button>
               {sel.status !== "open" && <Button variant="ghost" onClick={() => decide("open")}>Reopen</Button>}
+              {notify?.configured && <Button variant="ghost" onClick={share} disabled={sharing} title="Post this recommendation to the Sphinx chat now">{sharing ? "Sending…" : "Send to Sphinx"}</Button>}
             </div>
+            {shareResult && shareResult.id === sel.id && <div className={`mt-1 text-xs ${shareResult.result === "sent" ? "text-emerald-300" : "text-red-300"}`}>{shareResult.result === "sent" ? "sent to Sphinx" : shareResult.result}</div>}
           </div>
         </div>
         <div className="min-w-0">

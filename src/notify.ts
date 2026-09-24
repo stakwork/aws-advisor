@@ -1,6 +1,11 @@
 /**
  * Notifications into a Sphinx chat through a Sphinx bot.
  *
+ * Two things go out. Alerts (below, `dispatchNotifications`), and recommendation events (`queueRecommendationEvent`):
+ * a decision (approved, rejected, done), a measured saving from the verifier, or a recommendation someone shares by
+ * hand. Each event is one row in `notifications` with a dedupe key, posted right away unless quiet hours hold it for
+ * the next after-job dispatch, with the receipt on the row.
+ *
  * After every scheduled job the dispatcher looks at the alerts raised in the last two hours that carry no
  * receipt yet, decides for each one (level, watched resource, quiet hours, already acknowledged by Jev or a
  * human), posts the ones that pass with one request per alert, and writes the receipt on the alert row
@@ -169,6 +174,7 @@ export async function dispatchNotifications(): Promise<{ considered: number; sen
     }
     if (out.considered) console.log(`[notify] ${out.sent} sent, ${out.skipped} skipped, ${out.failed} failed of ${out.considered}`);
   } finally { inFlight = false; }
+  await dispatchRecommendationEvents().catch((e: any) => console.error(`[notify] recommendation events: ${e?.message || e}`));
   return out;
 }
 
@@ -176,5 +182,109 @@ export async function dispatchNotifications(): Promise<{ considered: number; sen
 export function notifyStatus() {
   let host = "";
   try { host = new URL(config.sphinxBotUrl).host; } catch { /* unset */ }
-  return { configured: configured(), bot_host: host, level: config.notifyLevel, scope: config.notifyScope, quiet_hours: config.notifyQuietHours || null, quiet_now: inQuietHours(config.notifyQuietHours, new Date().getHours()) };
+  return { configured: configured(), bot_host: host, level: config.notifyLevel, scope: config.notifyScope, recommendations: config.notifyRecommendations, quiet_hours: config.notifyQuietHours || null, quiet_now: inQuietHours(config.notifyQuietHours, new Date().getHours()) };
+}
+
+// ---- recommendation events -------------------------------------------------------------------------------------
+
+export type RecEvent = "approved" | "rejected" | "done" | "verified" | "shared";
+
+export interface RecRowForMessage { id: number; title: string; status: string; resource: string | null; resource_name: string | null; est_monthly_saving: number | null; decided_by: string | null; decision_reason: string | null }
+export interface Verdict { verdict: string; realised_usd_month: number | null; estimate_usd_month: number | null; ratio: number | null; days_after: number | null; note: string | null }
+
+const usd = (n: number | null | undefined) => (n == null ? null : `${Math.round(Number(n))} USD/month`);
+
+/** Plain text for the chat: what happened to which recommendation, by whom and why, then the link. */
+export function formatRecommendationMessage(rec: RecRowForMessage, event: RecEvent, ctx: { verdict?: Verdict | null; by?: string | null; publicUrl: string }): string {
+  const head: Record<RecEvent, string> = { approved: "✅ APPROVED", rejected: "⛔ REJECTED", done: "🏁 DONE", verified: "📏 MEASURED", shared: "📣 RECOMMENDATION" };
+  const saving = usd(rec.est_monthly_saving);
+  const lines = [`${head[event]} — #${rec.id} ${rec.title}${saving && event !== "verified" ? ` (≈ ${saving})` : ""}`];
+  if (event === "verified" && ctx.verdict) {
+    const v = ctx.verdict;
+    const words: Record<string, string> = { realised: "saving realised", partial: "partly realised", none: "no saving seen", increase: "cost went up" };
+    const parts = [words[v.verdict] || v.verdict];
+    if (v.realised_usd_month != null) parts.push(`${usd(v.realised_usd_month)} measured${v.estimate_usd_month != null ? ` of ${usd(v.estimate_usd_month)} estimated` : ""}${v.ratio != null ? ` (${Math.round(v.ratio * 100)} %)` : ""}`);
+    if (v.days_after != null) parts.push(`${v.days_after} days after the decision`);
+    lines.push(parts.join(" · "));
+    if (v.note) lines.push(v.note);
+  } else if (event === "shared") {
+    lines.push(`status ${rec.status}${ctx.by ? ` · shared by ${ctx.by}` : ""}`);
+  } else {
+    const who = ctx.by || rec.decided_by;
+    const tail = [who ? `by ${who}` : null, rec.decision_reason ? rec.decision_reason : null].filter(Boolean);
+    if (tail.length) lines.push(tail.join(" · "));
+  }
+  const about = rec.resource_name && rec.resource_name !== rec.resource ? `${rec.resource_name} (${rec.resource})` : rec.resource;
+  if (about) lines.push(about);
+  lines.push(`${ctx.publicUrl}/recommendations?status=all&id=${rec.id}`);
+  return lines.join("\n");
+}
+
+/** The rule for a queued event: off and unconfigured are final receipts; quiet hours only wait. */
+export function decideRecommendationEvent(s: { configured: boolean; enabled: boolean; quiet: boolean; forced: boolean }): { send: boolean; reason: string | null } {
+  if (!s.configured) return { send: false, reason: "skipped: bot not configured" };
+  if (!s.forced && !s.enabled) return { send: false, reason: "skipped: recommendation events off" };
+  if (!s.forced && s.quiet) return { send: false, reason: null };
+  return { send: true, reason: "sent" };
+}
+
+const insertEvent = db.prepare("insert or ignore into notifications(subject, subject_id, event, dedupe, content) values ('recommendation', ?, ?, ?, ?)");
+const receiptEvent = db.prepare("update notifications set sent_at = datetime('now'), result = ? where id = ?");
+
+/**
+ * Records the event and posts it in the background. `dedupe` keeps a repeat (the same verdict on the next
+ * verification run, a decision saved twice) from going out again; a forced share always goes.
+ */
+export function queueRecommendationEvent(id: number, event: RecEvent, opts: { verdict?: Verdict | null; by?: string | null; dedupe?: string | null; force?: boolean } = {}): number | null {
+  const rec = db.prepare("select id, title, status, resource, resource_name, est_monthly_saving, decided_by, decision_reason from recommendations where id = ?").get(id) as RecRowForMessage | undefined;
+  if (!rec) return null;
+  const content = formatRecommendationMessage(rec, event, { verdict: opts.verdict, by: opts.by, publicUrl: config.publicUrl });
+  const dedupe = opts.dedupe === undefined ? `${event}:${id}:${new Date().toISOString().slice(0, 16)}` : opts.dedupe;
+  const r = insertEvent.run(id, event, dedupe, content);
+  if (!r.changes) return null;
+  const rowId = Number(r.lastInsertRowid);
+  dispatchRecommendationEvents({ only: rowId, force: opts.force }).catch((e: any) => console.error(`[notify] recommendation ${id} ${event}: ${e?.message || e}`));
+  return rowId;
+}
+
+let eventsInFlight = false;
+/** Sends the queued events without a receipt; with `only`, that one row (the "send now" paths). */
+export async function dispatchRecommendationEvents(opts: { only?: number; force?: boolean } = {}): Promise<{ sent: number; skipped: number; failed: number; waiting: number }> {
+  const out = { sent: 0, skipped: 0, failed: 0, waiting: 0 };
+  if (eventsInFlight && !opts.only) return out;
+  if (!opts.only) eventsInFlight = true;
+  try {
+    const rows = (opts.only
+      ? db.prepare("select id, content from notifications where id = ? and result is null").all(opts.only)
+      : db.prepare("select id, content from notifications where result is null order by id").all()) as { id: number; content: string }[];
+    const d = decideRecommendationEvent({ configured: configured(), enabled: config.notifyRecommendations === "on", quiet: inQuietHours(config.notifyQuietHours, new Date().getHours()), forced: Boolean(opts.force) });
+    for (const row of rows) {
+      if (!d.send) {
+        if (d.reason) { receiptEvent.run(d.reason, row.id); out.skipped++; } else out.waiting++;
+        continue;
+      }
+      const r = await sendSphinx(row.content);
+      const result = r.ok ? "sent" : `failed: ${r.status ? `${r.status} ` : ""}${r.body || "no response"}`.slice(0, 300);
+      receiptEvent.run(result, row.id);
+      if (r.ok) out.sent++; else out.failed++;
+    }
+    if (rows.length && !opts.only) console.log(`[notify] recommendation events: ${out.sent} sent, ${out.skipped} skipped, ${out.failed} failed, ${out.waiting} waiting for quiet hours to end`);
+  } finally { if (!opts.only) eventsInFlight = false; }
+  return out;
+}
+
+/** Sends one queued event again (a new row with the same content, so the history keeps the first receipt). */
+export async function resendNotification(id: number): Promise<string> {
+  const row = db.prepare("select subject_id, event, content from notifications where id = ?").get(id) as { subject_id: number; event: string; content: string } | undefined;
+  if (!row) throw new Error("not found");
+  const r = insertEvent.run(row.subject_id, row.event, null, row.content);
+  const res = await dispatchRecommendationEvents({ only: Number(r.lastInsertRowid), force: true });
+  return res.sent ? "sent" : (db.prepare("select result from notifications where id = ?").get(Number(r.lastInsertRowid)) as { result: string | null })?.result || "failed";
+}
+
+/** The decision hook for both decision routes: only the statuses worth a message become events. */
+export function noteDecision(id: number, status: string, by: string | null): void {
+  if (status !== "approved" && status !== "rejected" && status !== "done") return;
+  const rec = db.prepare("select decided_at from recommendations where id = ?").get(id) as { decided_at: string | null } | undefined;
+  queueRecommendationEvent(id, status, { by, dedupe: `${status}:${id}:${rec?.decided_at || ""}` });
 }

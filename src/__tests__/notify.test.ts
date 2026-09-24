@@ -60,3 +60,37 @@ test("notify: the message leads with the level and the alert, then what you woul
   const bare = formatMessage({ id: 7, kind: "credentials", resource: "advisor", message: "AWS credentials expired", created_at: "" }, { level: "alarm", resource: null, domains: [], recommendations: [], publicUrl: "http://x" });
   assert.deepEqual(bare.split("\n"), ["🔴 ALARM — AWS credentials expired", "credentials · advisor", "http://x/alerts?status=all&id=7"]);
 });
+
+import { decideRecommendationEvent, formatRecommendationMessage } from "../notify.js";
+
+test("notify: a decision message says what happened, by whom and why, then the resource and the link", () => {
+  const rec = { id: 317, title: "Attribute the 1,940 USD NAT line", status: "approved", resource: "nat-01043d58a73015593", resource_name: "production NGW us-east-1a", est_monthly_saving: 400, decided_by: "gonzalo", decision_reason: "flow logs first" };
+  assert.deepEqual(formatRecommendationMessage(rec, "approved", { publicUrl: "https://advisor.example" }).split("\n"), [
+    "✅ APPROVED — #317 Attribute the 1,940 USD NAT line (≈ 400 USD/month)",
+    "by gonzalo · flow logs first",
+    "production NGW us-east-1a (nat-01043d58a73015593)",
+    "https://advisor.example/recommendations?status=all&id=317",
+  ]);
+  assert.equal(formatRecommendationMessage({ ...rec, decision_reason: null, resource_name: null, est_monthly_saving: null }, "rejected", { by: "jev", publicUrl: "http://x" }).split("\n")[0], "⛔ REJECTED — #317 Attribute the 1,940 USD NAT line");
+  assert.equal(formatRecommendationMessage({ ...rec, decision_reason: null, resource_name: null, est_monthly_saving: null }, "rejected", { by: "jev", publicUrl: "http://x" }).split("\n")[1], "by jev");
+});
+
+test("notify: a measured saving leads with the verdict and the numbers, never the estimate in the head", () => {
+  const rec = { id: 317, title: "NAT: bake the whisper model into the image", status: "done", resource: null, resource_name: null, est_monthly_saving: 400, decided_by: "ui", decision_reason: null };
+  const msg = formatRecommendationMessage(rec, "verified", { verdict: { verdict: "realised", realised_usd_month: 512, estimate_usd_month: 400, ratio: 1.28, days_after: 14, note: "NatGateway-Bytes down 330 GB/day" }, publicUrl: "http://x" });
+  assert.deepEqual(msg.split("\n"), [
+    "📏 MEASURED — #317 NAT: bake the whisper model into the image",
+    "saving realised · 512 USD/month measured of 400 USD/month estimated (128 %) · 14 days after the decision",
+    "NatGateway-Bytes down 330 GB/day",
+    "http://x/recommendations?status=all&id=317",
+  ]);
+  assert.equal(formatRecommendationMessage(rec, "shared", { by: "gonzalo", publicUrl: "http://x" }).split("\n")[1], "status done · shared by gonzalo");
+});
+
+test("notify: recommendation events wait through quiet hours, but off and unconfigured are final; a share ignores both", () => {
+  assert.deepEqual(decideRecommendationEvent({ configured: true, enabled: true, quiet: false, forced: false }), { send: true, reason: "sent" });
+  assert.deepEqual(decideRecommendationEvent({ configured: true, enabled: true, quiet: true, forced: false }), { send: false, reason: null });
+  assert.equal(decideRecommendationEvent({ configured: true, enabled: false, quiet: false, forced: false }).reason, "skipped: recommendation events off");
+  assert.equal(decideRecommendationEvent({ configured: false, enabled: true, quiet: false, forced: true }).reason, "skipped: bot not configured");
+  assert.equal(decideRecommendationEvent({ configured: true, enabled: false, quiet: true, forced: true }).send, true);
+});

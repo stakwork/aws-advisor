@@ -92,6 +92,14 @@ chat pubkey, the level to send from, the scope and the quiet hours, with a "send
 - **Receipts.** Every considered alert gets `notified_at` and `notify_result` ("sent", "failed: …" or
   "skipped: <rule>"), shown on the Alerts page; "Send to Sphinx" on a row sends it now whatever the rules say
   (`POST /api/alerts/:id/notify`), and "Resend" repeats it.
+- **Recommendation events.** With `NOTIFY_RECOMMENDATIONS=on` (the default) the chat also hears when a
+  recommendation is approved, rejected or marked done (who and the reason), and when the saving verifier measures
+  one (verdict, realised against estimated, days after the decision). Each event is a row in `notifications` with a
+  dedupe key, so a decision saved twice or the same verdict on the next verification run goes out once; the
+  receipt is on the row. Events are posted right away; in quiet hours they wait for the next after-job dispatch.
+  "Send to Sphinx" in a recommendation's detail posts it now whatever the rules say
+  (`POST /api/recommendations/:id/notify`); `GET /api/notifications[?recommendation=<id>]` lists events and
+  receipts, `POST /api/notifications/:id/resend` repeats one.
 
 ### Resources are intertwined: conflicts, blockers, systems, exposure, history
 

@@ -338,6 +338,19 @@ addColumn("recommendations", "progress", "text");
 addColumn("recommendations", "blocked_by", "integer");
 // Notifications (src/notify.ts): the receipt on the alert, and the per-resource watch override (1 watch, 0 ignore, null auto).
 addColumn("alerts", "notified_at", "text");
+// Recommendation events posted to the chat (src/notify.ts): one row per event, `dedupe` keeps each from going twice,
+// `result` is the receipt ("sent", "failed: …", "skipped: …"); null = not sent yet (quiet hours, or the bot was down).
+db.exec(`create table if not exists notifications (
+  id integer primary key autoincrement,
+  subject text not null,
+  subject_id integer not null,
+  event text not null,
+  dedupe text unique,
+  content text not null,
+  created_at text not null default (datetime('now')),
+  sent_at text,
+  result text
+)`);
 addColumn("alerts", "notify_result", "text");
 for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache"]) addColumn(t, "watch", "integer");
 addColumn("inventory_ec2", "pool_kind", "text");
