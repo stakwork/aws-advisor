@@ -13,6 +13,7 @@ import { shortResourceId } from "./resource_id.js";
 import { domainsReaching } from "./exposure.js";
 import { Tier } from "./rules.js";
 import { RdsLoadSummary, ensureRdsLoad, latestRdsLoad, loadSummary } from "./rds_load.js";
+import { outcomesText, parseProgress } from "./progress.js";
 
 /**
  * Tailored resolutions. A playbook (src/playbooks.ts) says how a kind of finding is acted on in general; a
@@ -363,6 +364,21 @@ export function parseResolutionResult(content: unknown): ResolutionPlan | null {
 
 // ---- the flow -------------------------------------------------------------------------------------------------------
 
+/**
+ * The feedback section of a re-plan: the previous plan's steps with what happened to each (src/progress.ts outcomes)
+ * and the person's note. Empty when there is no earlier completed plan. Pure; exported for the tests.
+ */
+export function buildFeedbackSection(prev: { resolutionId: number; plan: ResolutionPlan } | null, progress: ReturnType<typeof parseProgress>, note: string | null): string {
+  if (!prev) return note ? `## Note from the person asking for the plan\n${note}` : "";
+  const lines = [`## The previous plan (resolution ${prev.resolutionId}) and what happened when it was tried`, prev.plan.summary || ""];
+  prev.plan.plan.forEach((s, i) => lines.push(`${i + 1}. ${s.step}${s.command ? `\n   command: ${s.command}` : ""}`));
+  const tried = progress?.plan === `resolution:${prev.resolutionId}` ? outcomesText(prev.plan.plan, progress) : "";
+  lines.push("", "### Outcomes", tried || "- no step was recorded as tried");
+  if (note) lines.push("", "### Note from the person asking for the new plan", note);
+  lines.push("", "Write the new plan from here: keep the steps that worked (mark them as already done), replace the ones that failed with steps that fix the cause shown in the output, and do not repeat a step whose output shows it cannot work as written.");
+  return lines.join("\n");
+}
+
 export interface ResolveResult { resolutionId: number; status: "pending" | "not_applicable" | "failed"; requestId?: string }
 
 /**
@@ -370,7 +386,7 @@ export interface ResolveResult { resolutionId: number; status: "pending" | "not_
  * in flight unless force is set. The credential gate runs first like every other dispatch: the agent verifies
  * facts against the live account, which is pointless on dead credentials.
  */
-export async function resolveRecommendation(recId: number, opts: { force?: boolean } = {}): Promise<ResolveResult> {
+export async function resolveRecommendation(recId: number, opts: { force?: boolean; replan?: { note?: string | null } } = {}): Promise<ResolveResult> {
   const rec = db.prepare("select * from recommendations where id = ?").get(recId) as RecRow | undefined;
   if (!rec) { const e: any = new Error(`unknown recommendation ${recId}`); e.code = "not_found"; throw e; }
   const pending = db.prepare("select id, request_id from resolutions where recommendation_id = ? and status = 'pending' order by id desc limit 1").get(recId) as { id: number; request_id: string | null } | undefined;
@@ -382,6 +398,14 @@ export async function resolveRecommendation(recId: number, opts: { force?: boole
   const pre = resourceFacts(rec);
   if (pre.kind === "rds" && pre.id) await ensureRdsLoad(pre.id, 24, (l) => console.log(`[resolve] ${l}`));
   const ctx = assembleContext(rec, concepts);
+  // A re-plan carries the previous plan and what happened to each step; it is stored with the context so the UI can show it.
+  let feedback = "";
+  if (opts.replan) {
+    const prevRow = db.prepare("select id, plan from resolutions where recommendation_id = ? and status = 'completed' order by id desc limit 1").get(recId) as { id: number; plan: string | null } | undefined;
+    const prevPlan = prevRow ? (safeJson(prevRow.plan) as ResolutionPlan | null) : null;
+    feedback = buildFeedbackSection(prevRow && prevPlan ? { resolutionId: prevRow.id, plan: prevPlan } : null, parseProgress((rec as any).progress), opts.replan.note?.trim() || null);
+    (ctx as any).feedback = feedback || null;
+  }
   const resolutionId = Number(db.prepare("insert into resolutions(recommendation_id, context) values (?, ?)").run(recId, JSON.stringify(ctx)).lastInsertRowid);
   try {
     let gate: GateAnswer | null = null;
@@ -405,7 +429,7 @@ export async function resolveRecommendation(recId: number, opts: { force?: boole
     }
     db.prepare("update resolutions set gate = ?, gate_outcome = ? where id = ?").run(gateJson, verdict.outcome, resolutionId);
     const { requestId } = await postAgentRequest({
-      prompt: buildResolutionPrompt(ctx, gate),
+      prompt: feedback ? `${buildResolutionPrompt(ctx, gate)}\n\n${feedback}` : buildResolutionPrompt(ctx, gate),
       systemOverride: getPrompt("resolution"),
       sessionId: `aws-advisor-resolution-${resolutionId}-${Date.now().toString(36)}`,
       agentName: "aws-resolution-writer",
@@ -451,6 +475,6 @@ export function resolutionFor(recId: number) {
     id: row.id, recommendation_id: row.recommendation_id, request_id: row.request_id, status: row.status, gate_outcome: row.gate_outcome ?? null, error: row.error, created_at: row.created_at, finished_at: row.finished_at,
     gate: safeJson(row.gate),
     plan: plan ? { ...plan, concepts_used: plan.concepts_used.map(conceptLink) } : null,
-    context: ctx ? { control_id: ctx.control_id, playbook: ctx.playbook, resource: ctx.resource, concepts: ctx.concepts.map((c) => conceptLink(c.id)), history: ctx.history } : null,
+    context: ctx ? { control_id: ctx.control_id, playbook: ctx.playbook, resource: ctx.resource, concepts: ctx.concepts.map((c) => conceptLink(c.id)), history: ctx.history, feedback: (ctx as any).feedback ?? null } : null,
   };
 }

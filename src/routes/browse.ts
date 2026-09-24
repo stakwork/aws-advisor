@@ -10,6 +10,7 @@ import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendR
 import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
 import { statusAfterProgress, validateProgress } from "../progress.js";
 import { noteDecision } from "../notify.js";
+import { askAboutRecommendation, listMessages } from "../chat.js";
 import { Conflict, blockerLinks, blockersFor, distinctSaving, findConflicts, liveRows, makesCycle, systemMap } from "../related.js";
 import { listPlaybooks, playbookFor, playbookSummary } from "../playbooks.js";
 import { resolutionFor, resolveRecommendation } from "../resolve.js";
@@ -227,6 +228,26 @@ browse.post("/recommendations/:id/progress", auth, (req, res) => {
   const rec = db.prepare("select * from recommendations where id = ?").get(id) as any;
   if (next) { syncDecisionConceptInBackground(id); mirrorRecommendationsInBackground([id]); }
   res.json(rec);
+});
+
+// A new tailored plan written from what happened to the current one: the step outcomes and an optional note go
+// back to the agent (src/resolve.ts buildFeedbackSection). Body: { note?: string }. Same answer shape as /resolve.
+browse.post("/recommendations/:id/replan", auth, async (req, res) => {
+  const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 4000) : null;
+  try {
+    const r = await resolveRecommendation(Number(req.params.id), { replan: { note } });
+    res.status(r.status === "pending" ? 202 : 200).json({ ...r, resolution: resolutionFor(Number(req.params.id)) });
+  } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : 500).json({ error: e.message }); }
+});
+
+// The thread on a recommendation (src/chat.ts): every message, oldest first.
+browse.get("/recommendations/:id/messages", auth, (req, res) => res.json(listMessages(Number(req.params.id))));
+// Body: { message, by? }. Records the message and asks the agent; the answer lands through the webhook (202 while pending).
+browse.post("/recommendations/:id/messages", auth, async (req, res) => {
+  try {
+    const r = await askAboutRecommendation(Number(req.params.id), String(req.body?.message ?? ""), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
+    res.status(202).json(r);
+  } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
 });
 
 // Body: { id: number | null }: what this item waits on (another recommendation), or nothing. Refuses self and loops.

@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "reply": {
+      "type": "string",
+      "description": "the answer to the person, in plain text with blank lines between paragraphs; commands in fenced code blocks"
+    },
+    "suggest_replan": {
+      "type": "boolean",
+      "description": "true when the conversation shows the current plan is wrong enough that a new plan should be written"
+    },
+    "step_fixes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "step": { "type": "integer", "description": "the 1-based number of the step this replaces or repairs" },
+          "step_text": { "type": "string" },
+          "command": { "type": "string" },
+          "verify": { "type": "string" }
+        },
+        "required": ["step", "step_text"]
+      },
+      "description": "corrected steps when the person reports one failed; empty when the reply needs none"
+    }
+  },
+  "required": ["reply"]
+}

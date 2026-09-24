@@ -12,7 +12,8 @@ test("rubric paths fan out over arrays", () => {
 
 test("task files load, register the prompts and carry rubrics the grader understands", () => {
   const tasks = loadTasks();
-  assert.equal(tasks.length, 4);
+  assert.equal(tasks.length, 5);
+  assert.ok(taskFor("chat").system.includes("resolution assistant"));
   const observe = taskFor("observe");
   assert.ok(observe.system.includes("observing agent"));
   assert.ok(observe.rubric.length >= 6);

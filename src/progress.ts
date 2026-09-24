@@ -9,6 +9,11 @@
 export const PLAN_KEY = /^(resolution:\d{1,12}|playbook:[\w.\-]{1,120})$/;
 export const MAX_STEPS = 50;
 
+export const MAX_OUTCOME_NOTE = 8000;
+
+/** What happened when a step was tried: it worked, or it failed, with the output or the reason pasted in. */
+export interface StepOutcome { step: number; state: "worked" | "failed"; note: string; at: string }
+
 export interface Progress {
   plan: string;
   total: number;
@@ -16,6 +21,8 @@ export interface Progress {
   done: number[];
   /** YYYY-MM-DD, the day to look at this again (flow logs need a week of data, a cooling-off period, ...) */
   follow_up: string | null;
+  /** one per step at most; the feedback a re-plan or a chat hands back to the agent (src/resolve.ts, src/chat.ts) */
+  outcomes: StepOutcome[];
   updated_at: string;
 }
 
@@ -24,13 +31,14 @@ export function parseProgress(raw: unknown): Progress | null {
   try {
     const p = JSON.parse(raw);
     if (!p || typeof p !== "object" || typeof p.plan !== "string" || !Array.isArray(p.done)) return null;
-    return { plan: p.plan, total: Number(p.total) || 0, done: p.done.map(Number).filter(Number.isInteger), follow_up: p.follow_up || null, updated_at: String(p.updated_at || "") };
+    const outcomes: StepOutcome[] = Array.isArray(p.outcomes) ? p.outcomes.filter((o: any) => o && Number.isInteger(o.step) && (o.state === "worked" || o.state === "failed")).map((o: any) => ({ step: o.step, state: o.state, note: String(o.note || ""), at: String(o.at || "") })) : [];
+    return { plan: p.plan, total: Number(p.total) || 0, done: p.done.map(Number).filter(Number.isInteger), follow_up: p.follow_up || null, outcomes, updated_at: String(p.updated_at || "") };
   } catch { return null; }
 }
 
 /** Validates a progress body from the UI; the whole checklist is sent every time, so there is no merge to get wrong. */
 export function validateProgress(body: any, now = new Date()): { error: string } | { progress: Progress } {
-  const { plan, total, done, follow_up } = body || {};
+  const { plan, total, done, follow_up, outcomes } = body || {};
   if (typeof plan !== "string" || !PLAN_KEY.test(plan)) return { error: 'plan must be "resolution:<id>" or "playbook:<control id>"' };
   if (!Number.isInteger(total) || total < 0 || total > MAX_STEPS) return { error: `total must be an integer between 0 and ${MAX_STEPS}` };
   if (!Array.isArray(done) || !done.every((i) => Number.isInteger(i) && i >= 0 && i < total)) return { error: "done must be a list of step indices below total" };
@@ -39,7 +47,41 @@ export function validateProgress(body: any, now = new Date()): { error: string }
     if (typeof follow_up !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(follow_up) || Number.isNaN(Date.parse(follow_up))) return { error: "follow_up must be a YYYY-MM-DD date" };
     followUp = follow_up;
   }
-  return { progress: { plan, total, done: [...new Set(done as number[])].sort((a, b) => a - b), follow_up: followUp, updated_at: now.toISOString().slice(0, 19).replace("T", " ") } };
+  const stamp = now.toISOString().slice(0, 19).replace("T", " ");
+  const outs: StepOutcome[] = [];
+  if (outcomes !== undefined && outcomes !== null) {
+    if (!Array.isArray(outcomes)) return { error: "outcomes must be a list of { step, state, note }" };
+    const seen = new Set<number>();
+    for (const o of outcomes) {
+      if (!o || !Number.isInteger(o.step) || o.step < 0 || o.step >= total) return { error: "each outcome names a step index below total" };
+      if (o.state !== "worked" && o.state !== "failed") return { error: 'an outcome state is "worked" or "failed"' };
+      if (o.note !== undefined && o.note !== null && typeof o.note !== "string") return { error: "an outcome note is text" };
+      if (seen.has(o.step)) return { error: `step ${o.step + 1} has two outcomes` };
+      seen.add(o.step);
+      outs.push({ step: o.step, state: o.state, note: String(o.note || "").slice(0, MAX_OUTCOME_NOTE), at: typeof o.at === "string" && o.at ? o.at : stamp });
+    }
+    outs.sort((a, b) => a.step - b.step);
+  }
+  return { progress: { plan, total, done: [...new Set(done as number[])].sort((a, b) => a - b), follow_up: followUp, outcomes: outs, updated_at: stamp } };
+}
+
+/**
+ * The feedback section for the agent: each tried step with what happened, in the words the human wrote. Empty
+ * when nothing was tried. Shared by the re-plan (src/resolve.ts) and the chat (src/chat.ts).
+ */
+export function outcomesText(steps: { step: string }[], progress: Progress | null): string {
+  if (!progress) return "";
+  const byStep = new Map(progress.outcomes.map((o) => [o.step, o]));
+  const lines: string[] = [];
+  steps.forEach((s, i) => {
+    const o = byStep.get(i);
+    const ticked = progress.done.includes(i);
+    if (!o && !ticked) return;
+    const state = o?.state === "failed" ? "FAILED" : "worked";
+    lines.push(`${i + 1}. ${state}: ${s.step.split("\n")[0].slice(0, 200)}`);
+    if (o?.note) lines.push("```", o.note.slice(0, 3000), "```");
+  });
+  return lines.join("\n");
 }
 
 /**

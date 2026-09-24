@@ -4,8 +4,9 @@ import { api, usd, when } from "../api";
 import { Badge, Button, DetailCell, Empty, Pager, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { pct } from "../components/incident";
-import { EffortBadge, PlaybookBody, Prose, Step, StepChecks, usePlaybook } from "../components/playbook";
+import { EffortBadge, PlaybookBody, Prose, Step, StepChecks, StepOutcome, usePlaybook } from "../components/playbook";
 import { RdsLoadPanel } from "../components/rdsLoad";
+import { Thread } from "../components/thread";
 import { ImpactChart } from "../components/impact";
 
 const STATUSES = ["open", "pending", "approved", "rejected", "snoozed", "resolved", "done", "all"];
@@ -13,8 +14,8 @@ const PAGE_SIZE = 50;
 type Scope = "internal" | "generic";
 
 /** recommendations.progress (src/progress.ts): the ticked steps of one plan and the day to look again. */
-interface Progress { plan: string; total: number; done: number[]; follow_up: string | null; updated_at: string }
-const parseProgress = (raw: unknown): Progress | null => { try { const p = typeof raw === "string" && raw ? JSON.parse(raw) : null; return p && typeof p.plan === "string" && Array.isArray(p.done) ? { ...p, follow_up: p.follow_up || null } : null; } catch { return null; } };
+interface Progress { plan: string; total: number; done: number[]; follow_up: string | null; outcomes: StepOutcome[]; updated_at: string }
+const parseProgress = (raw: unknown): Progress | null => { try { const p = typeof raw === "string" && raw ? JSON.parse(raw) : null; return p && typeof p.plan === "string" && Array.isArray(p.done) ? { ...p, follow_up: p.follow_up || null, outcomes: Array.isArray(p.outcomes) ? p.outcomes : [] } : null; } catch { return null; } };
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 /** "2 of 6 steps · check again 2026-09-30" for a list row; due once the day has come. */
 function progressLine(raw: unknown): { text: string; due: boolean } | null {
@@ -108,16 +109,33 @@ export default function Recommendations() {
   const planTotal = resolution?.plan?.plan?.length ? resolution.plan.plan.length : playbook?.steps?.length || 0;
   const onThisPlan = progress?.plan === planKey;
   const doneSet = new Set<number>(onThisPlan ? progress!.done : []);
-  const saveProgress = async (done: Set<number>, followUp: string | null) => {
+  const outcomeMap = new Map<number, StepOutcome>((onThisPlan ? progress!.outcomes : []).map((o) => [o.step, o]));
+  const saveProgress = async (done: Set<number>, followUp: string | null, outcomes: Map<number, StepOutcome> = outcomeMap) => {
     if (!sel || !planKey) return;
     setProgressBusy(true); setErr("");
     try {
-      const r = await api(`/recommendations/${sel.id}/progress`, { method: "POST", body: JSON.stringify({ plan: planKey, total: planTotal, done: [...done], follow_up: followUp }) });
+      const r = await api(`/recommendations/${sel.id}/progress`, { method: "POST", body: JSON.stringify({ plan: planKey, total: planTotal, done: [...done], follow_up: followUp, outcomes: [...outcomes.values()] }) });
       setSel((prev: any) => ({ ...prev, ...r })); load();
     } catch (e: any) { setErr(e.message); }
     finally { setProgressBusy(false); }
   };
-  const checks: StepChecks | undefined = planKey ? { done: doneSet, busy: progressBusy, toggle: (i) => { const next = new Set(doneSet); next.has(i) ? next.delete(i) : next.add(i); saveProgress(next, onThisPlan ? progress!.follow_up : null); } } : undefined;
+  // A tick means the step worked; "failed" records the outcome with what was seen. Either replaces the other.
+  const checks: StepChecks | undefined = planKey ? {
+    done: doneSet, busy: progressBusy, outcomes: outcomeMap,
+    toggle: (i) => { const next = new Set(doneSet); const outs = new Map(outcomeMap); if (next.has(i)) { next.delete(i); outs.delete(i); } else { next.add(i); outs.set(i, { step: i, state: "worked", note: "", at: "" }); } saveProgress(next, onThisPlan ? progress!.follow_up : null, outs); },
+    setOutcome: (i, state, note) => { const outs = new Map(outcomeMap); const next = new Set(doneSet); if (!state) outs.delete(i); else { outs.set(i, { step: i, state, note, at: "" }); if (state === "failed") next.delete(i); } saveProgress(next, onThisPlan ? progress!.follow_up : null, outs); },
+  } : undefined;
+  const failedSteps = [...outcomeMap.values()].filter((o) => o.state === "failed").length;
+  // A new plan written from what happened to this one (POST /recommendations/:id/replan); the note goes to the agent with the outcomes.
+  const [replanNote, setReplanNote] = useState("");
+  const [replanning, setReplanning] = useState(false);
+  const replan = async () => {
+    if (!sel) return;
+    setReplanning(true); setErr("");
+    try { const r = await api(`/recommendations/${sel.id}/replan`, { method: "POST", body: JSON.stringify({ note: replanNote || null }) }); setResolution(r.resolution); setReplanNote(""); }
+    catch (e: any) { setErr(e.message); loadResolution(sel.id); }
+    finally { setReplanning(false); }
+  };
   const followUp = onThisPlan ? progress!.follow_up : null;
   const reloadSel = () => sel && api(`/recommendations/${sel.id}`).then(setSel).catch(() => {});
   // What this item waits on: another recommendation by id; the server refuses self and loops.
@@ -348,6 +366,13 @@ export default function Recommendations() {
                 {followUp && progressLine(sel.progress)?.due && <span className="text-amber-300"> The follow-up day has come.</span>}
                 {progress && !onThisPlan && <div className="mt-0.5 text-amber-300">Earlier progress ({progress.done.length} of {progress.total} steps{progress.follow_up ? `, check again ${progress.follow_up}` : ""}) was on {progress.plan.startsWith("playbook:") ? "the playbook" : "an earlier tailored plan"}; ticking here starts over on this one.</div>}
               </div>
+              {planKey.startsWith("resolution:") && (failedSteps > 0 || doneSet.size > 0) && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-2">
+                  <span className={failedSteps ? "text-red-300" : "text-zinc-500"}>{failedSteps ? `${failedSteps} step${failedSteps === 1 ? "" : "s"} failed.` : "Steps done so far."}</span>
+                  <input className="!py-1 !text-xs min-w-[16rem] flex-1" placeholder="note for the agent (optional): what you know that the plan did not" value={replanNote} onChange={(e) => setReplanNote(e.target.value)} disabled={replanning || resolution?.status === "pending"} />
+                  <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={replan} disabled={replanning || resolution?.status === "pending"} title="Ask the agent for a new plan written from these outcomes: what worked stays, what failed is replaced">{replanning ? "Starting…" : "Re-plan from here"}</Button>
+                </div>
+              )}
             </div>
           )}
           <div className="rounded border border-zinc-800 bg-zinc-950/60 p-3">
@@ -401,6 +426,11 @@ export default function Recommendations() {
                 )}
               </div>
             )}
+            {resolution?.context?.feedback && (
+              <details className="mt-2 text-xs"><summary className="cursor-pointer text-zinc-500">Written from what happened to the previous plan</summary>
+                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] leading-4 text-zinc-400">{resolution.context.feedback}</pre>
+              </details>
+            )}
             {resolution?.context && (resolution.context.concepts?.length > 0 || resolution.context.history?.recommendations?.length > 0) && (
               <details className="mt-2 text-xs"><summary className="cursor-pointer text-zinc-500">Context used ({resolution.context.concepts?.length || 0} concepts, {resolution.context.history?.recommendations?.length || 0} earlier recommendations, {resolution.context.history?.incidents?.length || 0} incidents)</summary>
                 <ul className="mt-1 space-y-0.5 text-zinc-400">
@@ -410,6 +440,7 @@ export default function Recommendations() {
               </details>
             )}
           </div>
+          <Thread recId={sel.id} onReplan={replan} replanBusy={replanning || resolution?.status === "pending"} />
           {playbook ? (
             <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/40 p-3 text-sm" open={!resolution?.plan}>
               <summary className="cursor-pointer text-zinc-200">How to do it <span className="text-zinc-500">· playbook: {playbook.title}</span> <Badge>{playbook.tier}</Badge> <EffortBadge effort={playbook.effort} /></summary>

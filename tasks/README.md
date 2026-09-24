@@ -8,4 +8,7 @@ and the prompt; the fact server exposes every tool), `max_turns`, the `rubric` t
 no_destructive_auto, covers, flag_consistent) and `retry`: when the score is below `on_score_below` the answer
 is sent back once with the failed checks appended, under the agent quota.
 
+The fifth folder, `chat/`, is the thread on a recommendation: it answers one message with the plan, the step
+outcomes and the conversation as context, and may return corrected steps and suggest a re-plan.
+
 Adding a situation is adding a folder; the score of every run is stored on `agent_runs`.
