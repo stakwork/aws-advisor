@@ -440,7 +440,7 @@ export default function Recommendations() {
               </details>
             )}
           </div>
-          <Thread recId={sel.id} onReplan={replan} replanBusy={replanning || resolution?.status === "pending"} />
+          <Thread base={`/recommendations/${sel.id}/messages`} onReplan={replan} replanBusy={replanning || resolution?.status === "pending"} />
           {playbook ? (
             <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/40 p-3 text-sm" open={!resolution?.plan}>
               <summary className="cursor-pointer text-zinc-200">How to do it <span className="text-zinc-500">· playbook: {playbook.title}</span> <Badge>{playbook.tier}</Badge> <EffortBadge effort={playbook.effort} /></summary>

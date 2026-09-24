@@ -123,15 +123,17 @@ test("chat: the brief carries the recommendation, the plan, the outcomes, the la
 
 import { buildAccountPrompt } from "../chat.js";
 
-test("chat: the account-wide brief carries the observation, the open recommendations and the thread, and asks for a reply only", () => {
-  const observation = "# Morning observation for 2026-09-24\n\n## Spend (Cost Explorer, net)\n- latest day with data 2026-09-23: 812 USD";
-  const open = [{ id: 317, title: "Attribute the NAT line", status: "pending", est_monthly_saving: 400, resource: "nat-1" }, { id: 306, title: "Interface endpoint", status: "open", est_monthly_saving: null, resource: null }];
-  const text = buildAccountPrompt(observation, open, [{ role: "user", author: "gonzalo", content: "what is the NAT costing us?", status: "completed" }], "and the workspace VPC?");
-  assert.match(text, /^# Thread with the team about this AWS account\n\n## What the advisor knows today\n## Spend \(Cost Explorer, net\)\n- latest day with data 2026-09-23: 812 USD/);
-  assert.match(text, /## Open recommendations \(2\)\n- #317 \[pending\] Attribute the NAT line \(≈ 400 USD\/month\) on nat-1\n- #306 \[open\] Interface endpoint\n/);
+test("chat: a general brief is a few numbers, the tool index and the thread; the agent pulls the rest", () => {
+  const header = { account: "745666712914", latest_run: "2026-09-24 06:10:00", spend_7d: 5710, month_to_date: 19400, projected: 24300, open_alerts: 3, open_recs: 2, open_saving: 400 };
+  const tools: [string, string][] = [["bill", "a month's bill"], ["nat_attribution", "who is behind a NAT gateway's traffic"]];
+  const text = buildAccountPrompt(header, tools, [{ role: "user", author: "gonzalo", content: "what is the NAT costing us?", status: "completed" }], "and the workspace VPC?", "NAT costs");
+  assert.match(text, /^# Thread with the team about the AWS account: NAT costs\n\n## The account in a few numbers/);
+  assert.match(text, /- account 745666712914; latest collection run 2026-09-24 06:10:00\n- spend: last 7 complete days 5710 USD; month to date 19400 USD, projected 24300 USD\n- 3 unacknowledged alerts in the last 7 days; 2 open\/pending\/approved recommendations claiming ≈ 400 USD\/month/);
+  assert.match(text, /## What you can look up \(tools arrive as aws_<name>\); pull what the question needs, say what you fetched\n- bill: a month's bill\n- nat_attribution: who is behind a NAT gateway's traffic/);
   assert.match(text, /\*\*gonzalo:\*\* what is the NAT costing us\?/);
   assert.match(text, /## The new message to answer\nand the workspace VPC\?/);
-  assert.match(text, /step_fixes and suggest_replan stay empty here/);
-  assert.match(buildAccountPrompt("", [], [], "hi"), /\(no observation yet: no collection run has completed\)/);
-  assert.match(buildAccountPrompt("", [], [], "hi"), /## Open recommendations \(0\)\n- none/);
+  assert.ok(!text.includes("Morning observation"), "no observation dump: the agent fetches what it needs");
+  const bare = buildAccountPrompt({ account: null, latest_run: null, spend_7d: null, month_to_date: null, projected: null, open_alerts: 0, open_recs: 0, open_saving: 0 }, [], [], "hi");
+  assert.match(bare, /- account unknown; latest collection run none yet\n- spend: last 7 complete days unknown/);
+  assert.match(bare, /- this is the first message/);
 });

@@ -134,7 +134,7 @@ function contextFor(a: AlertRow, level: AlertLevel) {
     domains = domainsReaching(res.kind, res.id).map((d) => d.name);
   } else if (res) resource = { kind: res.kind, id: res.id, name: null, region: null };
   const recommendations = res ? (db.prepare("select id, title, est_monthly_saving, resource, resource_name from recommendations where status in ('open','pending','approved') and resource like ? order by coalesce(est_monthly_saving, -1) desc limit 10").all(`%${res.id}%`) as any[]).filter((r) => namesId(r, res.id)) : [];
-  return { level, resource, domains, recommendations, publicUrl: config.publicUrl };
+  return { level, resource, domains, recommendations, publicUrl: config.notifyLinkUrl };
 }
 
 const receipt = db.prepare("update alerts set notified_at = datetime('now'), notify_result = ? where id = ?");
@@ -238,7 +238,7 @@ const receiptEvent = db.prepare("update notifications set sent_at = datetime('no
 export function queueRecommendationEvent(id: number, event: RecEvent, opts: { verdict?: Verdict | null; by?: string | null; dedupe?: string | null; force?: boolean } = {}): number | null {
   const rec = db.prepare("select id, title, status, resource, resource_name, est_monthly_saving, decided_by, decision_reason from recommendations where id = ?").get(id) as RecRowForMessage | undefined;
   if (!rec) return null;
-  const content = formatRecommendationMessage(rec, event, { verdict: opts.verdict, by: opts.by, publicUrl: config.publicUrl });
+  const content = formatRecommendationMessage(rec, event, { verdict: opts.verdict, by: opts.by, publicUrl: config.notifyLinkUrl });
   const dedupe = opts.dedupe === undefined ? `${event}:${id}:${new Date().toISOString().slice(0, 16)}` : opts.dedupe;
   const r = insertEvent.run(id, event, dedupe, content);
   if (!r.changes) return null;

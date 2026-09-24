@@ -57,6 +57,7 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "sphinxChatPubkey", env: "SPHINX_CHAT_PUBKEY", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Chat pubkey", help: "The tribe or chat the bot posts into." },
   { key: "notifyLevel", env: "NOTIFY_LEVEL", kind: "enum", def: "alarm", options: ["alarm", "warning", "off"], group: "Notifications (Sphinx)", label: "Send from level", help: "alarm = alarms only; warning = alarms and warnings; off = nothing is sent (the test button still works)." },
   { key: "notifyScope", env: "NOTIFY_SCOPE", kind: "enum", def: "watched", options: ["watched", "all"], group: "Notifications (Sphinx)", label: "Resources", help: "watched = alerts on resources marked watched (by hand, an advisor:watch tag, a database, a Route 53 record reaching it, or protected per Jev) plus account-level alerts; all = every alert at the level." },
+  { key: "notifyLinkUrl", env: "NOTIFY_LINK_URL", kind: "url", def: "", group: "Notifications (Sphinx)", label: "Link base for messages", help: "The address people open the advisor at, used only for the links in chat messages, e.g. http://10.0.1.23:9034 when the app is reached over the VPN by private IP. Empty = PUBLIC_URL (which is also what repo2graph calls back to, so leave that one alone)." },
   { key: "notifyRecommendations", env: "NOTIFY_RECOMMENDATIONS", kind: "enum", def: "on", options: ["on", "off"], group: "Notifications (Sphinx)", label: "Recommendation events", help: "on = approvals, rejections, items marked done and measured savings are posted (quiet hours defer them to the next dispatch); off = alerts only. \"Send to Sphinx\" on a recommendation always works." },
   { key: "notifyQuietHours", env: "NOTIFY_QUIET_HOURS", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Quiet hours", help: "HH-HH in the server's local time, e.g. 22-07: warnings wait until the morning's next dispatch, alarms still go. Empty = none." },
   { key: "agentRunsPerHour", env: "AGENT_RUNS_PER_HOUR", kind: "number", def: "6", min: 1, max: 100, group: "Quotas", label: "Agent runs per hour", help: "Findings batches, investigations, resolutions and observations together; each costs a few USD. A hit raises a quota alert and refuses the run." },
@@ -152,6 +153,8 @@ export const config = {
   get notifyScope(): "watched" | "all" { return rtEnum("notifyScope"); },
   get notifyQuietHours(): string { return rt("notifyQuietHours"); },
   get notifyRecommendations(): "on" | "off" { return rtEnum("notifyRecommendations"); },
+  /** Base for the links in chat messages: the link setting when set, else PUBLIC_URL. */
+  get notifyLinkUrl(): string { return (rt("notifyLinkUrl") || this.publicUrl).replace(/\/$/, ""); },
   get runCron(): string { return rt("runCron"); },
   get watchCron(): string { return rt("watchCron"); },
   get probeCron(): string { return rt("probeCron"); },
