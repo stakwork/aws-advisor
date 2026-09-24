@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History } from "lucide-react";
+import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare } from "lucide-react";
 import { api, signIn, token } from "./api";
 import Overview from "./pages/Overview";
 import Runs from "./pages/Runs";
@@ -13,6 +13,7 @@ import Settings from "./pages/Settings";
 import Knowledge from "./pages/Knowledge";
 import Bill from "./pages/Bill";
 import Changes from "./pages/Changes";
+import Chat from "./pages/Chat";
 
 const nav = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -24,6 +25,7 @@ const nav = [
   { to: "/changes", label: "Changes", icon: History },
   { to: "/bill", label: "This month", icon: Receipt },
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
+  { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
@@ -95,6 +97,7 @@ function AppShell() {
           <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/bill" element={<Bill />} />
           <Route path="/changes" element={<Changes />} />
+          <Route path="/chat" element={<Chat />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

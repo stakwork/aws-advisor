@@ -11,13 +11,15 @@ interface Message { id: number; role: "user" | "agent"; author: string | null; c
  * as the agent's context. A sent message gets a pending agent reply that the webhook fills in; while one is
  * pending the thread polls every 5 s (and nudges the run's poll, the fallback when the webhook is missed).
  */
-export function Thread({ recId, onReplan, replanBusy }: { recId: number; onReplan: () => void; replanBusy: boolean }) {
+export function Thread({ recId, onReplan, replanBusy, title, hint, tall }: { recId: number | null; onReplan?: () => void; replanBusy?: boolean; title?: string; hint?: string; tall?: boolean }) {
+  // recId null = the account-wide thread (GET|POST /api/chat/messages); otherwise the recommendation's own.
+  const base = recId == null ? "/chat/messages" : `/recommendations/${recId}/messages`;
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  const load = () => api(`/recommendations/${recId}/messages`).then(setMessages).catch((e) => setErr(e.message));
+  const load = () => api(base).then(setMessages).catch((e) => setErr(e.message));
   useEffect(() => { setMessages(null); setErr(""); setDraft(""); load(); }, [recId]);
   const pending = messages?.find((m) => m.status === "pending") ?? null;
   useEffect(() => {
@@ -30,20 +32,20 @@ export function Thread({ recId, onReplan, replanBusy }: { recId: number; onRepla
     const text = draft.trim();
     if (!text || sending || pending) return;
     setSending(true); setErr("");
-    try { await api(`/recommendations/${recId}/messages`, { method: "POST", body: JSON.stringify({ message: text }) }); setDraft(""); await load(); }
+    try { await api(base, { method: "POST", body: JSON.stringify({ message: text }) }); setDraft(""); await load(); }
     catch (e: any) { setErr(e.message); }
     finally { setSending(false); }
   };
   const lastAgent = [...(messages || [])].reverse().find((m) => m.role === "agent" && m.status === "completed");
   return (
-    <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/60 p-3">
+    <div className={`rounded border border-zinc-800 bg-zinc-950/60 p-3 ${recId == null ? "" : "mt-3"}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium text-zinc-200">Chat about this <span className="font-normal text-zinc-500">· the agent sees the plan, the step outcomes and this thread</span></span>
+        <span className="text-sm font-medium text-zinc-200">{title ?? "Chat about this"} <span className="font-normal text-zinc-500">· {hint ?? "the agent sees the plan, the step outcomes and this thread"}</span></span>
         {pending && <Badge>answering…</Badge>}
       </div>
-      {messages && messages.length === 0 && <div className="mt-1 text-xs text-zinc-500">Ask why a step failed, paste an output and ask what it means, or ask for the next command. Facts get checked with the advisor's tools before the answer.</div>}
+      {messages && messages.length === 0 && <div className="mt-1 text-xs text-zinc-500">{recId == null ? "Ask about spend, a resource, a pool, an alert or what to do next. The agent starts from today's observation and the open recommendations, and checks facts with the advisor's tools before answering." : "Ask why a step failed, paste an output and ask what it means, or ask for the next command. Facts get checked with the advisor's tools before the answer."}</div>}
       {messages && messages.length > 0 && (
-        <div className="mt-2 max-h-[28rem] space-y-3 overflow-y-auto pr-1 text-sm">
+        <div className={`mt-2 space-y-3 overflow-y-auto pr-1 text-sm ${tall ? "max-h-[70vh]" : "max-h-[28rem]"}`}>
           {messages.map((m) => (
             <div key={m.id} className={`rounded p-2 ${m.role === "user" ? "ml-6 bg-sky-500/10 text-zinc-200" : "mr-6 bg-zinc-900 text-zinc-300"}`}>
               <div className="mb-1 flex items-center gap-2 text-[11px] text-zinc-500"><span className="font-medium text-zinc-400">{m.role === "agent" ? "advisor" : m.author || "you"}</span><span>{when(m.finished_at || m.created_at)}</span>{m.status === "failed" && <span className="text-red-300">failed</span>}</div>
@@ -62,9 +64,9 @@ export function Thread({ recId, onReplan, replanBusy }: { recId: number; onRepla
                   ))}
                 </div>
               )}
-              {m.extra?.suggest_replan && m.id === lastAgent?.id && (
+              {m.extra?.suggest_replan && onReplan && m.id === lastAgent?.id && (
                 <div className="mt-2 flex items-center gap-2 text-xs text-amber-300">The agent thinks the plan needs rewriting from here.
-                  <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={onReplan} disabled={replanBusy}>Re-plan from here</Button>
+                  <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={onReplan} disabled={Boolean(replanBusy)}>Re-plan from here</Button>
                 </div>
               )}
             </div>
@@ -74,7 +76,7 @@ export function Thread({ recId, onReplan, replanBusy }: { recId: number; onRepla
       )}
       {err && <div className="mt-2 text-xs text-red-300">{err}</div>}
       <div className="mt-2 flex items-end gap-2">
-        <textarea className="!text-xs flex-1" rows={2} placeholder={pending ? "Wait for the answer…" : "Write to the agent about this recommendation. Enter sends, Shift+Enter for a new line."} value={draft} disabled={Boolean(pending) || sending} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+        <textarea className="!text-xs flex-1" rows={2} placeholder={pending ? "Wait for the answer…" : recId == null ? "Ask the advisor about the account. Enter sends, Shift+Enter for a new line." : "Write to the agent about this recommendation. Enter sends, Shift+Enter for a new line."} value={draft} disabled={Boolean(pending) || sending} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={send} disabled={!draft.trim() || Boolean(pending) || sending}>{sending ? "Sending…" : "Send"}</Button>
       </div>
     </div>

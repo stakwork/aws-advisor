@@ -75,6 +75,12 @@ the webhook (the thread polls every 5 s meanwhile). The agent can hand back corr
 lines (`step_fixes`, shown as cards) and say the plan needs rewriting (`suggest_replan`, which offers the re-plan
 button). Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
 
+**Chat** in the sidebar is the same thread for the account as a whole (`GET|POST /api/chat/messages`, the rows
+with no recommendation): each message goes to the agent with today's observation brief (spend against baseline,
+the review's findings, open alerts, pools, changes, logs, the same text the morning observation is written from),
+the open recommendations by saving and the last twelve messages. One thread for the team; questions about one
+recommendation's plan belong in that recommendation's own thread.
+
 The detail's "Affected resources" lists every resource the item touches as a link into its Inventory tab
 (opened in a new tab): the resource column split up when the agent grouped several ids, each resolved
 against the inventory for its name and kind (`src/affected.ts`, returned as `affected` by
