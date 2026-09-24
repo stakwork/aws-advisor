@@ -70,6 +70,29 @@ against the inventory for its name and kind (`src/affected.ts`, returned as `aff
 ("Right-size two boxes: Hive and swarmPExsmg" with one id in the resource column) are listed apart as "also
 named", because the rationale also names what the agent ruled out.
 
+### Notifications in Sphinx
+
+Alerts about resources you care about are posted into a Sphinx chat through a Sphinx bot (`src/notify.ts`).
+The request is the one Hive and the swarm checker use: `POST <bot url>` with `{ action: "broadcast", bot_id,
+bot_secret, chat_pubkey, chat_uuid, content }`. Settings > Notifications holds the bot endpoint, id, secret and
+chat pubkey, the level to send from, the scope and the quiet hours, with a "send a test message" button.
+
+- **Watched resources.** A resource is watched when marked so in its inventory detail ("watch" / "ignore" /
+  "auto"), else by an `advisor:watch` tag, else automatically when it is a database, a Route 53 record reaches
+  it, or Jev scores it protected (`GET|POST /api/inventory/:kind/:id/watch`). The detail says which rule applies.
+  With `NOTIFY_SCOPE=watched`, alerts on other resources stay in the UI; account-level alerts (credentials,
+  quota, spend and commitment steps) always qualify at their level.
+- **Dispatch.** After every scheduled job (the watcher, the probe pass, the review, …) the dispatcher takes the
+  alerts of the last two hours that carry no receipt, applies the rules (level, watched, quiet hours, already
+  acknowledged by Jev's triage or a human) and posts the ones that pass, one request per alert with one retry.
+  Each alert is sent once. `POST /api/notify/dispatch` runs it by hand; `GET /api/notify/status` says what is
+  in force.
+- **The message.** Level and the alert's text, the resource with its name and region, the Route 53 records that
+  reach it, the open recommendations on it, and a link to the alert in the advisor (`PUBLIC_URL`).
+- **Receipts.** Every considered alert gets `notified_at` and `notify_result` ("sent", "failed: …" or
+  "skipped: <rule>"), shown on the Alerts page; "Send to Sphinx" on a row sends it now whatever the rules say
+  (`POST /api/alerts/:id/notify`), and "Resend" repeats it.
+
 ### Resources are intertwined: conflicts, blockers, systems, exposure, history
 
 - **Conflicts.** Two live items (open, pending, approved, snoozed) proposing different resource-changing actions
@@ -1763,6 +1786,11 @@ What each one is for (✎ = also editable in Settings):
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | ✎ `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
 | ✎ `ALERT_INVESTIGATE` | NAT alerts should be investigated only on request (`manual`) or never (`off`) | `auto` |
+| ✎ `SPHINX_BOT_URL` | the swarm's bot endpoint alerts are broadcast to (the one Hive and the swarm checker use); empty = notifications off | unset |
+| ✎ `SPHINX_BOT_ID`, `SPHINX_BOT_SECRET`, `SPHINX_CHAT_PUBKEY` | the bot and the chat it posts into; the secret is masked on the Settings page and never logged | unset |
+| ✎ `NOTIFY_LEVEL` | `alarm` = alarms only, `warning` = alarms and warnings, `off` | `alarm` |
+| ✎ `NOTIFY_SCOPE` | `watched` = alerts on watched resources and account-level alerts; `all` = every alert at the level | `watched` |
+| ✎ `NOTIFY_QUIET_HOURS` | `HH-HH` local time during which warnings wait for the next dispatch; alarms still go | unset |
 | `CONCEPT_NAMESPACE` | decisions should land in another Concept namespace in repo2graph | `aws/cost-advisor` |
 | ✎ `TYPESAFE_API_KEY`, `JEV_MODEL` | you want Jev's alert triage, resource roles and tier checks (see [Typed decisions with Jev](#typed-decisions-with-jev)) | unset = no-op, `jev-latest` |
 | `DATA_DIR` | the SQLite database should live elsewhere (a named volume in the swarm) | `./data` |
@@ -1783,7 +1811,7 @@ What each one is for (✎ = also editable in Settings):
 - `POST /api/instances/:id/probe`, `GET /api/instances/:id/metrics`, `GET /api/instances/:id/timeseries?hours=`, `GET /api/instances/:id/history?days=`, `POST /api/history/rollup?days=`, `GET /api/probe/document` (the SSM document for `aws ssm create-document`)
 - `GET /api/permissions` (issues, merged policy, last check, recommended policy), `POST /api/permissions/check` (`{ instance_id? }`)
 - `GET /api/setup/plan?path&user&role&profile&region&instanceRole&instanceId&adminProfile&dryRun` (the wizard's steps and the one-liner), `GET /api/setup/script?...` (the setup script, `text/x-shellscript`)
-- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `GET /api/inventory/route53?q&sort&gone&zone&link&type`, `GET /api/inventory/route53/zones`, `GET /api/inventory/route53/resource/:kind/:id`, `GET /api/inventory/:kind/:id/timeline`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`, `POST /api/inventory/route53/refresh`
+- `GET /api/inventory/summary`, `GET /api/inventory/ec2?state&ssm&q&sort&gone`, `GET /api/inventory/ec2/:id`, `GET /api/inventory/rds`, `GET /api/inventory/elasticache`, `GET /api/inventory/lambda`, `GET /api/inventory/ebs?q&sort&gone`, `GET /api/inventory/s3?q&sort&gone`, `GET /api/inventory/route53?q&sort&gone&zone&link&type`, `GET /api/inventory/route53/zones`, `GET /api/inventory/route53/resource/:kind/:id`, `GET /api/inventory/:kind/:id/timeline`, `GET|POST /api/inventory/:kind/:id/watch`, `POST /api/inventory/refresh`, `POST /api/inventory/s3/refresh`, `POST /api/inventory/route53/refresh`
 - `GET /api/logs?limit=`, `POST /api/logs/refresh`, `GET /api/trail?hours=`, `POST /api/trail/refresh` (see [CloudWatch Logs and CloudTrail](#cloudwatch-logs-and-cloudtrail))
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))

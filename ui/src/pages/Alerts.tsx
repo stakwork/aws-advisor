@@ -55,12 +55,17 @@ export default function Alerts() {
   const selectedId = params.get("id");
   const [data, setData] = useState<{ total: number; page: number; page_size: number; counts: Record<string, number>; alerts: any[] } | null>(null);
   const [settings, setSettings] = useState<any>(null);
+  const [notify, setNotify] = useState<any>(null);
+  useEffect(() => { api("/notify/status").then(setNotify).catch(() => setNotify(null)); }, []);
   const [incident, setIncident] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const rows = data?.alerts ?? null;
 
   const load = () => api(`/alerts?status=${filter}&page=${page}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => { setErr(e.message); setData({ total: 0, page: 1, page_size: PAGE_SIZE, counts: {}, alerts: [] }); });
+  const [sending, setSending] = useState<number | null>(null);
+  // Sends one alert to the Sphinx chat by hand, whatever the rules say; the receipt shows on the row.
+  const sendNow = async (id: number) => { setSending(id); setErr(""); try { await api(`/alerts/${id}/notify`, { method: "POST", body: "{}" }); } catch (e: any) { setErr(e.message); } finally { setSending(null); load(); } };
   const loadIncident = () => { if (!selectedId) { setIncident(null); return; } api(`/alerts/${selectedId}/incident`).then(setIncident).catch(() => setIncident(null)); };
   useEffect(() => { api("/settings").then(setSettings).catch(() => {}); }, []);
   useEffect(() => { load(); }, [filter, page]);
@@ -126,6 +131,7 @@ export default function Alerts() {
                       <div className={open ? "" : "line-clamp-2"}>{a.message}</div>
                       <div className="font-mono text-xs text-zinc-500">{a.resource}{a.acknowledged ? ` · acknowledged${a.acknowledged_by ? ` by ${a.acknowledged_by}` : ""}` : ""}</div>
                       {triage && <div className="mt-0.5" onClick={(e) => e.stopPropagation()}><TriageLine alert={a} triage={triage} onUndo={() => reopen(a.id)} /></div>}
+                      {a.notify_result && <div className={`mt-0.5 text-xs ${a.notify_result === "sent" ? "text-emerald-300" : a.notify_result.startsWith("failed") ? "text-red-300" : "text-zinc-500"}`}>{a.notify_result === "sent" ? `sent to Sphinx ${when(a.notified_at)}` : a.notify_result}</div>}
                     </Td>
                     <Td className="whitespace-nowrap">
                       {inc ? <span className="flex items-center gap-2"><Badge>{inc.status}</Badge>{inc.status === "completed" && <span className="text-xs text-zinc-400">{pct(inc.confidence)}</span>}</span> : <span className="text-xs text-zinc-500">—</span>}
@@ -133,6 +139,7 @@ export default function Alerts() {
                     <Td className="whitespace-nowrap text-right">
                       <span className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
                         <InvestigateButton incident={inc} enabled={canInvestigate} busy={busy} onClick={() => investigate(a.id)} />
+                        {notify?.configured && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => sendNow(a.id)} disabled={sending === a.id} title={a.notify_result === "sent" ? "Send it again" : "Send this alert to the Sphinx chat now, whatever the rules say"}>{a.notify_result === "sent" ? "Resend" : "Send to Sphinx"}</Button>}
                         {!a.acknowledged && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => ack(a.id)}>Acknowledge</Button>}
                         {a.acknowledged ? <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => reopen(a.id)}>Reopen</Button> : null}
                       </span>

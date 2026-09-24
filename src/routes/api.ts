@@ -35,6 +35,7 @@ import { affectedResources } from "../affected.js";
 import { blockerLinks, distinctSaving, findConflicts, liveRows } from "../related.js";
 import { exposureFor } from "../exposure.js";
 import { TIMELINE_KINDS, timelineFor } from "../timeline.js";
+import { dispatchNotifications, notifyAlert, notifyStatus, sendSphinx, setWatch, watchState } from "../notify.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
 import { describeError } from "../permissions.js";
 
@@ -441,6 +442,28 @@ api.post("/alerts/:id/ack", (req, res) => {
 });
 
 // Undo of an acknowledgement, Jev's or a person's: the alert is open again (the triage stays on record).
+// Sends this alert to the Sphinx chat now, whatever the rules say; the receipt lands on the row.
+api.post("/alerts/:id/notify", async (req, res) => {
+  try { const result = await notifyAlert(Number(req.params.id), { force: true }); res.status(result === "sent" ? 200 : 502).json({ result, alert: db.prepare("select * from alerts where id = ?").get(req.params.id) }); }
+  catch (e: any) { res.status(e.message === "not found" ? 404 : 500).json({ error: e.message }); }
+});
+
+// ---- notifications (src/notify.ts) ------------------------------------------
+api.get("/notify/status", (_req, res) => res.json(notifyStatus()));
+api.post("/notify/test", async (_req, res) => {
+  const r = await sendSphinx(`✅ aws-advisor test message · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · ${config.publicUrl}`);
+  res.status(r.ok ? 200 : 502).json(r);
+});
+api.post("/notify/dispatch", async (_req, res) => res.json(await dispatchNotifications()));
+// Whether a resource is paged about: { watch: true | false | null } (null = back to the automatic rule).
+api.get("/inventory/:kind/:id/watch", (req, res) => res.json(watchState(String(req.params.kind), String(req.params.id))));
+api.post("/inventory/:kind/:id/watch", (req, res) => {
+  const v = req.body?.watch;
+  if (v !== true && v !== false && v !== null) return res.status(400).json({ error: "watch must be true, false or null" });
+  try { res.json(setWatch(String(req.params.kind), String(req.params.id), v === null ? null : v ? 1 : 0)); }
+  catch (e: any) { res.status(e.message === "not in the inventory" ? 404 : 400).json({ error: e.message }); }
+});
+
 api.post("/alerts/:id/reopen", (req, res) => {
   if (!reopenAlert(Number(req.params.id))) return res.status(404).json({ error: "not found" });
   mirrorAlertsInBackground();

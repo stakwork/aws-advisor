@@ -12,6 +12,13 @@ export function RuntimeSettings() {
   const [busy, setBusy] = useState<string>("");
   const [err, setErr] = useState<Record<string, string>>({});
   const [ran, setRan] = useState<Record<string, string>>({});
+  const [testMsg, setTestMsg] = useState("");
+  const sendTest = async () => {
+    setBusy("notify-test"); setTestMsg("sending…");
+    try { const r = await api("/notify/test", { method: "POST", body: "{}" }); setTestMsg(`sent (${r.status}${r.body ? `: ${r.body}` : ""})`); }
+    catch (e: any) { setTestMsg(`failed: ${e.message}`); }
+    finally { setBusy(""); }
+  };
   const runNow = async (key: string) => { setBusy(key); setRan((x) => ({ ...x, [key]: "running…" })); try { const r = await api(`/settings/runtime/${key}/run`, { method: "POST", body: "{}" }); setRan((x) => ({ ...x, [key]: r.result })); } catch (e: any) { setRan((x) => ({ ...x, [key]: `failed: ${e.message}` })); } finally { setBusy(""); } };
   const load = () => { api("/settings/runtime").then((d) => setRows(d.settings)).catch(() => setRows([])); api("/quotas").then((d) => setQuotas(d.quotas)).catch(() => setQuotas(null)); };
   useEffect(() => { load(); }, []);
@@ -53,6 +60,13 @@ export function RuntimeSettings() {
                 );
               })}</tbody>
             </table>
+            {g === "Notifications (Sphinx)" && (
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={sendTest} disabled={busy === "notify-test"}>{busy === "notify-test" ? "Sending…" : "Send a test message"}</Button>
+                {testMsg && <span className={testMsg.startsWith("failed") ? "text-red-300" : "text-zinc-400"}>{testMsg}</span>}
+                <span className="text-zinc-500">Posts one line to the chat with the saved bot settings. Alerts are sent after every scheduled job; each alert row shows its receipt.</span>
+              </div>
+            )}
           </div>
         ))}
         <div className="text-xs text-zinc-500">Bootstrap settings stay in the environment: port and bind address, data and config paths, the Steampipe connection, the three shared secrets (API, MCP, webhook), the public URL and the probe document. A cron change takes effect at once; a Neo4j or Jev change on the next call.</div>

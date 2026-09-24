@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
 import { Timeline } from "../components/timeline";
+import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
@@ -501,6 +502,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
       <h2 className="text-base font-medium text-zinc-100">{d.name || d.instance_id}</h2>
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><SsmBadge status={d.ssm_status} platform={d.ssm_platform} />{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.instance_id}</Mono></div>
       <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <WatchToggle kind="ec2" id={d.instance_id} />
 
       <Group title="Identity">
         <Dl rows={[
@@ -619,6 +621,7 @@ function RdsDetail({ d }: { d: any }) {
       <h2 className="text-base font-medium text-zinc-100">{d.db_instance_identifier}</h2>
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.status}</Badge>{d.gone ? <Badge>gone</Badge> : null}<span className="text-zinc-500">{d.engine} {d.engine_version}</span></div>
       <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <WatchToggle kind="rds" id={d.db_instance_identifier} />
       <Group title="Identity">
         <Dl rows={[
           ["Class", `${id.class}${id.multi_az ? " · Multi-AZ" : ""}`],
@@ -783,6 +786,7 @@ function CacheDetail({ d }: { d: any }) {
       <h2 className="text-base font-medium text-zinc-100">{d.cache_cluster_id}</h2>
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.status}</Badge>{d.gone ? <Badge>gone</Badge> : null}<span className="text-zinc-500">{d.engine} {d.engine_version}</span></div>
       <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <WatchToggle kind="elasticache" id={d.cache_cluster_id} />
       <Group title="Identity">
         <Dl rows={[
           ["Node type", `${id.node_type} × ${id.num_nodes}`],

@@ -51,6 +51,13 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "loadPerCore", env: "LOAD_PER_CORE", kind: "number", def: "1.5", min: 0.5, max: 10, group: "Probe pass", label: "Load per core, 15 min", help: "The 15-minute load average divided by vCPUs at which the box counts as saturated." },
   { key: "commitmentMinUtilPct", env: "COMMITMENT_MIN_UTIL_PCT", kind: "number", def: "80", min: 1, max: 100, group: "Schedules", label: "Commitment utilisation warning under (%)", help: "Savings Plan or reservation used less than this over 30 days: capacity paid for and not used." },
   { key: "lambdaErrorPct", env: "LAMBDA_ERROR_PCT", kind: "number", def: "5", min: 0.1, max: 100, group: "Probe pass", label: "Lambda error rate warning (%)", help: "Share of invocations that failed over 30 days, for functions with at least 100 invocations; closes at half the threshold." },
+  { key: "sphinxBotUrl", env: "SPHINX_BOT_URL", kind: "url", def: "", group: "Notifications (Sphinx)", label: "Bot endpoint", help: "The swarm's bot URL the broadcast is posted to (the same one Hive and the swarm checker use). Empty = notifications off." },
+  { key: "sphinxBotId", env: "SPHINX_BOT_ID", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Bot id", help: "" },
+  { key: "sphinxBotSecret", env: "SPHINX_BOT_SECRET", kind: "secret", def: "", group: "Notifications (Sphinx)", label: "Bot secret", help: "Never logged; sent only to the bot endpoint." },
+  { key: "sphinxChatPubkey", env: "SPHINX_CHAT_PUBKEY", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Chat pubkey", help: "The tribe or chat the bot posts into." },
+  { key: "notifyLevel", env: "NOTIFY_LEVEL", kind: "enum", def: "alarm", options: ["alarm", "warning", "off"], group: "Notifications (Sphinx)", label: "Send from level", help: "alarm = alarms only; warning = alarms and warnings; off = nothing is sent (the test button still works)." },
+  { key: "notifyScope", env: "NOTIFY_SCOPE", kind: "enum", def: "watched", options: ["watched", "all"], group: "Notifications (Sphinx)", label: "Resources", help: "watched = alerts on resources marked watched (by hand, an advisor:watch tag, a database, a Route 53 record reaching it, or protected per Jev) plus account-level alerts; all = every alert at the level." },
+  { key: "notifyQuietHours", env: "NOTIFY_QUIET_HOURS", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Quiet hours", help: "HH-HH in the server's local time, e.g. 22-07: warnings wait until the morning's next dispatch, alarms still go. Empty = none." },
   { key: "agentRunsPerHour", env: "AGENT_RUNS_PER_HOUR", kind: "number", def: "6", min: 1, max: 100, group: "Quotas", label: "Agent runs per hour", help: "Findings batches, investigations, resolutions and observations together; each costs a few USD. A hit raises a quota alert and refuses the run." },
   { key: "agentRunsPerDay", env: "AGENT_RUNS_PER_DAY", kind: "number", def: "20", min: 1, max: 500, group: "Quotas", label: "Agent runs per day", help: "" },
   { key: "probesPerHour", env: "PROBES_PER_HOUR", kind: "number", def: "150", min: 1, max: 5000, group: "Quotas", label: "SSM probes per hour", help: "Every probe is one SendCommand on an instance; the hourly pass over the whole fleet is about 60 here." },
@@ -84,7 +91,9 @@ export function validateRuntime(key: string, value: string): string {
     case "bool": if (!/^(true|false|1|0|yes|no|on|off)$/i.test(v)) throw new Error("true or false"); return /^(1|true|yes|on)$/i.test(v) ? "true" : "false";
     case "enum": if (!spec.options!.includes(v)) throw new Error(`one of ${spec.options!.join(", ")}`); return v;
     case "url": if (v && !/^(https?|bolt(\+s|\+ssc)?|neo4j(\+s|\+ssc)?):\/\/[^\s]+$/i.test(v)) throw new Error("a URL (http://, https://, bolt:// or neo4j://) or empty"); return v.replace(/\/$/, "");
-    default: if (v.length > 500) throw new Error("too long"); return v;
+    default:
+      if (key === "notifyQuietHours" && v && !/^([01]?\d|2[0-3])-([01]?\d|2[0-3])$/.test(v)) throw new Error('HH-HH, e.g. "22-07", or empty');
+      if (v.length > 500) throw new Error("too long"); return v;
   }
 }
 export const isSecretSetting = (key: string) => SPEC.get(key)?.kind === "secret";
@@ -134,6 +143,13 @@ export const config = {
   get neo4jUser(): string { return rt("neo4jUser") || "neo4j"; },
   get neo4jPassword(): string { return rt("neo4jPassword"); },
   get neo4jDatabase(): string { return rt("neo4jDatabase"); },
+  get sphinxBotUrl(): string { return rt("sphinxBotUrl"); },
+  get sphinxBotId(): string { return rt("sphinxBotId"); },
+  get sphinxBotSecret(): string { return rt("sphinxBotSecret"); },
+  get sphinxChatPubkey(): string { return rt("sphinxChatPubkey"); },
+  get notifyLevel(): "alarm" | "warning" | "off" { return rtEnum("notifyLevel"); },
+  get notifyScope(): "watched" | "all" { return rtEnum("notifyScope"); },
+  get notifyQuietHours(): string { return rt("notifyQuietHours"); },
   get runCron(): string { return rt("runCron"); },
   get watchCron(): string { return rt("watchCron"); },
   get probeCron(): string { return rt("probeCron"); },
