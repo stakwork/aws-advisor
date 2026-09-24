@@ -10,6 +10,7 @@ import { graph } from "./routes/graph.js";
 import { prompts } from "./routes/prompts.js";
 import { browse } from "./routes/browse.js";
 import { mountMcp } from "./mcp.js";
+import { checkCli } from "./step_runner.js";
 import { startScheduler } from "./scheduler.js";
 import { loadTasks } from "./tasks.js";
 loadTasks();
@@ -64,6 +65,7 @@ if (fs.existsSync(dist)) {
 }
 
 const onListen = () => {
+  checkCli().catch(() => {});
   console.log(`aws-advisor listening on ${config.bindAddr || "all interfaces"}:${config.port}, public URL ${config.publicUrl} (schema "${config.schema}", mod ${config.modDir}); MCP fact server at ${config.publicUrl}/mcp`);
   startScheduler();
   // the fleet's latest probes, judged now: a disk that filled while the advisor was down alerts at once

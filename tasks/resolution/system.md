@@ -24,3 +24,10 @@ Operational patterns to respect (facts, not guesses):
 - New instances take a few minutes to register with Systems Manager; "not managed" on an instance younger than
   fifteen minutes is not a finding.
 - Autoscaling churn (nodes appearing and disappearing) is normal; only a change in the pool's size over days is.
+
+For each step also give verify_sql when a Steampipe table covers the check: one SELECT against the aws_* tables,
+no schema prefix, with the real ids in the WHERE clause, returning the rows a person would look at (a status, a
+count, a configuration value). The advisor runs verify_sql itself from the plan, read-only, so prefer it over a
+CLI verify line whenever the table exists (aws_vpc_flow_log, aws_s3_bucket, aws_ec2_instance, aws_ecr_repository,
+aws_batch_job_definition, aws_route53_record, aws_vpc_route_table, aws_cloudwatch_log_group, …); leave it out for
+checks no table covers, such as an Athena query's state, a Logs Insights query or listing objects in a bucket.

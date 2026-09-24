@@ -35,6 +35,7 @@ import { affectedResources } from "../affected.js";
 import { blockerLinks, distinctSaving, findConflicts, liveRows } from "../related.js";
 import { exposureFor } from "../exposure.js";
 import { TIMELINE_KINDS, timelineFor } from "../timeline.js";
+import { cli } from "../step_runner.js";
 import { dispatchNotifications, noteDecision, notifyAlert, notifyStatus, queueRecommendationEvent, resendNotification, sendSphinx, setWatch, watchState } from "../notify.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
 import { describeError } from "../permissions.js";
@@ -452,6 +453,8 @@ api.post("/alerts/:id/notify", async (req, res) => {
 
 // ---- notifications (src/notify.ts) ------------------------------------------
 api.get("/notify/status", (_req, res) => res.json(notifyStatus()));
+// Whether plan steps can be run from this host (src/step_runner.ts): the CLI's presence and version.
+api.get("/run/status", (_req, res) => res.json(cli ?? { present: null, version: null }));
 api.post("/notify/test", async (_req, res) => {
   const r = await sendSphinx(`✅ aws-advisor test message · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC · ${config.notifyLinkUrl}`);
   res.status(r.ok ? 200 : 502).json(r);

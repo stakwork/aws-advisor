@@ -11,6 +11,7 @@ import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pagePar
 import { statusAfterProgress, validateProgress } from "../progress.js";
 import { noteDecision } from "../notify.js";
 import { ask, askAboutRecommendation, createThread, deleteThread, getThread, listMessages, listThreads, renameThread, threadForRecommendation } from "../chat.js";
+import { getRun, listRuns, runStep } from "../step_runner.js";
 import { Conflict, blockerLinks, blockersFor, distinctSaving, findConflicts, liveRows, makesCycle, systemMap } from "../related.js";
 import { listPlaybooks, playbookFor, playbookSummary } from "../playbooks.js";
 import { resolutionFor, resolveRecommendation } from "../resolve.js";
@@ -239,6 +240,17 @@ browse.post("/recommendations/:id/replan", auth, async (req, res) => {
     res.status(r.status === "pending" ? 202 : 200).json({ ...r, resolution: resolutionFor(Number(req.params.id)) });
   } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : 500).json({ error: e.message }); }
 });
+
+// Runs one read-only step of the latest tailored plan from the app (src/step_runner.ts) and records the outcome.
+// Body: { by? }. 409 while another step of the same item runs; 422 when the command is not a read call.
+browse.post("/recommendations/:id/steps/:index/run", auth, async (req, res) => {
+  try {
+    const r = await runStep(Number(req.params.id), Number(req.params.index), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
+    res.json({ ...r, recommendation: db.prepare("select * from recommendations where id = ?").get(req.params.id) });
+  } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "busy" ? 409 : e.code === "not_runnable" || e.code === "no_plan" || e.code === "bad_step" ? 422 : 500).json({ error: e.message }); }
+});
+browse.get("/recommendations/:id/runs", auth, (req, res) => res.json(listRuns(Number(req.params.id))));
+browse.get("/runs-of-steps/:id", auth, (req, res) => { const r = getRun(Number(req.params.id)); return r ? res.json(r) : res.status(404).json({ error: "not found" }); });
 
 // The thread on a recommendation (src/chat.ts): every message, oldest first; none until the first message.
 browse.get("/recommendations/:id/messages", auth, (req, res) => { const t = threadForRecommendation(Number(req.params.id), false); res.json(t ? listMessages(t.id) : []); });

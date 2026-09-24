@@ -66,7 +66,7 @@ export interface StepOutcome { step: number; state: "worked" | "failed"; note: s
  * each and how to record it. A tick means the step worked; "failed" opens a box for the output, which the
  * re-plan and the thread hand back to the agent (see the progress panel on Recommendations).
  */
-export interface StepChecks { done: Set<number>; toggle: (i: number) => void; busy?: boolean; outcomes?: Map<number, StepOutcome>; setOutcome?: (i: number, state: "worked" | "failed" | null, note: string) => void }
+export interface StepChecks { done: Set<number>; toggle: (i: number) => void; busy?: boolean; outcomes?: Map<number, StepOutcome>; setOutcome?: (i: number, state: "worked" | "failed" | null, note: string) => void; runnable?: (i: number) => { runnable: boolean; reason: string; via?: "sql" | "cli" } | null; run?: (i: number) => void; running?: number | null }
 
 /** One step of a plan, with a checkbox when it is being tracked. Ticked steps are struck through so the next one stands out. */
 export function Step({ i, checks, children }: { i: number; checks?: StepChecks; children: ReactNode }) {
@@ -81,6 +81,10 @@ export function Step({ i, checks, children }: { i: number; checks?: StepChecks; 
       <div className="flex items-start gap-2">
         {checks && <input type="checkbox" className="!mt-1 !w-auto" checked={done} disabled={checks.busy} onChange={() => checks.toggle(i)} title={done ? "Untick this step" : "Tick this step as done"} />}
         <div className={`min-w-0 flex-1 ${done ? "line-through decoration-zinc-600" : ""}`}>{children}</div>
+        {checks?.run && (() => { const v = checks.runnable?.(i); const isRunning = checks.running === i; return v?.runnable ? (
+          <button className={`shrink-0 rounded border px-1.5 py-0.5 text-[11px] ${isRunning ? "border-sky-500/40 bg-sky-500/15 text-sky-300" : "border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"}`} disabled={checks.busy || checks.running != null}
+            title={`Run from the app with the advisor's credentials (read-only, ${v.via === "sql" ? "through Steampipe" : "through the aws CLI"}: ${v.reason}); the output becomes this step's outcome`} onClick={() => checks.run!(i)}>{isRunning ? "Running…" : v.via === "sql" ? "Run · SQL" : "Run · CLI"}</button>
+        ) : v ? <span className="shrink-0 text-[11px] text-zinc-600" title={v.reason}>copy to run</span> : null; })()}
         {checks?.setOutcome && !done && (
           <button className={`shrink-0 rounded border px-1.5 py-0.5 text-[11px] ${failed ? "border-red-500/40 bg-red-500/15 text-red-300" : "border-zinc-700 text-zinc-500 hover:text-zinc-300"}`} disabled={checks.busy}
             title={failed ? "Clear the failure" : "This step failed: record what happened, so the agent can re-plan from it"} onClick={() => checks.setOutcome!(i, failed ? null : "failed", failed ? "" : note)}>{failed ? "failed ✕" : "failed?"}</button>
@@ -91,6 +95,11 @@ export function Step({ i, checks, children }: { i: number; checks?: StepChecks; 
           <textarea className="!text-[11px] !leading-4 font-mono w-full" rows={Math.min(8, Math.max(2, note.split("\n").length))} placeholder="Paste the output or say what went wrong. Saved when you click away." value={note} disabled={checks.busy} onChange={(e) => setDraft(e.target.value)} onBlur={save} />
           {outcome?.at && draft === null && <div className="text-[11px] text-zinc-600">recorded {outcome.at}</div>}
         </div>
+      )}
+      {!failed && outcome?.note && (
+        <details className="mt-1 ml-6 text-[11px]"><summary className="cursor-pointer text-zinc-500">output · {outcome.at}</summary>
+          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono leading-4 text-zinc-400">{outcome.note}</pre>
+        </details>
       )}
     </li>
   );
