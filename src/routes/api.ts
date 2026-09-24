@@ -35,7 +35,7 @@ import { affectedResources } from "../affected.js";
 import { blockerLinks, distinctSaving, findConflicts, liveRows } from "../related.js";
 import { exposureFor } from "../exposure.js";
 import { TIMELINE_KINDS, timelineFor } from "../timeline.js";
-import { dispatchNotifications, notifyAlert, notifyStatus, sendSphinx, setWatch, watchState } from "../notify.js";
+import { dispatchNotifications, noteDecision, notifyAlert, notifyStatus, queueRecommendationEvent, resendNotification, sendSphinx, setWatch, watchState } from "../notify.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
 import { describeError } from "../permissions.js";
 
@@ -318,6 +318,8 @@ api.post("/recommendations/:id/decision", (req, res) => {
   if (status === "rejected" && config.repo2graphUrl) postRejectionLearning({ id: rec.id, fingerprint: rec.fingerprint, title: rec.title, rule: rec.rule, resource: rec.resource, decision_reason: String(reason) });
   // Every decision is mirrored into repo2graph's Concept graph (see src/concepts.ts); also fire-and-forget.
   syncDecisionConceptInBackground(Number(req.params.id));
+  // Approvals, rejections and done land in the Sphinx chat (src/notify.ts); queued here, posted in the background.
+  noteDecision(Number(req.params.id), status, by || "ui");
   res.json(rec);
 });
 
@@ -455,6 +457,30 @@ api.post("/notify/test", async (_req, res) => {
   res.status(r.ok ? 200 : 502).json(r);
 });
 api.post("/notify/dispatch", async (_req, res) => res.json(await dispatchNotifications()));
+// Recommendation events posted (or waiting) with their receipts, newest first; `?recommendation=<id>` narrows to one.
+api.get("/notifications", (req, res) => {
+  const rid = Number(req.query.recommendation);
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  res.json(rid ? db.prepare("select * from notifications where subject = 'recommendation' and subject_id = ? order by id desc limit ?").all(rid, limit)
+    : db.prepare("select * from notifications order by id desc limit ?").all(limit));
+});
+api.post("/notifications/:id/resend", async (req, res) => {
+  try { const result = await resendNotification(Number(req.params.id)); res.status(result === "sent" ? 200 : 502).json({ result }); }
+  catch (e: any) { res.status(e.message === "not found" ? 404 : 500).json({ error: e.message }); }
+});
+// Shares a recommendation in the chat now, whatever the rules say: { by?: string }.
+api.post("/recommendations/:id/notify", async (req, res) => {
+  const id = Number(req.params.id);
+  const rowId = queueRecommendationEvent(id, "shared", { by: typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui", dedupe: null, force: true });
+  if (!rowId) return res.status(404).json({ error: "not found" });
+  // the queue posts in the background; wait for this row's receipt so the button can say what happened
+  for (let i = 0; i < 40; i++) {
+    const row = db.prepare("select result from notifications where id = ?").get(rowId) as { result: string | null };
+    if (row.result) return res.status(row.result === "sent" ? 200 : 502).json({ result: row.result, notification_id: rowId });
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  res.status(202).json({ result: "pending", notification_id: rowId });
+});
 // Whether a resource is paged about: { watch: true | false | null } (null = back to the automatic rule).
 api.get("/inventory/:kind/:id/watch", (req, res) => res.json(watchState(String(req.params.kind), String(req.params.id))));
 api.post("/inventory/:kind/:id/watch", (req, res) => {

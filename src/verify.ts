@@ -11,6 +11,7 @@ import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
 import { mergeRecommendations } from "./paging.js";
 import { DAYS_BEFORE, DailyCost, MIN_DAYS_AFTER, SKIP_DAYS_AFTER_DECISION, Verification, addDays, costScopeFor, verify } from "./verify_math.js";
+import { queueRecommendationEvent } from "./notify.js";
 
 db.exec(`create table if not exists verifications (
   id integer primary key autoincrement,
@@ -86,6 +87,8 @@ export async function runVerifications(opts: { force?: boolean; ids?: number[]; 
     const series = rows.filter((r) => r.day >= addDays(decidedDay, -DAYS_BEFORE));
     ins.run(rec.id, decidedDay, daysAfter, scope.service, scope.usage_like.join(","), scope.note, v.verdict, v.before_usd_day, v.after_usd_day, v.realised_usd_month, v.estimate_usd_month, v.ratio, applied, v.note, JSON.stringify(series));
     if (v.verdict === "too_early") out.too_early++; else out.verified++;
+    // A measured verdict goes to the Sphinx chat once per verdict (src/notify.ts); the same verdict tomorrow stays quiet.
+    if (["realised", "partial", "none", "increase"].includes(v.verdict)) queueRecommendationEvent(rec.id, "verified", { verdict: { verdict: v.verdict, realised_usd_month: v.realised_usd_month, estimate_usd_month: v.estimate_usd_month, ratio: v.ratio, days_after: daysAfter, note: v.note }, dedupe: `verified:${rec.id}:${v.verdict}` });
     log(`#${rec.id} ${rec.action_type} ${rec.resource}: ${v.verdict}${v.realised_usd_month != null ? ` ${v.realised_usd_month} USD/mo of ${rec.est_monthly_saving ?? "?"}` : ""}${applied ? ` · applied ${applied}` : ""}`);
   }
   // keep one row per recommendation per day
