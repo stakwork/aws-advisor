@@ -11,7 +11,7 @@ export const PROMPT_LABELS: Record<PromptKind, { title: string; when: string }> 
   incident: { title: "Incident investigation", when: "sent when an alert is investigated, with the alert, its attribution and the resource facts" },
   resolution: { title: "Tailored resolution", when: "sent when Resolve is pressed on a recommendation, with the playbook, the graph context and the resource facts" },
   observe: { title: "Daily observation", when: "sent every morning after the review, with what changed in the last day: review findings, alerts, spend against baseline, pools, run changes" },
-  chat: { title: "Recommendation chat", when: "sent when someone writes in a recommendation's thread, with the recommendation, its latest plan, what happened to each step and the conversation so far" },
+  chat: { title: "Recommendation chat", when: "sent when someone writes in a thread; the first message carries the brief (the recommendation, its plan, the step outcomes, or the account header), later ones go in the same session with only what changed" },
 };
 
 const defaults = new Map<PromptKind, string>();
