@@ -15,7 +15,7 @@ import { checkHostLevels } from "./host_alerts.js";
  * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
  * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.3";
+export const PROBE_VERSION = "aws-advisor/1.4";
 
 export const PROBE_SCRIPT = [
   "# aws-advisor probe v1 (read-only). Prints exactly one JSON object on the last line.",
@@ -53,19 +53,81 @@ export const PROBE_SCRIPT = [
   "top_mem=$(pslist -rss)",
   "containers=\"[]\"; docker_json='{\"available\":false,\"running\":0,\"total\":0}'",
   "if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then",
-  "  stats=$(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' 2>/dev/null || true)",
-  "  clist=$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.RunningFor}}' 2>/dev/null | head -40 | awk -F'\\t' -v stats=\"$stats\" 'BEGIN{ k=split(stats, L, \"\\n\"); for(i=1;i<=k;i++){ split(L[i],a,\"\\t\"); cpu[a[1]]=a[2]; mem[a[1]]=a[3]; memp[a[1]]=a[4] } }",
+  "  stats=$(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}' 2>/dev/null || true)",
+  "  clist=$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.RunningFor}}' 2>/dev/null | head -40 | awk -F'\\t' -v stats=\"$stats\" 'BEGIN{ k=split(stats, L, \"\\n\"); for(i=1;i<=k;i++){ split(L[i],a,\"\\t\"); cpu[a[1]]=a[2]; mem[a[1]]=a[3]; memp[a[1]]=a[4]; net[a[1]]=a[5] } }",
   "    function esc(x){ gsub(/\\\\/,\"\\\\\\\\\",x); gsub(/\"/,\"\\\\\\\"\",x); return x }",
-  "    function bytes(x,  v,u){ sub(/ \\/.*/,\"\",x); v=x+0; u=x; sub(/^[0-9.]+/,\"\",u); if(u==\"KiB\"||u==\"kB\"||u==\"KB\")v*=1024; else if(u==\"MiB\"||u==\"MB\")v*=1048576; else if(u==\"GiB\"||u==\"GB\")v*=1073741824; return v }",
+  "    function bytes(x,  v,u){ sub(/ \\/.*/,\"\",x); v=x+0; u=x; sub(/^[0-9.]+/,\"\",u); if(u==\"KiB\"||u==\"kB\"||u==\"KB\")v*=1024; else if(u==\"MiB\"||u==\"MB\")v*=1048576; else if(u==\"GiB\"||u==\"GB\")v*=1073741824; else if(u==\"TiB\"||u==\"TB\")v*=1099511627776; return v }",
+  "    function txb(x){ sub(/^.*\\/ */,\"\",x); return bytes(x) }",
   "    { n++; c=cpu[$1]; sub(/%/,\"\",c); mp=memp[$1]; sub(/%/,\"\",mp);",
-  "      printf \"%s{\\\"name\\\":\\\"%s\\\",\\\"image\\\":\\\"%s\\\",\\\"state\\\":\\\"%s\\\",\\\"running_for\\\":\\\"%s\\\",\\\"cpu_pct\\\":%s,\\\"mem_bytes\\\":%.0f,\\\"mem_pct\\\":%s}\", (n>1?\",\":\"\"), esc($1), esc($2), esc($3), esc($4), (c==\"\"?\"null\":c), bytes(mem[$1]), (mp==\"\"?\"null\":mp) }')",
+  "      printf \"%s{\\\"name\\\":\\\"%s\\\",\\\"image\\\":\\\"%s\\\",\\\"state\\\":\\\"%s\\\",\\\"running_for\\\":\\\"%s\\\",\\\"cpu_pct\\\":%s,\\\"mem_bytes\\\":%.0f,\\\"mem_pct\\\":%s,\\\"net_rx_bytes\\\":%.0f,\\\"net_tx_bytes\\\":%.0f}\", (n>1?\",\":\"\"), esc($1), esc($2), esc($3), esc($4), (c==\"\"?\"null\":c), bytes(mem[$1]), (mp==\"\"?\"null\":mp), bytes(net[$1]), txb(net[$1]) }')",
   "  containers=\"[$clist]\"",
   "  running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' '); total=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')",
   "  docker_json=\"{\\\"available\\\":true,\\\"running\\\":${running:-0},\\\"total\\\":${total:-0}}\"",
   "fi",
-  "printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s}\\n' \\",
+  "# ---- activity (probe 1.4): is anyone actually using this box? Counts and timestamps only; log text stays on the box,",
+  "# ---- except the last three lines of each container (capped, printable ASCII), shown in the UI and never sent to a model.",
+  "SIG_RE='(log(ged)? ?in|sign(ed)?[- ]?in|authenticat|authoriz|payment|invoice|keysend|sent message|new message|received message|joined|upload|\"(POST|PUT|PATCH|DELETE) |websocket|ws open|subscribe|checkout)'",
+  "HB_RE='(health|ping|pong|heartbeat|keepalive|/metrics|/status|readiness|liveness|ELB-HealthChecker|swarm-checker|UptimeRobot|kube-probe)'",
+  "ts_of() { printf '%s' \"$1\" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1; }",
+  "jts() { t=$(ts_of \"$1\"); if [ -n \"$t\" ]; then printf '\"%sZ\"' \"$t\"; else printf 'null'; fi; }",
+  "act_containers=\"\"; act_front='{\"source\":null,\"requests\":0,\"health\":0,\"last_request_at\":null,\"last_request_raw\":null,\"window\":null}'",
+  "if docker info >/dev/null 2>&1; then",
+  "  n=\"\"",
+  "  for c in $(docker ps --format '{{.Names}}' 2>/dev/null | head -20); do",
+  "    logs=$(docker logs --since 24h --tail 2000 --timestamps \"$c\" 2>&1 | tr -cd '\\12\\40-\\176')",
+  "    lines=$(printf '%s\\n' \"$logs\" | grep -c .)",
+  "    last_log=$(printf '%s\\n' \"$logs\" | grep . | tail -n 1)",
+  "    errs=$(printf '%s\\n' \"$logs\" | grep -ciE '\\b(error|err|fatal|panic|exception)\\b')",
+  "    warns=$(printf '%s\\n' \"$logs\" | grep -ciE '\\b(warn|warning)\\b')",
+  "    sig=$(printf '%s\\n' \"$logs\" | grep -iE \"$SIG_RE\" | grep -viE \"$HB_RE\" | grep -viE '\\b(error|exception|traceback|panic|fatal)\\b|^[^ ]+ +(from |at )')",
+  "    sigs=$(printf '%s\\n' \"$sig\" | grep -c .)",
+  "    last_sig=$(printf '%s\\n' \"$sig\" | grep . | tail -n 1)",
+  "    ins=$(docker inspect --format '{{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}}' \"$c\" 2>/dev/null)",
+  "    started=$(printf '%s' \"$ins\" | awk '{print $1}'); restarts=$(printf '%s' \"$ins\" | awk '{print $2}'); img=$(printf '%s' \"$ins\" | awk '{print $3}')",
+  "    tail3=$(printf '%s\\n' \"$logs\" | grep . | tail -n 3 | cut -c1-160 | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g' | awk '{ printf \"%s\\\"%s\\\"\", (NR>1?\",\":\"\"), $0 }')",
+  "    case \"$img\" in *nginx*|*caddy*|*traefik*|*haproxy*|*proxy*|*ingress*)",
+  "      if [ \"$act_front\" = '{\"source\":null,\"requests\":0,\"health\":0,\"last_request_at\":null,\"last_request_raw\":null,\"window\":null}' ]; then",
+  "        acc=$(printf '%s\\n' \"$logs\" | grep -E '\" [0-9]{3} |HTTP/[0-9.]+\" [0-9]{3}|\"status\":[0-9]{3}|status=[0-9]{3}')",
+  "        reqs=$(printf '%s\\n' \"$acc\" | grep -c .); hb=$(printf '%s\\n' \"$acc\" | grep -ciE \"$HB_RE\")",
+  "        lastreq=$(printf '%s\\n' \"$acc\" | grep -viE \"$HB_RE\" | grep . | tail -n 1)",
+  "        act_front=\"{\\\"source\\\":\\\"container:$(esc \"$c\")\\\",\\\"requests\\\":$((reqs - hb)),\\\"health\\\":${hb:-0},\\\"last_request_at\\\":$(jts \"$lastreq\"),\\\"last_request_raw\\\":null,\\\"window\\\":\\\"24h\\\"}\"",
+  "      fi;;",
+  "    esac",
+  "    act_containers=\"$act_containers$n{\\\"name\\\":\\\"$(esc \"$c\")\\\",\\\"started_at\\\":$(jts \"$started\"),\\\"restarts\\\":${restarts:-0},\\\"log_lines\\\":${lines:-0},\\\"last_log_at\\\":$(jts \"$last_log\"),\\\"errors\\\":${errs:-0},\\\"warns\\\":${warns:-0},\\\"signal_lines\\\":${sigs:-0},\\\"last_signal_at\\\":$(jts \"$last_sig\"),\\\"last_lines\\\":[$tail3]}\"",
+  "    n=\",\"",
+  "  done",
+  "fi",
+  "if [ \"$act_front\" = '{\"source\":null,\"requests\":0,\"health\":0,\"last_request_at\":null,\"last_request_raw\":null,\"window\":null}' ]; then",
+  "  for f in /var/log/nginx/access.log /var/log/caddy/access.log /var/log/apache2/access.log /var/log/httpd/access_log; do",
+  "    if [ -r \"$f\" ]; then",
+  "      acc=$(tail -n 5000 \"$f\" 2>/dev/null | tr -cd '\\12\\40-\\176')",
+  "      reqs=$(printf '%s\\n' \"$acc\" | grep -c .); hb=$(printf '%s\\n' \"$acc\" | grep -ciE \"$HB_RE\")",
+  "      lastreq=$(printf '%s\\n' \"$acc\" | grep -viE \"$HB_RE\" | grep . | tail -n 1 | grep -oE '\\[[^]]+\\]' | head -n 1 | tr -d '[]')",
+  "      act_front=\"{\\\"source\\\":\\\"file:$(esc \"$f\")\\\",\\\"requests\\\":$((reqs - hb)),\\\"health\\\":${hb:-0},\\\"last_request_at\\\":null,\\\"last_request_raw\\\":$(jstr \"$lastreq\"),\\\"window\\\":\\\"last 5000 lines\\\"}\"",
+  "      break",
+  "    fi",
+  "  done",
+  "fi",
+  "# established TCP flows: conntrack sees the DNAT'd container traffic the host's own sockets do not; ss covers host services and ssh",
+  "conns=\"\"; src=\"none\"",
+  "if [ -r /proc/net/nf_conntrack ]; then conns=$(grep -E '^ipv[46] +[0-9]+ +tcp .*ESTABLISHED' /proc/net/nf_conntrack 2>/dev/null | awk '{ for(i=1;i<=NF;i++){ if($i ~ /^src=/ && s==\"\") s=substr($i,5); if($i ~ /^dport=/ && d==\"\") d=substr($i,7) } print s, d; s=\"\"; d=\"\" }'); src=\"conntrack\"",
+  "elif command -v conntrack >/dev/null 2>&1; then conns=$(conntrack -L -p tcp --state ESTABLISHED 2>/dev/null | awk '{ for(i=1;i<=NF;i++){ if($i ~ /^src=/ && s==\"\") s=substr($i,5); if($i ~ /^dport=/ && d==\"\") d=substr($i,7) } print s, d; s=\"\"; d=\"\" }'); src=\"conntrack\"",
+  "elif command -v ss >/dev/null 2>&1; then conns=$(ss -Htn state established 2>/dev/null | awk '{ l=$3; p=$4; sub(/.*:/,\"\",l); sub(/:[0-9]+$/,\"\",p); gsub(/[\\[\\]]/,\"\",p); sub(/^::ffff:/,\"\",p); print p, l }'); src=\"ss\"",
+  "fi",
+  "ssh_n=$(ss -Htn state established '( sport = :22 )' 2>/dev/null | grep -c .)",
+  "act_conns=$(printf '%s\\n' \"$conns\" | awk -v src=\"$src\" -v ssh=\"${ssh_n:-0}\" '",
+  "  function kind(ip){ if(ip==\"\" ) return \"x\"; if(ip ~ /^127\\./ || ip==\"::1\" || ip ~ /^169\\.254\\./ || ip ~ /^fe80/) return \"x\"; if(ip ~ /^172\\.(1[6-9]|2[0-9]|3[01])\\./) return \"x\"; if(ip ~ /^10\\./ || ip ~ /^192\\.168\\./) return \"internal\"; return \"external\" }",
+  "  NF==2 { k=kind($1); if(k==\"x\") next; total++; if(k==\"external\") ext++; else int_++; ports[$2]++; peers[$1]=1 }",
+  "  END { np=0; for(p in ports) np++; printf \"{\\\"source\\\":\\\"%s\\\",\\\"established\\\":%d,\\\"external\\\":%d,\\\"internal\\\":%d,\\\"peers\\\":%d,\\\"ssh\\\":%d,\\\"by_port\\\":{\", src, total, ext, int_, length(peers), ssh; first=1; for(p in ports){ if(p ~ /^[0-9]+$/){ printf \"%s\\\"%s\\\":%d\", (first?\"\":\",\"), p, ports[p]; first=0 } } printf \"}}\" }')",
+  "users_now=$(who 2>/dev/null | grep -c .)",
+  "lastl=$(last -n 8 --time-format iso 2>/dev/null | grep -vE '^(reboot|shutdown|wtmp|btmp|$)' | head -n 1)",
+  "last_user=$(printf '%s' \"$lastl\" | awk '{print $1}'); last_at=$(printf '%s' \"$lastl\" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:?[0-9]{2}' | head -n 1)",
+  "act_logins=\"{\\\"users_now\\\":${users_now:-0},\\\"last_login_user\\\":$(jstr \"$last_user\"),\\\"last_login_at\\\":$(jstr \"$last_at\")}\"",
+  "act_net=$(awk -F'[: ]+' 'NR>2 && $2 !~ /^(lo|docker|br-|veth|virbr)/ { rx+=$3; tx+=$11 } END { printf \"{\\\"rx_bytes\\\":%.0f,\\\"tx_bytes\\\":%.0f}\", rx, tx }' /proc/net/dev 2>/dev/null)",
+  "activity=\"{\\\"version\\\":1,\\\"containers\\\":[$act_containers],\\\"connections\\\":${act_conns:-null},\\\"front_door\\\":$act_front,\\\"logins\\\":$act_logins,\\\"net\\\":${act_net:-null}}\"",
+  "printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s}\\n' \\",
   "  \"$(esc \"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)\")\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${cpus:-0}\" \"${uptime_s:-0}\" \\",
-  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\""
+  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\""
 ].join("\n");
 
 /**
@@ -104,7 +166,21 @@ export function probeDocumentInfo() {
 /** device is the whole disk in sysfs terms (nvme0n1, xvda); volume_id the EBS volume read from the NVMe serial, null on Xen and for anything that is not EBS. Both absent from probes before 1.3. */
 export interface ProbeDisk { mount: string; filesystem: string; device?: string | null; volume_id?: string | null; total_bytes: number; used_bytes: number; used_pct: number }
 export interface ProbeProcess { pid: number; cpu_pct: number; mem_pct: number; rss_bytes: number; command: string }
-export interface ProbeContainer { name: string; image: string; state: string; running_for: string; cpu_pct: number | null; mem_bytes: number; mem_pct: number | null }
+export interface ProbeContainer { name: string; image: string; state: string; running_for: string; cpu_pct: number | null; mem_bytes: number; mem_pct: number | null; /** Cumulative since the container started (probe 1.4); the difference between probes is its traffic. */ net_rx_bytes?: number | null; net_tx_bytes?: number | null }
+
+/** Probe 1.4: what the last 24 h of a running container's log say about use. `last_lines` is untrusted text shown only in the UI. */
+export interface ProbeContainerActivity { name: string; started_at: string | null; restarts: number; log_lines: number; last_log_at: string | null; errors: number; warns: number; signal_lines: number; last_signal_at: string | null; last_lines: string[] }
+export interface ProbeActivity {
+  version: number;
+  containers: ProbeContainerActivity[];
+  /** Established TCP flows (conntrack sees the DNAT'd container traffic; ss covers host sockets). external = public peers, internal = RFC1918 peers other than docker bridges. */
+  connections: { source: string; established: number; external: number; internal: number; peers: number; ssh: number; by_port: Record<string, number> } | null;
+  /** Requests on the front door (a proxy container's log over 24 h, or the host's access log tail), health checks counted apart. */
+  front_door: { source: string | null; requests: number; health: number; last_request_at: string | null; last_request_raw: string | null; window: string | null };
+  logins: { users_now: number; last_login_user: string | null; last_login_at: string | null };
+  /** Host interface counters since boot (loopback and docker bridges excluded); the difference between probes is traffic. */
+  net: { rx_bytes: number; tx_bytes: number } | null;
+}
 
 export interface ProbeResult {
   probe: string;
@@ -120,6 +196,8 @@ export interface ProbeResult {
   /** Present from probe 1.2: Docker daemon state and the containers on the box (running and stopped, up to 40). */
   docker?: { available: boolean; running: number; total: number };
   containers?: ProbeContainer[];
+  /** Present from probe 1.4: the use signals beyond CPU, memory and disk. */
+  activity?: ProbeActivity;
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -133,6 +211,9 @@ export interface ProbeSummary {
   top_process: string | null;
   containers_running?: number | null;
   top_container?: string | null;
+  /** Probe 1.4: when the box was last really used, from the activity section. */
+  last_use_at?: string | null;
+  last_use_kind?: UseSummary["last_use_kind"];
 }
 
 export type ProbeErrorCode = "no_credentials" | "not_managed" | "permission" | "timeout" | "failed" | "bad_output";
@@ -186,7 +267,68 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     containers: Array.isArray(raw.containers) ? raw.containers.map((c: any): ProbeContainer => ({
       name: String(c.name ?? ""), image: String(c.image ?? ""), state: String(c.state ?? ""), running_for: String(c.running_for ?? ""),
       cpu_pct: c.cpu_pct == null ? null : Number(c.cpu_pct), mem_bytes: Number(c.mem_bytes || 0), mem_pct: c.mem_pct == null ? null : Number(c.mem_pct),
+      net_rx_bytes: c.net_rx_bytes == null ? null : Number(c.net_rx_bytes), net_tx_bytes: c.net_tx_bytes == null ? null : Number(c.net_tx_bytes),
     })) : undefined,
+    activity: raw.activity && typeof raw.activity === "object" ? parseActivity(raw.activity) : undefined,
+  };
+}
+
+const iso = (v: unknown): string | null => { if (typeof v !== "string" || !v) return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
+const int = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n) : 0; };
+
+/** Tolerant: a missing or malformed part becomes null or zero; the probe never fails on the activity section alone. */
+export function parseActivity(a: any): ProbeActivity {
+  const c = a.connections && typeof a.connections === "object" ? a.connections : null;
+  const f = a.front_door && typeof a.front_door === "object" ? a.front_door : {};
+  const l = a.logins && typeof a.logins === "object" ? a.logins : {};
+  const byPort: Record<string, number> = {};
+  if (c?.by_port && typeof c.by_port === "object") for (const [k, v] of Object.entries(c.by_port)) if (/^\d+$/.test(k)) byPort[k] = int(v);
+  return {
+    version: int(a.version) || 1,
+    containers: Array.isArray(a.containers) ? a.containers.map((x: any): ProbeContainerActivity => ({
+      name: String(x.name ?? ""), started_at: iso(x.started_at), restarts: int(x.restarts), log_lines: int(x.log_lines), last_log_at: iso(x.last_log_at),
+      errors: int(x.errors), warns: int(x.warns), signal_lines: int(x.signal_lines), last_signal_at: iso(x.last_signal_at),
+      last_lines: Array.isArray(x.last_lines) ? x.last_lines.slice(0, 3).map((s: unknown) => String(s).slice(0, 160)) : [],
+    })) : [],
+    connections: c ? { source: String(c.source ?? "none"), established: int(c.established), external: int(c.external), internal: int(c.internal), peers: int(c.peers), ssh: int(c.ssh), by_port: byPort } : null,
+    front_door: { source: f.source == null ? null : String(f.source), requests: int(f.requests), health: int(f.health), last_request_at: iso(f.last_request_at), last_request_raw: f.last_request_raw == null ? null : String(f.last_request_raw).slice(0, 80), window: f.window == null ? null : String(f.window) },
+    logins: { users_now: int(l.users_now), last_login_user: l.last_login_user == null ? null : String(l.last_login_user).slice(0, 64), last_login_at: iso(l.last_login_at) },
+    net: a.net && typeof a.net === "object" ? { rx_bytes: int(a.net.rx_bytes), tx_bytes: int(a.net.tx_bytes) } : null,
+  };
+}
+
+/** The one line the drawer, the review and the rules want: when this box was last really used, and by what evidence. */
+export interface UseSummary {
+  /** The newest of the signals below, or null when the probe has none. */
+  last_use_at: string | null;
+  last_use_kind: "signal_line" | "request" | "login" | "external_connection" | null;
+  external_connections_now: number;
+  ssh_sessions_now: number;
+  users_now: number;
+  requests_24h: number | null;
+  health_checks_24h: number | null;
+  signal_lines_24h: number;
+  containers_logging_24h: number;
+  containers_running: number;
+  restarting_containers: string[];
+}
+
+export function useSummary(p: ProbeResult): UseSummary | null {
+  const a = p.activity; if (!a) return null;
+  const cands: { at: string; kind: UseSummary["last_use_kind"] }[] = [];
+  for (const c of a.containers) if (c.last_signal_at) cands.push({ at: c.last_signal_at, kind: "signal_line" });
+  if (a.front_door.last_request_at) cands.push({ at: a.front_door.last_request_at, kind: "request" });
+  if (a.logins.last_login_at) cands.push({ at: a.logins.last_login_at, kind: "login" });
+  if (a.connections && a.connections.external > 0) cands.push({ at: iso(p.collected_at) ?? p.collected_at, kind: "external_connection" });
+  cands.sort((x, y) => y.at.localeCompare(x.at));
+  return {
+    last_use_at: cands[0]?.at ?? null, last_use_kind: cands[0]?.kind ?? null,
+    external_connections_now: a.connections?.external ?? 0, ssh_sessions_now: a.connections?.ssh ?? 0, users_now: a.logins.users_now,
+    requests_24h: a.front_door.source ? a.front_door.requests : null, health_checks_24h: a.front_door.source ? a.front_door.health : null,
+    signal_lines_24h: a.containers.reduce((s, c) => s + c.signal_lines, 0),
+    containers_logging_24h: a.containers.filter((c) => c.log_lines > 0).length,
+    containers_running: a.containers.length,
+    restarting_containers: a.containers.filter((c) => c.restarts >= 10).map((c) => c.name),
   };
 }
 
@@ -202,6 +344,7 @@ export function summarizeProbe(p: ProbeResult): ProbeSummary {
     top_process: p.top_cpu[0]?.command || p.top_mem[0]?.command || null,
     containers_running: p.docker?.available ? p.docker.running : null,
     top_container: p.containers?.length ? [...p.containers].filter((c) => c.state === "running").sort((a, b) => (b.mem_bytes || 0) - (a.mem_bytes || 0))[0]?.name || null : null,
+    ...(p.activity ? { last_use_at: useSummary(p)!.last_use_at, last_use_kind: useSummary(p)!.last_use_kind } : {}),
   };
 }
 

@@ -6,6 +6,29 @@ import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
+
+/** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
+function ActivityBlock({ activity, summary, collectedAt }: { activity: any; summary: any; collectedAt: string }) {
+  const a = activity; const c = a.connections; const f = a.front_door; const l = a.logins;
+  const ports = c ? Object.entries(c.by_port || {}).sort((x: any, y: any) => y[1] - x[1]).slice(0, 6).map(([p, n]) => `${p}: ${n}`).join(", ") : "";
+  const kind: Record<string, string> = { signal_line: "a container logged real use", request: "a request on the front door", login: "a login", external_connection: "an external client connected" };
+  const restarting = (a.containers || []).filter((x: any) => x.restarts >= 10);
+  return (
+    <div className="mt-2 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
+      <div className="text-zinc-300">
+        {summary?.last_use_at ? <>Last real use <span className="text-zinc-100">{when(summary.last_use_at)}</span> <span className="text-zinc-500">({kind[summary.last_use_kind] || summary.last_use_kind}; probe {when(collectedAt)})</span></>
+          : <>No sign of real use in this probe's window <span className="text-zinc-500">(24 h of container logs, the front door, logins, external connections; probe {when(collectedAt)})</span></>}
+      </div>
+      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-zinc-400">
+        {c ? <span title={`source: ${c.source}${ports ? `; by port ${ports}` : ""}`}>connections <span className="text-zinc-200">{c.external}</span> external · {c.internal} internal · {c.ssh} ssh</span> : <span>connections: not readable</span>}
+        <span title={f.source ? `source: ${f.source}, window: ${f.window}` : "no proxy container or access log found"}>front door {f.source ? <><span className="text-zinc-200">{f.requests}</span> requests · {f.health} health checks{f.last_request_at ? ` · last ${when(f.last_request_at)}` : f.last_request_raw ? ` · last ${f.last_request_raw}` : ""}</> : "none found"}</span>
+        <span>logins {l.users_now} now{l.last_login_at ? ` · last ${l.last_login_user || "?"} ${when(l.last_login_at)}` : " · none on record"}</span>
+        {a.net && <span title="host interface counters since boot; the difference between probes is the traffic">net {Math.round((a.net.rx_bytes + a.net.tx_bytes) / 1048576)} MB since boot</span>}
+      </div>
+      {restarting.length > 0 && <div className="mt-1 text-amber-300">Restart loops: {restarting.map((x: any) => `${x.name} (${x.restarts})`).join(", ")}</div>}
+    </div>
+  );
+}
 import { RdsLoadPanel } from "../components/rdsLoad";
 import { metricLabel } from "./Knowledge";
 
@@ -594,18 +617,25 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         {latest?.data?.disks?.length > 0 && <div className="mt-1 text-xs text-zinc-400">Disks: {latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).join(", ")}</div>}
         {latest?.data?.top_cpu?.length > 0 && <div className="text-xs text-zinc-400">Top CPU: {latest.data.top_cpu.slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
         {latest?.data?.top_mem?.length > 0 && <div className="text-xs text-zinc-400">Top memory: {latest.data.top_mem.slice(0, 3).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ")}</div>}
+        {latest?.data?.activity && <ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} />}
         {latest?.data?.docker?.available && (
           <div className="mt-1 text-xs text-zinc-400">
             Docker: {latest.data.docker.running} running of {latest.data.docker.total}
             {latest.data.containers?.length > 0 && (
               <ul className="mt-0.5 space-y-0.5">
-                {latest.data.containers.slice(0, 12).map((c: any) => (
+                {latest.data.containers.slice(0, 12).map((c: any) => {
+                  const a = latest.data.activity?.containers?.find((x: any) => x.name === c.name);
+                  return (
                   <li key={c.name} className="flex flex-wrap gap-x-2">
                     <span className={c.state === "running" ? "text-zinc-200" : "text-zinc-500"}>{c.name}</span>
                     <span className="text-zinc-500">{c.image}</span>
                     <span className="text-zinc-500">{c.state}{c.cpu_pct != null ? ` · cpu ${c.cpu_pct}%` : ""}{c.mem_bytes ? ` · ${Math.round(c.mem_bytes / 1048576)} MB${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : ""}</span>
+                    {a && <span className={a.signal_lines > 0 ? "text-emerald-300/80" : "text-zinc-500"} title={a.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : "no log lines in 24 h"}>
+                      {a.log_lines} log lines/24h{a.signal_lines > 0 ? ` · ${a.signal_lines} use signals, last ${when(a.last_signal_at)}` : a.last_log_at ? ` · last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? ` · ${a.errors} errors` : ""}{a.restarts >= 10 ? ` · ${a.restarts} restarts` : ""}
+                    </span>}
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             )}
           </div>

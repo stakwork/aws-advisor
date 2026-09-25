@@ -49,6 +49,19 @@ export interface LoadTarget {
 
 export interface Series { t: number[]; v: number[] }
 
+/** Per UTC hour of day (index 0-23): the median and the p95 of the samples that fell in that hour, and how many days contributed. */
+export interface HourProfile { median: number[]; p95: number[]; days: number }
+
+/** Groups a series by UTC hour of day; null with fewer than `minDays` distinct days (a weekend is not a profile). */
+export function hourProfile(s: Series, minDays = 7): HourProfile | null {
+  const days = new Set(s.t.map(dayOf)).size;
+  if (days < minDays) return null;
+  const buckets: number[][] = Array.from({ length: 24 }, () => []);
+  s.t.forEach((t, i) => buckets[new Date(t).getUTCHours()].push(s.v[i]));
+  if (buckets.some((b) => !b.length)) return null;
+  return { median: buckets.map((b) => round(median(b)!, 2)), p95: buckets.map((b) => round(quantile(b, 0.95)!, 2)), days };
+}
+
 export interface Burst { start: string; minutes: number; peak: number }
 
 export interface LoadProfile {
@@ -66,6 +79,8 @@ export interface LoadProfile {
     memory_gib_avg: number; cache_gib_avg: number; cache_gib_at_cap: number; db_fits_in_cache_at_avg: boolean | null; db_fits_in_cache_at_cap: boolean | null;
     bursts: { count: number; per_day: number; median_minutes: number | null; longest_minutes: number | null; median_gap_minutes: number | null; cadence: "hourly" | "daily" | "irregular" | null; top_start_minute: number | null; sample: Burst[] };
     sample_minutes: number;
+    /** The capacity by UTC hour of day over the window (five-minute averages): what the database needs at 03:00 versus 15:00. The executor's ACU window action reads it. */
+    by_hour: HourProfile | null;
   };
   cpu: { avg_pct: number | null; p95_pct: number | null; max_pct: number | null };
   connections: { avg: number | null; max: number | null };
@@ -238,6 +253,7 @@ export function buildProfile(target: LoadTarget, series: Record<string, Series>,
       db_fits_in_cache_at_avg: dbGib != null ? dbGib <= cacheAvg : null, db_fits_in_cache_at_cap: dbGib != null ? dbGib <= cacheCap : null,
       bursts: { count: bursts.length, per_day: round(bursts.length / days, 1), median_minutes: median(bursts.map((b) => b.minutes)), longest_minutes: bursts.length ? Math.max(...bursts.map((b) => b.minutes)) : null, median_gap_minutes: median(gaps), cadence, top_start_minute, sample: bursts.slice(-12) },
       sample_minutes: fine.v.length,
+      by_hour: hourProfile(acu5.v.length ? acu5 : fine),
     };
     if (dbGib != null && capacity.db_fits_in_cache_at_avg === false) notes.push(`the database (${round(dbGib, 1)} GiB) is larger than the buffer cache at the average capacity (about ${round(cacheAvg, 1)} GiB at ${round(avg, 2)} ACU)${capacity.db_fits_in_cache_at_cap ? `; it would fit at the ceiling (${round(cacheCap, 1)} GiB at ${cap} ACU)` : `, and would not fit at the ceiling either (${round(cacheCap, 1)} GiB at ${cap} ACU)`}`);
     if (atCap >= 0.3) notes.push(`at the ${cap} ACU ceiling ${Math.round(atCap * 100)}% of the time`);
