@@ -78,7 +78,8 @@ the outcomes when they changed. The prompt prefix is the same from turn to turn,
 rather than paid for again. When repo2graph no longer has the session (`GET /api/sessions/:id` answers 404) or the
 previous turn failed, the thread opens a new session with the full brief. The agent can hand back corrected steps with commands and verify
 lines (`step_fixes`, shown as cards) and say the plan needs rewriting (`suggest_replan`, which offers the re-plan
-button). Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
+button). Its replies are rendered as Markdown (`ui/src/components/markdown.tsx`: fenced code, lists, tables, links);
+what you wrote is shown as typed, so a pasted output is never reflowed. Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
 
 **Run** on a step executes its check from the app (`src/step_runner.ts`,
 `POST /api/recommendations/:id/steps/:index/run`), Steampipe first. The agent is asked to give each step a
@@ -863,7 +864,9 @@ Endpoints: `POST /api/alerts/:id/investigate` (202 with `{ incidentId, requestId
 investigation of the same alert is pending unless `?force=1`; 400 when the agent is not configured or
 `ALERT_INVESTIGATE=off`), `GET /api/alerts/:id/incident` (the latest incident with parsed evidence, fixes and
 the recommendations they became), `GET /api/incidents`. `GET /api/alerts?status=open|acknowledged|all` rows
-carry `incident_id`, `incident_status` and, once completed, the cause, confidence, costs and fixes.
+carry `incident_id`, `incident_status` and, once completed, the cause, confidence, costs and fixes; `&kind=<kind>`
+keeps one kind (nat_traffic, instance_state, disk_full, …) and the answer's `kinds` counts every kind in scope, which
+is the kind dropdown on the Alerts page (a kind under a row's badge is clickable too).
 
 Each investigation is one agent run, so it costs model time: the watcher only investigates NAT alerts, one per
 alert, and the same gateway does not alert again while an earlier alert is unacknowledged.

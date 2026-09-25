@@ -51,11 +51,12 @@ function Details({ alert }: { alert: any }) {
 export default function Alerts() {
   const [params, setParams] = useSearchParams();
   const filter = FILTERS.includes(params.get("status") || "") ? params.get("status")! : "open";
+  const kind = params.get("kind") || "";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const selectedId = params.get("id");
   // A deep link carries an id and no page: the server answers with the page that holds that alert.
   const pageQuery = params.get("page") ? `page=${page}` : selectedId ? `id=${encodeURIComponent(selectedId)}` : "page=1";
-  const [data, setData] = useState<{ total: number; page: number; page_size: number; counts: Record<string, number>; alerts: any[] } | null>(null);
+  const [data, setData] = useState<{ total: number; page: number; page_size: number; counts: Record<string, number>; kinds: Record<string, number>; alerts: any[] } | null>(null);
   const [settings, setSettings] = useState<any>(null);
   const [notify, setNotify] = useState<any>(null);
   useEffect(() => { api("/notify/status").then(setNotify).catch(() => setNotify(null)); }, []);
@@ -64,13 +65,13 @@ export default function Alerts() {
   const [err, setErr] = useState("");
   const rows = data?.alerts ?? null;
 
-  const load = () => api(`/alerts?status=${filter}&${pageQuery}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => { setErr(e.message); setData({ total: 0, page: 1, page_size: PAGE_SIZE, counts: {}, alerts: [] }); });
+  const load = () => api(`/alerts?status=${filter}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}&${pageQuery}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => { setErr(e.message); setData({ total: 0, page: 1, page_size: PAGE_SIZE, counts: {}, kinds: {}, alerts: [] }); });
   const [sending, setSending] = useState<number | null>(null);
   // Sends one alert to the Sphinx chat by hand, whatever the rules say; the receipt shows on the row.
   const sendNow = async (id: number) => { setSending(id); setErr(""); try { await api(`/alerts/${id}/notify`, { method: "POST", body: "{}" }); } catch (e: any) { setErr(e.message); } finally { setSending(null); load(); } };
   const loadIncident = () => { if (!selectedId) { setIncident(null); return; } api(`/alerts/${selectedId}/incident`).then(setIncident).catch(() => setIncident(null)); };
   useEffect(() => { api("/settings").then(setSettings).catch(() => {}); }, []);
-  useEffect(() => { load(); }, [filter, pageQuery]);
+  useEffect(() => { load(); }, [filter, kind, pageQuery]);
   useEffect(() => { loadIncident(); }, [selectedId, rows]);
   // Once the page holding the linked alert is on screen, bring its row into view.
   useEffect(() => { if (selectedId && rows) document.getElementById(`alert-${selectedId}`)?.scrollIntoView({ block: "nearest" }); }, [selectedId, rows]);
@@ -81,7 +82,7 @@ export default function Alerts() {
     return () => clearInterval(t);
   }, [rows]);
 
-  const set = (k: string, v: string | null) => { const p = new URLSearchParams(params); v ? p.set(k, v) : p.delete(k); if (k === "status") p.delete("page"); setParams(p); };
+  const set = (k: string, v: string | null) => { const p = new URLSearchParams(params); v ? p.set(k, v) : p.delete(k); if (k === "status" || k === "kind") p.delete("page"); setParams(p); };
   // Expands or collapses a row. Once the page was resolved from a deep link's id, it is written to the URL here, so
   // collapsing the linked row (or a refresh after that) stays on this page instead of falling back to page 1.
   const toggle = (id: number) => {
@@ -110,6 +111,9 @@ export default function Alerts() {
     ? { id: incident.id, status: incident.status, cause: incident.cause, confidence: incident.confidence, episode_cost_usd: incident.episode_cost_usd, monthly_run_rate_usd: incident.monthly_run_rate_usd, fixes: incident.fixes || [], error: incident.error }
     : selected ? incidentOfAlertRow(selected) : null;
   const counts = data?.counts || {};
+  // The kinds in scope (status and day, before the kind filter), so the picked kind stays listed with the others.
+  const kinds = Object.entries(data?.kinds || {});
+  if (kind && !kinds.some(([k]) => k === kind)) kinds.push([kind, 0]);
 
   return (
     <div className="space-y-4">
@@ -120,12 +124,18 @@ export default function Alerts() {
           </h1>
           <div className="text-sm text-zinc-500">Raised by the watcher ({settings?.schedule?.watchCron ? <>cron <code className="text-zinc-300">{settings.schedule.watchCron}</code></> : "WATCH_CRON off"}); NAT alerts are {settings?.schedule?.alertInvestigate === "auto" ? "investigated automatically" : settings?.schedule?.alertInvestigate === "manual" ? "investigated on request" : "not investigated"} (ALERT_INVESTIGATE={settings?.schedule?.alertInvestigate || "…"}).{settings?.jev?.enabled ? " Jev triages every new NAT and instance alert: routine ones are acknowledged for you (undo any time), unexpected ones go to the agent." : ""} Today first, then older days; alarms before warnings before info.</div>
         </div>
-        <select value={filter} onChange={(e) => { set("status", e.target.value); }}>
-          {FILTERS.map((f) => <option key={f} value={f}>{f}</option>)}
-        </select>
+        <div className="flex items-center gap-2">
+          <select value={kind} onChange={(e) => { set("kind", e.target.value || null); }} title="Only alerts of one kind">
+            <option value="">all kinds</option>
+            {kinds.map(([k, n]) => <option key={k} value={k}>{k} · {n}</option>)}
+          </select>
+          <select value={filter} onChange={(e) => { set("status", e.target.value); }}>
+            {FILTERS.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </div>
       </div>
       {err && <div className="text-sm text-zinc-400">{err}</div>}
-      {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>No {filter === "all" ? "" : filter + " "}alerts{data && data.total > 0 ? " on this page" : ""}.</Empty> : (
+      {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>No {filter === "all" ? "" : filter + " "}{kind ? `${kind} ` : ""}alerts{data && data.total > 0 ? " on this page" : ""}.</Empty> : (
         <table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
           <thead className="bg-zinc-900"><tr><Th>When</Th><Th>Kind</Th><Th>Alert</Th><Th>Investigation</Th><Th /></tr></thead>
           <tbody>
@@ -137,7 +147,7 @@ export default function Alerts() {
                 <Fragment key={a.id}>
                   <tr id={`alert-${a.id}`} onClick={() => toggle(a.id)} className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open ? "bg-zinc-900" : ""}`}>
                     <Td className="whitespace-nowrap text-zinc-400">{when(a.created_at)}</Td>
-                    <Td><Badge>{alertLevel(a)}</Badge><div className="mt-0.5 text-xs text-zinc-500">{a.kind}</div></Td>
+                    <Td><Badge>{alertLevel(a)}</Badge><div className="mt-0.5 text-xs text-zinc-500"><button className={`hover:text-zinc-300 ${kind === a.kind ? "text-zinc-300 underline" : ""}`} title={kind === a.kind ? "Show every kind" : `Only ${a.kind} alerts`} onClick={(e) => { e.stopPropagation(); set("kind", kind === a.kind ? null : a.kind); }}>{a.kind}</button></div></Td>
                     <Td>
                       <div className={open ? "" : "line-clamp-2"}>{a.message}</div>
                       <div className="font-mono text-xs text-zinc-500">{a.resource}{a.acknowledged ? ` · acknowledged${a.acknowledged_by ? ` by ${a.acknowledged_by}` : ""}` : ""}</div>

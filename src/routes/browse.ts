@@ -7,7 +7,7 @@ import { listAlerts } from "../investigate.js";
 import { postRejectionLearning } from "../learnings.js";
 import { ConceptScope, suggestDecisionScope, syncDecisionConceptInBackground } from "../concepts.js";
 import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendRows, spendSummary } from "../spend.js";
-import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageOf, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
+import { dedupeFindings, kindCounts, levelCounts, mergeRecommendations, orderAlerts, pageOf, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
 import { statusAfterProgress, validateProgress } from "../progress.js";
 import { noteDecision } from "../notify.js";
 import { ask, askAboutRecommendation, createThread, deleteThread, getThread, listMessages, listThreads, renameThread, threadForRecommendation } from "../chat.js";
@@ -27,6 +27,7 @@ export const browse = Router();
 const auth = authMiddleware;
 
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+const KIND_RE = /^[a-z0-9_]{1,64}$/i;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // ---- spend ------------------------------------------------------------------------------------------------
@@ -58,13 +59,17 @@ browse.get("/alerts", auth, (req, res) => {
   const status = req.query.status === "acknowledged" ? "acknowledged" : req.query.status === "all" || req.query.all === "1" || req.query.all === "true" ? "all" : "open";
   const day = str(req.query.day);
   if (day && !DAY_RE.test(day)) return res.status(400).json({ error: "day must be YYYY-MM-DD" });
+  const kind = str(req.query.kind);
+  if (kind && !KIND_RE.test(kind)) return res.status(400).json({ error: "kind must be a kind name (letters, digits, _)" });
   const ordered = orderAlerts(listAlerts(status, 100_000));
-  const rows = day ? ordered.filter((a) => a.day === day) : ordered;
+  const inScope = day ? ordered.filter((a) => a.day === day) : ordered;
+  // `kinds` counts the scope before the kind filter, so the filter's options stay listed while one is picked.
+  const rows = kind ? inScope.filter((a) => a.kind === kind) : inScope;
   const params = pageParams(req.query as Record<string, unknown>, { size: 10, max: 50 });
   const id = Number(req.query.id);
   if (req.query.page == null && Number.isInteger(id)) params.page = pageOf(rows, id, params.page_size) ?? 1;
   const p = paginate(rows, params);
-  res.json({ total: p.total, page: p.page, page_size: p.page_size, status, day: day ?? null, counts: levelCounts(rows), alerts: p.items });
+  res.json({ total: p.total, page: p.page, page_size: p.page_size, status, day: day ?? null, kind: kind ?? null, counts: levelCounts(rows), kinds: kindCounts(inScope), alerts: p.items });
 });
 
 // ---- findings ---------------------------------------------------------------------------------------------

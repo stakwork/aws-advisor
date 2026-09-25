@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, when } from "../api";
 import { Badge, Button } from "./ui";
 import { Prose } from "./playbook";
+import { Markdown } from "./markdown";
 
 /** GET /api/recommendations/:id/messages (src/chat.ts). */
 interface Message { id: number; role: "user" | "agent"; author: string | null; content: string; extra: { suggest_replan?: boolean; step_fixes?: { step: number; step_text: string; command?: string; verify?: string }[] } | null; request_id: string | null; status: "pending" | "completed" | "failed"; error: string | null; created_at: string; finished_at: string | null }
@@ -10,6 +11,8 @@ interface Message { id: number; role: "user" | "agent"; author: string | null; c
  * The thread on a recommendation: the engineer and the agent, back and forth, with the plan and the step outcomes
  * as the agent's context. A sent message gets a pending agent reply that the webhook fills in; while one is
  * pending the thread polls every 5 s (and nudges the run's poll, the fallback when the webhook is missed).
+ * The agent's replies are Markdown (components/markdown.tsx); what the person wrote stays as typed, since a pasted
+ * command output full of # and * must not turn into headings and bullets.
  */
 export function Thread({ base, general, onReplan, replanBusy, title, hint, tall, onSent }: { base: string; general?: boolean; onReplan?: () => void; replanBusy?: boolean; title?: string; hint?: string; tall?: boolean; onSent?: () => void }) {
   // `base` is the messages endpoint: /recommendations/:id/messages, or /chat/threads/:id/messages for a general thread.
@@ -51,7 +54,7 @@ export function Thread({ base, general, onReplan, replanBusy, title, hint, tall,
               <div className="mb-1 flex items-center gap-2 text-[11px] text-zinc-500"><span className="font-medium text-zinc-400">{m.role === "agent" ? "advisor" : m.author || "you"}</span><span>{when(m.finished_at || m.created_at)}</span>{m.status === "failed" && <span className="text-red-300">failed</span>}</div>
               {m.status === "pending" && <div className="text-xs text-zinc-500">The agent is checking the facts and writing the answer{m.request_id ? ` (request ${m.request_id})` : ""}…</div>}
               {m.status === "failed" && <div className="text-xs text-red-300">{m.error}</div>}
-              {m.status === "completed" && <div className="leading-relaxed"><Prose text={m.content} /></div>}
+              {m.status === "completed" && <div className="leading-relaxed">{m.role === "agent" ? <Markdown text={m.content} /> : <Prose text={m.content} />}</div>}
               {m.extra?.step_fixes && m.extra.step_fixes.length > 0 && (
                 <div className="mt-2 space-y-2 text-xs">
                   {m.extra.step_fixes.map((f, i) => (
