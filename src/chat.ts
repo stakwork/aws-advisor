@@ -7,6 +7,15 @@
  * Each message the person writes becomes one agent request (kind chat, tasks/chat); the answer lands as the next
  * message through the webhook (completeChat) or the poll. On a recommendation the agent may hand back corrected
  * steps (`step_fixes`) and say a new plan is due (`suggest_replan`); both stay on the message.
+ *
+ * One repo2graph session per thread. The first message of a thread opens it with the full brief; every later
+ * message is posted with the same sessionId, which makes repo2graph replay the stored conversation (our messages,
+ * the agent's answers and its tool calls) in front of the new one, so the follow-up brief carries only what is
+ * new: the message, and on a recommendation the plan or the step outcomes when they changed since the last turn.
+ * The prompt prefix stays byte-identical across turns, so the model's prompt cache is hit instead of paid for
+ * again. When the session is gone on repo2graph's side (its sessions live on its disk; GET /api/sessions/:id
+ * answers 404), or the previous turn on the thread failed, a fresh session is opened with the full brief and the
+ * last THREAD_CONTEXT messages, exactly as before.
  */
 import { config } from "./config.js";
 import { db } from "./db.js";
@@ -61,19 +70,28 @@ create index if not exists recommendation_messages_rec on recommendation_message
   }
 }
 db.exec("create index if not exists recommendation_messages_thread on recommendation_messages(thread_id, id)");
+// The repo2graph session a thread talks in, and what its brief last carried (older threads have neither
+// and open a session on their next message).
+{
+  const cols = (db.pragma("table_info(chat_threads)") as { name: string }[]).map((c) => c.name);
+  if (!cols.includes("session_id")) db.exec("alter table chat_threads add column session_id text");
+  if (!cols.includes("session_state")) db.exec("alter table chat_threads add column session_state text");
+}
 
 export const MAX_MESSAGE = 8000;
 export const THREAD_CONTEXT = 12;
 
 export interface Message { id: number; recommendation_id: number | null; thread_id: number; role: "user" | "agent"; author: string | null; content: string; extra: { suggest_replan?: boolean; step_fixes?: { step: number; step_text: string; command?: string; verify?: string }[] } | null; request_id: string | null; status: "pending" | "completed" | "failed"; error: string | null; created_at: string; finished_at: string | null }
-export interface Thread { id: number; recommendation_id: number | null; title: string | null; created_by: string | null; created_at: string; updated_at: string; messages: number; last_at: string | null; pending: boolean }
+export interface Thread { id: number; recommendation_id: number | null; title: string | null; created_by: string | null; created_at: string; updated_at: string; session_id: string | null; session_state: SessionState | null; messages: number; last_at: string | null; pending: boolean }
+/** What the session has already been told, so a follow-up turn repeats none of it: the plan's resolution id and the step outcomes text. */
+export interface SessionState { resolutionId: number | null; outcomes: string }
 
 const safeJson = (s: unknown) => { if (typeof s !== "string" || !s) return null; try { return JSON.parse(s); } catch { return null; } };
 
 const threadRow = db.prepare(`select t.*, (select count(*) from recommendation_messages m where m.thread_id = t.id) as messages,
   (select max(coalesce(m.finished_at, m.created_at)) from recommendation_messages m where m.thread_id = t.id) as last_at,
   exists(select 1 from recommendation_messages m where m.thread_id = t.id and m.status = 'pending') as pending from chat_threads t`);
-const asThread = (r: any): Thread => ({ ...r, pending: Boolean(r.pending) });
+const asThread = (r: any): Thread => ({ ...r, session_state: safeJson(r.session_state), pending: Boolean(r.pending) });
 
 /** The general threads (no recommendation), most recently active first. */
 export function listThreads(): Thread[] {
@@ -150,8 +168,13 @@ export function accountHeader(): AccountHeader {
   return h;
 }
 
-/** The general brief: the header, the tool index, the thread and the new message. Pure given its inputs. */
-export function buildAccountPrompt(header: AccountHeader, tools: [string, string][], thread: Pick<Message, "role" | "author" | "content" | "status">[], message: string, threadTitle?: string | null): string {
+/**
+ * The general brief: the header, the tool index, the thread and the new message. Pure given its inputs.
+ * With `resumed` (the thread's session is being continued) the brief is the new message alone: repo2graph replays
+ * the conversation, and the header and tool index are already in it.
+ */
+export function buildAccountPrompt(header: AccountHeader, tools: [string, string][], thread: Pick<Message, "role" | "author" | "content" | "status">[], message: string, threadTitle?: string | null, resumed = false): string {
+  if (resumed) return ["## The new message to answer (the thread so far is in front of you; the account numbers may have moved since, fetch them if they matter)", message, "", "Answer with the JSON object described by the schema: reply (step_fixes and suggest_replan stay empty here; there is no plan)."].join("\n");
   const usd = (n: number | null) => (n == null ? "unknown" : `${Math.round(n)} USD`);
   const lines: string[] = [`# Thread with the team about the AWS account${threadTitle ? `: ${threadTitle}` : ""}`, "",
     "## The account in a few numbers (fetch anything else with the tools)",
@@ -175,28 +198,71 @@ export function latestPlan(recId: number): { resolutionId: number; plan: Resolut
   return row && plan ? { resolutionId: row.id, plan } : null;
 }
 
-/** The brief for one turn: the recommendation, the plan, what happened, the thread, then the new message. Pure. */
-export function buildChatPrompt(rec: RecRow, facts: unknown, plan: { resolutionId: number; plan: ResolutionPlan } | null, progress: Progress | null, thread: Pick<Message, "role" | "author" | "content" | "status">[], message: string): string {
+/** The step outcomes as the brief shows them: empty when there is no plan or the progress belongs to another plan. */
+export const outcomesForPlan = (plan: { resolutionId: number; plan: ResolutionPlan } | null, progress: Progress | null): string =>
+  plan && progress?.plan === `resolution:${plan.resolutionId}` ? outcomesText(plan.plan.plan, progress) : "";
+
+/** What a brief tells the session about the plan and the outcomes; stored on the thread so the next turn repeats neither. */
+export const sessionStateFor = (plan: { resolutionId: number; plan: ResolutionPlan } | null, progress: Progress | null): SessionState => ({ resolutionId: plan?.resolutionId ?? null, outcomes: outcomesForPlan(plan, progress) });
+
+/**
+ * The brief for one turn: the recommendation, the plan, what happened, the thread, then the new message. Pure.
+ * With `resumed` (what the thread's session was last told) the brief carries the new message, the recommendation's
+ * status line, and the plan or the outcomes only when they differ from what the session already has; the rest is
+ * replayed by repo2graph from the session.
+ */
+export function buildChatPrompt(rec: RecRow, facts: unknown, plan: { resolutionId: number; plan: ResolutionPlan } | null, progress: Progress | null, thread: Pick<Message, "role" | "author" | "content" | "status">[], message: string, resumed: SessionState | null = null): string {
+  const status = `Rule ${rec.rule} (source ${rec.source}), action ${rec.action_type}, tier ${rec.tier}, estimated saving ${rec.est_monthly_saving != null ? `${Math.round(rec.est_monthly_saving)} USD/month` : "unknown"}, status ${rec.status}${rec.decision_reason ? `, decision reason: "${rec.decision_reason}"` : ""}.`;
+  const planLines = (): string[] => {
+    if (!plan) return ["", "## Plan", "No tailored plan has been written yet; the person is working from the rationale or the generic playbook."];
+    const out = ["", `## The current tailored plan (resolution ${plan.resolutionId})`, plan.plan.summary || ""];
+    plan.plan.plan.forEach((s, i) => { out.push(`${i + 1}. ${s.step}`); if (s.command) out.push("```", s.command, "```"); if (s.verify) out.push(`   verify: ${s.verify}`); });
+    if (plan.plan.needs_from_human.length) out.push("Needs from a human:", ...plan.plan.needs_from_human.map((n) => `- ${n}`));
+    return out;
+  };
+  const tried = outcomesForPlan(plan, progress);
+  const answer = ["", "Answer with the JSON object described by the schema: reply, suggest_replan, step_fixes."];
+  if (resumed) {
+    const lines: string[] = [`# Follow-up on recommendation #${rec.id} (the thread so far is in front of you)`, status];
+    const planChanged = (plan?.resolutionId ?? null) !== resumed.resolutionId;
+    if (planChanged) lines.push(...planLines().map((l, i) => (i === 1 && plan ? `${l}, replacing the one you saw` : l)));
+    if (planChanged || tried !== resumed.outcomes) lines.push("", `## What happened when the steps were tried${planChanged ? "" : " (changed since your last answer)"}`, tried || "- nothing recorded yet");
+    lines.push("", "## The new message to answer", message, ...answer);
+    return lines.join("\n");
+  }
   const lines: string[] = [
-    `# Thread on recommendation #${rec.id}: ${rec.title}`,
-    `Rule ${rec.rule} (source ${rec.source}), action ${rec.action_type}, tier ${rec.tier}, estimated saving ${rec.est_monthly_saving != null ? `${Math.round(rec.est_monthly_saving)} USD/month` : "unknown"}, status ${rec.status}${rec.decision_reason ? `, decision reason: "${rec.decision_reason}"` : ""}.`,
+    `# Thread on recommendation #${rec.id}: ${rec.title}`, status,
     `Resource: ${rec.resource ?? "unknown"}${rec.resource_name && rec.resource_name !== rec.resource ? ` (${rec.resource_name})` : ""}`,
     "", "## Rationale", rec.rationale || "(none)",
     "", "## Resource facts (advisor inventory)", "```json", JSON.stringify(facts ?? {}, null, 1).slice(0, 4000), "```",
+    ...planLines(),
+    "", "## What happened when the steps were tried", tried || "- nothing recorded yet",
+    "", "## The conversation so far",
   ];
-  if (plan) {
-    lines.push("", `## The current tailored plan (resolution ${plan.resolutionId})`, plan.plan.summary || "");
-    plan.plan.plan.forEach((s, i) => { lines.push(`${i + 1}. ${s.step}`); if (s.command) lines.push("```", s.command, "```"); if (s.verify) lines.push(`   verify: ${s.verify}`); });
-    if (plan.plan.needs_from_human.length) lines.push("Needs from a human:", ...plan.plan.needs_from_human.map((n) => `- ${n}`));
-  } else lines.push("", "## Plan", "No tailored plan has been written yet; the person is working from the rationale or the generic playbook.");
-  const tried = plan && progress?.plan === `resolution:${plan.resolutionId}` ? outcomesText(plan.plan.plan, progress) : "";
-  lines.push("", "## What happened when the steps were tried", tried || "- nothing recorded yet");
-  lines.push("", "## The conversation so far");
   const past = thread.filter((m) => m.status === "completed" && m.content).slice(-THREAD_CONTEXT);
   if (!past.length) lines.push("- this is the first message");
   for (const m of past) lines.push(`**${m.role === "agent" ? "advisor" : m.author || "engineer"}:** ${m.content.slice(0, 2500)}`, "");
-  lines.push("## The new message to answer", message, "", "Answer with the JSON object described by the schema: reply, suggest_replan, step_fixes.");
+  lines.push("## The new message to answer", message, ...answer);
   return lines.join("\n");
+}
+
+/**
+ * Whether repo2graph still holds a session (its sessions are files on its disk; GET /api/sessions/:id answers 404
+ * once one is gone). Anything but a 200 counts as gone: the thread then opens a new session with the full brief,
+ * which costs tokens but never an answer given without the conversation.
+ */
+export async function sessionAlive(sessionId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${config.repo2graphUrl}/api/sessions/${encodeURIComponent(sessionId)}`, { headers: { "x-api-token": config.repo2graphToken } });
+    return res.ok;
+  } catch { return false; }
+}
+
+/** The session a thread's next message goes in: the existing one when it is alive and the last turn worked, else a new one. */
+export async function sessionFor(thread: Thread, past: Message[]): Promise<{ sessionId: string; resumed: boolean }> {
+  const last = [...past].reverse().find((m) => m.role === "agent");
+  if (thread.session_id && last?.status === "completed" && (await sessionAlive(thread.session_id))) return { sessionId: thread.session_id, resumed: true };
+  return { sessionId: `aws-advisor-chat-${thread.id}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, resumed: false };
 }
 
 /** Records the person's message in a thread and asks the agent; the answer arrives through the webhook. */
@@ -209,24 +275,32 @@ export async function ask(threadId: number, message: string, author: string | nu
   if (thread.pending) { const e: any = new Error("the agent is still answering the previous message"); e.code = "pending"; throw e; }
   if (!config.repo2graphUrl) throw new Error("REPO2GRAPH_URL is not configured: no agent can answer");
   const past = listMessages(threadId);
+  // Same session as the thread's earlier turns when repo2graph still has it: it replays the conversation, so the
+  // brief carries only what is new and the cached prompt prefix is reused. Decided before the rows are written so
+  // a lost session is found out while there is nothing to undo.
+  const session = await sessionFor(thread, past);
   const userId = Number(db.prepare("insert into recommendation_messages(recommendation_id, thread_id, role, author, content, status) values (?, ?, 'user', ?, ?, 'completed')").run(thread.recommendation_id, threadId, author, text).lastInsertRowid);
   const agentId = Number(db.prepare("insert into recommendation_messages(recommendation_id, thread_id, role, status) values (?, ?, 'agent', 'pending')").run(thread.recommendation_id, threadId).lastInsertRowid);
   // a general thread without a name takes its first message as the title
   if (!rec && !thread.title) db.prepare("update chat_threads set title = ? where id = ?").run(text.split("\n")[0].slice(0, 80), threadId);
   db.prepare("update chat_threads set updated_at = datetime('now') where id = ?").run(threadId);
   try {
+    const plan = rec ? latestPlan(rec.id) : null;
+    const progress = rec ? parseProgress((rec as any).progress) : null;
     const prompt = rec
-      ? buildChatPrompt(rec, resourceFacts(rec), latestPlan(rec.id), parseProgress((rec as any).progress), past, text)
-      : buildAccountPrompt(accountHeader(), FACT_TOOLS, past, text, thread.title);
+      ? buildChatPrompt(rec, resourceFacts(rec), plan, progress, past, text, session.resumed ? thread.session_state ?? { resolutionId: null, outcomes: "" } : null)
+      : buildAccountPrompt(accountHeader(), FACT_TOOLS, past, text, thread.title, session.resumed);
     const { requestId } = await postAgentRequest({
       prompt,
       systemOverride: getPrompt("chat"),
-      sessionId: `aws-advisor-chat-${threadId}-${agentId}-${Date.now().toString(36)}`,
+      sessionId: session.sessionId,
       agentName: rec ? "aws-resolution-chat" : "aws-account-chat",
       metadata: { threadId, recommendationId: thread.recommendation_id, messageId: agentId },
       link: { kind: "chat", recommendationId: thread.recommendation_id },
     });
     db.prepare("update recommendation_messages set request_id = ? where id = ?").run(requestId, agentId);
+    db.prepare("update chat_threads set session_id = ?, session_state = ? where id = ?").run(session.sessionId, JSON.stringify(sessionStateFor(plan, progress)), threadId);
+    if (!session.resumed && thread.session_id) console.log(`[chat] thread ${threadId}: session ${thread.session_id} not resumable, opened ${session.sessionId} with the full brief`);
   } catch (e: any) {
     db.prepare("update recommendation_messages set status = 'failed', error = ?, finished_at = datetime('now') where id = ?").run(String(e?.message || e).slice(0, 500), agentId);
     throw e;

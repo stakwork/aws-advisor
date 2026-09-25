@@ -69,9 +69,14 @@ output or the reason (`progress.outcomes`, one per step). Those outcomes are wha
 plan with the previous plan, each step's outcome and your note in the brief (`src/resolve.ts buildFeedbackSection`):
 what worked stays, what failed is replaced with steps that fix the cause shown in the output. The new resolution
 shows the feedback it was written from. **Chat about this** (`src/chat.ts`, `GET|POST /api/recommendations/:id/messages`)
-is a thread under the plan: each message you write becomes one agent request (task `chat`, `tasks/chat/`) whose brief
-is the recommendation, the current plan, the step outcomes and the last twelve messages; the answer arrives through
-the webhook (the thread polls every 5 s meanwhile). The agent can hand back corrected steps with commands and verify
+is a thread under the plan: each message you write becomes one agent request (task `chat`, `tasks/chat/`); the answer
+arrives through the webhook (the thread polls every 5 s meanwhile). A thread talks in one repo2graph session: the
+first message carries the full brief (the recommendation, the current plan, the step outcomes and, for a thread that
+predates sessions, the last twelve messages), every later message is posted with the same `sessionId`, so repo2graph
+replays the conversation with the agent's own tool calls and the brief carries only the new message plus the plan or
+the outcomes when they changed. The prompt prefix is the same from turn to turn, so the model's prompt cache is hit
+rather than paid for again. When repo2graph no longer has the session (`GET /api/sessions/:id` answers 404) or the
+previous turn failed, the thread opens a new session with the full brief. The agent can hand back corrected steps with commands and verify
 lines (`step_fixes`, shown as cards) and say the plan needs rewriting (`suggest_replan`, which offers the re-plan
 button). Facts in the brief are read-only; the agent checks claims with the `aws_*` tools before answering.
 
@@ -98,9 +103,10 @@ changes AWS ever runs from the app: that is the executor on the roadmap, under i
 `src/chat.ts`; a thread without a name takes its first message as its title). The brief is deliberately small: a
 few account numbers (spend last 7 days, month to date and projection, unacknowledged alerts, open recommendations
 and their claimed saving), the index of the advisor's fact tools (bill, forecast, baselines, inventory, pools, RDS
-load, NAT attribution, CloudTrail, the graph, Steampipe SQL, …) and the last twelve messages. The agent pulls what
-the question needs with those tools and says what it fetched, instead of being handed a dump it may not need. A
-recommendation's plan has its own thread under that recommendation, where the brief is the plan and the outcomes.
+load, NAT attribution, CloudTrail, the graph, Steampipe SQL, …); it is sent once, on the thread's first message,
+and later messages continue the same session with the message alone. The agent pulls what the question needs with
+those tools and says what it fetched, instead of being handed a dump it may not need. A recommendation's plan has
+its own thread under that recommendation, where the brief is the plan and the outcomes.
 
 The detail's "Affected resources" lists every resource the item touches as a link into its Inventory tab
 (opened in a new tab): the resource column split up when the agent grouped several ids, each resolved

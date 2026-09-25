@@ -147,7 +147,8 @@ export async function postAgentRequest(req: AgentRequest): Promise<AgentAccepted
     // The advisor's own read-only fact server; tools arrive at the agent as aws_<tool>.
     mcpServers: [{ name: "aws", url: `${config.publicUrl}/mcp`, ...(config.mcpToken ? { token: config.mcpToken } : {}) }],
     jsonSchema: req.jsonSchema ?? taskFor(req.link.kind).schema,
-    // Unique per dispatch: repo2graph aborts an in-flight run when a new request reuses its sessionId.
+    // Unique per dispatch (repo2graph aborts an in-flight run when a new request reuses its sessionId), except
+    // chat: a thread keeps one session so repo2graph replays the conversation and the prompt cache is reused.
     sessionId: req.sessionId,
     agentName: req.agentName,
     _metadata: req.metadata ?? {},
