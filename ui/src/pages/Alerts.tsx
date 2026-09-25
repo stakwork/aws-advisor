@@ -53,6 +53,8 @@ export default function Alerts() {
   const filter = FILTERS.includes(params.get("status") || "") ? params.get("status")! : "open";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const selectedId = params.get("id");
+  // A deep link carries an id and no page: the server answers with the page that holds that alert.
+  const pageQuery = params.get("page") ? `page=${page}` : selectedId ? `id=${encodeURIComponent(selectedId)}` : "page=1";
   const [data, setData] = useState<{ total: number; page: number; page_size: number; counts: Record<string, number>; alerts: any[] } | null>(null);
   const [settings, setSettings] = useState<any>(null);
   const [notify, setNotify] = useState<any>(null);
@@ -62,14 +64,16 @@ export default function Alerts() {
   const [err, setErr] = useState("");
   const rows = data?.alerts ?? null;
 
-  const load = () => api(`/alerts?status=${filter}&page=${page}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => { setErr(e.message); setData({ total: 0, page: 1, page_size: PAGE_SIZE, counts: {}, alerts: [] }); });
+  const load = () => api(`/alerts?status=${filter}&${pageQuery}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => { setErr(e.message); setData({ total: 0, page: 1, page_size: PAGE_SIZE, counts: {}, alerts: [] }); });
   const [sending, setSending] = useState<number | null>(null);
   // Sends one alert to the Sphinx chat by hand, whatever the rules say; the receipt shows on the row.
   const sendNow = async (id: number) => { setSending(id); setErr(""); try { await api(`/alerts/${id}/notify`, { method: "POST", body: "{}" }); } catch (e: any) { setErr(e.message); } finally { setSending(null); load(); } };
   const loadIncident = () => { if (!selectedId) { setIncident(null); return; } api(`/alerts/${selectedId}/incident`).then(setIncident).catch(() => setIncident(null)); };
   useEffect(() => { api("/settings").then(setSettings).catch(() => {}); }, []);
-  useEffect(() => { load(); }, [filter, page]);
+  useEffect(() => { load(); }, [filter, pageQuery]);
   useEffect(() => { loadIncident(); }, [selectedId, rows]);
+  // Once the page holding the linked alert is on screen, bring its row into view.
+  useEffect(() => { if (selectedId && rows) document.getElementById(`alert-${selectedId}`)?.scrollIntoView({ block: "nearest" }); }, [selectedId, rows]);
   // While an investigation is running, refresh so the webhook's result shows up without a reload.
   useEffect(() => {
     if (!rows?.some((r) => r.incident_status === "pending")) return;
@@ -124,7 +128,7 @@ export default function Alerts() {
               const open = String(a.id) === selectedId;
               return (
                 <Fragment key={a.id}>
-                  <tr onClick={() => toggle(a.id)} className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open ? "bg-zinc-900" : ""}`}>
+                  <tr id={`alert-${a.id}`} onClick={() => toggle(a.id)} className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open ? "bg-zinc-900" : ""}`}>
                     <Td className="whitespace-nowrap text-zinc-400">{when(a.created_at)}</Td>
                     <Td><Badge>{alertLevel(a)}</Badge><div className="mt-0.5 text-xs text-zinc-500">{a.kind}</div></Td>
                     <Td>

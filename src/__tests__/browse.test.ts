@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { addDays, daysInMonth, localDay } from "../localdate.js";
-import { alertDay, dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, shortResourceId } from "../paging.js";
+import { alertDay, dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageOf, pageParams, paginate, shortResourceId } from "../paging.js";
 import { SpendRow, summarizeSpend } from "../spend_math.js";
 
 // ---- spend --------------------------------------------------------------------------------------------------
@@ -191,4 +191,13 @@ test("recommendations: same (resource, action) merge into the highest estimate, 
   assert.deepEqual(merged.find((r) => r.id === 6)!.merged, []);
   assert.deepEqual(merged.find((r) => r.id === 8)!.merged, []);
   assert.equal(merged[merged.length - 1].est_monthly_saving, null);
+});
+
+test("pageOf: the page that holds an id in the ordered list, null when it is not there", () => {
+  const rows = Array.from({ length: 23 }, (_, i) => ({ id: 100 - i }));
+  assert.equal(pageOf(rows, 100, 10), 1);
+  assert.equal(pageOf(rows, 91, 10), 1);
+  assert.equal(pageOf(rows, 90, 10), 2);
+  assert.equal(pageOf(rows, 78, 10), 3);
+  assert.equal(pageOf(rows, 5, 10), null);
 });
