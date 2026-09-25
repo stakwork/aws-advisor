@@ -956,13 +956,13 @@ timestamps so nothing from the logs leaves the instance except the last three li
 | signal | how the probe reads it | what it says |
 | --- | --- | --- |
 | per running container (up to 20): log lines in the last 24 h, the last line's time, error and warning counts | `docker logs --since 24h --tail 2000 --timestamps` | a container that logged nothing but heartbeat since it started is not serving anyone |
-| **use signals** per container: lines that look like a human did something (login, auth, payment, invoice, keysend, message sent or received, joined, upload, a `POST`/`PUT`/`PATCH`/`DELETE`, a websocket opening, subscribe, checkout), minus health checks, pings, metrics and stack traces | the `SIG_RE` / `HB_RE` patterns in the script; a first cut, tuned on a live swarm before the parking rule relies on it (`docs/park-swarms-plan.md`) | `signal_lines` and `last_signal_at` are the "last real use" of that container |
+| **use signals** per container: lines that look like a human did something, matched against nine named patterns (`login`, `auth`, `payment`, `message`, `join`, `upload`, `write_request`, `websocket`, `subscribe`), minus health checks, pings, metrics and stack traces; the count per pattern and up to five recent distinct matched lines | the `SIGS` / `HB_RE` patterns in the script; which patterns *count* is decided per image in the advisor, see [Tuning the use signals](#tuning-the-use-signals) | `signal_lines` and `last_signal_at` are the "last real use" of that container |
 | restarts since the container started | `docker inspect .RestartCount` | a restart loop (≥ 10) is flagged: a crashing worker, not a busy one |
 | per container network bytes since it started | `docker stats .NetIO` (`net_rx_bytes` / `net_tx_bytes` on the container row) | the difference between probes is that container's traffic; rolled up as `net_bytes_day` |
-| established TCP flows: external (public peers), internal (RFC 1918 peers other than docker bridges), ssh, by destination port | `/proc/net/nf_conntrack` first (it sees the DNAT'd flows into containers that the host's own sockets do not), else `conntrack -L`, else `ss` | an external client connected right now is the strongest "in use" there is |
+| established TCP flows: external (public peers), internal (RFC 1918 peers other than docker bridges), ssh, by destination port, the busiest peer→port pairs, and which container answers on each published port | `/proc/net/nf_conntrack` first (it sees the DNAT'd flows into containers that the host's own sockets do not), else `conntrack -L`, else `ss`; `docker ps` for the port map | an external client connected right now is the strongest "in use" there is, and the drawer says who, to what: `203.0.113.5 → :443 (proxy)` |
 | the front door: requests in 24 h, health checks counted apart, the last non-health request | the log of the first proxy container (image `nginx`, `caddy`, `traefik`, `haproxy`, `*proxy*`, `*ingress*`), else the tail of `/var/log/nginx/access.log` and friends (`last_request_raw` then, since access-log dates are not parsed on the box) | a swarm nobody visits has thousands of health checks and zero requests |
 | logins: users on the box now, the last login and who | `who`, `last --time-format iso` | somebody working on the box is use too |
-| host interface counters since boot | `/proc/net/dev`, loopback and docker bridges excluded | the difference between probes is the box's traffic, without CloudWatch |
+| host interface counters since boot | `/proc/net/dev`, loopback and docker bridges excluded | the drawer shows the difference from the previous probe ("12 MB in the 58 min since the previous probe"), the roll-up the bytes per day; the raw counter is never shown |
 
 The section takes about three seconds on a box with a handful of containers and never fails the probe: a
 missing tool or file becomes a null. `useSummary` (`src/ssm.ts`) reduces it to one line, **last real use** and
@@ -976,6 +976,31 @@ and `container_daily` (`log_lines_avg`, `signal_lines_avg`, `errors_avg`, `resta
 connections, with requests, with signals; the newest use). After upgrading, update the SSM document as described
 under [Containers and long-lived history](#containers-and-long-lived-history); instances keep answering with 1.3
 output until then, and everything above simply stays empty for them.
+
+#### Tuning the use signals
+
+The patterns are generic and a container's log decides what they mean: boltwall writes an `authorization` line
+for every macaroon check and a health checker's `POST` matches `write_request`, so a box nobody uses can show
+hundreds of "use signals". The fix is not a probe script per instance but a **rule per image**
+(`src/signal_rules.ts`, table `signal_rules`): for images whose name contains a pattern (the image without its
+tag, `sphinxlightning/sphinx-boltwall`), a kind is `noise` (never counts) or `signal`. Rules apply to every
+instance running that image, at the moment a probe is stored (`container_signals` in `src/ssm.ts`): the
+container's `signal_lines_24h` becomes the count after the rules, a container whose every matched kind is noise
+has no last use, and the drawer's "last real use" line and the roll-ups follow.
+
+- **In the drawer** every container shows one chip per matched kind with its count (`auth 200`, `write_request
+  18`) and a "lines" toggle with the sample lines that matched, so you can see what the pattern caught. Click a
+  chip to rule that kind noise for that image (with a reason), click again to lift the rule.
+- **Ask the agent to review the signals** opens a chat thread: the agent reads the samples with the
+  `activity_signals` tool, says per container what is a person and what is machine chatter, and records
+  proposals with `propose_signal_rule`. Proposals change nothing until you press **Confirm** on them in the
+  drawer (or Reject); a confirmed rule is never overridden by a proposal. This is the one write tool the agent
+  has, and it can only propose.
+- `GET /api/signal-rules`, `PUT /api/signal-rules` `{ image_pattern, kind, verdict, note }` (confirmed),
+  `POST /api/signal-rules/:id/confirm`, `DELETE /api/signal-rules/:id`, `POST /api/instances/:id/signals/review`.
+
+The raw per-kind counts stay on `container_samples.signal_kinds`, so a rule added later can be judged against
+the last thirty days.
 
 ### Testing the probe
 

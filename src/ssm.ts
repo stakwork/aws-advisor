@@ -9,6 +9,7 @@ import { checkProbeQuota } from "./quota.js";
 import { checkDiskLevels } from "./disk_alerts.js";
 import { applyProbeDisks } from "./ebs_inventory.js";
 import { checkHostLevels } from "./host_alerts.js";
+import { effectiveSignals } from "./signal_rules.js";
 
 /**
  * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
@@ -66,7 +67,16 @@ export const PROBE_SCRIPT = [
   "fi",
   "# ---- activity (probe 1.4): is anyone actually using this box? Counts and timestamps only; log text stays on the box,",
   "# ---- except the last three lines of each container (capped, printable ASCII), shown in the UI and never sent to a model.",
-  "SIG_RE='(log(ged)? ?in|sign(ed)?[- ]?in|authenticat|authoriz|payment|invoice|keysend|sent message|new message|received message|joined|upload|\"(POST|PUT|PATCH|DELETE) |websocket|ws open|subscribe|checkout)'",
+  "SIGS='login=log(ged)? ?in|sign(ed)?[- ]?in",
+  "auth=authenticat|authoriz",
+  "payment=payment|invoice|keysend",
+  "message=sent message|new message|received message",
+  "join=joined",
+  "upload=upload",
+  "write_request=\"(POST|PUT|PATCH|DELETE) ",
+  "websocket=websocket|ws open",
+  "subscribe=subscribe|checkout'",
+  "SIG_RE=$(printf '%s\\n' \"$SIGS\" | cut -d= -f2- | paste -sd'|' -)",
   "HB_RE='(health|ping|pong|heartbeat|keepalive|/metrics|/status|readiness|liveness|ELB-HealthChecker|swarm-checker|UptimeRobot|kube-probe)'",
   "ts_of() { printf '%s' \"$1\" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1; }",
   "jts() { t=$(ts_of \"$1\"); if [ -n \"$t\" ]; then printf '\"%sZ\"' \"$t\"; else printf 'null'; fi; }",
@@ -79,7 +89,11 @@ export const PROBE_SCRIPT = [
   "    last_log=$(printf '%s\\n' \"$logs\" | grep . | tail -n 1)",
   "    errs=$(printf '%s\\n' \"$logs\" | grep -ciE '\\b(error|err|fatal|panic|exception)\\b')",
   "    warns=$(printf '%s\\n' \"$logs\" | grep -ciE '\\b(warn|warning)\\b')",
-  "    sig=$(printf '%s\\n' \"$logs\" | grep -iE \"$SIG_RE\" | grep -viE \"$HB_RE\" | grep -viE '\\b(error|exception|traceback|panic|fatal)\\b|^[^ ]+ +(from |at )')",
+  "    clean=$(printf '%s\\n' \"$logs\" | grep -viE \"$HB_RE\" | grep -viE '\\b(error|exception|traceback|panic|fatal)\\b|^[^ ]+ +(from |at )')",
+  "    sig=$(printf '%s\\n' \"$clean\" | grep -iE \"$SIG_RE\")",
+  "    kinds=$(printf '%s\\n' \"$SIGS\" | while IFS='=' read -r nm re; do [ -n \"$nm\" ] || continue; k=$(printf '%s\\n' \"$clean\" | grep -ciE \"$re\"); [ \"${k:-0}\" -gt 0 ] && printf ',\"%s\":%s' \"$nm\" \"$k\"; done)",
+  "    kinds=\"{${kinds#,}}\"",
+  "    samples=$(printf '%s\\n' \"$sig\" | grep . | tail -n 60 | awk '{ $1=\"\"; sub(/^ /,\"\"); if(!($0 in seen)){ seen[$0]=1; out[++n]=$0 } } END { for(i=(n>5?n-4:1); i<=n; i++) print out[i] }' | cut -c1-160 | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g' | awk '{ printf \"%s\\\"%s\\\"\", (NR>1?\",\":\"\"), $0 }')",
   "    sigs=$(printf '%s\\n' \"$sig\" | grep -c .)",
   "    last_sig=$(printf '%s\\n' \"$sig\" | grep . | tail -n 1)",
   "    ins=$(docker inspect --format '{{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}}' \"$c\" 2>/dev/null)",
@@ -93,7 +107,7 @@ export const PROBE_SCRIPT = [
   "        act_front=\"{\\\"source\\\":\\\"container:$(esc \"$c\")\\\",\\\"requests\\\":$((reqs - hb)),\\\"health\\\":${hb:-0},\\\"last_request_at\\\":$(jts \"$lastreq\"),\\\"last_request_raw\\\":null,\\\"window\\\":\\\"24h\\\"}\"",
   "      fi;;",
   "    esac",
-  "    act_containers=\"$act_containers$n{\\\"name\\\":\\\"$(esc \"$c\")\\\",\\\"started_at\\\":$(jts \"$started\"),\\\"restarts\\\":${restarts:-0},\\\"log_lines\\\":${lines:-0},\\\"last_log_at\\\":$(jts \"$last_log\"),\\\"errors\\\":${errs:-0},\\\"warns\\\":${warns:-0},\\\"signal_lines\\\":${sigs:-0},\\\"last_signal_at\\\":$(jts \"$last_sig\"),\\\"last_lines\\\":[$tail3]}\"",
+  "    act_containers=\"$act_containers$n{\\\"name\\\":\\\"$(esc \"$c\")\\\",\\\"started_at\\\":$(jts \"$started\"),\\\"restarts\\\":${restarts:-0},\\\"log_lines\\\":${lines:-0},\\\"last_log_at\\\":$(jts \"$last_log\"),\\\"errors\\\":${errs:-0},\\\"warns\\\":${warns:-0},\\\"signal_lines\\\":${sigs:-0},\\\"last_signal_at\\\":$(jts \"$last_sig\"),\\\"last_lines\\\":[$tail3],\\\"signal_kinds\\\":$kinds,\\\"signal_samples\\\":[$samples]}\"",
   "    n=\",\"",
   "  done",
   "fi",
@@ -115,10 +129,14 @@ export const PROBE_SCRIPT = [
   "elif command -v ss >/dev/null 2>&1; then conns=$(ss -Htn state established 2>/dev/null | awk '{ l=$3; p=$4; sub(/.*:/,\"\",l); sub(/:[0-9]+$/,\"\",p); gsub(/[\\[\\]]/,\"\",p); sub(/^::ffff:/,\"\",p); print p, l }'); src=\"ss\"",
   "fi",
   "ssh_n=$(ss -Htn state established '( sport = :22 )' 2>/dev/null | grep -c .)",
-  "act_conns=$(printf '%s\\n' \"$conns\" | awk -v src=\"$src\" -v ssh=\"${ssh_n:-0}\" '",
+  "# which container answers on each published host port, so a flow to :443 can be named",
+  "port_map=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | awk -F'\t' '{ n=split($2, P, \", \"); for(i=1;i<=n;i++){ if(match(P[i], /:[0-9]+->/)){ hp=substr(P[i], RSTART+1, RLENGTH-3); if(!(hp in seen)){ seen[hp]=1; nm=$1; gsub(/[\"\\\\]/, \"\", nm); printf \"%s\\\"%s\\\":\\\"%s\\\"\", (c++?\",\":\"\"), hp, nm } } } }')",
+  "act_conns=$(printf '%s\\n' \"$conns\" | awk -v src=\"$src\" -v ssh=\"${ssh_n:-0}\" -v pmap=\"$port_map\" '",
   "  function kind(ip){ if(ip==\"\" ) return \"x\"; if(ip ~ /^127\\./ || ip==\"::1\" || ip ~ /^169\\.254\\./ || ip ~ /^fe80/) return \"x\"; if(ip ~ /^172\\.(1[6-9]|2[0-9]|3[01])\\./) return \"x\"; if(ip ~ /^10\\./ || ip ~ /^192\\.168\\./) return \"internal\"; return \"external\" }",
-  "  NF==2 { k=kind($1); if(k==\"x\") next; total++; if(k==\"external\") ext++; else int_++; ports[$2]++; peers[$1]=1 }",
-  "  END { np=0; for(p in ports) np++; printf \"{\\\"source\\\":\\\"%s\\\",\\\"established\\\":%d,\\\"external\\\":%d,\\\"internal\\\":%d,\\\"peers\\\":%d,\\\"ssh\\\":%d,\\\"by_port\\\":{\", src, total, ext, int_, length(peers), ssh; first=1; for(p in ports){ if(p ~ /^[0-9]+$/){ printf \"%s\\\"%s\\\":%d\", (first?\"\":\",\"), p, ports[p]; first=0 } } printf \"}}\" }')",
+  "  NF==2 { k=kind($1); if(k==\"x\") next; total++; if(k==\"external\") ext++; else int_++; ports[$2]++; peers[$1]=1; pair[$1 \" \" $2]++; pk[$1 \" \" $2]=k }",
+  "  END { np=0; for(p in ports) np++; printf \"{\\\"source\\\":\\\"%s\\\",\\\"established\\\":%d,\\\"external\\\":%d,\\\"internal\\\":%d,\\\"peers\\\":%d,\\\"ssh\\\":%d,\\\"by_port\\\":{\", src, total, ext, int_, length(peers), ssh; first=1; for(p in ports){ if(p ~ /^[0-9]+$/){ printf \"%s\\\"%s\\\":%d\", (first?\"\":\",\"), p, ports[p]; first=0 } }",
+  "    printf \"},\\\"top_peers\\\":[\"; for(t=0;t<8;t++){ best=\"\"; bn=0; for(q in pair){ if(!(q in done) && pair[q]>bn){ best=q; bn=pair[q] } } if(best==\"\") break; done[best]=1; split(best, ab, \" \"); if(ab[2] !~ /^[0-9]+$/) continue; printf \"%s{\\\"ip\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"flows\\\":%d,\\\"kind\\\":\\\"%s\\\"}\", (t?\",\":\"\"), ab[1], ab[2], bn, pk[best] }",
+  "    printf \"],\\\"port_map\\\":{%s}}\", pmap }')",
   "users_now=$(who 2>/dev/null | grep -c .)",
   "lastl=$(last -n 8 --time-format iso 2>/dev/null | grep -vE '^(reboot|shutdown|wtmp|btmp|$)' | head -n 1)",
   "last_user=$(printf '%s' \"$lastl\" | awk '{print $1}'); last_at=$(printf '%s' \"$lastl\" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:?[0-9]{2}' | head -n 1)",
@@ -169,12 +187,20 @@ export interface ProbeProcess { pid: number; cpu_pct: number; mem_pct: number; r
 export interface ProbeContainer { name: string; image: string; state: string; running_for: string; cpu_pct: number | null; mem_bytes: number; mem_pct: number | null; /** Cumulative since the container started (probe 1.4); the difference between probes is its traffic. */ net_rx_bytes?: number | null; net_tx_bytes?: number | null }
 
 /** Probe 1.4: what the last 24 h of a running container's log say about use. `last_lines` is untrusted text shown only in the UI. */
-export interface ProbeContainerActivity { name: string; started_at: string | null; restarts: number; log_lines: number; last_log_at: string | null; errors: number; warns: number; signal_lines: number; last_signal_at: string | null; last_lines: string[] }
+export interface ProbeContainerActivity {
+  name: string; started_at: string | null; restarts: number; log_lines: number; last_log_at: string | null; errors: number; warns: number;
+  /** Lines matching any use pattern (exact), the count per named pattern (a line can match two), and up to five recent distinct matched lines (untrusted text). */
+  signal_lines: number; last_signal_at: string | null; signal_kinds: Record<string, number>; signal_samples: string[]; last_lines: string[];
+}
 export interface ProbeActivity {
   version: number;
   containers: ProbeContainerActivity[];
   /** Established TCP flows (conntrack sees the DNAT'd container traffic; ss covers host sockets). external = public peers, internal = RFC1918 peers other than docker bridges. */
-  connections: { source: string; established: number; external: number; internal: number; peers: number; ssh: number; by_port: Record<string, number> } | null;
+  connections: { source: string; established: number; external: number; internal: number; peers: number; ssh: number; by_port: Record<string, number>;
+    /** The busiest (peer, host port) pairs, so the drawer can say who is connected to what. */
+    top_peers: { ip: string; port: number; flows: number; kind: "external" | "internal" }[];
+    /** Published host port → container name, from `docker ps`. */
+    port_map: Record<string, string> } | null;
   /** Requests on the front door (a proxy container's log over 24 h, or the host's access log tail), health checks counted apart. */
   front_door: { source: string | null; requests: number; health: number; last_request_at: string | null; last_request_raw: string | null; window: string | null };
   logins: { users_now: number; last_login_user: string | null; last_login_at: string | null };
@@ -288,9 +314,15 @@ export function parseActivity(a: any): ProbeActivity {
     containers: Array.isArray(a.containers) ? a.containers.map((x: any): ProbeContainerActivity => ({
       name: String(x.name ?? ""), started_at: iso(x.started_at), restarts: int(x.restarts), log_lines: int(x.log_lines), last_log_at: iso(x.last_log_at),
       errors: int(x.errors), warns: int(x.warns), signal_lines: int(x.signal_lines), last_signal_at: iso(x.last_signal_at),
+      signal_kinds: x.signal_kinds && typeof x.signal_kinds === "object" ? Object.fromEntries(Object.entries(x.signal_kinds).filter(([k]) => /^[a-z_]+$/.test(k)).map(([k, v]) => [k, int(v)])) : {},
+      signal_samples: Array.isArray(x.signal_samples) ? x.signal_samples.slice(0, 5).map((s: unknown) => String(s).slice(0, 160)) : [],
       last_lines: Array.isArray(x.last_lines) ? x.last_lines.slice(0, 3).map((s: unknown) => String(s).slice(0, 160)) : [],
     })) : [],
-    connections: c ? { source: String(c.source ?? "none"), established: int(c.established), external: int(c.external), internal: int(c.internal), peers: int(c.peers), ssh: int(c.ssh), by_port: byPort } : null,
+    connections: c ? {
+      source: String(c.source ?? "none"), established: int(c.established), external: int(c.external), internal: int(c.internal), peers: int(c.peers), ssh: int(c.ssh), by_port: byPort,
+      top_peers: Array.isArray(c.top_peers) ? c.top_peers.filter((t: any) => t && typeof t.ip === "string").slice(0, 8).map((t: any) => ({ ip: String(t.ip).slice(0, 45), port: int(t.port), flows: int(t.flows), kind: t.kind === "internal" ? "internal" as const : "external" as const })) : [],
+      port_map: c.port_map && typeof c.port_map === "object" ? Object.fromEntries(Object.entries(c.port_map).filter(([k]) => /^\d+$/.test(k)).map(([k, v]) => [k, String(v).slice(0, 80)])) : {},
+    } : null,
     front_door: { source: f.source == null ? null : String(f.source), requests: int(f.requests), health: int(f.health), last_request_at: iso(f.last_request_at), last_request_raw: f.last_request_raw == null ? null : String(f.last_request_raw).slice(0, 80), window: f.window == null ? null : String(f.window) },
     logins: { users_now: int(l.users_now), last_login_user: l.last_login_user == null ? null : String(l.last_login_user).slice(0, 64), last_login_at: iso(l.last_login_at) },
     net: a.net && typeof a.net === "object" ? { rx_bytes: int(a.net.rx_bytes), tx_bytes: int(a.net.tx_bytes) } : null,
@@ -313,10 +345,18 @@ export interface UseSummary {
   restarting_containers: string[];
 }
 
+/** A container's use-signal count after the image's rules (src/signal_rules.ts); a container whose every matched kind is noise has no last use. */
+export function containerSignals(p: ProbeResult, c: ProbeContainerActivity): { signal_lines: number; last_signal_at: string | null; noise_kinds: string[] } {
+  const image = p.containers?.find((x) => x.name === c.name)?.image ?? "";
+  const eff = effectiveSignals(image, c.signal_kinds, c.signal_lines);
+  return { signal_lines: eff.signal_lines, last_signal_at: eff.signal_lines > 0 ? c.last_signal_at : null, noise_kinds: eff.noise_kinds };
+}
+
 export function useSummary(p: ProbeResult): UseSummary | null {
   const a = p.activity; if (!a) return null;
   const cands: { at: string; kind: UseSummary["last_use_kind"] }[] = [];
-  for (const c of a.containers) if (c.last_signal_at) cands.push({ at: c.last_signal_at, kind: "signal_line" });
+  const eff = a.containers.map((c) => containerSignals(p, c));
+  for (const e of eff) if (e.last_signal_at) cands.push({ at: e.last_signal_at, kind: "signal_line" });
   if (a.front_door.last_request_at) cands.push({ at: a.front_door.last_request_at, kind: "request" });
   if (a.logins.last_login_at) cands.push({ at: a.logins.last_login_at, kind: "login" });
   if (a.connections && a.connections.external > 0) cands.push({ at: iso(p.collected_at) ?? p.collected_at, kind: "external_connection" });
@@ -325,7 +365,7 @@ export function useSummary(p: ProbeResult): UseSummary | null {
     last_use_at: cands[0]?.at ?? null, last_use_kind: cands[0]?.kind ?? null,
     external_connections_now: a.connections?.external ?? 0, ssh_sessions_now: a.connections?.ssh ?? 0, users_now: a.logins.users_now,
     requests_24h: a.front_door.source ? a.front_door.requests : null, health_checks_24h: a.front_door.source ? a.front_door.health : null,
-    signal_lines_24h: a.containers.reduce((s, c) => s + c.signal_lines, 0),
+    signal_lines_24h: eff.reduce((s, e) => s + e.signal_lines, 0),
     containers_logging_24h: a.containers.filter((c) => c.log_lines > 0).length,
     containers_running: a.containers.length,
     restarting_containers: a.containers.filter((c) => c.restarts >= 10).map((c) => c.name),

@@ -148,6 +148,8 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["alert_context", "a watcher alert with its context"],
   ["price_lookup", "on-demand price of an instance or database SKU"],
   ["instance_probe", "probe an instance over SSM: processes, disks, memory"],
+  ["activity_signals", "is anyone using this box: per container the use-signal patterns matched with sample lines, connections, front door, logins"],
+  ["propose_signal_rule", "propose that a use-signal kind is noise (or real) for an image; a person confirms"],
   ["graph_systems", "our systems from the knowledge graph"],
   ["graph_system", "one system and everything linked to it"],
   ["graph_bill", "the bill as the graph explains it, per system"],

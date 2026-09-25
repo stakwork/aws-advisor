@@ -17,6 +17,7 @@ export default function Actions() {
   const [preview, setPreview] = useState<any>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
+  const [lastPass, setLastPass] = useState<any>(null);
   const [showPolicy, setShowPolicy] = useState(false);
   const [open, setOpen] = useState<number | null>(selectedId ? Number(selectedId) : null);
 
@@ -42,7 +43,7 @@ export default function Actions() {
           <span>acts as {status?.identity?.ok ? <span className="font-mono text-emerald-300" title={status.identity.arn}>{String(status.identity.arn).split(":").pop()}</span> : <span className="text-amber-300" title={status?.identity?.error}>{status?.identity?.error || "…"}</span>}</span>
           <span className="ml-auto flex gap-2">
             <Button variant="ghost" onClick={doPreview} disabled={busy === "preview"} title="what the pass would propose now, without recording it">{busy === "preview" ? "Planning…" : "Preview plan"}</Button>
-            <Button onClick={() => run("/actions/run", "run", (r) => setMsg(`${r.mode}: ${r.proposed} proposed (${r.fresh} new), ${r.applied} applied, ${r.verified} verified, ${r.failed} failed${r.errors?.length ? `; ${r.errors.join("; ")}` : ""}`))} disabled={busy === "run" || mode === "off"} title="run the pass now, as the cron would (dry_run records, apply acts)">{busy === "run" ? "Running…" : "Run pass now"}</Button>
+            <Button onClick={() => run("/actions/run", "run", (r) => { setLastPass(r); setMsg(""); })} disabled={busy === "run" || mode === "off"} title="run the pass now, as the cron would (dry_run records, apply acts)">{busy === "run" ? "Running…" : "Run pass now"}</Button>
           </span>
         </div>
         <div className="mt-2 text-xs text-zinc-500">
@@ -59,6 +60,14 @@ export default function Actions() {
         )}
         {status?.modules && <div className="mt-2 text-xs text-zinc-500">Actions: {status.modules.map((m: any) => m.label).join(" · ")}</div>}
         {msg && <div className="mt-2 text-xs text-amber-300">{msg}</div>}
+        {lastPass && (
+          <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
+            <div className="text-zinc-200">Pass finished ({lastPass.mode}, {lastPass.took_ms} ms): {lastPass.proposed} proposed{lastPass.fresh ? ` (${lastPass.fresh} new)` : ""}, {lastPass.applied} applied, {lastPass.verified} verified, {lastPass.failed} failed, {lastPass.refused} refused, {lastPass.stale} stale.</div>
+            {lastPass.proposed === 0 && <div className="mt-1 text-zinc-400">Nothing to change right now. What each action looked at and why it left things alone:</div>}
+            {lastPass.notes?.length > 0 && <ul className="mt-1 space-y-0.5 text-zinc-400">{lastPass.notes.map((n: string, i: number) => <li key={i}>· {n}</li>)}</ul>}
+            {lastPass.errors?.length > 0 && <ul className="mt-1 space-y-0.5 text-red-300">{lastPass.errors.map((n: string, i: number) => <li key={i}>· {n}</li>)}</ul>}
+          </div>
+        )}
       </Card>
 
       {preview && (
@@ -76,7 +85,7 @@ export default function Actions() {
         <div className="mb-3 flex flex-wrap gap-1 text-xs">
           {FILTERS.map((f) => <button key={f} onClick={() => setParams({ status: f })} className={`rounded px-2 py-1 ${filter === f ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}>{f}{data?.counts && f !== "all" && data.counts[f] ? ` (${data.counts[f]})` : ""}</button>)}
         </div>
-        {!data ? <div className="text-sm text-zinc-500">Loading…</div> : !data.actions.length ? <Empty>No {filter === "all" ? "" : filter + " "}actions yet. {mode === "off" ? "The executor is off." : "Run a pass to see what it proposes."}</Empty> : (
+        {!data ? <div className="text-sm text-zinc-500">Loading…</div> : !data.actions.length ? <Empty>No {filter === "all" ? "" : filter + " "}actions yet. {mode === "off" ? "The executor is off." : lastPass ? "The last pass found nothing to change; its notes above say why." : "Run a pass, or Preview plan, to see what it proposes and why."}</Empty> : (
           <table className="w-full text-sm">
             <thead><tr><Th>When</Th><Th>Action</Th><Th>Change</Th><Th className="text-right">≈ USD/mo</Th><Th>Status</Th><Th></Th></tr></thead>
             <tbody>

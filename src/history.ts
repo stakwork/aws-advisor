@@ -4,7 +4,7 @@
  * after the detail expires. Roll-ups are idempotent: a day is recomputed whenever it is rolled again.
  */
 import { db } from "./db.js";
-import type { ProbeResult } from "./ssm.js";
+import { containerSignals, type ProbeResult } from "./ssm.js";
 
 db.exec(`
 create table if not exists container_samples (
@@ -49,7 +49,8 @@ create table if not exists instance_activity (
   requests_24h integer, health_24h integer, last_request_at text,
   last_login_at text, last_login_user text,
   signal_lines_24h integer, last_signal_at text, last_log_at text,
-  net_rx_bytes real, net_tx_bytes real
+  net_rx_bytes real, net_tx_bytes real,
+  peers text
 );
 create index if not exists instance_activity_inst on instance_activity(instance_id, collected_at);
 `);
@@ -59,11 +60,13 @@ const addColumn = (table: string, column: string, type: string) => { try { db.ex
 for (const [c, t] of [["log_lines_24h", "integer"], ["signal_lines_24h", "integer"], ["errors_24h", "integer"], ["warns_24h", "integer"], ["restarts", "integer"], ["last_log_at", "text"], ["last_signal_at", "text"], ["net_rx_bytes", "real"], ["net_tx_bytes", "real"]]) addColumn("container_samples", c, t);
 for (const [c, t] of [["log_lines_avg", "real"], ["signal_lines_avg", "real"], ["errors_avg", "real"], ["restarts_max", "integer"], ["last_log_at", "text"], ["last_signal_at", "text"], ["net_bytes_day", "real"]]) addColumn("container_daily", c, t);
 for (const [c, t] of [["external_connections_avg", "real"], ["external_connections_max", "integer"], ["ssh_sessions_max", "integer"], ["requests_24h_avg", "real"], ["signal_lines_24h_avg", "real"], ["last_use_at", "text"], ["last_use_kind", "text"], ["net_bytes_day", "real"]]) addColumn("instance_daily", c, t);
+addColumn("instance_activity", "peers", "text");
+addColumn("container_samples", "signal_kinds", "text");
 
-const insertSample = db.prepare(`insert into container_samples(instance_id, collected_at, name, image, state, cpu_pct, mem_bytes, mem_pct, log_lines_24h, signal_lines_24h, errors_24h, warns_24h, restarts, last_log_at, last_signal_at, net_rx_bytes, net_tx_bytes)
+const insertSample = db.prepare(`insert into container_samples(instance_id, collected_at, name, image, state, cpu_pct, mem_bytes, mem_pct, log_lines_24h, signal_lines_24h, errors_24h, warns_24h, restarts, last_log_at, last_signal_at, net_rx_bytes, net_tx_bytes, signal_kinds)
+  values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+const insertActivity = db.prepare(`insert into instance_activity(instance_id, collected_at, external_connections, internal_connections, ssh_sessions, users_now, requests_24h, health_24h, last_request_at, last_login_at, last_login_user, signal_lines_24h, last_signal_at, last_log_at, net_rx_bytes, net_tx_bytes, peers)
   values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-const insertActivity = db.prepare(`insert into instance_activity(instance_id, collected_at, external_connections, internal_connections, ssh_sessions, users_now, requests_24h, health_24h, last_request_at, last_login_at, last_login_user, signal_lines_24h, last_signal_at, last_log_at, net_rx_bytes, net_tx_bytes)
-  values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
 /** Called for every stored probe: one row per container so container history is queryable, plus (probe 1.4) one activity row per probe. */
 export function recordContainerSamples(instanceId: string, collectedAt: string, data: ProbeResult): number {
@@ -71,16 +74,20 @@ export function recordContainerSamples(instanceId: string, collectedAt: string, 
   const tx = db.transaction(() => {
     for (const c of data.containers ?? []) {
       const a = act.get(c.name);
+      const e = a ? containerSignals(data, a) : null;
       insertSample.run(instanceId, collectedAt, c.name, c.image, c.state, c.cpu_pct, c.mem_bytes, c.mem_pct,
-        a?.log_lines ?? null, a?.signal_lines ?? null, a?.errors ?? null, a?.warns ?? null, a?.restarts ?? null, a?.last_log_at ?? null, a?.last_signal_at ?? null, c.net_rx_bytes ?? null, c.net_tx_bytes ?? null);
+        a?.log_lines ?? null, e?.signal_lines ?? null, a?.errors ?? null, a?.warns ?? null, a?.restarts ?? null, a?.last_log_at ?? null, e?.last_signal_at ?? null, c.net_rx_bytes ?? null, c.net_tx_bytes ?? null,
+        a && Object.keys(a.signal_kinds).length ? JSON.stringify(a.signal_kinds) : null);
     }
     const A = data.activity;
     if (A) {
-      const lastSignal = A.containers.map((c) => c.last_signal_at).filter((x): x is string => Boolean(x)).sort().pop() ?? null;
+      const effs = A.containers.map((c) => containerSignals(data, c));
+      const lastSignal = effs.map((e) => e.last_signal_at).filter((x): x is string => Boolean(x)).sort().pop() ?? null;
       const lastLog = A.containers.map((c) => c.last_log_at).filter((x): x is string => Boolean(x)).sort().pop() ?? null;
       insertActivity.run(instanceId, collectedAt, A.connections?.external ?? null, A.connections?.internal ?? null, A.connections?.ssh ?? null, A.logins.users_now,
         A.front_door.source ? A.front_door.requests : null, A.front_door.source ? A.front_door.health : null, A.front_door.last_request_at, A.logins.last_login_at, A.logins.last_login_user,
-        A.containers.reduce((s, c) => s + c.signal_lines, 0), lastSignal, lastLog, A.net?.rx_bytes ?? null, A.net?.tx_bytes ?? null);
+        effs.reduce((s, e) => s + e.signal_lines, 0), lastSignal, lastLog, A.net?.rx_bytes ?? null, A.net?.tx_bytes ?? null,
+        A.connections?.top_peers.length ? JSON.stringify(A.connections.top_peers.map((t) => ({ ...t, container: A.connections!.port_map[String(t.port)] ?? null }))) : null);
     }
   });
   tx();
