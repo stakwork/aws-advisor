@@ -13,9 +13,10 @@ import { db } from "./db.js";
 
 export interface IamStatement {
   Sid: string;
-  Effect: "Allow";
+  Effect: "Allow" | "Deny";
   Action: string[];
   Resource: string | string[];
+  Condition?: Record<string, Record<string, string | string[]>>;
 }
 
 export interface IamPolicy { Version: "2012-10-17"; Statement: IamStatement[] }
@@ -438,4 +439,27 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
       Resource: "*",
     },
   ],
+});
+
+/**
+ * The actuator policy: what the executor's role (Settings > Auto-actions, `ACT_ROLE_ARN`) may change, and nothing
+ * else. One statement per action the executor implements, each with the read calls its pre- and post-checks make,
+ * and a Deny on anything tagged `advisor:hands-off`, so a human can fence a resource off from the executor with a
+ * tag whatever the executor thinks. The read-only role never gets any of this: the executor assumes this role from
+ * the read credentials only for the change itself.
+ */
+export const actuatorPolicy = (): IamPolicy => ({
+  Version: "2012-10-17",
+  Statement: [
+    { Sid: "ActuatorIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
+    { Sid: "ActuatorServerlessCapacity", Effect: "Allow", Action: ["rds:ModifyDBCluster", "rds:DescribeDBClusters", "rds:ListTagsForResource"], Resource: "*" },
+    { Sid: "ActuatorSnapshotTier", Effect: "Allow", Action: ["ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:DescribeSnapshots", "ec2:DescribeSnapshotTierStatus"], Resource: "*" },
+    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+  ],
+});
+
+/** The trust policy the actuator role needs: the advisor's read identity (role or user ARN) may assume it. */
+export const actuatorTrustPolicy = (readIdentityArn = "<the advisor's read role or user ARN>") => ({
+  Version: "2012-10-17",
+  Statement: [{ Sid: "AdvisorExecutor", Effect: "Allow", Principal: { AWS: readIdentityArn }, Action: "sts:AssumeRole" }],
 });

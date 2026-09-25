@@ -13,6 +13,8 @@ import { mountMcp } from "./mcp.js";
 import { checkCli } from "./step_runner.js";
 import { startScheduler } from "./scheduler.js";
 import { loadTasks } from "./tasks.js";
+import { actions } from "./routes/actions.js";
+import "./actions/index.js";
 loadTasks();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,7 @@ app.use("/api", browse);
 app.use("/api", knowledge);
 app.use("/api", graph);
 app.use("/api", prompts);
+app.use("/api", actions);
 app.use("/api", api);
 mountMcp(app, "/mcp");
 

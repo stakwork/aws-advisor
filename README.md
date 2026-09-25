@@ -2,9 +2,11 @@
 
 An AWS cost advisor that lives next to a sphinx-swarm. Steampipe and Powerpipe collect the facts,
 fixed rules draft recommendations, repo2graph's agent ranks and enriches them with evidence it gathers
-itself, and a small web app is where the team reviews, decides and watches. Nothing in this repository
-changes anything in AWS: the advisor reads, the agent proposes, humans decide. An executor that acts on
-approved items is on the roadmap and will run under its own IAM role, never through the agent.
+itself, and a small web app is where the team reviews, decides and watches. The advisor reads, the agent
+proposes, humans decide. The one exception is the [executor](#auto-actions-the-executor): a short catalog of
+reversible micro-adjustments (a Serverless cluster's minimum capacity by hour of day, old snapshots to the
+Archive tier) that run on a schedule under a separate actuator IAM role, ledgered, dry-run by default, never
+through the agent.
 
 ## How it fits together
 
@@ -45,9 +47,10 @@ approved items is on the roadmap and will run under its own IAM role, never thro
 ### What "Approve" does today
 
 It records the decision (status, who, when) and moves the item to the approved list. Nothing is executed.
-Approved items are the queue the future executor will read from, restricted to a catalog of tiered actions:
-`auto` (reversible: retention policies, tags, snapshots), `approve` (stop, resize, storage tier changes,
-deletions after a snapshot), `report` (never automated).
+Approved recommendations are not (yet) read by the executor: its catalog is a separate list of standing
+micro-adjustments (see [Auto-actions](#auto-actions-the-executor)), tiered like the playbooks: `auto`
+(reversible: retention policies, tags, snapshots), `approve` (stop, resize, storage tier changes, deletions after
+a snapshot), `report` (never automated).
 
 ### Pending: work in progress, step by step
 
@@ -933,13 +936,46 @@ the only one the policy ever grants; the setup script creates it; see [The SSM p
 to one instance that `aws_ssm_managed_instance` reports as online Linux, using the same
 identity Steampipe uses (the saved keys, the profile or the default chain, with the role when one is set; see
 [Three ways to authenticate](#three-ways-to-authenticate)). It prints one JSON object (memory total and used,
-disk usage per mount, 1/5/15 load, top five processes by CPU and by memory); the app polls the invocation,
+disk usage per mount, 1/5/15 load, top five processes by CPU and by memory, the containers, and from 1.4 the
+[activity section](#activity-is-anyone-using-this-box)); the app polls the invocation,
 validates the output and stores it in `instance_metrics`. The idle-instance rule uses the latest probe to raise
 or lower its confidence and to mention memory and load in the rationale. The credentials need
 `ssm:SendCommand` and `ssm:GetCommandInvocation`; missing permission, an unmanaged instance or a timeout come
 back as a clear error code (`permission`, `not_managed`, `no_credentials`, `timeout`, `failed`, `bad_output`). A
 `permission` error names the missing action, carries its IAM statement (`issue`) and is recorded for Settings >
 Permissions.
+
+### Activity: is anyone using this box?
+
+CPU, memory and disk say whether a box is *busy*, not whether anyone *uses* it: a swarm with no customers still
+runs its containers, logs its heartbeats and answers its health checks. Probe 1.4 adds an `activity` section
+that reads the signals a person would look at before deciding a box is idle, and reduces each to counts and
+timestamps so nothing from the logs leaves the instance except the last three lines of each container (capped at
+160 printable ASCII characters, shown in the drawer as untrusted text and never put in a prompt):
+
+| signal | how the probe reads it | what it says |
+| --- | --- | --- |
+| per running container (up to 20): log lines in the last 24 h, the last line's time, error and warning counts | `docker logs --since 24h --tail 2000 --timestamps` | a container that logged nothing but heartbeat since it started is not serving anyone |
+| **use signals** per container: lines that look like a human did something (login, auth, payment, invoice, keysend, message sent or received, joined, upload, a `POST`/`PUT`/`PATCH`/`DELETE`, a websocket opening, subscribe, checkout), minus health checks, pings, metrics and stack traces | the `SIG_RE` / `HB_RE` patterns in the script; a first cut, tuned on a live swarm before the parking rule relies on it (`docs/park-swarms-plan.md`) | `signal_lines` and `last_signal_at` are the "last real use" of that container |
+| restarts since the container started | `docker inspect .RestartCount` | a restart loop (≥ 10) is flagged: a crashing worker, not a busy one |
+| per container network bytes since it started | `docker stats .NetIO` (`net_rx_bytes` / `net_tx_bytes` on the container row) | the difference between probes is that container's traffic; rolled up as `net_bytes_day` |
+| established TCP flows: external (public peers), internal (RFC 1918 peers other than docker bridges), ssh, by destination port | `/proc/net/nf_conntrack` first (it sees the DNAT'd flows into containers that the host's own sockets do not), else `conntrack -L`, else `ss` | an external client connected right now is the strongest "in use" there is |
+| the front door: requests in 24 h, health checks counted apart, the last non-health request | the log of the first proxy container (image `nginx`, `caddy`, `traefik`, `haproxy`, `*proxy*`, `*ingress*`), else the tail of `/var/log/nginx/access.log` and friends (`last_request_raw` then, since access-log dates are not parsed on the box) | a swarm nobody visits has thousands of health checks and zero requests |
+| logins: users on the box now, the last login and who | `who`, `last --time-format iso` | somebody working on the box is use too |
+| host interface counters since boot | `/proc/net/dev`, loopback and docker bridges excluded | the difference between probes is the box's traffic, without CloudWatch |
+
+The section takes about three seconds on a box with a handful of containers and never fails the probe: a
+missing tool or file becomes a null. `useSummary` (`src/ssm.ts`) reduces it to one line, **last real use** and
+what the evidence was (the newest of: a use signal line, a front-door request, a login, an external connection
+at probe time), which the drawer shows first and `summarizeProbe` carries as `last_use_at` for the rules. The
+history keeps it: `instance_activity` (one row per probe, 30 days), the activity columns on `container_samples`
+and `container_daily` (`log_lines_avg`, `signal_lines_avg`, `errors_avg`, `restarts_max`, `last_log_at`,
+`last_signal_at`, `net_bytes_day`) and on `instance_daily` (`external_connections_avg/max`, `ssh_sessions_max`,
+`requests_24h_avg`, `signal_lines_24h_avg`, `last_use_at`, `last_use_kind`, `net_bytes_day`, 400 days).
+`GET /api/instances/:id/history` returns them with an `activity` summary over the window (days with external
+connections, with requests, with signals; the newest use). After upgrading, update the SSM document as described
+under [Containers and long-lived history](#containers-and-long-lived-history); instances keep answering with 1.3
+output until then, and everything above simply stays empty for them.
 
 ### Testing the probe
 
@@ -1015,7 +1051,8 @@ aws ssm update-document --name AwsAdvisorProbe --document-version '$LATEST' \
 | `instance_metrics` | probe (the full JSON) | 30 days |
 | `container_samples` | container per probe (name, image, state, CPU %, memory) | 30 days |
 | `instance_daily` | instance per day (samples, memory / disk / load average and max, containers running) | 400 days |
-| `container_daily` | container per instance per day (running share, CPU and memory average and max) | 400 days |
+| `container_daily` | container per instance per day (running share, CPU and memory average and max; from probe 1.4 log lines, use signals, errors, restarts, last log and last signal, bytes moved) | 400 days |
+| `instance_activity` | probe (probe 1.4: connections, front-door requests, logins, signal lines, counters) | 30 days |
 
 The roll-ups are rebuilt for the last 31 days, today included, at the end of every probe pass, so a late probe still lands in the
 right day; `POST /api/history/rollup?days=` rebuilds further back on demand. The EC2 drawer's utilisation charts
@@ -1772,15 +1809,69 @@ is a system type the knowledge does not hold yet.
 
 Results are stored in `reconciliations` (one JSON per month) and summarised on the Overview.
 
+## Auto-actions: the executor
+
+The brief behind it: an agent that watches the numbers and makes the small adjustments a person would never
+bother making all day: turn things down when nothing needs them, turn them back up before something does,
+move what is cold to cold storage. The dollar amount is beside the point; the point is that it happens every
+hour without anyone remembering. `src/executor.ts` is that loop, the Auto-actions page is its ledger, and
+`src/actions/*` is the catalog: one module per adjustment, each with the same four verbs.
+
+- **plan** reads the facts with the advisor's ordinary read credentials and proposes changes, each with its
+  before, its after, the numbers that justify it, an estimate at list price and how to undo it.
+- **apply** makes one change under the actuator role.
+- **verify** reads the change back with the read credentials.
+- **revert** undoes it (the Revert button on the row).
+
+**Modes** (Settings › Auto-actions, `ACT_MODE`): `off` runs nothing; `dry_run` (the default) records every
+proposal in the ledger and touches nothing; `apply` applies the proposals up to the per-pass cap
+(`ACT_MAX_PER_PASS`). In `dry_run` you can still press **Apply** on one row: a human decision, made under the same
+role. The pass runs on `ACT_CRON` (hourly at :45, so a change is in place before the hour it is for), from
+**Run pass now** on the page and from Run now on the Settings row; **Preview plan** shows what a pass would
+propose without recording it. Every applied, failed or reverted row is posted to Sphinx (quiet hours respected)
+with what changed, why, the estimate, how to undo and a link to the row.
+
+**The actuator role.** `ACT_ROLE_ARN` is the only identity that ever changes AWS. The executor assumes it from the
+read credentials for the change itself and for nothing else; the read role never gains a write action. The page
+shows the permissions policy to put on it (`actuatorPolicy` in `src/permissions.ts`: `rds:ModifyDBCluster`,
+`ec2:ModifySnapshotTier`, `ec2:RestoreSnapshotTier`, the describes those need, and a **Deny on anything tagged
+`advisor:hands-off`**) and the trust policy naming the advisor's read identity. Without a role the executor is
+dry-run only and "acts as" on the page says so. Every plan also skips a hands-off tag itself, and a change
+that failed three times in a day is refused until the next day.
+
+**The catalog today**
+
+| action | what it does | when it leaves things alone |
+| --- | --- | --- |
+| Serverless v2 minimum by hour of day (`src/actions/acu_window.ts`) | From the load profile's capacity per UTC hour over fourteen days (`by_hour` in `rds_load_profiles`, p95 per hour), sets an Aurora Serverless v2 cluster's minimum to the floor (`ACT_ACU_FLOOR`, 0.5) before two quiet hours and back to the minimum the owner configured before a working hour or the daily burst. Moves only within [floor, owner's minimum]; an owner's own change to the minimum becomes the new band; the maximum is never touched. Estimate: the band × quiet hours × 0.12 USD/ACU-hour. | no profile or one older than 30 h; fewer than four quiet hours a day; bursts every hour; the cluster busy right now; the owner's minimum already at the floor; `advisor:hands-off`; cluster not `available` |
+| EBS snapshots to the Archive tier (`src/actions/snapshot_archive.ts`) | Every completed snapshot the account owns, per region, through the SDK: older than `ACT_SNAPSHOT_MIN_AGE_DAYS` (90), standard tier, not behind an AMI, not AWS Backup's or DLM's, and either the newest remaining standard snapshot of a volume that no longer exists (the chain drains one per pass, newest first, because an archived snapshot becomes a full copy) or the only snapshot of a live volume. `ModifySnapshotTier`; the read-back is `DescribeSnapshotTierStatus`, so the row stays `applied` until the archival completes. Estimate: size × (0.05 − 0.0125) USD/GB-month, a ceiling. Revert is a permanent `RestoreSnapshotTier` (24 to 72 hours). | younger snapshots, AMI-backed, Backup/DLM-managed, `advisor:hands-off`, an older sibling of a gone volume, one of several snapshots of a live volume |
+
+**The ledger** (`actions`, `GET /api/actions?status=`): `proposed` (waiting for an apply pass or a click),
+`applied` (the call succeeded, read-back pending), `verified`, `failed`, `refused` (no role, or failing
+repeatedly), `reverted`, `stale` (the latest pass no longer proposes it: the hour moved on). An open proposal with
+the same dedupe key is refreshed, not duplicated. `GET /api/actions/status` returns mode, role, who the executor
+acts as, the policy and the trust policy; `POST /api/actions/run`, `GET /api/actions/preview`,
+`POST /api/actions/:id/apply|verify|revert`.
+
+What the first dry run said in this account: the hub cluster already sits at the 0.5 ACU floor and hits its 2 ACU
+ceiling in every hour's p95 (a different problem, the profiler's), and of 24 snapshots twelve are already archived,
+four sit behind AMIs, six are young and two are siblings on a live volume: nothing to do today, which is the
+correct answer and the ledger says so. The next adjustments to add, in this shape: gp3 provisioned IOPS and
+throughput trimmed to the 30-day peak (the review already flags them), log group retention per group from its own
+query history, and parking stopped swarms (see `docs/park-swarms-plan.md`).
+
 ## Security posture
 
 What a compromise of the advisor, of the repo2graph agent, or of a machine on the same network can and cannot do,
 after the 2026-09-19 review (`src/__tests__/security.test.ts` pins the guards):
 
-- **No write path to AWS.** The only mutating SDK call is `SendCommand` on the probe document, whose name comes
-  from the environment and never from a request or the agent; the script is a constant and instance ids are
-  regex-checked. `PROBE_DOCUMENT=AWS-RunShellScript` is refused at startup. Approving a recommendation only
-  updates a row; nothing reads `approved` or `tier = auto` to act. The executor, when it exists, gets its own role.
+- **One write path to AWS, under its own role.** On the read credentials the only mutating SDK call is
+  `SendCommand` on the probe document, whose name comes from the environment and never from a request or the
+  agent; the script is a constant and instance ids are regex-checked. `PROBE_DOCUMENT=AWS-RunShellScript` is
+  refused at startup. Approving a recommendation only updates a row; nothing reads `approved` or `tier = auto` to
+  act. The [executor](#auto-actions-the-executor) changes AWS only by assuming `ACT_ROLE_ARN` for the call itself,
+  from a fixed catalog (`ModifyDBCluster` scaling configuration, `ModifySnapshotTier`, `RestoreSnapshotTier`),
+  with a tag-based Deny in the role's policy and a ledger row per change; the agent has no tool that reaches it.
 - **Three shared secrets, all mandatory when `PUBLIC_URL` is not localhost**: `API_TOKEN` (API and UI),
   `MCP_TOKEN` (the fact server the agent calls back into) and `CALLBACK_SECRET` (the webhook). The advisor sends
   the last two to repo2graph itself, so setting them is a `.env` change and a restart. Comparisons are constant
@@ -1844,6 +1935,7 @@ What each one is for (✎ = also editable in Settings):
 | ✎ `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
 | ✎ `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `SPEND_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
 | ✎ `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
+| ✎ `ACT_MODE`, `ACT_ROLE_ARN`, `ACT_CRON`, `ACT_ACU_FLOOR`, `ACT_MAX_PER_PASS`, `ACT_SNAPSHOT_MIN_AGE_DAYS` | the executor: `off` / `dry_run` / `apply`, the actuator role it assumes for changes, its rhythm, the lowest Serverless v2 minimum it may set, the cap per pass, the snapshot age | `dry_run`, unset (dry runs only), hourly at :45, 0.5 ACU, 10, 90 days |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | ✎ `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
 | ✎ `ALERT_INVESTIGATE` | NAT alerts should be investigated only on request (`manual`) or never (`off`) | `auto` |
@@ -1961,8 +2053,10 @@ stack's auto-update list.
 
 ## Roadmap
 
-1. Executor with an actuator IAM role: tiered actions, pre-check, dry run, post-check, rollback note, tag-based
-   deny. Tier one first.
+1. Executor: done for two standing adjustments (Serverless v2 minimum by hour, snapshots to Archive) with the
+   actuator role, dry run, read-back, revert and the tag-based deny. Next in the same shape: gp3 IOPS and
+   throughput trimming, log retention per group, parking stopped swarms (`docs/park-swarms-plan.md`), and reading
+   approved recommendations of tier `auto` as a source of proposals.
 2. Seven-day realized-saving verification from Cost Explorer.
 3. sphinx-swarm images as above.
 4. Cross-link the [graph mirror](#graph-mirror) with the code graph (which repository deploys to which instance).

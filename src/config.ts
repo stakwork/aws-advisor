@@ -2,6 +2,7 @@ import "dotenv/config";
 import os from "node:os";
 import path from "node:path";
 import cron from "node-cron";
+import { ROLE_ARN_RE } from "./aws_config.js";
 
 const port = Number(process.env.PORT || 9034);
 
@@ -60,6 +61,12 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "notifyLinkUrl", env: "NOTIFY_LINK_URL", kind: "url", def: "", group: "Notifications (Sphinx)", label: "Link base for messages", help: "The address people open the advisor at, used only for the links in chat messages, e.g. http://10.0.1.23:9034 when the app is reached over the VPN by private IP. Empty = PUBLIC_URL (which is also what repo2graph calls back to, so leave that one alone)." },
   { key: "notifyRecommendations", env: "NOTIFY_RECOMMENDATIONS", kind: "enum", def: "on", options: ["on", "off"], group: "Notifications (Sphinx)", label: "Recommendation events", help: "on = approvals, rejections, items marked done and measured savings are posted (quiet hours defer them to the next dispatch); off = alerts only. \"Send to Sphinx\" on a recommendation always works." },
   { key: "notifyQuietHours", env: "NOTIFY_QUIET_HOURS", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Quiet hours", help: "HH-HH in the server's local time, e.g. 22-07: warnings wait until the morning's next dispatch, alarms still go. Empty = none." },
+  { key: "actMode", env: "ACT_MODE", kind: "enum", def: "dry_run", options: ["off", "dry_run", "apply"], group: "Auto-actions", label: "Mode", help: "off = the executor never runs; dry_run = every pass records what it would change and touches nothing; apply = changes are made under the actuator role. Applying one row by hand from the Auto-actions page works in dry_run too." },
+  { key: "actRoleArn", env: "ACT_ROLE_ARN", kind: "string", def: "", group: "Auto-actions", label: "Actuator role ARN", help: "The only identity that ever changes AWS: a role with the actuator policy (Auto-actions page), assumed from the advisor's read credentials. Empty = nothing can be applied." },
+  { key: "actCron", env: "ACT_CRON", kind: "cron", def: "45 * * * *", group: "Auto-actions", label: "Executor pass", help: "Hourly by default, fifteen minutes before the hour, so a capacity change is in place before the hour it is for. off = disabled." },
+  { key: "actAcuFloor", env: "ACT_ACU_FLOOR", kind: "number", def: "0.5", min: 0.5, max: 64, group: "Auto-actions", label: "Lowest Serverless v2 minimum (ACU)", help: "The executor moves a cluster's minimum capacity between this floor and the minimum you configured; it never goes below this, never above yours, and never touches the maximum." },
+  { key: "actMaxPerPass", env: "ACT_MAX_PER_PASS", kind: "number", def: "10", min: 1, max: 200, group: "Auto-actions", label: "Changes per pass", help: "At most this many changes in one pass, across every action." },
+  { key: "actSnapshotMinAgeDays", env: "ACT_SNAPSHOT_MIN_AGE_DAYS", kind: "number", def: "90", min: 30, max: 3650, group: "Auto-actions", label: "Archive snapshots older than (days)", help: "EBS snapshots at least this old, whose volume is gone or that are the only snapshot of their volume, move to the Archive tier (a quarter of the price, 24 to 72 hours to restore)." },
   { key: "agentRunsPerHour", env: "AGENT_RUNS_PER_HOUR", kind: "number", def: "6", min: 1, max: 100, group: "Quotas", label: "Agent runs per hour", help: "Findings batches, investigations, resolutions and observations together; each costs a few USD. A hit raises a quota alert and refuses the run." },
   { key: "agentRunsPerDay", env: "AGENT_RUNS_PER_DAY", kind: "number", def: "20", min: 1, max: 500, group: "Quotas", label: "Agent runs per day", help: "" },
   { key: "probesPerHour", env: "PROBES_PER_HOUR", kind: "number", def: "150", min: 1, max: 5000, group: "Quotas", label: "SSM probes per hour", help: "Every probe is one SendCommand on an instance; the hourly pass over the whole fleet is about 60 here." },
@@ -95,6 +102,7 @@ export function validateRuntime(key: string, value: string): string {
     case "url": if (v && !/^(https?|bolt(\+s|\+ssc)?|neo4j(\+s|\+ssc)?):\/\/[^\s]+$/i.test(v)) throw new Error("a URL (http://, https://, bolt:// or neo4j://) or empty"); return v.replace(/\/$/, "");
     default:
       if (key === "notifyQuietHours" && v && !/^([01]?\d|2[0-3])-([01]?\d|2[0-3])$/.test(v)) throw new Error('HH-HH, e.g. "22-07", or empty');
+      if (key === "actRoleArn" && v && (!ROLE_ARN_RE.test(v) || /\s/.test(v))) throw new Error("arn:aws:iam::<12 digits>:role/<name>, or empty");
       if (v.length > 500) throw new Error("too long"); return v;
   }
 }
@@ -176,6 +184,12 @@ export const config = {
   get diskAlarmPct(): number { return rtNum("diskAlarmPct"); },
   get lambdaErrorPct(): number { return rtNum("lambdaErrorPct"); },
   get commitmentMinUtilPct(): number { return rtNum("commitmentMinUtilPct"); },
+  get actMode(): "off" | "dry_run" | "apply" { return rtEnum("actMode"); },
+  get actRoleArn(): string { return rt("actRoleArn"); },
+  get actCron(): string { return rt("actCron"); },
+  get actAcuFloor(): number { return rtNum("actAcuFloor"); },
+  get actMaxPerPass(): number { return rtNum("actMaxPerPass"); },
+  get actSnapshotMinAgeDays(): number { return rtNum("actSnapshotMinAgeDays"); },
   get agentRunsPerHour(): number { return rtNum("agentRunsPerHour"); },
   get agentRunsPerDay(): number { return rtNum("agentRunsPerDay"); },
   get probesPerHour(): number { return rtNum("probesPerHour"); },

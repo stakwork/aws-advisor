@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { PROBE_SCRIPT, ProbeError, parseProbeOutput, summarizeProbe } from "../ssm.js";
+import { PROBE_SCRIPT, PROBE_VERSION, ProbeError, parseProbeOutput, summarizeProbe, useSummary } from "../ssm.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = fs.readFileSync(path.join(here, "probe.fixture.txt"), "utf8");
@@ -144,4 +144,91 @@ test("probe window: the configured hours minus a five-minute margin, never under
   assert.equal(probeWindowMinutes(1), 55);
   assert.equal(probeWindowMinutes(24), 1435);
   assert.equal(probeWindowMinutes(0.05), 1);
+});
+
+const probe14 = () => JSON.stringify({
+  probe: "aws-advisor/1", hostname: "swarm-27", collected_at: "2026-09-25T10:00:00Z", cpus: 4, uptime_seconds: 100,
+  memory: { total_bytes: 100, used_bytes: 50, available_bytes: 50 }, load: { "1m": 0.1, "5m": 0.1, "15m": 0.1 }, disks: [], top_cpu: [], top_mem: [],
+  docker: { available: true, running: 2, total: 2 },
+  containers: [{ name: "relay", image: "sphinx/relay", state: "running", running_for: "9 days", cpu_pct: 0.2, mem_bytes: 1000, mem_pct: 1, net_rx_bytes: 5000, net_tx_bytes: 700 }, { name: "proxy", image: "nginx", state: "running", running_for: "9 days", cpu_pct: 0, mem_bytes: 100, mem_pct: 0 }],
+  activity: {
+    version: 1,
+    containers: [
+      { name: "relay", started_at: "2026-09-16T08:00:00Z", restarts: 0, log_lines: 300, last_log_at: "2026-09-25T09:59:00Z", errors: 2, warns: 1, signal_lines: 4, last_signal_at: "2026-09-24T18:30:00Z", last_lines: ["2026-09-25T09:59:00Z ping", "x".repeat(300)] },
+      { name: "proxy", started_at: "2026-09-16T08:00:00Z", restarts: 41, log_lines: 2000, last_log_at: "2026-09-25T09:58:00Z", errors: 0, warns: 0, signal_lines: 0, last_signal_at: null, last_lines: [] },
+    ],
+    connections: { source: "conntrack", established: 3, external: 1, internal: 2, peers: 2, ssh: 0, by_port: { "443": 1, "22": 0, "bad": 9 } },
+    front_door: { source: "container:proxy", requests: 7, health: 2880, last_request_at: "2026-09-25T07:12:00Z", last_request_raw: null, window: "24h" },
+    logins: { users_now: 0, last_login_user: "ssm-user", last_login_at: "2026-09-20T11:00:00+00:00" },
+    net: { rx_bytes: 123456789, tx_bytes: 987654 },
+  },
+});
+
+test("probe 1.4: the activity section parses, is tolerant, and the use summary picks the newest real-use signal", () => {
+  const p = parseProbeOutput(`noise\n${probe14()}`);
+  assert.equal(PROBE_VERSION, "aws-advisor/1.4");
+  assert.equal(p.containers?.[0].net_rx_bytes, 5000);
+  assert.equal(p.containers?.[1].net_rx_bytes, null, "a container without NetIO reports null, not zero");
+  const a = p.activity!;
+  assert.equal(a.containers.length, 2);
+  assert.equal(a.containers[0].last_lines[1].length, 160, "last lines are capped");
+  assert.deepEqual(a.connections?.by_port, { "443": 1, "22": 0 }, "a port that is not a number is dropped");
+  assert.equal(a.logins.last_login_at, "2026-09-20T11:00:00.000Z");
+  const u = useSummary(p)!;
+  assert.equal(u.last_use_at, "2026-09-25T10:00:00.000Z", "an external connection at probe time is the newest evidence");
+  assert.equal(u.last_use_kind, "external_connection");
+  assert.equal(u.requests_24h, 7);
+  assert.equal(u.health_checks_24h, 2880);
+  assert.equal(u.signal_lines_24h, 4);
+  assert.deepEqual(u.restarting_containers, ["proxy"]);
+  const s = summarizeProbe(p);
+  assert.equal(s.last_use_at, "2026-09-25T10:00:00.000Z");
+  // without the external connection the last request wins over the older signal line
+  const q = JSON.parse(probe14()); q.activity.connections.external = 0;
+  const u2 = useSummary(parseProbeOutput(JSON.stringify(q)))!;
+  assert.equal(u2.last_use_kind, "request");
+  assert.equal(u2.last_use_at, "2026-09-25T07:12:00.000Z");
+  // a 1.3 probe has no activity and no summary line
+  const old = JSON.parse(probe14()); delete old.activity;
+  assert.equal(parseProbeOutput(JSON.stringify(old)).activity, undefined);
+  assert.equal(useSummary(parseProbeOutput(JSON.stringify(old))), null);
+  assert.equal(summarizeProbe(parseProbeOutput(JSON.stringify(old))).last_use_at, undefined);
+});
+
+test("probe 1.4: the activity script reads logs and counters only, and the history keeps the signals per container and per day", async () => {
+  assert.match(PROBE_SCRIPT, /docker logs --since 24h --tail 2000 --timestamps/);
+  assert.match(PROBE_SCRIPT, /"activity":%s/);
+  assert.doesNotMatch(PROBE_SCRIPT, /docker (exec|run|restart|stop|start|rm)\b/);
+  const { db } = await import("../db.js");
+  const { recordContainerSamples, rollupDaily, instanceHistory, counterDelta } = await import("../history.js");
+  const id = "i-0activity000000001";
+  db.prepare("delete from instance_metrics where instance_id = ?").run(id);
+  db.prepare("delete from container_samples where instance_id = ?").run(id);
+  db.prepare("delete from instance_activity where instance_id = ?").run(id);
+  db.prepare("delete from instance_daily where instance_id = ?").run(id);
+  db.prepare("delete from container_daily where instance_id = ?").run(id);
+  const day = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  for (const [h, rx] of [["01", 1000], ["02", 4000], ["03", 500]] as const) {
+    const q = JSON.parse(probe14()); q.collected_at = `${day}T${h}:00:00Z`; q.activity.net.rx_bytes = rx; q.containers[0].net_rx_bytes = rx;
+    db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(id, q.collected_at, JSON.stringify(q));
+    recordContainerSamples(id, q.collected_at, parseProbeOutput(JSON.stringify(q)));
+  }
+  assert.equal((db.prepare("select count(*) as n from instance_activity where instance_id = ?").get(id) as any).n, 3);
+  assert.equal(counterDelta([{ at: "1", rx: 1000, tx: 0 }, { at: "2", rx: 4000, tx: 0 }, { at: "3", rx: 500, tx: 0 }]), 3000, "a counter reset is not counted as negative traffic");
+  rollupDaily(3);
+  const h = instanceHistory(id, 7);
+  const relay = h.containers.find((c: any) => c.name === "relay") as any;
+  assert.equal(relay.signal_lines_avg, 4);
+  assert.equal(relay.last_signal_at, "2026-09-24T18:30:00.000Z");
+  assert.equal(relay.net_bytes, 3000);
+  const proxy = h.containers.find((c: any) => c.name === "proxy") as any;
+  assert.equal(proxy.restarts_max, 41);
+  const d = (h.daily as any[]).find((x) => x.day === day);
+  assert.equal(d.external_connections_max, 1);
+  // the probes are dated yesterday, so the fixture's front-door request (today 07:12) is the newest evidence of that day
+  assert.equal(d.last_use_kind, "request");
+  assert.equal(d.last_use_at, "2026-09-25T07:12:00.000Z");
+  assert.equal(d.net_bytes_day, 3000);
+  assert.equal(h.activity.window.days_with_external, 1);
+  assert.equal(h.activity.latest.requests_24h, 7);
 });
