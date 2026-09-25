@@ -60,7 +60,7 @@ export default function Alerts() {
   const [notify, setNotify] = useState<any>(null);
   useEffect(() => { api("/notify/status").then(setNotify).catch(() => setNotify(null)); }, []);
   const [incident, setIncident] = useState<any>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<number | null>(null); // the alert whose investigation is being started
   const [err, setErr] = useState("");
   const rows = data?.alerts ?? null;
 
@@ -82,12 +82,19 @@ export default function Alerts() {
   }, [rows]);
 
   const set = (k: string, v: string | null) => { const p = new URLSearchParams(params); v ? p.set(k, v) : p.delete(k); if (k === "status") p.delete("page"); setParams(p); };
-  const toggle = (id: number) => set("id", String(id) === selectedId ? null : String(id));
+  // Expands or collapses a row. Once the page was resolved from a deep link's id, it is written to the URL here, so
+  // collapsing the linked row (or a refresh after that) stays on this page instead of falling back to page 1.
+  const toggle = (id: number) => {
+    const p = new URLSearchParams(params);
+    String(id) === selectedId ? p.delete("id") : p.set("id", String(id));
+    if (!p.get("page") && data) p.set("page", String(data.page));
+    setParams(p);
+  };
   const investigate = async (id: number, force = false) => {
-    setBusy(true); setErr("");
+    setBusy(id); setErr("");
     try { await api(`/alerts/${id}/investigate${force ? "?force=1" : ""}`, { method: "POST" }); await load(); }
     catch (e: any) { setErr(e.message); }
-    finally { setBusy(false); }
+    finally { setBusy(null); }
   };
   const ack = async (id: number) => { try { await api(`/alerts/${id}/ack`, { method: "POST" }); load(); } catch (e: any) { setErr(e.message); } };
   const reopen = async (id: number) => { try { await api(`/alerts/${id}/reopen`, { method: "POST" }); load(); } catch (e: any) { setErr(e.message); } };
@@ -142,7 +149,7 @@ export default function Alerts() {
                     </Td>
                     <Td className="whitespace-nowrap text-right">
                       <span className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                        <InvestigateButton incident={inc} enabled={canInvestigate} busy={busy} onClick={() => investigate(a.id)} />
+                        <InvestigateButton incident={inc} enabled={canInvestigate} busy={busy === a.id} onClick={() => investigate(a.id)} />
                         {notify?.configured && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => sendNow(a.id)} disabled={sending === a.id} title={a.notify_result === "sent" ? "Send it again" : "Send this alert to the Sphinx chat now, whatever the rules say"}>{a.notify_result === "sent" ? "Resend" : "Send to Sphinx"}</Button>}
                         {!a.acknowledged && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => ack(a.id)}>Acknowledge</Button>}
                         {a.acknowledged ? <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => reopen(a.id)}>Reopen</Button> : null}
@@ -166,7 +173,7 @@ export default function Alerts() {
                                     <ul className="mt-2 list-disc space-y-1.5 pl-4 leading-relaxed text-zinc-300">{incident.evidence.map((e: string, i: number) => <li key={i}>{e}</li>)}</ul></details>
                                 )}
                                 {incident && <div className="text-xs text-zinc-500">started {when(incident.created_at)}{incident.finished_at ? ` · finished ${when(incident.finished_at)}` : ""}{incident.request_id ? ` · request ${incident.request_id}` : ""}</div>}
-                                {incident?.status === "failed" && canInvestigate && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => investigate(a.id, true)} disabled={busy}>Retry</Button>}
+                                {incident?.status === "failed" && canInvestigate && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => investigate(a.id, true)} disabled={busy != null}>Retry</Button>}
                               </div>
                             )}
                           </Card>
