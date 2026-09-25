@@ -16,6 +16,12 @@ export function paginate<T>(rows: T[], p: PageParams): { total: number; page: nu
   return { total: rows.length, page: p.page, page_size: p.page_size, items: rows.slice(start, start + p.page_size) };
 }
 
+/** The 1-based page on which the row with this id sits in the ordered list, or null when it is not in the list. */
+export function pageOf(rows: { id: number }[], id: number, pageSize: number): number | null {
+  const i = rows.findIndex((r) => r.id === id);
+  return i < 0 ? null : Math.floor(i / pageSize) + 1;
+}
+
 // ---- alerts -----------------------------------------------------------------------------------------------
 
 /** created_at is SQLite's datetime('now') (UTC, "YYYY-MM-DD HH:MM:SS"); the day is the server's local date. */

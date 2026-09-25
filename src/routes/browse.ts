@@ -7,7 +7,7 @@ import { listAlerts } from "../investigate.js";
 import { postRejectionLearning } from "../learnings.js";
 import { ConceptScope, suggestDecisionScope, syncDecisionConceptInBackground } from "../concepts.js";
 import { SPEND_DAYS, SPEND_MIN_INTERVAL_MS, lastSpendFetch, refreshSpend, spendRows, spendSummary } from "../spend.js";
-import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
+import { dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageOf, pageParams, paginate, parseRecQuery, recMatches } from "../paging.js";
 import { statusAfterProgress, validateProgress } from "../progress.js";
 import { noteDecision } from "../notify.js";
 import { ask, askAboutRecommendation, createThread, deleteThread, getThread, listMessages, listThreads, renameThread, threadForRecommendation } from "../chat.js";
@@ -51,6 +51,8 @@ browse.post("/spend/refresh", auth, async (req, res) => {
 
 // ---- alerts -----------------------------------------------------------------------------------------------
 // ?status=open (default) | acknowledged | all, ?page (1-based), ?page_size (default 10, max 50), ?day=YYYY-MM-DD (local server date).
+// ?id=<alert id> without ?page lands on the page that holds that alert (deep links from a recommendation or the
+// overview), so the linked row is on screen; with ?page as well, ?page wins. An id outside the filter gives page 1.
 // Today's alerts first, then older days; within a day alarms, warnings, info; newest first. Same columns as before (incident_*, triage).
 browse.get("/alerts", auth, (req, res) => {
   const status = req.query.status === "acknowledged" ? "acknowledged" : req.query.status === "all" || req.query.all === "1" || req.query.all === "true" ? "all" : "open";
@@ -58,7 +60,10 @@ browse.get("/alerts", auth, (req, res) => {
   if (day && !DAY_RE.test(day)) return res.status(400).json({ error: "day must be YYYY-MM-DD" });
   const ordered = orderAlerts(listAlerts(status, 100_000));
   const rows = day ? ordered.filter((a) => a.day === day) : ordered;
-  const p = paginate(rows, pageParams(req.query as Record<string, unknown>, { size: 10, max: 50 }));
+  const params = pageParams(req.query as Record<string, unknown>, { size: 10, max: 50 });
+  const id = Number(req.query.id);
+  if (req.query.page == null && Number.isInteger(id)) params.page = pageOf(rows, id, params.page_size) ?? 1;
+  const p = paginate(rows, params);
   res.json({ total: p.total, page: p.page, page_size: p.page_size, status, day: day ?? null, counts: levelCounts(rows), alerts: p.items });
 });
 
