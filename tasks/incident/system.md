@@ -31,3 +31,9 @@ Operational patterns to respect (facts, not guesses):
 - New instances take a few minutes to register with Systems Manager; "not managed" on an instance younger than
   fifteen minutes is not a finding.
 - Autoscaling churn (nodes appearing and disappearing) is normal; only a change in the pool's size over days is.
+- The advisor is the monitor for SSM-managed instances. It probes memory, disk, load, reboots and containers itself,
+  keeps daily roll-ups, raises disk_high, disk_full and disk_fill (days until full at the current rate), memory and
+  load alerts, and reviews the statistics every day. Never recommend installing the CloudWatch agent, creating
+  CloudWatch alarms or adding external monitoring for these; a monitoring gap (an instance the advisor does not probe,
+  a threshold, a figure it does not compute) goes under needs_from_human or in the rationale, not in a recommendation
+  or a fix.

@@ -1427,7 +1427,10 @@ and mount with the free GB in the message. The alert closes by itself (acknowled
 falls five points under its threshold, so a disk hovering at the line does not flap; an escalation replaces the
 warning with an alarm. The latest probe of every running instance is judged again at startup and after every
 probe pass, so a disk that filled while the advisor was down alerts immediately. This is the level today; the
-daily review's `disk_fill` is the trend, days until full at the current rate.
+daily review's `disk_fill` is the trend, days until full at the current rate. The agents are told this (an
+operational pattern in every task's `system.md` and `src/pools.ts`): the advisor is the monitor for SSM-managed
+instances, so they must not recommend the CloudWatch agent, CloudWatch alarms or external monitoring for disk,
+memory, load or reboots; a gap in the advisor's coverage goes under `needs_from_human`, not into a recommendation.
 
 ## Host alerts from the probes
 
@@ -1687,7 +1690,7 @@ recommendations and alerts with the numbers attached (`src/review_math.ts`, pure
 |---|---|---|
 | sustained idle | at least 5 days of probes with memory under 40 % (peak under 60 %), load under 25 % of cores, CPU p95 under 20 % | recommendation `review_idle` (right-size, saving ≈ half the list price); report-only for pool members, protected or naturally idle roles; Batch workers skipped |
 | memory pressure | memory over 85 % on average for 5+ days | warning alert |
-| disk filling | a least-squares line through the root disk usage reaches 90 % within 60 days (fit r² ≥ 0.5) | recommendation `review_disk_fill`; alarm when under 14 days |
+| disk filling | a least-squares line through the root disk usage reaches 90 % (100 % for a disk already past 90 %) within 60 days, climbing at least 0.01 points a day (fit r² ≥ 0.5) | recommendation `review_disk_fill`; alarm when under 14 days |
 | idle container | ran 90 %+ of the window at under 0.3 % CPU | observation on the Overview |
 | spend step | a service's last 3 complete days average more than 3 spreads and 30 % above its 60-day median, at least 20 USD/day | warning alert with the monthly excess |
 | bucket without lifecycle | a bucket with at least 20 GB in Standard and no lifecycle rule | observation `s3_no_lifecycle` with the IA saving |

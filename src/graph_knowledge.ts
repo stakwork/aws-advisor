@@ -114,7 +114,9 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   await writeCypher(`UNWIND $rows AS row MERGE (t:KnSystemType {id: row.id}) SET t += row, t.updated_at = $now`, { rows: [...skus, ...usage], now });
   const archetypes = Object.entries(ROLE_OPTIONS).map(([name, description]) => ({ id: name, name, description }));
   await writeCypher(`UNWIND $rows AS row MERGE (a:KnArchetype {id: row.id}) SET a += row, a.updated_at = $now`, { rows: archetypes, now });
-  const patterns = OPERATIONAL_PATTERNS.split("\n").filter((l) => l.startsWith("- ")).map((l, i) => ({ id: `pattern:${i + 1}`, text: l.slice(2).trim(), source: "advisor" }));
+  // one pattern per "- " bullet; the indented lines that follow a bullet are its continuation
+  const bullets = OPERATIONAL_PATTERNS.split("\n").reduce<string[]>((acc, l) => { if (l.startsWith("- ")) acc.push(l.slice(2).trim()); else if (/^\s+\S/.test(l) && acc.length) acc[acc.length - 1] += " " + l.trim(); return acc; }, []);
+  const patterns = bullets.map((text, i) => ({ id: `pattern:${i + 1}`, text, source: "advisor" }));
   await writeCypher(`UNWIND $rows AS row MERGE (p:KnPattern {id: row.id}) SET p += row, p.updated_at = $now`, { rows: patterns, now });
 
   // ---- our side: systems
