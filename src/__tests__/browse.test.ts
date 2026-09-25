@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { addDays, daysInMonth, localDay } from "../localdate.js";
-import { alertDay, dedupeFindings, levelCounts, mergeRecommendations, orderAlerts, pageOf, pageParams, paginate, shortResourceId } from "../paging.js";
+import { alertDay, dedupeFindings, kindCounts, levelCounts, mergeRecommendations, orderAlerts, pageOf, pageParams, paginate, shortResourceId } from "../paging.js";
 import { SpendRow, summarizeSpend } from "../spend_math.js";
 
 // ---- spend --------------------------------------------------------------------------------------------------
@@ -119,6 +119,8 @@ test("alerts: today before older days, alarms then warnings then info within a d
   assert.equal(ordered[0].day, alertDay(t(0)));
   assert.notEqual(ordered[6].day, ordered[0].day);
   assert.deepEqual(levelCounts(ordered), { alarm: 3, warning: 2, info: 3 });
+  // the kind filter's options: most frequent first, ties by name
+  assert.deepEqual(Object.entries(kindCounts(ordered)), [["nat_traffic", 3], ["instance_state", 2], ["node_churn", 2], ["credentials", 1]]);
   // The day is the server's local date of a UTC timestamp.
   assert.equal(alertDay("2026-09-19 12:00:00"), localDay(new Date("2026-09-19T12:00:00Z")));
 });

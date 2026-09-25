@@ -46,6 +46,13 @@ export function levelCounts(rows: { level: AlertLevel }[]): Record<AlertLevel, n
   return c;
 }
 
+/** How many alerts of each kind, most frequent first (the kind filter's options on the Alerts page). */
+export function kindCounts(rows: { kind: string }[]): Record<string, number> {
+  const c = new Map<string, number>();
+  for (const r of rows) c.set(r.kind, (c.get(r.kind) ?? 0) + 1);
+  return Object.fromEntries([...c.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
+}
+
 // ---- findings ---------------------------------------------------------------------------------------------
 
 export interface FindingLike { id: number; fingerprint: string; control_id: string; resource: string | null }
