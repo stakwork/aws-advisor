@@ -15,6 +15,19 @@ const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "E
 const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name", route53: "id" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
+const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
+// Disk levels use the same lines as the disk alerts (80 % warning, 90 % alarm by default).
+const usedTone = (p: number) => (p >= 90 ? "text-red-300" : p >= 80 ? "text-amber-300" : "");
+const UsedBar = ({ used_pct, used_bytes, total_bytes, usage_at, empty }: { used_pct: number | null; used_bytes?: number | null; total_bytes?: number | null; usage_at?: string | null; empty: string }) => {
+  if (used_pct == null) return <span className="text-zinc-600" title={empty}>—</span>;
+  const p = Number(used_pct);
+  return (
+    <span className="inline-flex items-center gap-2" title={total_bytes != null ? `${bytes(used_bytes)} used · ${bytes(Number(total_bytes) - Number(used_bytes))} free of ${bytes(total_bytes)}${usage_at ? ` · probed ${when(usage_at)}` : ""}` : undefined}>
+      <span className="h-1.5 w-12 overflow-hidden rounded bg-zinc-800"><span className={`block h-full ${p >= 90 ? "bg-red-400" : p >= 80 ? "bg-amber-400" : "bg-emerald-500"}`} style={{ width: `${Math.min(100, Math.max(2, p))}%` }} /></span>
+      <span className={usedTone(p)}>{pct(p)}</span>
+    </span>
+  );
+};
 const gb = (v: number | null | undefined) => (v == null ? "—" : `${Number(v).toLocaleString()} GB`);
 const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString() : "—");
 const yesNo = (v: unknown) => (v == null ? null : v ? "yes" : "no");
@@ -131,6 +144,7 @@ export default function Inventory() {
     setRows(null);
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
+    if (tab === "ebs" && state) qs.set("state", state);
     if (tab === "route53") { if (zone) qs.set("zone", zone); if (link) qs.set("link", link); }
     if (params.get("q")) qs.set("q", params.get("q")!);
     if (sort) qs.set("sort", sort);
@@ -187,7 +201,7 @@ export default function Inventory() {
 
       <div className="flex gap-1 border-b border-zinc-800">
         {TABS.map((t) => (
-          <button key={t} onClick={() => set({ tab: t, id: null, sort: null })} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
+          <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
             {TAB_LABEL[t]}{s && <span className="ml-1 text-xs text-zinc-500">{s[t].total}</span>}
           </button>
         ))}
@@ -220,10 +234,11 @@ export default function Inventory() {
       )}
 
       {tab === "ebs" && inv && (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Stat label="Volumes" value={inv.total} hint={`${Number(inv.gb).toLocaleString()} GB${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <Stat label="Volumes" value={inv.total} hint={`${Number(inv.gb).toLocaleString()} GB${inv.probed ? ` · used / free known for ${inv.probed}${inv.high ? `, ${inv.high} over 80 %` : ""}` : " · probe an instance to see used / free"}${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
           <Stat label="At list / month" value={usd(inv.monthly_usd)} hint="storage plus provisioned IOPS and throughput" />
           <Stat label="Unattached" value={inv.unattached} hint={inv.unattached ? `${usd(inv.unattached_usd)}/month for nothing` : "none"} />
+          <Stat label="On stopped instances" value={inv.on_stopped} hint={inv.on_stopped ? `${usd(inv.on_stopped_usd)}/month: AWS says in-use, but the instance is not running` : "every attached volume is on a running instance"} />
           <Stat label="Still gp2" value={inv.gp2} hint={inv.gp2 ? "gp3 is 20 % cheaper for the same size" : "all gp3 or better"} />
         </div>
       )}
@@ -264,6 +279,11 @@ export default function Inventory() {
             </select>
           </>
         )}
+        {tab === "ebs" && (
+          <select value={state} onChange={(e) => set({ state: e.target.value, id: null })}>
+            <option value="">All volumes</option><option value="in-use">attached (in-use)</option><option value="stopped">on a stopped instance</option><option value="available">unattached (available)</option>
+          </select>
+        )}
         {tab === "route53" && (
           <>
             <select value={zone} onChange={(e) => set({ zone: e.target.value, id: null })}>
@@ -299,7 +319,7 @@ export default function Inventory() {
               )}
               {tab === "ebs" && (
                 <thead className="bg-zinc-900"><tr>
-                  <SortTh col="volume_id">Volume</SortTh><SortTh col="volume_type">Type</SortTh><SortTh col="size_gb" className="text-right">Size</SortTh><SortTh col="iops" className="text-right">IOPS prov.</SortTh>
+                  <SortTh col="volume_id">Volume</SortTh><SortTh col="volume_type">Type</SortTh><SortTh col="size_gb" className="text-right">Size</SortTh><SortTh col="used_pct" className="text-right">Used</SortTh><SortTh col="iops" className="text-right">IOPS prov.</SortTh>
                   <SortTh col="iops_max" className="text-right">IOPS peak 30d</SortTh><SortTh col="state">State</SortTh><SortTh col="instance_id">Attached to</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="created">Created</SortTh>
                 </tr></thead>
               )}
@@ -377,9 +397,10 @@ export default function Inventory() {
                       <Td><div className="flex items-center gap-2"><span className="font-mono text-xs text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}</div>{r.name && <div className="text-xs text-zinc-500">{r.name}</div>}</Td>
                       <Td>{r.volume_type}{r.encrypted ? " 🔒" : ""}</Td>
                       <Td className="text-right">{r.size_gb} GB</Td>
+                      <Td className="text-right"><UsedBar used_pct={r.used_pct} used_bytes={r.used_bytes} total_bytes={r.total_bytes} usage_at={r.usage_at} empty={r.instance_id ? "no probe of the instance yet" : "unattached: nothing can read it"} /></Td>
                       <Td className="text-right">{r.provisioned_iops != null ? Number(r.provisioned_iops).toLocaleString() : "—"}</Td>
                       <Td className={`text-right ${r.iops_max != null && r.provisioned_iops && r.iops_max < 0.3 * r.provisioned_iops && r.iops > 3000 ? "text-amber-300" : ""}`}>{r.iops_max != null ? Number(r.iops_max).toLocaleString() : <span className="text-zinc-600">—</span>}</Td>
-                      <Td><Badge>{r.state}</Badge></Td>
+                      <Td><div className="flex items-center gap-1.5"><Badge>{r.state}</Badge>{r.instance_id && r.instance_state && r.instance_state !== "running" ? <span className="text-xs text-amber-300" title="attached, so AWS says in-use, but the instance is not running: the volume is billed all the same">instance {r.instance_state}</span> : null}</div></Td>
                       <Td className="text-xs">{r.instance_id ? <Link className="hover:underline" to={`/inventory?tab=ec2&id=${r.instance_id}`}>{r.instance_name || r.instance_id}<span className="text-zinc-500"> {r.device}</span></Link> : <span className="text-amber-300">unattached</span>}</Td>
                       <Td className="text-right font-medium text-zinc-100">{usd(r.monthly_usd, 2)}</Td>
                       <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
@@ -447,7 +468,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 9, s3: 8, route53: 6 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 10, s3: 8, route53: 6 };
 
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
 /** The instance's baselines: median and p95 per metric, from 14 days of CloudWatch CPU and the probe history. */
@@ -536,8 +557,8 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         <Dl rows={[["Root device", st.root_device_name && `${st.root_device_name} (${st.root_device_type})`]]} />
         {st.volumes?.length > 0 && (
           <table className="mt-1 w-full text-xs">
-            <thead><tr className="text-zinc-500"><th className="text-left font-normal">Volume</th><th className="text-left font-normal">Device</th><th className="text-left font-normal">Type</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">IOPS</th><th className="text-right font-normal">Del. on term.</th></tr></thead>
-            <tbody>{st.volumes.map((v: any) => <tr key={v.volume_id} className="border-t border-zinc-800/60"><td className="py-0.5 font-mono">{v.volume_id}</td><td>{v.device}</td><td>{v.type}{v.encrypted ? " 🔒" : ""}</td><td className="text-right">{v.size}</td><td className="text-right">{v.iops ?? "—"}</td><td className="text-right">{yesNo(v.delete_on_termination)}</td></tr>)}</tbody>
+            <thead><tr className="text-zinc-500"><th className="text-left font-normal">Volume</th><th className="text-left font-normal">Device</th><th className="text-left font-normal">Type</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">Used</th><th className="text-right font-normal">IOPS</th><th className="text-right font-normal">Del. on term.</th></tr></thead>
+            <tbody>{st.volumes.map((v: any) => { const u = d.volume_usage?.[v.volume_id]; return <tr key={v.volume_id} className="border-t border-zinc-800/60"><td className="py-0.5 font-mono"><Link className="hover:underline" to={`/inventory?tab=ebs&id=${v.volume_id}`}>{v.volume_id}</Link></td><td>{v.device}</td><td>{v.type}{v.encrypted ? " 🔒" : ""}</td><td className="text-right">{v.size}</td><td className="text-right"><UsedBar used_pct={u?.used_pct ?? null} used_bytes={u?.used_bytes} total_bytes={u?.total_bytes} usage_at={u?.usage_at} empty="no probe yet" /></td><td className="text-right">{v.iops ?? "—"}</td><td className="text-right">{yesNo(v.delete_on_termination)}</td></tr>; })}</tbody>
           </table>
         )}
       </Group>
@@ -673,12 +694,30 @@ function RdsDetail({ d }: { d: any }) {
 
 function EbsDetail({ d }: { d: any }) {
   const used = Math.max(Number(d.iops_max || 0), Number(d.read_iops_avg || 0) + Number(d.write_iops_avg || 0));
+  const stopped = Boolean(d.instance_id && d.instance_state && d.instance_state !== "running");
   return (
     <>
       <h2 className="text-base font-medium text-zinc-100">{d.name || d.volume_id}</h2>
-      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><Badge>{d.volume_type}</Badge>{d.encrypted ? <Badge>encrypted</Badge> : null}<Mono>{d.volume_id}</Mono></div>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge>{stopped ? <span className="text-amber-300">instance {d.instance_state}</span> : null}<Badge>{d.volume_type}</Badge>{d.encrypted ? <Badge>encrypted</Badge> : null}<Mono>{d.volume_id}</Mono></div>
       <Group title="Volume">
-        <Dl rows={[["Size", `${d.size_gb} GB`], ["Provisioned", d.provisioned_iops != null ? `${Number(d.provisioned_iops).toLocaleString()} IOPS${d.throughput_mibps ? ` · ${d.throughput_mibps} MiB/s` : ""}` : null], ["Attached to", d.instance_id ? <Link className="underline" to={`/inventory?tab=ec2&id=${d.instance_id}`}>{d.instance_name || d.instance_id} {d.device}</Link> : "nothing: unattached volumes cost the same as attached ones"], ["Region", d.region], ["Created", when(d.created)]]} />
+        <Dl rows={[["Size", `${d.size_gb} GB`], ["Provisioned", d.provisioned_iops != null ? `${Number(d.provisioned_iops).toLocaleString()} IOPS${d.throughput_mibps ? ` · ${d.throughput_mibps} MiB/s` : ""}` : null],
+          ["Attached to", d.instance_id ? <span><Link className="underline" to={`/inventory?tab=ec2&id=${d.instance_id}`}>{d.instance_name || d.instance_id} {d.device}</Link>{stopped ? <span className="ml-2 text-amber-300">instance {d.instance_state}: AWS still says in-use, and bills the volume in full</span> : d.instance_state ? <span className="ml-2 text-zinc-500">instance {d.instance_state}</span> : null}</span> : "nothing: unattached volumes cost the same as attached ones"],
+          ["Region", d.region], ["Created", when(d.created)]]} />
+      </Group>
+      <Group title={d.used_pct != null ? `Disk usage · ${pct(d.used_pct)} used` : "Disk usage"}>
+        {d.used_pct != null ? (
+          <>
+            <Dl rows={[["Used / free", <span className={usedTone(Number(d.used_pct))}>{bytes(d.used_bytes)} used · {bytes(Number(d.total_bytes) - Number(d.used_bytes))} free of {bytes(d.total_bytes)}</span>],
+              ["Filesystem vs volume", Number(d.total_bytes) < 0.85 * Number(d.size_gb) * 1073741824 ? <span className="text-amber-300">the filesystem covers {bytes(d.total_bytes)} of a {d.size_gb} GB volume: the rest is unpartitioned or not grown into (paid for, unusable until it is)</span> : null],
+              ["Probed", `${when(d.usage_at)}${stopped ? " (before the instance stopped)" : ""}`]]} />
+            {d.mounts?.length > 0 && (
+              <table className="mt-1 w-full text-xs">
+                <thead><tr className="text-zinc-500"><th className="text-left font-normal">Mount</th><th className="text-left font-normal">Filesystem</th><th className="text-right font-normal">Used</th><th className="text-right font-normal">Free</th><th className="text-right font-normal">Size</th><th className="text-right font-normal">%</th></tr></thead>
+                <tbody>{d.mounts.map((m: any) => <tr key={m.mount} className="border-t border-zinc-800/60"><td className="py-0.5 font-mono">{m.mount}</td><td className="font-mono text-zinc-400">{m.filesystem}</td><td className="text-right">{bytes(m.used_bytes)}</td><td className="text-right">{bytes(m.total_bytes - m.used_bytes)}</td><td className="text-right">{bytes(m.total_bytes)}</td><td className={`text-right ${usedTone(m.used_pct)}`}>{pct(m.used_pct)}</td></tr>)}</tbody>
+              </table>
+            )}
+          </>
+        ) : <div className="text-sm text-zinc-500">{!d.instance_id ? "Unattached: no instance can read the filesystem. The volume costs the same full or empty." : stopped ? "No probe of the instance from before it stopped, so used and free are unknown until it runs again and is probed." : "No probe of the instance yet. Probe it from the EC2 tab (Systems Manager, Linux) to see used and free."}</div>}
       </Group>
       <Group title="Usage, 30 days">
         <Dl rows={[["Read / write", d.read_iops_avg != null ? `${d.read_iops_avg} / ${d.write_iops_avg} IOPS average` : "no metrics"], ["Peak", d.iops_max != null ? `${Number(d.iops_max).toLocaleString()} IOPS peak sample (30 d)` : null], ["Provisioned used", d.provisioned_iops ? <span className={used < 0.3 * d.provisioned_iops && d.iops > 3000 ? "text-amber-300" : ""}>{Math.round((100 * used) / d.provisioned_iops)} % of {Number(d.provisioned_iops).toLocaleString()}{used < 0.3 * d.provisioned_iops && d.iops > 3000 ? " (over-provisioned)" : ""}</span> : null]]} />

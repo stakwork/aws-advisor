@@ -19,6 +19,8 @@ test("parseProbeOutput reads the JSON line and ignores noise", () => {
   assert.equal(p.disks.length, 2);
   assert.equal(p.disks[0].mount, "/");
   assert.equal(p.disks[0].used_pct, 57.3);
+  assert.equal(p.disks[0].device, null, "a probe before 1.3 names no device");
+  assert.equal(p.disks[0].volume_id, null);
   assert.equal(p.top_cpu.length, 5);
   assert.equal(p.top_cpu[0].command, "java");
   assert.equal(p.top_cpu[0].rss_bytes, 520093696);
@@ -35,6 +37,11 @@ test("summarizeProbe derives the numbers the idle rule uses", () => {
   assert.equal(s.cpus, 4);
   assert.equal(s.top_process, "java");
   assert.equal(s.collected_at, "2026-09-18T17:14:31Z");
+});
+
+test("parseProbeOutput keeps the device and volume id a 1.3 probe reports per mount", () => {
+  const p = parseProbeOutput('{"probe":"aws-advisor/1","cpus":2,"uptime_seconds":1,"memory":{"total_bytes":1,"used_bytes":1,"available_bytes":0},"load":{"1m":0,"5m":0,"15m":0},"disks":[{"mount":"/","filesystem":"/dev/nvme0n1p1","device":"nvme0n1","volume_id":"vol-0abc","total_bytes":100,"used_bytes":50,"used_pct":50.0},{"mount":"/data","filesystem":"/dev/xvdf","device":"xvdf","volume_id":null,"total_bytes":100,"used_bytes":1,"used_pct":1.0}]}');
+  assert.deepEqual(p.disks.map((d) => [d.device, d.volume_id]), [["nvme0n1", "vol-0abc"], ["xvdf", null]]);
 });
 
 test("parseProbeOutput rejects output that is not the probe's", () => {
