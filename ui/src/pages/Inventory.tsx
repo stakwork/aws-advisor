@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useNavigate, Link, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
 import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
@@ -8,9 +8,56 @@ import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
-function ActivityBlock({ activity, summary, collectedAt }: { activity: any; summary: any; collectedAt: string }) {
+/** One chip per matched use-signal kind; click marks it noise for this image (or lifts the rule), so the count stops fooling the last-use line. */
+function SignalChips({ image, act, rules, onChange }: { image: string; act: any; rules: any[]; onChange: () => void }) {
+  const [busy, setBusy] = useState("");
+  const key = String(image || "").replace(/@sha256:[0-9a-f]+$/i, "").replace(/:[^/]+$/, "");
+  const kinds = Object.entries(act.signal_kinds || {}) as [string, number][];
+  if (!kinds.length) return null;
+  const ruleFor = (kind: string) => rules.find((r) => r.kind === kind && r.status === "confirmed" && (r.image_pattern === key || image.includes(r.image_pattern) || key.includes(r.image_pattern)));
+  const toggle = async (kind: string) => {
+    const r = ruleFor(kind); setBusy(kind);
+    try {
+      if (r && r.verdict === "noise") await api(`/signal-rules/${r.id}`, { method: "DELETE" });
+      else { const note = window.prompt(`Mark "${kind}" as noise for every container of ${key}? Say why (optional):`, ""); if (note === null) return; await api("/signal-rules", { method: "PUT", body: JSON.stringify({ image_pattern: key, kind, verdict: "noise", note }) }); }
+      onChange();
+    } catch (e: any) { alert(e.message); } finally { setBusy(""); }
+  };
+  return (
+    <span className="flex flex-wrap gap-1">
+      {kinds.sort((x, y) => y[1] - x[1]).map(([k, n]) => { const r = ruleFor(k); const noise = r?.verdict === "noise"; return (
+        <button key={k} type="button" onClick={() => toggle(k)} disabled={busy === k} title={noise ? `ruled noise for ${r.image_pattern}${r.note ? `: ${r.note}` : ""} (${r.decided_by}); click to lift` : `${n} lines matched "${k}" in 24 h; click to mark as noise for ${key}`}
+          className={`rounded border px-1.5 py-0 text-[11px] ${noise ? "border-zinc-800 text-zinc-600 line-through" : "border-emerald-900/60 text-emerald-300/80 hover:border-emerald-700"}`}>{k} {n}</button>
+      ); })}
+      {act.signal_samples?.length > 0 && <details className="inline"><summary className="cursor-pointer text-[11px] text-zinc-500">lines</summary><ul className="mt-0.5 space-y-0.5 font-mono text-[11px] text-zinc-500">{act.signal_samples.map((x: string, i: number) => <li key={i} className="truncate" title={x}>{x}</li>)}</ul></details>}
+    </span>
+  );
+}
+
+function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, rules, onRules }: { activity: any; summary: any; collectedAt: string; previous?: { collected_at: string; data: any } | null; instanceId: string; rules: any[]; onRules: () => void }) {
   const a = activity; const c = a.connections; const f = a.front_door; const l = a.logins;
+  const navigate = useNavigate();
+  const [asking, setAsking] = useState<string>("");
+  const images = new Set<string>((activity.containers || []).map((x: any) => x.image || ""));
+  const proposed = rules.filter((r) => r.status === "proposed");
+  const askAgent = async () => {
+    setAsking("asking…");
+    try { const r = await api(`/instances/${instanceId}/signals/review`, { method: "POST", body: "{}" }); navigate(`/chat?t=${r.thread_id}`); }
+    catch (e: any) { setAsking(e.message); }
+  };
+  const decide = async (r: any, ok: boolean) => { try { if (ok) await api(`/signal-rules/${r.id}/confirm`, { method: "POST", body: "{}" }); else await api(`/signal-rules/${r.id}`, { method: "DELETE" }); onRules(); } catch (e: any) { alert(e.message); } };
   const ports = c ? Object.entries(c.by_port || {}).sort((x: any, y: any) => y[1] - x[1]).slice(0, 6).map(([p, n]) => `${p}: ${n}`).join(", ") : "";
+  const peerLine = (t: any) => `${t.ip} → :${t.port}${c?.port_map?.[String(t.port)] ? ` (${c.port_map[String(t.port)]})` : ""}${t.flows > 1 ? ` ×${t.flows}` : ""}`;
+  const peers = c?.top_peers?.length ? c.top_peers.slice(0, 4).map(peerLine).join(", ") + (c.top_peers.length > 4 ? ", …" : "") : "";
+  // traffic since the previous probe: the host counters are cumulative since boot, so only the difference means anything
+  let traffic: string | null = null;
+  const prevNet = previous?.data?.activity?.net;
+  if (a.net && prevNet && previous) {
+    const hours = (new Date(collectedAt.endsWith("Z") ? collectedAt : collectedAt + "Z").getTime() - new Date(previous.collected_at.endsWith("Z") ? previous.collected_at : previous.collected_at + "Z").getTime()) / 3600000;
+    const delta = a.net.rx_bytes + a.net.tx_bytes - (prevNet.rx_bytes + prevNet.tx_bytes);
+    if (hours > 0.05 && delta >= 0) traffic = `${delta < 1048576 ? `${Math.round(delta / 1024)} KB` : `${Math.round(delta / 1048576)} MB`} in the ${hours < 1.5 ? `${Math.round(hours * 60)} min` : `${hours.toFixed(1)} h`} since the previous probe`;
+    else if (delta < 0) traffic = "counters reset since the previous probe (rebooted)";
+  }
   const kind: Record<string, string> = { signal_line: "a container logged real use", request: "a request on the front door", login: "a login", external_connection: "an external client connected" };
   const restarting = (a.containers || []).filter((x: any) => x.restarts >= 10);
   return (
@@ -20,12 +67,23 @@ function ActivityBlock({ activity, summary, collectedAt }: { activity: any; summ
           : <>No sign of real use in this probe's window <span className="text-zinc-500">(24 h of container logs, the front door, logins, external connections; probe {when(collectedAt)})</span></>}
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-zinc-400">
-        {c ? <span title={`source: ${c.source}${ports ? `; by port ${ports}` : ""}`}>connections <span className="text-zinc-200">{c.external}</span> external · {c.internal} internal · {c.ssh} ssh</span> : <span>connections: not readable</span>}
+        {c ? <span title={`source: ${c.source}${ports ? `; by port ${ports}` : ""}`}>connections <span className="text-zinc-200">{c.external}</span> external · {c.internal} internal · {c.ssh} ssh{peers && <span className="text-zinc-500"> · {peers}</span>}</span> : <span>connections: not readable</span>}
         <span title={f.source ? `source: ${f.source}, window: ${f.window}` : "no proxy container or access log found"}>front door {f.source ? <><span className="text-zinc-200">{f.requests}</span> requests · {f.health} health checks{f.last_request_at ? ` · last ${when(f.last_request_at)}` : f.last_request_raw ? ` · last ${f.last_request_raw}` : ""}</> : "none found"}</span>
         <span>logins {l.users_now} now{l.last_login_at ? ` · last ${l.last_login_user || "?"} ${when(l.last_login_at)}` : " · none on record"}</span>
-        {a.net && <span title="host interface counters since boot; the difference between probes is the traffic">net {Math.round((a.net.rx_bytes + a.net.tx_bytes) / 1048576)} MB since boot</span>}
+        {traffic ? <span title="from the host's interface counters, loopback and docker bridges excluded">traffic {traffic}</span> : a.net ? <span className="text-zinc-600" title="the counters are cumulative; the next probe gives the rate">traffic: from the next probe on</span> : null}
       </div>
       {restarting.length > 0 && <div className="mt-1 text-amber-300">Restart loops: {restarting.map((x: any) => `${x.name} (${x.restarts})`).join(", ")}</div>}
+      {proposed.length > 0 && (
+        <div className="mt-2 rounded border border-sky-900/60 bg-sky-950/30 p-1.5">
+          <div className="text-sky-200">The agent proposes {proposed.length} use-signal rule{proposed.length > 1 ? "s" : ""}:</div>
+          <ul className="mt-0.5 space-y-0.5">{proposed.map((r) => <li key={r.id} className="flex flex-wrap items-center gap-2"><span className="font-mono text-zinc-300">{r.image_pattern}</span><span>{r.kind} is <span className={r.verdict === "noise" ? "text-zinc-400" : "text-emerald-300"}>{r.verdict}</span></span>{r.note && <span className="text-zinc-500">{r.note}</span>}<Button className="!px-1.5 !py-0 !text-[11px]" onClick={() => decide(r, true)}>Confirm</Button><Button variant="ghost" className="!px-1.5 !py-0 !text-[11px]" onClick={() => decide(r, false)}>Reject</Button></li>)}</ul>
+        </div>
+      )}
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-zinc-500">
+        <span>Use-signal chips on each container: click one to rule it noise for that image (every instance running it), click again to lift.</span>
+        <Button variant="ghost" className="!px-1.5 !py-0 !text-[11px]" onClick={askAgent} disabled={asking === "asking…"} title="opens a chat thread: the agent reads the samples with activity_signals and proposes rules for you to confirm">{asking === "asking…" ? "Asking…" : "Ask the agent to review the signals"}</Button>
+        {asking && asking !== "asking…" && <span className="text-red-300">{asking}</span>}
+      </div>
     </div>
   );
 }
@@ -544,6 +602,9 @@ function GraphLine({ id }: { id: string }) {
 }
 
 function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; error: string }; onProbe: () => void }) {
+  const [rules, setRules] = useState<any[]>([]);
+  const loadRules = () => api("/signal-rules").then((r) => setRules(r.rules)).catch(() => setRules([]));
+  useEffect(() => { loadRules(); }, [d.instance_id]);
   const s = d.snapshot || {};
   const id = s.identity || {}; const net = s.network || {}; const st = s.storage || {}; const ssm = s.ssm; const ut = s.utilisation || {}; const price = s.price;
   const latest = d.probes?.[0];
@@ -617,7 +678,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         {latest?.data?.disks?.length > 0 && <div className="mt-1 text-xs text-zinc-400">Disks: {latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).join(", ")}</div>}
         {latest?.data?.top_cpu?.length > 0 && <div className="text-xs text-zinc-400">Top CPU: {latest.data.top_cpu.slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
         {latest?.data?.top_mem?.length > 0 && <div className="text-xs text-zinc-400">Top memory: {latest.data.top_mem.slice(0, 3).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ")}</div>}
-        {latest?.data?.activity && <ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} />}
+        {latest?.data?.activity && <ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} />}
         {latest?.data?.docker?.available && (
           <div className="mt-1 text-xs text-zinc-400">
             Docker: {latest.data.docker.running} running of {latest.data.docker.total}
@@ -633,6 +694,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
                     {a && <span className={a.signal_lines > 0 ? "text-emerald-300/80" : "text-zinc-500"} title={a.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : "no log lines in 24 h"}>
                       {a.log_lines} log lines/24h{a.signal_lines > 0 ? ` · ${a.signal_lines} use signals, last ${when(a.last_signal_at)}` : a.last_log_at ? ` · last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? ` · ${a.errors} errors` : ""}{a.restarts >= 10 ? ` · ${a.restarts} restarts` : ""}
                     </span>}
+                    {a && <SignalChips image={c.image} act={a} rules={rules} onChange={loadRules} />}
                   </li>
                   );
                 })}

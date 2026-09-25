@@ -38,6 +38,8 @@ import { TIMELINE_KINDS, timelineFor } from "../timeline.js";
 import { cli } from "../step_runner.js";
 import { dispatchNotifications, noteDecision, notifyAlert, notifyStatus, queueRecommendationEvent, resendNotification, sendSphinx, setWatch, watchState } from "../notify.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
+import { SIGNAL_KINDS, confirmRule, deleteRule, listRules, upsertRule } from "../signal_rules.js";
+import { ask, createThread } from "../chat.js";
 import { describeError } from "../permissions.js";
 
 export const api = Router();
@@ -344,6 +346,29 @@ api.post("/instances/:id/probe", async (req, res) => {
   } finally {
     probeInFlight.delete(id);
   }
+});
+
+// ---- use signals: which log patterns count as a person using the service, per image (src/signal_rules.ts) ----
+api.get("/signal-rules", (_req, res) => res.json({ rules: listRules(), kinds: SIGNAL_KINDS }));
+api.put("/signal-rules", (req, res) => {
+  try { res.json({ rule: upsertRule({ image_pattern: req.body?.image_pattern, kind: req.body?.kind, verdict: req.body?.verdict, note: req.body?.note ?? null, decided_by: typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui", status: "confirmed" }) }); }
+  catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
+});
+api.post("/signal-rules/:id/confirm", (req, res) => { const r = confirmRule(Number(req.params.id), typeof req.body?.by === "string" ? req.body.by : null); r ? res.json({ rule: r }) : res.status(404).json({ error: "no such rule" }); });
+api.delete("/signal-rules/:id", (req, res) => (deleteRule(Number(req.params.id)) ? res.status(204).end() : res.status(404).json({ error: "no such rule" })));
+/** Opens a chat thread asking the agent to judge the instance's use signals; the answer arrives in the thread (Chat page). */
+api.post("/instances/:id/signals/review", async (req, res) => {
+  const id = String(req.params.id);
+  if (!/^i-[0-9a-f]{8,17}$/.test(id)) return res.status(400).json({ error: "instance id expected" });
+  if (!config.repo2graphUrl) return res.status(400).json({ error: "no repo2graph URL (Settings > Agent): the agent is not configured" });
+  const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(id) as { name: string | null } | undefined)?.name;
+  const by = typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui";
+  try {
+    const thread = createThread(`Use signals on ${name || id}`, by);
+    const message = `Review the use signals on ${name ? `${name} (${id})` : id} with the activity_signals tool. For each container say which matched kinds show a person using the service and which are machine chatter (health checkers, token checks, internal sync), citing the sample lines. Then call propose_signal_rule for every kind that is noise for that image, with the reason in the note, and tell me what you proposed so I can confirm it in the drawer.`;
+    const r = await ask(thread.id, message, by);
+    res.status(201).json({ thread_id: thread.id, agent_message_id: r.agent.id });
+  } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
 api.get("/instances/:id/metrics", (req, res) => {

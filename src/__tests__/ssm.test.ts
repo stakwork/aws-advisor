@@ -154,10 +154,10 @@ const probe14 = () => JSON.stringify({
   activity: {
     version: 1,
     containers: [
-      { name: "relay", started_at: "2026-09-16T08:00:00Z", restarts: 0, log_lines: 300, last_log_at: "2026-09-25T09:59:00Z", errors: 2, warns: 1, signal_lines: 4, last_signal_at: "2026-09-24T18:30:00Z", last_lines: ["2026-09-25T09:59:00Z ping", "x".repeat(300)] },
+      { name: "relay", started_at: "2026-09-16T08:00:00Z", restarts: 0, log_lines: 300, last_log_at: "2026-09-25T09:59:00Z", errors: 2, warns: 1, signal_lines: 4, last_signal_at: "2026-09-24T18:30:00Z", signal_kinds: { message: 3, auth: 2, "bad kind": 1 }, signal_samples: ["new message from 02ab", "authorized macaroon"], last_lines: ["2026-09-25T09:59:00Z ping", "x".repeat(300)] },
       { name: "proxy", started_at: "2026-09-16T08:00:00Z", restarts: 41, log_lines: 2000, last_log_at: "2026-09-25T09:58:00Z", errors: 0, warns: 0, signal_lines: 0, last_signal_at: null, last_lines: [] },
     ],
-    connections: { source: "conntrack", established: 3, external: 1, internal: 2, peers: 2, ssh: 0, by_port: { "443": 1, "22": 0, "bad": 9 } },
+    connections: { source: "conntrack", established: 3, external: 1, internal: 2, peers: 2, ssh: 0, by_port: { "443": 1, "22": 0, "bad": 9 }, top_peers: [{ ip: "203.0.113.5", port: 443, flows: 1, kind: "external" }, { ip: "10.0.1.9", port: 5002, flows: 2, kind: "internal" }], port_map: { "443": "proxy", "5002": "relay", "x": "no" } },
     front_door: { source: "container:proxy", requests: 7, health: 2880, last_request_at: "2026-09-25T07:12:00Z", last_request_raw: null, window: "24h" },
     logins: { users_now: 0, last_login_user: "ssm-user", last_login_at: "2026-09-20T11:00:00+00:00" },
     net: { rx_bytes: 123456789, tx_bytes: 987654 },
@@ -172,7 +172,12 @@ test("probe 1.4: the activity section parses, is tolerant, and the use summary p
   const a = p.activity!;
   assert.equal(a.containers.length, 2);
   assert.equal(a.containers[0].last_lines[1].length, 160, "last lines are capped");
+  assert.deepEqual(a.containers[0].signal_kinds, { message: 3, auth: 2 }, "a kind that is not a pattern name is dropped");
+  assert.equal(a.containers[0].signal_samples.length, 2);
+  assert.deepEqual(a.containers[1].signal_kinds, {}, "a 1.4 probe without kinds parses");
   assert.deepEqual(a.connections?.by_port, { "443": 1, "22": 0 }, "a port that is not a number is dropped");
+  assert.deepEqual(a.connections?.port_map, { "443": "proxy", "5002": "relay" });
+  assert.equal(a.connections?.top_peers[0].ip, "203.0.113.5");
   assert.equal(a.logins.last_login_at, "2026-09-20T11:00:00.000Z");
   const u = useSummary(p)!;
   assert.equal(u.last_use_at, "2026-09-25T10:00:00.000Z", "an external connection at probe time is the newest evidence");
@@ -231,4 +236,36 @@ test("probe 1.4: the activity script reads logs and counters only, and the histo
   assert.equal(d.net_bytes_day, 3000);
   assert.equal(h.activity.window.days_with_external, 1);
   assert.equal(h.activity.latest.requests_24h, 7);
+  assert.deepEqual(JSON.parse(h.activity.latest.peers)[0], { ip: "203.0.113.5", port: 443, flows: 1, kind: "external", container: "proxy" });
+});
+
+test("use-signal rules: a kind ruled noise for an image stops counting, per image, and the agent can only propose", async () => {
+  const { effectiveSignals, upsertRule, deleteRule, listRules, rulesFor, imageKey, validateRule } = await import("../signal_rules.js");
+  for (const r of listRules()) deleteRule(r.id);
+  assert.equal(imageKey("sphinxlightning/sphinx-boltwall:latest"), "sphinxlightning/sphinx-boltwall");
+  assert.equal(imageKey("ghcr.io/stakwork/stakgraph-mcp@sha256:abc"), "ghcr.io/stakwork/stakgraph-mcp");
+  assert.equal(effectiveSignals("sphinxlightning/sphinx-boltwall:latest", { auth: 200, write_request: 18 }, 215).signal_lines, 215, "no rule: the probe's exact count");
+  const proposed = upsertRule({ image_pattern: "sphinxlightning/sphinx-boltwall", kind: "auth", verdict: "noise", note: "one line per macaroon check", decided_by: "agent", status: "proposed" });
+  assert.equal(proposed.status, "proposed");
+  assert.equal(effectiveSignals("sphinxlightning/sphinx-boltwall:latest", { auth: 200, write_request: 18 }, 215).signal_lines, 215, "a proposal changes nothing until confirmed");
+  const confirmed = upsertRule({ image_pattern: "sphinxlightning/sphinx-boltwall", kind: "auth", verdict: "noise", note: "one line per macaroon check", decided_by: "gonzalo", status: "confirmed" });
+  const e = effectiveSignals("sphinxlightning/sphinx-boltwall:latest", { auth: 200, write_request: 18 }, 215);
+  assert.equal(e.signal_lines, 18);
+  assert.deepEqual(e.noise_kinds, ["auth"]);
+  assert.equal(effectiveSignals("sphinxlightning/sphinx-relay:latest", { auth: 5 }, 5).signal_lines, 5, "another image is untouched");
+  assert.equal(rulesFor("sphinxlightning/sphinx-boltwall:v2").length, 1);
+  assert.throws(() => upsertRule({ image_pattern: "sphinxlightning/sphinx-boltwall", kind: "auth", verdict: "signal", note: null, decided_by: "agent", status: "proposed" }), /a person has to change it/);
+  assert.throws(() => validateRule({ image_pattern: "x y", kind: "auth", verdict: "noise" }), /image_pattern/);
+  assert.throws(() => validateRule({ image_pattern: "x", kind: "nope", verdict: "noise" }), /kind/);
+  // the use summary follows the rule: relay's only kinds are message and auth; ruling both noise removes its last use
+  const { parseProbeOutput: parse, useSummary: use } = await import("../ssm.js");
+  const q = JSON.parse(probe14()); q.activity.connections.external = 0; q.activity.front_door.last_request_at = null; q.activity.front_door.source = null; q.activity.logins.last_login_at = null;
+  assert.equal(use(parse(JSON.stringify(q)))!.last_use_kind, "signal_line");
+  upsertRule({ image_pattern: "sphinx/relay", kind: "message", verdict: "noise", note: null, decided_by: "t", status: "confirmed" });
+  upsertRule({ image_pattern: "sphinx/relay", kind: "auth", verdict: "noise", note: null, decided_by: "t", status: "confirmed" });
+  const u = use(parse(JSON.stringify(q)))!;
+  assert.equal(u.last_use_at, null);
+  assert.equal(u.signal_lines_24h, 0);
+  deleteRule(confirmed.id);
+  for (const r of listRules()) deleteRule(r.id);
 });
