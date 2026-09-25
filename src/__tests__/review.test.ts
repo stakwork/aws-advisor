@@ -20,8 +20,20 @@ test("disk forecast: a steady climb gives days to full; flat disks give none", (
   assert.ok(Math.abs(f.slope_pct_day - 2) < 1e-9);
   assert.ok(Math.abs(f.days_to_full! - 6) < 1e-6, `days to full ${f.days_to_full}`);
   assert.ok(f.r2 > 0.99);
+  assert.equal(f.target_pct, 90);
   assert.equal(diskForecast(Array.from({ length: 10 }, (_, i) => day(i)))!.days_to_full, null);
   assert.equal(diskForecast([day(0), day(1)]), null);
+});
+
+test("disk forecast: past 90 % the target is 100 %, and a slow climb on a big disk still gives days to full", () => {
+  // a 1 TB disk at 97 % growing 0.3 GB a day: 0.03 points a day, about 100 days left
+  const slow = Array.from({ length: 7 }, (_, i) => day(i, { disk_pct_avg: 97 + i * 0.03 }));
+  const f = diskForecast(slow)!;
+  assert.equal(f.target_pct, 100);
+  assert.ok(Math.abs(f.slope_pct_day - 0.03) < 1e-9);
+  assert.ok(Math.abs(f.days_to_full! - (3 - 6 * 0.03) / 0.03) < 1e-6, `days to full ${f.days_to_full}`);
+  // truly flat past the line: no forecast, the level alert (disk_full) carries it
+  assert.equal(diskForecast(Array.from({ length: 7 }, (_, i) => day(i, { disk_pct_avg: 97 })))!.days_to_full, null);
 });
 
 test("memory pressure, idle containers and spend steps", () => {

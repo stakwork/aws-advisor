@@ -10,6 +10,8 @@ export const REVIEW_MIN_DAYS = 5;
 export const IDLE_MEM_AVG = 40, IDLE_MEM_MAX = 60, IDLE_LOAD_PER_CPU = 0.25, IDLE_CPU_P95 = 20;
 export const PRESSURE_MEM_AVG = 85;
 export const DISK_FULL_PCT = 90, DISK_HORIZON_DAYS = 60, DISK_URGENT_DAYS = 14;
+/** Slope (points a day) under which a disk counts as flat; 0.01 is 0.1 GB a day on a 1 TB disk. */
+export const DISK_MIN_SLOPE = 0.01;
 export const CONTAINER_IDLE_CPU = 0.3;
 
 const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : NaN);
@@ -37,9 +39,9 @@ export function sustainedIdle(rows: DailyRow[], cpuP95: number | null): IdleVerd
   return v;
 }
 
-export interface DiskForecast { slope_pct_day: number; now_pct: number; days_to_full: number | null; r2: number; days: number }
+export interface DiskForecast { slope_pct_day: number; now_pct: number; target_pct: number; days_to_full: number | null; r2: number; days: number }
 
-/** Least-squares line through disk usage per day; days until DISK_FULL_PCT at the current rate, null when flat or falling. */
+/** Least-squares line through disk usage per day; days until DISK_FULL_PCT (or 100 % once past it) at the current rate, null when flat or falling. */
 export function diskForecast(rows: DailyRow[]): DiskForecast | null {
   const pts = rows.map((r, i) => ({ x: i, y: num(r.disk_pct_avg) })).filter((p): p is { x: number; y: number } => p.y != null);
   if (pts.length < REVIEW_MIN_DAYS) return null;
@@ -49,8 +51,9 @@ export function diskForecast(rows: DailyRow[]): DiskForecast | null {
   const ssTot = pts.reduce((s, p) => s + (p.y - my) ** 2, 0); const ssRes = pts.reduce((s, p) => s + (p.y - (icept + slope * p.x)) ** 2, 0);
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 1;
   const now = icept + slope * (n - 1);
-  const daysToFull = slope > 0.05 ? (DISK_FULL_PCT - now) / slope : null;
-  return { slope_pct_day: slope, now_pct: now, days_to_full: daysToFull != null && daysToFull > 0 ? daysToFull : daysToFull != null ? 0 : null, r2, days: n };
+  const target = now >= DISK_FULL_PCT ? 100 : DISK_FULL_PCT;
+  const daysToFull = slope > DISK_MIN_SLOPE ? (target - now) / slope : null;
+  return { slope_pct_day: slope, now_pct: now, target_pct: target, days_to_full: daysToFull != null && daysToFull > 0 ? daysToFull : daysToFull != null ? 0 : null, r2, days: n };
 }
 
 export function memoryPressure(rows: DailyRow[]): { pressure: boolean; days: number; mem_avg: number | null; mem_max: number | null } {

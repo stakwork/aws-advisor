@@ -81,12 +81,13 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
     const df = diskForecast(rows);
     if (df && df.days_to_full != null && df.days_to_full <= DISK_HORIZON_DAYS && df.r2 >= 0.5) {
       const when = df.days_to_full < 1 ? "now" : `in about ${Math.round(df.days_to_full)} days`;
-      const msg = `${name}: root disk ${df.now_pct.toFixed(0)}% and growing ${df.slope_pct_day.toFixed(2)} points a day; full ${when}`;
+      const reaches = df.target_pct === 100 ? "full" : `at ${df.target_pct}%`;
+      const msg = `${name}: root disk ${df.now_pct.toFixed(0)}% and growing ${df.slope_pct_day.toFixed(2)} points a day; ${reaches} ${when}`;
       const sev = df.days_to_full <= DISK_URGENT_DAYS ? "alarm" : "warning";
       insertFinding.run(day, "disk_fill", i.instance_id, name, sev, msg, JSON.stringify({ ...df, instance_type: i.instance_type }));
       count("disk_fill");
       if (sev === "alarm" && alertOnce("disk_fill", i.instance_id, msg, { summary: msg, ...df, name })) out.alerts++;
-      recs.push({ rule: "review_disk_fill", title: `Clean up or grow the root volume of ${name}: full ${when} at the current rate`, resource: i.instance_id, resourceName: name, actionType: "other", estMonthlySaving: 0, tier: "report", confidence: Math.min(0.95, df.r2),
+      recs.push({ rule: "review_disk_fill", title: `Clean up or grow the root volume of ${name}: ${reaches} ${when} at the current rate`, resource: i.instance_id, resourceName: name, actionType: "other", estMonthlySaving: 0, tier: "report", confidence: Math.min(0.95, df.r2),
         rationale: `${df.days} days of probes: root disk at ${df.now_pct.toFixed(0)}%, rising ${df.slope_pct_day.toFixed(2)} percentage points a day (fit r² ${df.r2.toFixed(2)}). Find what grows (logs, docker images, snapshots of a chain) before adding storage.`, evidence: df });
     }
     // idle containers
