@@ -88,6 +88,13 @@ const Domains = ({ list, empty = "No Route 53 record in this account points here
   </Group>
 );
 
+/** The first few Route 53 names that lead to a row, for the list; the detail's Domains group has them all with how they get there. */
+const DomainLine = ({ list, max = 3 }: { list?: any[] | null; max?: number }) => {
+  if (!list?.length) return null;
+  const names = [...new Set(list.map((d: any) => String(d.name)))];
+  return <div className="text-xs text-sky-300/80" title={names.join("\n")}>{names.slice(0, max).join(" · ")}{names.length > max ? <span className="text-zinc-500"> +{names.length - max} more</span> : null}</div>;
+};
+
 /** Links to the Findings and Recommendations pages filtered on one resource, with the counts the inventory stored. */
 const Related = ({ id, recs, findings, list }: { id: string; recs: number; findings: number; list?: any[] }) => (
   <Group title="Findings and recommendations">
@@ -365,7 +372,7 @@ export default function Inventory() {
                   ) : null;
                   if (tab === "ec2") return (<Fragment key={id}>
                     <tr key={id} onClick={() => pick(id)} className={cls}>
-                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name || <span className="text-zinc-500">(no name)</span>}</span>{r.pool_kind ? <PoolBadge kind={r.pool_kind} name={r.pool} /> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{id}{r.private_ip ? ` · ${r.private_ip}` : ""}</div></Td>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name || <span className="text-zinc-500">(no name)</span>}</span>{r.pool_kind ? <PoolBadge kind={r.pool_kind} name={r.pool} /> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{id}{r.private_ip ? ` · ${r.private_ip}` : ""}</div><DomainLine list={r.domains} /></Td>
                       <Td className="whitespace-nowrap">{r.instance_type}</Td>
                       <Td><Badge>{r.state}</Badge></Td>
                       <Td><SsmBadge status={r.ssm_status} platform={r.ssm_platform} /></Td>
@@ -552,6 +559,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
           ["Security groups", net.security_groups?.length ? net.security_groups.map((g: any) => `${g.GroupName || ""} (${g.GroupId})`).join(", ") : null],
         ]} />
       </Group>
+      <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
 
       <Group title={`Storage · ${gb(st.ebs_gb)}`}>
         <Dl rows={[["Root device", st.root_device_name && `${st.root_device_name} (${st.root_device_type})`]]} />
@@ -622,7 +630,6 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
 
       <Group title="Tags"><Tags tags={s.tags} /></Group>
 
-      <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
       <Related id={d.instance_id} recs={d.open_recs} findings={d.findings_count ?? 0} list={d.recommendations} />
       {d.findings_run_id && d.findings?.length > 0 && (
         <ul className="mt-1 space-y-0.5 text-sm">{d.findings.map((f: any) => <li key={f.id} className="flex gap-2"><Badge>{f.status}</Badge><span className="min-w-0 truncate" title={f.reason || ""}>{f.control_title || f.control_id}{f.reason ? `: ${f.reason}` : ""}</span></li>)}</ul>
