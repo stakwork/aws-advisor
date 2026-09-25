@@ -162,7 +162,7 @@ test("real run, everything already exists: every step is skipped or refreshed, n
   assert.ok(r.out.includes("aws-advisor already has 1 access key(s): none created"));
   assert.ok(r.out.includes("[aws-advisor-user] on this machine already holds a key: kept"));
   assert.ok(r.out.includes("ok: arn:aws:sts::123456789012:assumed-role/aws-advisor-read/botocore-session-1"));
-  assert.ok(r.out.includes("already up to date (aws-advisor/1.2): arn:aws:ssm:us-east-1:123456789012:document/AwsAdvisorProbe"));
+  assert.ok(r.out.includes("already up to date (aws-advisor/1.3): arn:aws:ssm:us-east-1:123456789012:document/AwsAdvisorProbe"));
   if (hasPython) {
     assert.ok(r.out.includes("Steampipe: connected to account 123456789012"));
     assert.ok(r.out.includes("1 ok, 0 missing, 0 error, 1 skipped"));

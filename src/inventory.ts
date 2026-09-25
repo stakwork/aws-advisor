@@ -423,7 +423,9 @@ export function ec2Detail(instanceId: string) {
   const recommendations = db.prepare("select id, rule, source, title, action_type, est_monthly_saving, tier, confidence, status, decided_at, decided_by, decision_reason, run_id, updated_at from recommendations where resource = ? or resource like ? order by updated_at desc")
     .all(instanceId, `%${instanceId}%`);
   const probes = instanceMetrics(instanceId, 20).map((p) => ({ id: p.id, collected_at: p.collected_at, summary: summarizeProbe(p.data), data: p.data }));
-  return { ...row, findings_count: row.findings, snapshot: safeJson(row.snapshot), findings_run_id: latest?.id ?? null, findings, recommendations, probes };
+  // used and free per attached volume, as the latest probe credited them (src/ebs_inventory.ts)
+  const volume_usage = Object.fromEntries((db.prepare("select volume_id, total_bytes, used_bytes, used_pct, usage_at from inventory_ebs where instance_id = ? and used_pct is not null").all(instanceId) as any[]).map((v) => [v.volume_id, v]));
+  return { ...row, findings_count: row.findings, snapshot: safeJson(row.snapshot), findings_run_id: latest?.id ?? null, findings, recommendations, probes, volume_usage };
 }
 
 export interface SimpleFilter { q?: string; sort?: string; gone?: boolean }

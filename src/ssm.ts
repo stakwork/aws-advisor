@@ -7,14 +7,15 @@ import { NoSdkCredentials, credentialRemedy } from "./aws_config.js";
 import { S, credentialsMeta, query, sdkCredentials } from "./steampipe.js";
 import { checkProbeQuota } from "./quota.js";
 import { checkDiskLevels } from "./disk_alerts.js";
+import { applyProbeDisks } from "./ebs_inventory.js";
 import { checkHostLevels } from "./host_alerts.js";
 
 /**
  * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
- * it only reads /proc, df and ps, and prints exactly one JSON object as its last line. Tested on
+ * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
  * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.2";
+export const PROBE_VERSION = "aws-advisor/1.3";
 
 export const PROBE_SCRIPT = [
   "# aws-advisor probe v1 (read-only). Prints exactly one JSON object on the last line.",
@@ -31,9 +32,20 @@ export const PROBE_SCRIPT = [
   "read l1 l5 l15 rest < /proc/loadavg",
   "cpus=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo)",
   "uptime_s=$(cut -d. -f1 /proc/uptime)",
-  "disks=$(df -P -k 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|udev|overlay|squashfs|shm|none)$/ && $1 !~ /^\\/dev\\/loop/ && $2 > 0 {",
-  "  m=$6; gsub(/\\\\/,\"\\\\\\\\\",m); gsub(/\"/,\"\\\\\\\"\",m); f=$1; gsub(/\"/,\"\\\\\\\"\",f);",
-  "  printf \"%s{\\\"mount\\\":\\\"%s\\\",\\\"filesystem\\\":\\\"%s\\\",\\\"total_bytes\\\":%.0f,\\\"used_bytes\\\":%.0f,\\\"used_pct\\\":%.1f}\", (n++?\",\":\"\"), m, f, $2*1024, $3*1024, $3*100/$2 }')",
+  "# Which disk a mounted filesystem sits on: the partition's parent (or a device-mapper volume's single slave), then",
+  "# the EBS volume id from the NVMe serial on Nitro (\"vol0123...\" -> \"vol-0123...\"); Xen disks have no serial, so",
+  "# only the device name (xvda) is reported and the advisor matches it to the attachment (/dev/sda1).",
+  "blk_of() { d=$(basename \"$(readlink -f \"$1\" 2>/dev/null || printf '%s' \"$1\")\"); [ -e \"/sys/class/block/$d\" ] || return 0",
+  "  [ -e \"/sys/class/block/$d/partition\" ] && d=$(basename \"$(dirname \"$(readlink -f \"/sys/class/block/$d\")\")\")",
+  "  if [ \"$(ls \"/sys/class/block/$d/slaves\" 2>/dev/null | wc -l | tr -d ' ')\" = 1 ]; then d=$(ls \"/sys/class/block/$d/slaves\"); [ -e \"/sys/class/block/$d/partition\" ] && d=$(basename \"$(dirname \"$(readlink -f \"/sys/class/block/$d\")\")\"); fi",
+  "  printf '%s' \"$d\"; }",
+  "vol_of() { s=$(tr -d ' ' < \"/sys/class/block/$1/device/serial\" 2>/dev/null); case \"$s\" in vol*) printf 'vol-%s' \"${s#vol}\";; esac; }",
+  "jstr() { if [ -n \"$1\" ]; then printf '\"%s\"' \"$(esc \"$1\")\"; else printf 'null'; fi; }",
+  "n=\"\"",
+  "disks=$(df -P -k 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|udev|overlay|squashfs|shm|none)$/ && $1 !~ /^\\/dev\\/loop/ && $2 > 0 {print $1 \"\\t\" $2 \"\\t\" $3 \"\\t\" $6}' | while IFS=\"$(printf '\\t')\" read -r f t u m; do",
+  "  b=$(blk_of \"$f\"); v=\"\"; [ -n \"$b\" ] && v=$(vol_of \"$b\")",
+  "  printf '%s{\"mount\":%s,\"filesystem\":%s,\"device\":%s,\"volume_id\":%s,\"total_bytes\":%.0f,\"used_bytes\":%.0f,\"used_pct\":%s}' \"$n\" \"$(jstr \"$m\")\" \"$(jstr \"$f\")\" \"$(jstr \"$b\")\" \"$(jstr \"$v\")\" \"$((t*1024))\" \"$((u*1024))\" \"$(awk -v u=\"$u\" -v t=\"$t\" 'BEGIN{printf \"%.1f\", u*100/t}')\"; n=\",\"",
+  "done)",
   "pslist() { ps -eo pid,pcpu,pmem,rss,comm --sort=\"$1\" 2>/dev/null | awk 'NR>1 && NR<=6 {",
   "  c=$5; for(i=6;i<=NF;i++) c=c\" \"$i; gsub(/\\\\/,\"\\\\\\\\\",c); gsub(/\"/,\"\\\\\\\"\",c);",
   "  printf \"%s{\\\"pid\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"mem_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"command\\\":\\\"%s\\\"}\", (n++?\",\":\"\"), $1, $2, $3, $4*1024, c }'; }",
@@ -89,7 +101,8 @@ export function probeDocumentInfo() {
   };
 }
 
-export interface ProbeDisk { mount: string; filesystem: string; total_bytes: number; used_bytes: number; used_pct: number }
+/** device is the whole disk in sysfs terms (nvme0n1, xvda); volume_id the EBS volume read from the NVMe serial, null on Xen and for anything that is not EBS. Both absent from probes before 1.3. */
+export interface ProbeDisk { mount: string; filesystem: string; device?: string | null; volume_id?: string | null; total_bytes: number; used_bytes: number; used_pct: number }
 export interface ProbeProcess { pid: number; cpu_pct: number; mem_pct: number; rss_bytes: number; command: string }
 export interface ProbeContainer { name: string; image: string; state: string; running_for: string; cpu_pct: number | null; mem_bytes: number; mem_pct: number | null }
 
@@ -152,7 +165,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
   try { raw = JSON.parse(line); } catch (e: any) { throw new ProbeError("bad_output", `probe output is not valid JSON: ${e.message}`); }
   if (typeof raw?.probe !== "string" || !raw.probe.startsWith("aws-advisor/")) throw new ProbeError("bad_output", "probe output is not from the advisor probe");
   const proc = (p: any): ProbeProcess => ({ pid: num(p.pid, "pid"), cpu_pct: num(p.cpu_pct, "cpu_pct"), mem_pct: num(p.mem_pct, "mem_pct"), rss_bytes: num(p.rss_bytes, "rss_bytes"), command: String(p.command ?? "") });
-  const disk = (d: any): ProbeDisk => ({ mount: String(d.mount ?? ""), filesystem: String(d.filesystem ?? ""), total_bytes: num(d.total_bytes, "total_bytes"), used_bytes: num(d.used_bytes, "used_bytes"), used_pct: num(d.used_pct, "used_pct") });
+  const disk = (d: any): ProbeDisk => ({ mount: String(d.mount ?? ""), filesystem: String(d.filesystem ?? ""), device: d.device == null ? null : String(d.device), volume_id: d.volume_id == null ? null : String(d.volume_id), total_bytes: num(d.total_bytes, "total_bytes"), used_bytes: num(d.used_bytes, "used_bytes"), used_pct: num(d.used_pct, "used_pct") });
   const m = raw.memory || {};
   const l = raw.load || {};
   return {
@@ -299,6 +312,7 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
     const collectedAt = data.collected_at;
     const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data)).lastInsertRowid);
     try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }
+    try { applyProbeDisks(instanceId, data.disks, collectedAt); } catch (e: any) { console.error(`[probe] disk usage not credited to volumes for ${instanceId}: ${e?.message || e}`); }
     try { const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null; checkDiskLevels(instanceId, name, data.disks as any, collectedAt); checkHostLevels(instanceId, name, id, collectedAt, data); } catch (e: any) { console.error(`[probe] disk or host levels not checked for ${instanceId}: ${e?.message || e}`); }
     return { id, instance_id: instanceId, collected_at: collectedAt, data };
   } finally {
