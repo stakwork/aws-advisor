@@ -364,7 +364,7 @@ api.post("/inventory/refresh", async (_req, res) => {
 api.get("/inventory/summary", (_req, res) => res.json(inventorySummary()));
 
 api.get("/inventory/ec2", (req, res) => {
-  res.json(listEc2({ state: str(req.query.state), ssm: str(req.query.ssm), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }));
+  res.json(withDomains(listEc2({ state: str(req.query.state), ssm: str(req.query.ssm), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["ec2", "instance_id"]));
 });
 
 api.get("/inventory/ec2/:id", (req, res) => {
