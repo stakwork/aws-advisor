@@ -3,7 +3,7 @@ import { useNavigate, Link, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
 import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
-import { Badge, Button, Card, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
+import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 
@@ -829,6 +829,49 @@ function EbsDetail({ d }: { d: any }) {
   );
 }
 
+/** The usage analysis: bytes by age, what is read, and the lifecycle rules the advisor proposes (src/s3_usage.ts). */
+function S3UsageBlock({ name }: { name: string }) {
+  const [u, setU] = useState<any>(null);
+  const [state, setState] = useState<"loading" | "none" | "ok" | "error">("loading");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const load = () => { setState("loading"); api(`/inventory/s3/${encodeURIComponent(name)}/usage`).then((x) => { setU(x); setState("ok"); }).catch((e) => { setState(/not analysed/.test(e.message) ? "none" : "error"); setErr(e.message); }); };
+  useEffect(() => { load(); }, [name]);
+  const refresh = async () => { setBusy(true); setErr(""); try { setU(await api(`/inventory/s3/${encodeURIComponent(name)}/usage/refresh`, { method: "POST", body: "{}" })); setState("ok"); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
+  const gbOf = (b: number) => (b / 1e9).toFixed(2);
+  return (
+    <Group title="Usage and lifecycle" action={<Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={refresh} disabled={busy} title="list up to ten thousand keys, the multipart uploads, the versions, the rules and the request metrics">{busy ? "Analysing…" : u ? "Analyse again" : "Analyse"}</Button>}>
+      {state === "loading" ? <div className="text-sm text-zinc-500">…</div>
+        : state === "none" ? <div className="text-sm text-zinc-500">Not analysed yet. Buckets above the size threshold (Settings › Auto-actions) are analysed after the daily S3 inventory; press Analyse for this one now.</div>
+        : state === "error" ? <div className="text-sm text-red-300">{err}</div>
+        : (
+          <div className="space-y-2 text-sm">
+            <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-zinc-400">
+              <span>sampled <span className="text-zinc-200">{u.sample.objects.toLocaleString()}</span> objects{u.sample.truncated ? " (truncated, scaled to the bucket)" : ""} on {when(u.collected_at)}</span>
+              <span>multipart left incomplete <span className="text-zinc-200">{u.multipart.uploads}</span></span>
+              {u.noncurrent && <span>noncurrent versions <span className="text-zinc-200">{u.noncurrent.versions.toLocaleString()}</span> ({gbOf(u.noncurrent.bytes)} GB)</span>}
+              <span>reads {u.requests ? <><span className="text-zinc-200">{u.requests.get_per_day ?? "?"}</span> GET/day over {u.requests.days} days</> : <span title="the executor's S3 request metrics action enables them">unknown: no request metrics</span>}</span>
+              {u.small_objects_bytes_share >= 0.5 && <span>{Math.round(u.small_objects_bytes_share * 100)}% of bytes in objects under 128 KB</span>}
+            </div>
+            <table className="w-full text-xs"><thead><tr className="text-zinc-500"><th className="text-left font-normal">Standard bytes by age</th>{["0-30", "30-90", "90-365", "365+"].map((a) => <th key={a} className="text-right font-normal">{a} days</th>)}</tr></thead>
+              <tbody><tr className="border-t border-zinc-800/60"><td className="py-0.5 text-zinc-400">GB</td>{["0-30", "30-90", "90-365", "365+"].map((a) => <td key={a} className="text-right">{gbOf(u.standard_by_age[a].bytes)}</td>)}</tr></tbody></table>
+            {u.by_prefix?.length > 1 && <div className="text-xs text-zinc-500">Top prefixes: {u.by_prefix.slice(0, 5).map((p: any) => `${p.prefix} ${gbOf(p.bytes)} GB${p.old_bytes ? ` (${gbOf(p.old_bytes)} old)` : ""}`).join(" · ")}</div>}
+            {u.lifecycle?.length > 0 && <div className="text-xs text-zinc-500">Rules on the bucket: {u.lifecycle.map((r: any) => `${r.id || "(no id)"} ${r.status}${r.transitions.length ? ` → ${r.transitions.map((t: any) => `${t.storage_class}@${t.days}d`).join(", ")}` : ""}${r.expiration_days ? ` expire@${r.expiration_days}d` : ""}${r.noncurrent_expiration_days ? ` noncurrent@${r.noncurrent_expiration_days}d` : ""}${r.abort_multipart_days ? ` abort-multipart@${r.abort_multipart_days}d` : ""}`).join(" · ")}</div>}
+            {u.proposal.rules.length ? (
+              <div className="rounded border border-zinc-800 bg-zinc-950/60 p-2">
+                <div className="text-zinc-200">Proposed: {u.proposal.rules.length} rule{u.proposal.rules.length > 1 ? "s" : ""}{u.proposal.est_usd_month ? <span className="ml-2 text-emerald-300">≈ {usd(u.proposal.est_usd_month, 2)}/mo</span> : null} <span className="text-zinc-500">· also a recommendation (tier approve)</span></div>
+                <ul className="mt-1 space-y-1 text-xs">{u.proposal.rules.map((r: any) => <li key={r.id}><span className="font-mono text-zinc-300">{r.id.replace(/^aws-advisor-/, "")}</span>{r.est_usd_month ? <span className="ml-1 text-emerald-300">≈ {usd(r.est_usd_month, 2)}/mo</span> : null}<div className="text-zinc-500">{r.why}</div></li>)}</ul>
+                <details className="mt-1 text-xs"><summary className="cursor-pointer text-zinc-500">put-bucket-lifecycle-configuration JSON <CopyButton text={JSON.stringify(u.proposal.lifecycle, null, 2)} /></summary><Code className="max-h-64 overflow-auto">{JSON.stringify(u.proposal.lifecycle, null, 2)}</Code></details>
+              </div>
+            ) : <div className="text-xs text-zinc-500">Nothing to propose.</div>}
+            {u.proposal.notes?.length > 0 && <div className="text-xs text-zinc-500">{u.proposal.notes.join(" · ")}</div>}
+            {err && <div className="text-xs text-red-300">{err}</div>}
+          </div>
+        )}
+    </Group>
+  );
+}
+
 function S3Detail({ d }: { d: any }) {
   const sizes: Record<string, number> = d.sizes || {};
   const PRICE: Record<string, number> = { StandardStorage: 0.023, StandardIAStorage: 0.0125, OneZoneIAStorage: 0.01, IntelligentTieringFAStorage: 0.023, IntelligentTieringIAStorage: 0.0125, IntelligentTieringAAStorage: 0.004, IntelligentTieringAIAStorage: 0.004, IntelligentTieringDAAStorage: 0.00099, GlacierInstantRetrievalStorage: 0.004, GlacierStorage: 0.0036, DeepArchiveStorage: 0.00099, ReducedRedundancyStorage: 0.023 };
@@ -836,6 +879,7 @@ function S3Detail({ d }: { d: any }) {
     <>
       <h2 className="text-base font-medium text-zinc-100">{d.name}</h2>
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.region}</Badge>{d.public ? <Badge>public</Badge> : null}{d.versioning ? <Badge>versioned</Badge> : null}<span className="text-zinc-500">created {when(d.created)}</span></div>
+      <S3UsageBlock name={d.name} />
       <Group title="Storage by class">
         {Object.keys(sizes).length === 0 ? <div className="text-sm text-zinc-500">No storage metrics yet (CloudWatch publishes bucket sizes once a day; empty buckets have none).</div> : (
           <table className="w-full text-sm"><thead><tr className="text-zinc-500"><th className="text-left font-normal">Class</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">$ / GB-mo</th><th className="text-right font-normal">$ / mo</th></tr></thead>

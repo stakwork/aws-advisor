@@ -17,6 +17,7 @@ import { refreshTrail } from "./trail.js";
 import { runVerifications } from "./verify.js";
 import { refreshCommitments } from "./commitments.js";
 import { refreshS3Inventory } from "./s3_inventory.js";
+import { s3UsagePass } from "./s3_usage.js";
 import { dispatchNotifications } from "./notify.js";
 import { dispatchActionNotifications, runExecutorPass } from "./executor.js";
 
@@ -90,6 +91,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     try { await refreshLogs((l) => console.log(`[logs] ${l}`)); out.push("logs"); } catch (e: any) { console.error(`[logs] failed: ${e?.message || e}`); out.push(`logs failed: ${e?.message || e}`); }
     try { await refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`)); out.push("cloudtrail"); } catch (e: any) { console.error(`[cloudtrail] failed: ${e?.message || e}`); out.push(`cloudtrail failed: ${e?.message || e}`); }
     try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
+    try { const r = await s3UsagePass((l) => console.log(`[s3-usage] ${l}`)); out.push(`s3 usage ${r.analysed.length}/${r.candidates}`); } catch (e: any) { console.error(`[s3-usage] failed: ${e?.message || e}`); out.push(`s3 usage failed: ${e?.message || e}`); }
     return out.join(", ");
   } },
   actCron: { label: "Auto-actions pass", run: async () => {

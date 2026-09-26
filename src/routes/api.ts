@@ -38,7 +38,8 @@ import { TIMELINE_KINDS, timelineFor } from "../timeline.js";
 import { cli } from "../step_runner.js";
 import { dispatchNotifications, noteDecision, notifyAlert, notifyStatus, queueRecommendationEvent, resendNotification, sendSphinx, setWatch, watchState } from "../notify.js";
 import { latestRdsLoad, refreshRdsLoad } from "../rds_load.js";
-import { SIGNAL_KINDS, confirmRule, deleteRule, listRules, upsertRule } from "../signal_rules.js";
+import { confirmRule, deleteRule, listRules, signalKinds, upsertRule } from "../signal_rules.js";
+import { latestS3Usage, refreshS3Usage, s3UsagePass } from "../s3_usage.js";
 import { ask, createThread } from "../chat.js";
 import { describeError } from "../permissions.js";
 
@@ -349,7 +350,7 @@ api.post("/instances/:id/probe", async (req, res) => {
 });
 
 // ---- use signals: which log patterns count as a person using the service, per image (src/signal_rules.ts) ----
-api.get("/signal-rules", (_req, res) => res.json({ rules: listRules(), kinds: SIGNAL_KINDS }));
+api.get("/signal-rules", (_req, res) => res.json({ rules: listRules(), kinds: signalKinds() }));
 api.put("/signal-rules", (req, res) => {
   try { res.json({ rule: upsertRule({ image_pattern: req.body?.image_pattern, kind: req.body?.kind, verdict: req.body?.verdict, note: req.body?.note ?? null, decided_by: typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui", status: "confirmed" }) }); }
   catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
@@ -426,6 +427,10 @@ api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ q: 
 api.get("/inventory/ebs", (req, res) => res.json(listEbs({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));
 api.get("/inventory/s3", (req, res) => res.json(withDomains(listS3({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["s3", "name"])));
 api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await refreshS3Inventory()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+// the usage analysis and the lifecycle rules that fit (src/s3_usage.ts)
+api.get("/inventory/s3/:name/usage", (req, res) => { const u = latestS3Usage(String(req.params.name)); u ? res.json(u) : res.status(404).json({ error: "not analysed yet" }); });
+api.post("/inventory/s3/:name/usage/refresh", async (req, res) => { try { res.json(await refreshS3Usage(String(req.params.name), (l) => console.log(`[s3-usage] ${l}`))); } catch (e: any) { res.status(500).json({ error: describeError(e, `s3 usage ${req.params.name} (s3:ListBucket)`) }); } });
+api.post("/inventory/s3/usage/run", async (_req, res) => { try { res.json(await s3UsagePass((l) => console.log(`[s3-usage] ${l}`))); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 api.get("/inventory/route53", (req, res) => res.json(listRoute53({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), zone: str(req.query.zone), link: str(req.query.link), type: str(req.query.type) })));
 api.get("/inventory/route53/zones", (req, res) => res.json(listRoute53Zones(flag(req.query.gone))));
 api.get("/inventory/route53/resource/:kind/:id", (req, res) => res.json(domainsFor(String(req.params.kind), String(req.params.id))));

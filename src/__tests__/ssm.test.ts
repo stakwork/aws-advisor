@@ -166,7 +166,7 @@ const probe14 = () => JSON.stringify({
 
 test("probe 1.4: the activity section parses, is tolerant, and the use summary picks the newest real-use signal", () => {
   const p = parseProbeOutput(`noise\n${probe14()}`);
-  assert.equal(PROBE_VERSION, "aws-advisor/1.4");
+  assert.equal(PROBE_VERSION, "aws-advisor/1.5");
   assert.equal(p.containers?.[0].net_rx_bytes, 5000);
   assert.equal(p.containers?.[1].net_rx_bytes, null, "a container without NetIO reports null, not zero");
   const a = p.activity!;

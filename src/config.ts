@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import cron from "node-cron";
 import { ROLE_ARN_RE } from "./aws_config.js";
+import { DEFAULT_SIGNALS_STRING, parseSignals, serialiseSignals } from "./signals.js";
 
 const port = Number(process.env.PORT || 9034);
 
@@ -50,6 +51,7 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "memAlarmPct", env: "MEM_ALARM_PCT", kind: "number", def: "95", min: 60, max: 100, group: "Probe pass", label: "Memory alarm at (%)", help: "" },
   { key: "swapWarnPct", env: "SWAP_WARN_PCT", kind: "number", def: "25", min: 1, max: 100, group: "Probe pass", label: "Swap in use warning at (%)", help: "Of the swap space; any swap use means memory is short." },
   { key: "loadPerCore", env: "LOAD_PER_CORE", kind: "number", def: "1.5", min: 0.5, max: 10, group: "Probe pass", label: "Load per core, 15 min", help: "The 15-minute load average divided by vCPUs at which the box counts as saturated." },
+  { key: "probeSignals", env: "PROBE_SIGNALS", kind: "string", def: DEFAULT_SIGNALS_STRING, group: "Probe pass", label: "Use-signal patterns", help: "name=regex entries joined by ;; (POSIX ERE, case-insensitive), matched against each container's log by the probe; the names are the kinds the drawer chips and the rules speak of. Passed to the SSM document as its signals parameter on every probe, so no document update is needed to revise them. Which kinds count per image is decided by the rules in the EC2 drawer." },
   { key: "commitmentMinUtilPct", env: "COMMITMENT_MIN_UTIL_PCT", kind: "number", def: "80", min: 1, max: 100, group: "Schedules", label: "Commitment utilisation warning under (%)", help: "Savings Plan or reservation used less than this over 30 days: capacity paid for and not used." },
   { key: "lambdaErrorPct", env: "LAMBDA_ERROR_PCT", kind: "number", def: "5", min: 0.1, max: 100, group: "Probe pass", label: "Lambda error rate warning (%)", help: "Share of invocations that failed over 30 days, for functions with at least 100 invocations; closes at half the threshold." },
   { key: "sphinxBotUrl", env: "SPHINX_BOT_URL", kind: "url", def: "", group: "Notifications (Sphinx)", label: "Bot endpoint", help: "The swarm's bot URL the broadcast is posted to (the same one Hive and the swarm checker use). Empty = notifications off." },
@@ -66,6 +68,8 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "actCron", env: "ACT_CRON", kind: "cron", def: "45 * * * *", group: "Auto-actions", label: "Executor pass", help: "Hourly by default, fifteen minutes before the hour, so a capacity change is in place before the hour it is for. off = disabled." },
   { key: "actAcuFloor", env: "ACT_ACU_FLOOR", kind: "number", def: "0.5", min: 0.5, max: 64, group: "Auto-actions", label: "Lowest Serverless v2 minimum (ACU)", help: "The executor moves a cluster's minimum capacity between this floor and the minimum you configured; it never goes below this, never above yours, and never touches the maximum." },
   { key: "actMaxPerPass", env: "ACT_MAX_PER_PASS", kind: "number", def: "10", min: 1, max: 200, group: "Auto-actions", label: "Changes per pass", help: "At most this many changes in one pass, across every action." },
+  { key: "actLogRetentionDays", env: "ACT_LOG_RETENTION_DAYS", kind: "number", def: "90", min: 1, max: 3653, group: "Auto-actions", label: "Retention for log groups without one (days)", help: "Put on every group that has no retention policy (snapped to a value CloudWatch accepts). An existing retention is never lowered. Events older than this are purged, so keep it long." },
+  { key: "actS3MinGb", env: "ACT_S3_MIN_GB", kind: "number", def: "20", min: 1, max: 100000, group: "Auto-actions", label: "S3 buckets analysed from (GB)", help: "Buckets at or above this get request metrics enabled by the executor and a lifecycle analysis (Inventory › S3, recommendations)." },
   { key: "actSnapshotMinAgeDays", env: "ACT_SNAPSHOT_MIN_AGE_DAYS", kind: "number", def: "90", min: 30, max: 3650, group: "Auto-actions", label: "Archive snapshots older than (days)", help: "EBS snapshots at least this old, whose volume is gone or that are the only snapshot of their volume, move to the Archive tier (a quarter of the price, 24 to 72 hours to restore)." },
   { key: "agentRunsPerHour", env: "AGENT_RUNS_PER_HOUR", kind: "number", def: "6", min: 1, max: 100, group: "Quotas", label: "Agent runs per hour", help: "Findings batches, investigations, resolutions and observations together; each costs a few USD. A hit raises a quota alert and refuses the run." },
   { key: "agentRunsPerDay", env: "AGENT_RUNS_PER_DAY", kind: "number", def: "20", min: 1, max: 500, group: "Quotas", label: "Agent runs per day", help: "" },
@@ -103,6 +107,7 @@ export function validateRuntime(key: string, value: string): string {
     default:
       if (key === "notifyQuietHours" && v && !/^([01]?\d|2[0-3])-([01]?\d|2[0-3])$/.test(v)) throw new Error('HH-HH, e.g. "22-07", or empty');
       if (key === "actRoleArn" && v && (!ROLE_ARN_RE.test(v) || /\s/.test(v))) throw new Error("arn:aws:iam::<12 digits>:role/<name>, or empty");
+      if (key === "probeSignals") return serialiseSignals(parseSignals(v));
       if (v.length > 500) throw new Error("too long"); return v;
   }
 }
@@ -190,6 +195,10 @@ export const config = {
   get actAcuFloor(): number { return rtNum("actAcuFloor"); },
   get actMaxPerPass(): number { return rtNum("actMaxPerPass"); },
   get actSnapshotMinAgeDays(): number { return rtNum("actSnapshotMinAgeDays"); },
+  get actLogRetentionDays(): number { return rtNum("actLogRetentionDays"); },
+  get actS3MinGb(): number { return rtNum("actS3MinGb"); },
+  /** The use-signal patterns as the probe takes them (validated; the default list when the saved value is broken). */
+  get probeSignals(): string { try { return serialiseSignals(parseSignals(rt("probeSignals"))); } catch { return DEFAULT_SIGNALS_STRING; } },
   get agentRunsPerHour(): number { return rtNum("agentRunsPerHour"); },
   get agentRunsPerDay(): number { return rtNum("agentRunsPerDay"); },
   get probesPerHour(): number { return rtNum("probesPerHour"); },

@@ -956,11 +956,11 @@ timestamps so nothing from the logs leaves the instance except the last three li
 | signal | how the probe reads it | what it says |
 | --- | --- | --- |
 | per running container (up to 20): log lines in the last 24 h, the last line's time, error and warning counts | `docker logs --since 24h --tail 2000 --timestamps` | a container that logged nothing but heartbeat since it started is not serving anyone |
-| **use signals** per container: lines that look like a human did something, matched against nine named patterns (`login`, `auth`, `payment`, `message`, `join`, `upload`, `write_request`, `websocket`, `subscribe`), minus health checks, pings, metrics and stack traces; the count per pattern and up to five recent distinct matched lines | the `SIGS` / `HB_RE` patterns in the script; which patterns *count* is decided per image in the advisor, see [Tuning the use signals](#tuning-the-use-signals) | `signal_lines` and `last_signal_at` are the "last real use" of that container |
+| **use signals** per container: lines that look like a human did something, matched against named patterns (`login`, `auth`, `payment`, `message`, `join`, `upload`, `write_request`, `websocket`, `subscribe` by default), minus health checks, pings, metrics and stack traces; the count per pattern and up to five recent distinct matched lines | the patterns are the SSM document's `signals` parameter (probe 1.5), which the advisor fills from **Settings › Probe pass › Use-signal patterns** (`PROBE_SIGNALS`, `name=regex` entries joined by `;;`, POSIX ERE, `src/signals.ts`) on every probe, so revising or adding a pattern is a setting, not a new document; a document from before 1.5 has no parameter and the probe falls back to its built-in list, saying so once in the log. Which patterns *count* is decided per image, see [Tuning the use signals](#tuning-the-use-signals) | `signal_lines` and `last_signal_at` are the "last real use" of that container |
 | restarts since the container started | `docker inspect .RestartCount` | a restart loop (≥ 10) is flagged: a crashing worker, not a busy one |
 | per container network bytes since it started | `docker stats .NetIO` (`net_rx_bytes` / `net_tx_bytes` on the container row) | the difference between probes is that container's traffic; rolled up as `net_bytes_day` |
 | established TCP flows: external (public peers), internal (RFC 1918 peers other than docker bridges), ssh, by destination port, the busiest peer→port pairs, and which container answers on each published port | `/proc/net/nf_conntrack` first (it sees the DNAT'd flows into containers that the host's own sockets do not), else `conntrack -L`, else `ss`; `docker ps` for the port map | an external client connected right now is the strongest "in use" there is, and the drawer says who, to what: `203.0.113.5 → :443 (proxy)` |
-| the front door: requests in 24 h, health checks counted apart, the last non-health request | the log of the first proxy container (image `nginx`, `caddy`, `traefik`, `haproxy`, `*proxy*`, `*ingress*`), else the tail of `/var/log/nginx/access.log` and friends (`last_request_raw` then, since access-log dates are not parsed on the box) | a swarm nobody visits has thousands of health checks and zero requests |
+| the front door: requests in 24 h, health checks counted apart, the last non-health request | the log of the first proxy container (image `nginx`, `caddy`, `traefik`, `haproxy`, `*proxy*`, `*ingress*`), else the tail of `/var/log/nginx/access.log` and friends, whose `25/Sep/2026:10:00:00 +0000` date the advisor parses on arrival (`parseClfDate`) | a swarm nobody visits has thousands of health checks and zero requests |
 | logins: users on the box now, the last login and who | `who`, `last --time-format iso` | somebody working on the box is use too |
 | host interface counters since boot | `/proc/net/dev`, loopback and docker bridges excluded | the drawer shows the difference from the previous probe ("12 MB in the 58 min since the previous probe"), the roll-up the bytes per day; the raw counter is never shown |
 
@@ -1869,7 +1869,15 @@ that failed three times in a day is refused until the next day.
 | action | what it does | when it leaves things alone |
 | --- | --- | --- |
 | Serverless v2 minimum by hour of day (`src/actions/acu_window.ts`) | From the load profile's capacity per UTC hour over fourteen days (`by_hour` in `rds_load_profiles`, p95 per hour), sets an Aurora Serverless v2 cluster's minimum to the floor (`ACT_ACU_FLOOR`, 0.5) before two quiet hours and back to the minimum the owner configured before a working hour or the daily burst. Moves only within [floor, owner's minimum]; an owner's own change to the minimum becomes the new band; the maximum is never touched. Estimate: the band × quiet hours × 0.12 USD/ACU-hour. | no profile or one older than 30 h; fewer than four quiet hours a day; bursts every hour; the cluster busy right now; the owner's minimum already at the floor; `advisor:hands-off`; cluster not `available` |
+| gp3 IOPS trimmed to the 30-day peak (`src/actions/ebs_iops_trim.ts`) | gp3 volumes above the free 3,000 IOPS whose 30-day peak stays under 30 % of what is provisioned (the review's `ebs_overprovisioned_iops`): `ModifyVolume` to twice the peak rounded up to 500, never under 3,000, online. Estimate: the IOPS removed × 0.005 USD/month. EBS allows one modification per volume per six hours, so a recent modification waits and the revert says so. Throughput is left alone (no metrics yet). | fewer than 5 days of metrics, peak above 30 %, a modification in flight or under 6 h old, `advisor:hands-off`, not gp3 any more |
+| Log groups with no retention get one (`src/actions/log_retention.ts`) | every group with no retention policy and at least 100 MB stored: `PutRetentionPolicy` with `ACT_LOG_RETENTION_DAYS` (90, snapped to a value CloudWatch accepts). An existing retention is never lowered. Estimate: the stored GB beyond that many days of ingestion × 0.03 USD. The one action that is not fully reversible: lifting the policy keeps what is left, the events already purged are gone, hence the long default. | groups under 100 MB (unless approved), a retention already set, `advisor:hands-off` |
+| S3 request metrics on the big buckets (`src/actions/s3_request_metrics.ts`) | buckets at or above `ACT_S3_MIN_GB` (20) with no entire-bucket metrics configuration: `PutBucketMetricsConfiguration`, so CloudWatch publishes GetRequests, PutRequests and BytesDownloaded and the [lifecycle analysis](#s3-lifecycle-rules-from-usage) can tell what is read. Costs about 5 USD per bucket per month in CloudWatch metrics (the row says so; no saving is claimed). Reversible in one call. | buckets under the threshold, a configuration already there |
 | EBS snapshots to the Archive tier (`src/actions/snapshot_archive.ts`) | Every completed snapshot the account owns, per region, through the SDK: older than `ACT_SNAPSHOT_MIN_AGE_DAYS` (90), standard tier, not behind an AMI, not AWS Backup's or DLM's, and either the newest remaining standard snapshot of a volume that no longer exists (the chain drains one per pass, newest first, because an archived snapshot becomes a full copy) or the only snapshot of a live volume. `ModifySnapshotTier`; the read-back is `DescribeSnapshotTierStatus`, so the row stays `applied` until the archival completes. Estimate: size × (0.05 − 0.0125) USD/GB-month, a ceiling. Revert is a permanent `RestoreSnapshotTier` (24 to 72 hours). | younger snapshots, AMI-backed, Backup/DLM-managed, `advisor:hands-off`, an older sibling of a gone volume, one of several snapshots of a live volume |
+
+**Approved recommendations as the go-ahead.** An approved recommendation of tier `auto` on a resource (a log
+group without retention, an over-provisioned volume) is picked up by the matching action whatever its own
+thresholds say (`approvedFor` in `src/executor.ts`): the row cites "approved as #id by whom", and once the change
+is read back the recommendation is marked done by the executor, with the decision posted to Sphinx like any other.
 
 **The ledger** (`actions`, `GET /api/actions?status=`): `proposed` (waiting for an apply pass or a click),
 `applied` (the call succeeded, read-back pending), `verified`, `failed`, `refused` (no role, or failing
@@ -1884,6 +1892,39 @@ four sit behind AMIs, six are young and two are siblings on a live volume: nothi
 correct answer and the ledger says so. The next adjustments to add, in this shape: gp3 provisioned IOPS and
 throughput trimmed to the 30-day peak (the review already flags them), log group retention per group from its own
 query history, and parking stopped swarms (see `docs/park-swarms-plan.md`).
+
+## S3 lifecycle rules from usage
+
+The Thrifty finding says a bucket has no lifecycle policy; it cannot say which one it should have. `src/s3_usage.ts`
+looks at how each bucket at or above `ACT_S3_MIN_GB` is used and proposes the rules that fit, after the daily S3
+inventory (`LOGS_CRON`, fifteen buckets a pass, each re-analysed after six days) and on demand (Inventory › S3 ›
+Usage and lifecycle › Analyse, `POST /api/inventory/s3/:name/usage/refresh`, the agent's `s3_usage` tool).
+Read-only: a sampled listing (up to ten pages of a thousand keys, flat, so the top-level prefixes fall out of the
+keys; scaled to the bucket's size when truncated) gives the bytes by age (0-30, 30-90, 90-365, 365+ days) and by
+storage class and the share of bytes in objects under 128 KB; `ListMultipartUploads` the incomplete uploads;
+`ListObjectVersions` (five pages) the noncurrent versions when versioning is on; the lifecycle rules already there;
+and, once the executor has put request metrics on the bucket, the GET and PUT requests and bytes downloaded per
+day over fourteen days. It needs `s3:ListBucket`, `s3:ListBucketVersions`, `s3:ListBucketMultipartUploads` and
+`s3:GetMetricsConfiguration`, in the recommended policy.
+
+`proposeLifecycle` (pure, tested) turns that into rules, each with its reason and its estimate at the class prices:
+
+| observation | rule |
+| --- | --- |
+| incomplete multipart uploads | `AbortIncompleteMultipartUpload` after 7 days (their parts are billed and never listed) |
+| versioning with a gigabyte or more of noncurrent versions | `NoncurrentVersionExpiration` at 90 days |
+| a gigabyte or more of Standard older than 30 days, reads known and near zero (under 10 GET/day or one per thousand objects) | transition to Glacier Instant Retrieval at 90 days (millisecond access, a sixth of the price, 90-day minimum, retrieval per GB) |
+| the same, read more than that | transition to Standard-IA at 30 days (half the price, 0.01 USD/GB per read) |
+| the same, reads unknown (no request metrics yet) | transition to Intelligent-Tiering at 0 days (moves what is untouched for 30 days by itself, no retrieval charge, 0.0025 USD per thousand objects); the reason says request metrics would let the next analysis pick a sharper class |
+
+When 80 % or more of the old bytes sit under one top-level prefix the transition is scoped to it. Over half the
+bytes in objects under 128 KB adds a note: an IA class bills those as 128 KB each, Intelligent-Tiering does not.
+A rule already on the bucket is respected (an existing transition means no new one; an existing abort or
+noncurrent rule likewise) and listed. The result is a recommendation per bucket (`review_s3_lifecycle`, tier
+`approve`, playbook "bucket without a lifecycle policy") whose evidence carries the rules, the usage summary and
+the `put-bucket-lifecycle-configuration` JSON, with the existing enabled rules named so the merge is explicit;
+the S3 drawer shows the same with a copy button. Applying it is a later executor action, once the verifier has
+shown a few of these behaving: transitions carry minimum-storage and retrieval charges, so a person confirms.
 
 ## Security posture
 
@@ -1960,7 +2001,8 @@ What each one is for (✎ = also editable in Settings):
 | ✎ `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
 | ✎ `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `SPEND_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
 | ✎ `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
-| ✎ `ACT_MODE`, `ACT_ROLE_ARN`, `ACT_CRON`, `ACT_ACU_FLOOR`, `ACT_MAX_PER_PASS`, `ACT_SNAPSHOT_MIN_AGE_DAYS` | the executor: `off` / `dry_run` / `apply`, the actuator role it assumes for changes, its rhythm, the lowest Serverless v2 minimum it may set, the cap per pass, the snapshot age | `dry_run`, unset (dry runs only), hourly at :45, 0.5 ACU, 10, 90 days |
+| ✎ `ACT_MODE`, `ACT_ROLE_ARN`, `ACT_CRON`, `ACT_ACU_FLOOR`, `ACT_MAX_PER_PASS`, `ACT_SNAPSHOT_MIN_AGE_DAYS`, `ACT_LOG_RETENTION_DAYS`, `ACT_S3_MIN_GB` | the executor: `off` / `dry_run` / `apply`, the actuator role it assumes for changes, its rhythm, the lowest Serverless v2 minimum it may set, the cap per pass, the snapshot age, the retention put on log groups without one, the bucket size from which request metrics are enabled and the lifecycle analysis runs | `dry_run`, unset (dry runs only), hourly at :45, 0.5 ACU, 10, 90 days, 90 days, 20 GB |
+| ✎ `PROBE_SIGNALS` | other or more use-signal patterns for the probe (`name=regex;;name=regex`) | the nine built-in patterns |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | ✎ `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |
 | ✎ `ALERT_INVESTIGATE` | NAT alerts should be investigated only on request (`manual`) or never (`off`) | `auto` |
@@ -2078,10 +2120,11 @@ stack's auto-update list.
 
 ## Roadmap
 
-1. Executor: done for two standing adjustments (Serverless v2 minimum by hour, snapshots to Archive) with the
-   actuator role, dry run, read-back, revert and the tag-based deny. Next in the same shape: gp3 IOPS and
-   throughput trimming, log retention per group, parking stopped swarms (`docs/park-swarms-plan.md`), and reading
-   approved recommendations of tier `auto` as a source of proposals.
+1. Executor: done for five standing adjustments (Serverless v2 minimum by hour, snapshots to Archive, gp3 IOPS
+   trim, log retention, S3 request metrics) with the actuator role, dry run, read-back, revert, the tag-based deny
+   and approved `auto` recommendations as the go-ahead. Next in the same shape: gp3 throughput (needs throughput
+   metrics in the EBS inventory), applying the S3 lifecycle recommendations, parking stopped swarms
+   (`docs/park-swarms-plan.md`).
 2. Seven-day realized-saving verification from Cost Explorer.
 3. sphinx-swarm images as above.
 4. Cross-link the [graph mirror](#graph-mirror) with the code graph (which repository deploys to which instance).

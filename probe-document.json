@@ -1,6 +1,14 @@
 {
   "schemaVersion": "2.2",
-  "description": "aws-advisor read-only probe aws-advisor/1.4",
+  "description": "aws-advisor read-only probe aws-advisor/1.5",
+  "parameters": {
+    "signals": {
+      "type": "String",
+      "description": "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).",
+      "default": "login=log(ged)? ?in|sign(ed)?[- ]?in;;auth=authenticat|authoriz;;payment=payment|invoice|keysend;;message=sent message|new message|received message;;join=joined;;upload=upload;;write_request=\"(POST|PUT|PATCH|DELETE) ;;websocket=websocket|ws open;;subscribe=subscribe|checkout",
+      "allowedPattern": "^[^'\\r\\n]{1,4000}$"
+    }
+  },
   "mainSteps": [
     {
       "action": "aws:runShellScript",
@@ -56,15 +64,8 @@
           "fi",
           "# ---- activity (probe 1.4): is anyone actually using this box? Counts and timestamps only; log text stays on the box,",
           "# ---- except the last three lines of each container (capped, printable ASCII), shown in the UI and never sent to a model.",
-          "SIGS='login=log(ged)? ?in|sign(ed)?[- ]?in",
-          "auth=authenticat|authoriz",
-          "payment=payment|invoice|keysend",
-          "message=sent message|new message|received message",
-          "join=joined",
-          "upload=upload",
-          "write_request=\"(POST|PUT|PATCH|DELETE) ",
-          "websocket=websocket|ws open",
-          "subscribe=subscribe|checkout'",
+          "# the patterns come from the document parameter `signals` (Settings > Probe pass); the advisor passes the current list on every probe",
+          "SIGS=$(printf '%s' '{{ signals }}' | sed 's/;;/\\n/g')",
           "SIG_RE=$(printf '%s\\n' \"$SIGS\" | cut -d= -f2- | paste -sd'|' -)",
           "HB_RE='(health|ping|pong|heartbeat|keepalive|/metrics|/status|readiness|liveness|ELB-HealthChecker|swarm-checker|UptimeRobot|kube-probe)'",
           "ts_of() { printf '%s' \"$1\" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1; }",

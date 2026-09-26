@@ -9,6 +9,8 @@
  * is what the history, the use summary and the rules see.
  */
 import { db } from "./db.js";
+import { config } from "./config.js";
+import { parseSignals } from "./signals.js";
 
 db.exec(`create table if not exists signal_rules (
   id integer primary key autoincrement,
@@ -22,18 +24,8 @@ db.exec(`create table if not exists signal_rules (
   unique(image_pattern, kind)
 )`);
 
-/** The named patterns the probe script matches (keep in step with SIGS in src/ssm.ts PROBE_SCRIPT). */
-export const SIGNAL_KINDS: Record<string, string> = {
-  login: "a login or sign-in line",
-  auth: "an authentication or authorization line (often machine-to-machine: check the samples)",
-  payment: "a payment, invoice or keysend",
-  message: "a message sent, received or new",
-  join: "someone joined",
-  upload: "an upload",
-  write_request: "a POST, PUT, PATCH or DELETE request line",
-  websocket: "a websocket opening",
-  subscribe: "a subscribe or checkout",
-};
+/** The kinds the probe currently matches (Settings › Probe pass, src/signals.ts): name → what it means. */
+export function signalKinds(): Record<string, string> { return Object.fromEntries(parseSignals(config.probeSignals).map((p) => [p.name, p.description])); }
 export const VERDICTS = ["noise", "signal"] as const;
 export type Verdict = (typeof VERDICTS)[number];
 
@@ -50,7 +42,10 @@ export function validateRule(input: { image_pattern?: unknown; kind?: unknown; v
   const image_pattern = String(input.image_pattern ?? "").trim();
   if (!image_pattern || image_pattern.length > 200 || /[\s"'\\]/.test(image_pattern)) throw new Error("image_pattern: a substring of the image name (no spaces or quotes), e.g. sphinxlightning/sphinx-boltwall");
   const kind = String(input.kind ?? "").trim();
-  if (!(kind in SIGNAL_KINDS)) throw new Error(`kind: one of ${Object.keys(SIGNAL_KINDS).join(", ")}`);
+  const kinds = signalKinds();
+  // a kind from a pattern since removed from the setting may still carry a rule (old probes in the history): accept it when a rule exists
+  const known = kind in kinds || Boolean(db.prepare("select 1 from signal_rules where kind = ? limit 1").get(kind));
+  if (!/^[a-z][a-z0-9_]{0,23}$/.test(kind) || !known) throw new Error(`kind: one of ${Object.keys(kinds).join(", ")}`);
   const verdict = String(input.verdict ?? "").trim() as Verdict;
   if (!VERDICTS.includes(verdict)) throw new Error("verdict: noise or signal");
   const note = input.note == null ? null : String(input.note).trim().slice(0, 500) || null;

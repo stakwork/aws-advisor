@@ -679,6 +679,7 @@ export const RULE_CONTROL: Record<string, string> = {
   idle_instance: "query.idle_instances",
   aurora_storage_tier: "rule.aurora_storage_tier",
   enable_flow_logs: "rule.enable_flow_logs",
+  review_s3_lifecycle: "aws_thrifty.control.buckets_with_no_lifecycle",
 };
 
 /** Origin control of a recommendation: the evidence's `playbook` (the graviton rule sets it), else the rule's control. */

@@ -10,13 +10,14 @@ import { checkDiskLevels } from "./disk_alerts.js";
 import { applyProbeDisks } from "./ebs_inventory.js";
 import { checkHostLevels } from "./host_alerts.js";
 import { effectiveSignals } from "./signal_rules.js";
+import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN } from "./signals.js";
 
 /**
  * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
  * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
  * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.4";
+export const PROBE_VERSION = "aws-advisor/1.5";
 
 export const PROBE_SCRIPT = [
   "# aws-advisor probe v1 (read-only). Prints exactly one JSON object on the last line.",
@@ -67,15 +68,8 @@ export const PROBE_SCRIPT = [
   "fi",
   "# ---- activity (probe 1.4): is anyone actually using this box? Counts and timestamps only; log text stays on the box,",
   "# ---- except the last three lines of each container (capped, printable ASCII), shown in the UI and never sent to a model.",
-  "SIGS='login=log(ged)? ?in|sign(ed)?[- ]?in",
-  "auth=authenticat|authoriz",
-  "payment=payment|invoice|keysend",
-  "message=sent message|new message|received message",
-  "join=joined",
-  "upload=upload",
-  "write_request=\"(POST|PUT|PATCH|DELETE) ",
-  "websocket=websocket|ws open",
-  "subscribe=subscribe|checkout'",
+  "# the patterns come from the document parameter `signals` (Settings > Probe pass); the advisor passes the current list on every probe",
+  "SIGS=$(printf '%s' '__SIGNALS__' | sed 's/;;/\\n/g')",
   "SIG_RE=$(printf '%s\\n' \"$SIGS\" | cut -d= -f2- | paste -sd'|' -)",
   "HB_RE='(health|ping|pong|heartbeat|keepalive|/metrics|/status|readiness|liveness|ELB-HealthChecker|swarm-checker|UptimeRobot|kube-probe)'",
   "ts_of() { printf '%s' \"$1\" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1; }",
@@ -148,6 +142,9 @@ export const PROBE_SCRIPT = [
   "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\""
 ].join("\n");
 
+/** The script with the use-signal patterns inlined: what the stock AWS-RunShellScript path (tests, fallback) sends. */
+export const probeScript = (signals: string = config.probeSignals) => PROBE_SCRIPT.replace("__SIGNALS__", signals);
+
 /**
  * The SSM Command document that embeds the probe script, for `aws ssm create-document`. With
  * PROBE_DOCUMENT set to its name the advisor sends it instead of AWS-RunShellScript and passes no
@@ -158,11 +155,14 @@ export function probeDocument() {
   return {
     schemaVersion: "2.2",
     description: `aws-advisor read-only probe ${PROBE_VERSION}`,
+    parameters: {
+      signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: SIGNALS_ALLOWED_PATTERN },
+    },
     mainSteps: [
       {
         action: "aws:runShellScript",
         name: "probe",
-        inputs: { timeoutSeconds: "60", runCommand: PROBE_SCRIPT.split("\n") },
+        inputs: { timeoutSeconds: "60", runCommand: PROBE_SCRIPT.replace("__SIGNALS__", "{{ signals }}").split("\n") },
       },
     ],
   };
@@ -300,6 +300,17 @@ export function parseProbeOutput(stdout: string): ProbeResult {
 }
 
 const iso = (v: unknown): string | null => { if (typeof v !== "string" || !v) return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
+const MONTHS: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+/** An access log's `25/Sep/2026:10:00:00 +0000` (nginx, Apache, Caddy's common format) as ISO, or null. */
+export function parseClfDate(raw: unknown): string | null {
+  const m = /^(\d{1,2})\/([A-Za-z]{3})\/(\d{4}):(\d{2}):(\d{2}):(\d{2})(?:\s*([+-])(\d{2}):?(\d{2}))?/.exec(String(raw ?? "").trim());
+  if (!m) return null;
+  const mon = MONTHS[m[2].toLowerCase()]; if (mon == null) return null;
+  const utc = Date.UTC(Number(m[3]), mon, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6]));
+  const offset = m[7] ? (m[7] === "-" ? -1 : 1) * (Number(m[8]) * 60 + Number(m[9])) * 60000 : 0;
+  const d = new Date(utc - offset);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
 const int = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n) : 0; };
 
 /** Tolerant: a missing or malformed part becomes null or zero; the probe never fails on the activity section alone. */
@@ -323,7 +334,7 @@ export function parseActivity(a: any): ProbeActivity {
       top_peers: Array.isArray(c.top_peers) ? c.top_peers.filter((t: any) => t && typeof t.ip === "string").slice(0, 8).map((t: any) => ({ ip: String(t.ip).slice(0, 45), port: int(t.port), flows: int(t.flows), kind: t.kind === "internal" ? "internal" as const : "external" as const })) : [],
       port_map: c.port_map && typeof c.port_map === "object" ? Object.fromEntries(Object.entries(c.port_map).filter(([k]) => /^\d+$/.test(k)).map(([k, v]) => [k, String(v).slice(0, 80)])) : {},
     } : null,
-    front_door: { source: f.source == null ? null : String(f.source), requests: int(f.requests), health: int(f.health), last_request_at: iso(f.last_request_at), last_request_raw: f.last_request_raw == null ? null : String(f.last_request_raw).slice(0, 80), window: f.window == null ? null : String(f.window) },
+    front_door: { source: f.source == null ? null : String(f.source), requests: int(f.requests), health: int(f.health), last_request_at: iso(f.last_request_at) ?? parseClfDate(f.last_request_raw), last_request_raw: f.last_request_raw == null ? null : String(f.last_request_raw).slice(0, 80), window: f.window == null ? null : String(f.window) },
     logins: { users_now: int(l.users_now), last_login_user: l.last_login_user == null ? null : String(l.last_login_user).slice(0, 64), last_login_at: iso(l.last_login_at) },
     net: a.net && typeof a.net === "object" ? { rx_bytes: int(a.net.rx_bytes), tx_bytes: int(a.net.tx_bytes) } : null,
   };
@@ -415,6 +426,7 @@ export function instanceMetrics(instanceId: string, limit = 20): StoredProbe[] {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+let warnedOldDocument = false;
 const sqlLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" | "GetCommandInvocation"): ProbeError {
@@ -457,13 +469,21 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
     let commandId = "";
     try {
       // A custom document embeds the script (see probeDocument()); only the stock document takes it as a parameter.
-      const sent = await client.send(new SendCommandCommand({
+      const send = (withSignals: boolean) => client.send(new SendCommandCommand({
         DocumentName: config.probeDocument,
         InstanceIds: [instanceId],
-        ...(usesCustomProbeDocument() ? {} : { Parameters: { commands: [PROBE_SCRIPT], executionTimeout: ["60"] } }),
+        ...(usesCustomProbeDocument() ? (withSignals ? { Parameters: { signals: [config.probeSignals] } } : {}) : { Parameters: { commands: [probeScript()], executionTimeout: ["60"] } }),
         TimeoutSeconds: 60,
         Comment: `aws-advisor probe ${PROBE_VERSION}`,
       }));
+      let sent;
+      try { sent = await send(true); }
+      catch (e: any) {
+        // a document from before 1.5 has no `signals` parameter: send without it (its built-in patterns apply) and say so once
+        if (!/InvalidParameters/i.test(String(e?.name || e?.message)) || !usesCustomProbeDocument()) throw e;
+        if (!warnedOldDocument) { warnedOldDocument = true; console.warn(`[probe] SSM document ${config.probeDocument} predates probe 1.5 (no signals parameter): probing with its built-in patterns; update it (Settings > Permissions) to use the patterns from Settings`); }
+        sent = await send(false);
+      }
       commandId = sent.Command?.CommandId || "";
       if (!commandId) throw new ProbeError("failed", "SSM returned no command id");
     } catch (e: any) {
