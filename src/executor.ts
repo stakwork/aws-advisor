@@ -21,6 +21,7 @@ import { db } from "./db.js";
 import { sdkCredentials } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
+import { canonicalResource } from "./resource_id.js";
 
 db.exec(`create table if not exists actions (
   id integer primary key autoincrement,
@@ -52,7 +53,7 @@ db.exec(`create table if not exists actions (
 create index if not exists actions_dedupe on actions(dedupe, status);
 create index if not exists actions_status on actions(status, created_at)`);
 
-export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics";
+export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -102,6 +103,10 @@ export interface ActionModule {
   verify(p: Proposal, creds: Creds): Promise<{ ok: boolean | null; note: string }>;
   /** Undoes the change; returns a one-line result. */
   revert(p: Proposal, creds: Creds): Promise<string>;
+  /** The pass leaves a fresh proposal alone for this long (hours) so a person can object; a click on Apply does not wait. */
+  grace_hours?: () => number;
+  /** A fresh proposal is posted to Sphinx when first made (with the grace period), not only once applied. */
+  announce?: boolean;
 }
 
 export class NoActuator extends Error { constructor(m: string) { super(m); this.name = "NoActuator"; } }
@@ -124,11 +129,36 @@ export function approvedFor(rules: string[], resource: string): { id: number; ti
   return (db.prepare(`select id, title, decided_by from recommendations where status = 'approved' and tier = 'auto' and resource = ? and rule in (${rules.map(() => "?").join(", ")}) order by id desc limit 1`).get(resource, ...rules) as any) ?? null;
 }
 
+/**
+ * A recommendation a person approved is the go-ahead for the action that carries it out, whatever its tier: the
+ * approval is the decision. Resources are matched on the bare id (`rds:foo`, an ARN and `foo` are one thing) and,
+ * for cluster-level actions, on the cluster a member instance belongs to. Newest approval first.
+ */
+export function approvedRecs(actionTypes: string[], opts: { rules?: string[] } = {}): { id: number; title: string; decided_by: string | null; resource: string; resource_name: string | null; action_type: string; rule: string; est_monthly_saving: number | null; evidence: any }[] {
+  const where = ["status = 'approved'"]; const args: unknown[] = [];
+  if (actionTypes.length) { where.push(`action_type in (${actionTypes.map(() => "?").join(", ")})`); args.push(...actionTypes); }
+  if (opts.rules?.length) { where.push(`rule in (${opts.rules.map(() => "?").join(", ")})`); args.push(...opts.rules); }
+  const rows = db.prepare(`select id, title, decided_by, resource, resource_name, action_type, rule, est_monthly_saving, evidence from recommendations where ${where.join(" and ")} order by id desc`).all(...args) as any[];
+  return rows.map((r) => ({ ...r, resource: canonicalResource(r.resource, r.action_type) ?? String(r.resource ?? ""), evidence: (() => { try { return r.evidence ? JSON.parse(r.evidence) : null; } catch { return null; } })() })).filter((r) => r.resource);
+}
+
+/** Approved recommendations whose change is already in place when the executor looks (someone did it by hand): closed as done, with the reason. */
+export function markRecommendationsDone(ids: number[], reason: string): number {
+  let n = 0;
+  for (const recId of ids) {
+    const r = db.prepare("update recommendations set status = 'done', decided_at = datetime('now'), decided_by = 'executor', decision_reason = ?, updated_at = datetime('now') where id = ? and status = 'approved'").run(reason, recId);
+    if (r.changes) { n++; console.log(`[executor] recommendation #${recId} marked done: ${reason}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } }
+  }
+  return n;
+}
+
 function closeRecommendation(row: ActionRow): void {
-  const recId = Number(row.facts?.recommendation_id); if (!recId) return;
-  const r = db.prepare("update recommendations set status = 'done', decided_at = datetime('now'), decided_by = 'executor', decision_reason = ?, updated_at = datetime('now') where id = ? and status = 'approved'")
-    .run(`applied by the executor: auto-action #${row.id} (${row.title})`, recId);
-  if (r.changes) { console.log(`[executor] recommendation #${recId} marked done by #${row.id}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } }
+  const ids = [Number(row.facts?.recommendation_id), ...(Array.isArray(row.facts?.recommendation_ids) ? row.facts.recommendation_ids.map(Number) : [])].filter((n, i, a) => n > 0 && a.indexOf(n) === i);
+  for (const recId of ids) {
+    const r = db.prepare("update recommendations set status = 'done', decided_at = datetime('now'), decided_by = 'executor', decision_reason = ?, updated_at = datetime('now') where id = ? and status = 'approved'")
+      .run(`applied by the executor: auto-action #${row.id} (${row.title})`, recId);
+    if (r.changes) { console.log(`[executor] recommendation #${recId} marked done by #${row.id}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } }
+  }
 }
 
 // ---- credentials ------------------------------------------------------------------------------------------------
@@ -175,14 +205,35 @@ export function getAction(id: number): ActionRow | null {
   return r ? rowOf(r) : null;
 }
 
-export function listActions(opts: { status?: string; kind?: string; limit?: number } = {}): { actions: ActionRow[]; counts: Record<string, number> } {
+export interface ActionPage { actions: ActionRow[]; total: number; page: number; page_size: number; counts: Record<string, number>; kinds: Record<string, number> }
+
+/**
+ * The ledger, newest first, one page at a time. `counts` is per status over the whole ledger (the status chips);
+ * `kinds` is per kind within the status filter, before the kind filter, so the picked kind stays listed with the
+ * others. `id` without `page` lands on the page that holds that row (a deep link from Sphinx); an id outside the
+ * filter gives page 1.
+ */
+export function listActions(opts: { status?: string; kind?: string; page?: number; page_size?: number; id?: number } = {}): ActionPage {
+  const page_size = Math.min(200, Math.max(1, Math.floor(opts.page_size || 25)));
   const where: string[] = []; const args: unknown[] = [];
   if (opts.status && opts.status !== "all") { where.push("status = ?"); args.push(opts.status); }
+  const scope = where.length ? `where ${where.join(" and ")}` : "";
+  const kinds: Record<string, number> = {};
+  for (const k of db.prepare(`select kind, count(*) as n from actions ${scope} group by kind order by n desc, kind`).all(...args) as { kind: string; n: number }[]) kinds[k.kind] = k.n;
   if (opts.kind) { where.push("kind = ?"); args.push(opts.kind); }
-  const rows = db.prepare(`select * from actions ${where.length ? `where ${where.join(" and ")}` : ""} order by id desc limit ?`).all(...args, Math.min(500, opts.limit || 200));
+  const filter = where.length ? `where ${where.join(" and ")}` : "";
+  const total = (db.prepare(`select count(*) as n from actions ${filter}`).get(...args) as { n: number }).n;
+  let page = Math.max(1, Math.floor(opts.page || 0) || 1);
+  if (!opts.page && opts.id != null) {
+    // Rows are ordered by id desc, so the row's position is the number of matching rows with a higher id.
+    const above = (db.prepare(`select count(*) as n from actions ${filter}${filter ? " and" : " where"} id > ?`).get(...args, opts.id) as { n: number }).n;
+    const there = (db.prepare(`select count(*) as n from actions ${filter}${filter ? " and" : " where"} id = ?`).get(...args, opts.id) as { n: number }).n;
+    page = there ? Math.floor(above / page_size) + 1 : 1;
+  }
+  const rows = db.prepare(`select * from actions ${filter} order by id desc limit ? offset ?`).all(...args, page_size, (page - 1) * page_size);
   const counts: Record<string, number> = {};
   for (const c of db.prepare("select status, count(*) as n from actions group by status").all() as { status: string; n: number }[]) counts[c.status] = c.n;
-  return { actions: rows.map(rowOf), counts };
+  return { actions: rows.map(rowOf), total, page, page_size, counts, kinds };
 }
 
 const proposalOf = (r: ActionRow): Proposal => ({ kind: r.kind, resource: r.resource, resource_name: r.resource_name, region: r.region || "us-east-1", dedupe: r.dedupe, title: r.title, reason: r.reason, before: r.before || {}, after: r.after || {}, facts: r.facts || {}, rollback: r.rollback || "", est_usd_month: r.est_usd_month });
@@ -312,7 +363,10 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
         const { row, fresh } = recordProposal(p, mode, trigger);
         out.proposed++; if (fresh) out.fresh++;
         log(`${fresh ? "proposed" : "still proposed"} #${row.id} ${p.title}${p.est_usd_month != null ? ` (≈ ${p.est_usd_month.toFixed(2)} USD/month)` : ""}`);
+        if (fresh && mod.announce) announceProposal(row, mod.grace_hours?.() ?? 0, mode).catch(() => {});
         if (mode !== "apply") continue;
+        const wait = graceLeftMs(row, mod.grace_hours?.() ?? 0);
+        if (wait > 0) { const n = `#${row.id} waits ${Math.ceil(wait / 3600000)} h more (grace period; Apply on the page skips it)`; out.notes.push(`${mod.kind}: ${n}`); log(n); continue; }
         if (budget.left <= 0) { log(`cap of ${config.actMaxPerPass} changes per pass reached; #${row.id} waits`); continue; }
         budget.left--;
         const done = await applyAction(row.id, trigger);
@@ -343,6 +397,28 @@ export async function previewActions(): Promise<{ proposals: Proposal[]; notes: 
 }
 
 // ---- Sphinx ---------------------------------------------------------------------------------------------------------
+
+/** How long a fresh proposal still has to wait before the pass may apply it (0 when the module has no grace period). */
+export function graceLeftMs(row: Pick<ActionRow, "created_at">, graceHours: number, now = Date.now()): number {
+  if (!graceHours) return 0;
+  const created = new Date(row.created_at.includes("T") ? row.created_at : row.created_at.replace(" ", "T") + "Z").getTime();
+  return Math.max(0, created + graceHours * 3600000 - now);
+}
+
+export function formatProposalMessage(r: Pick<ActionRow, "id" | "title" | "reason" | "rollback" | "est_usd_month">, graceHours: number, mode: string, publicUrl: string): string {
+  const lines = [`📋 Auto-action planned · ${r.title}`, r.reason];
+  if (r.est_usd_month != null && r.est_usd_month > 0) lines.push(`≈ ${r.est_usd_month.toFixed(2)} USD/month`);
+  lines.push(mode === "apply" ? `It happens in about ${graceHours} h unless someone objects: tag the resource advisor:hands-off, or say so here.` : `Dry run: nothing happens unless someone presses Apply on the page.`);
+  if (r.rollback) lines.push(`Undo afterwards: ${r.rollback}`);
+  lines.push(`${publicUrl}/actions?id=${r.id}`);
+  return lines.join("\n");
+}
+
+async function announceProposal(row: ActionRow, graceHours: number, mode: string): Promise<void> {
+  if (!notifyConfigured() || config.notifyLevel === "off") return;
+  try { const res = await sendSphinx(formatProposalMessage(row, graceHours, mode, config.notifyLinkUrl)); console.log(`[executor] announced #${row.id}: ${res.ok ? "sent" : `${res.status} ${res.body.slice(0, 80)}`}`); }
+  catch (e: any) { console.log(`[executor] announce #${row.id} failed: ${e?.message || e}`); }
+}
 
 const ICON: Record<string, string> = { applied: "⚙️", verified: "✅", failed: "❌", reverted: "↩️" };
 
@@ -377,5 +453,5 @@ export async function dispatchActionNotifications(): Promise<{ sent: number; ski
 /** The Auto-actions page header: mode, role, who it acts as, the modules and their labels. */
 export async function executorStatus(): Promise<{ mode: string; role_arn: string; cron: string; identity: { ok: boolean; arn?: string; error?: string }; modules: { kind: string; label: string }[]; counts: Record<string, number> }> {
   const identity = config.actRoleArn ? await actuatorIdentity() : { ok: false as const, error: "no actuator role configured: dry runs only" };
-  return { mode: config.actMode, role_arn: config.actRoleArn, cron: config.actCron, identity, modules: actionModules().map((m) => ({ kind: m.kind, label: m.label })), counts: listActions({ limit: 1 }).counts };
+  return { mode: config.actMode, role_arn: config.actRoleArn, cron: config.actCron, identity, modules: actionModules().map((m) => ({ kind: m.kind, label: m.label })), counts: listActions({ page_size: 1 }).counts };
 }

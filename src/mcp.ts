@@ -9,6 +9,7 @@ import { S, query, queryReadOnly } from "./steampipe.js";
 import { ProbeError, containerSignals, latestProbe, probeInstance, summarizeProbe, useSummary } from "./ssm.js";
 import { listRules, rulesFor, signalKinds, upsertRule } from "./signal_rules.js";
 import { latestS3Usage, refreshS3Usage } from "./s3_usage.js";
+import { revertAction } from "./executor.js";
 import { PriceSpec, fetchPrices } from "./prices.js";
 import { inventoryRefreshedAt, listEc2 } from "./inventory.js";
 import { domainsFor, listRoute53 } from "./route53_inventory.js";
@@ -498,6 +499,20 @@ export function createFactServer(): McpServer {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, (a) => {
     try { const r = upsertRule({ ...a, decided_by: "agent", status: "proposed" }); return text({ rule: r, note: r.status === "confirmed" ? "a confirmed rule already says the same" : "proposed; a person confirms it in the EC2 drawer (Use signals)" }); }
+    catch (e: any) { return fail(e?.message || String(e)); }
+  });
+
+  server.registerTool("wake_swarm", {
+    title: "Wake a swarm the executor parked",
+    description: "Starts an instance the auto-actions executor stopped (a swarm_park row that is applied or verified): the one write the chat may do, and it can only undo. Name the instance by id or by (part of) its name. Nothing happens for an instance the executor did not park.",
+    inputSchema: { instance: z.string().min(2).max(120).describe("instance id, or part of the name shown in the inventory") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async (a) => {
+    const q = `%${a.instance}%`;
+    const rows = db.prepare("select id, resource, resource_name, status, applied_at from actions where kind = 'swarm_park' and status in ('applied', 'verified') and (resource = ? or resource like ? or resource_name like ?) order by id desc").all(a.instance, q, q) as { id: number; resource: string; resource_name: string | null; status: string; applied_at: string | null }[];
+    if (!rows.length) return fail(`no parked swarm matches "${a.instance}" (only instances the executor stopped can be woken here; the Auto-actions page lists them)`);
+    if (rows.length > 1 && new Set(rows.map((r) => r.resource)).size > 1) return fail(`several parked swarms match: ${rows.map((r) => `${r.resource_name || r.resource} (#${r.id})`).join(", ")}; name one`);
+    try { const r = await revertAction(rows[0].id, "chat"); return text({ action_id: r.id, instance: r.resource, name: r.resource_name, status: r.status, result: r.result, note: "started; the Elastic IP keeps the address, the containers come back with the box in a minute or two" }); }
     catch (e: any) { return fail(e?.message || String(e)); }
   });
 

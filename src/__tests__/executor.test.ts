@@ -222,3 +222,106 @@ test("use-signal patterns: the setting is validated and the probe document takes
   assert.equal(parseClfDate("25/Sep/2026:12:30:00 +0200"), "2026-09-25T10:30:00.000Z");
   assert.equal(parseClfDate("nonsense"), null);
 });
+
+test("ledger: pages newest first, counts kinds within the status scope, lands on the page holding an id", async () => {
+  const { listActions } = await import("../executor.js");
+  const { db } = await import("../db.js");
+  db.exec("delete from actions");
+  const ins = db.prepare("insert into actions(kind, resource, region, dedupe, status, mode, trigger, title, reason) values (?, ?, 'us-east-1', ?, ?, 'dry_run', 'test', ?, 'because')");
+  for (let i = 1; i <= 7; i++) ins.run(i % 2 ? "log_retention" : "s3_request_metrics", `r${i}`, `d${i}`, i === 7 ? "stale" : "proposed", `row ${i}`);
+  const all = listActions({ page_size: 3 });
+  assert.equal(all.total, 7);
+  assert.deepEqual(all.actions.map((a) => a.title), ["row 7", "row 6", "row 5"]);
+  assert.deepEqual(all.counts, { proposed: 6, stale: 1 });
+  assert.deepEqual(all.kinds, { log_retention: 4, s3_request_metrics: 3 });
+  const p3 = listActions({ page_size: 3, page: 3 });
+  assert.deepEqual(p3.actions.map((a) => a.title), ["row 1"]);
+  // kinds count the status scope before the kind filter, so the other kind stays listed
+  const s3 = listActions({ status: "proposed", kind: "s3_request_metrics", page_size: 10 });
+  assert.equal(s3.total, 3);
+  assert.deepEqual(s3.kinds, { log_retention: 3, s3_request_metrics: 3 });
+  // a deep link's id resolves to its page; an id outside the filter gives page 1
+  const row2 = all.actions.length && (db.prepare("select id from actions where title = 'row 2'").get() as { id: number }).id;
+  assert.equal(listActions({ page_size: 3, id: row2 as number }).page, 2);
+  assert.equal(listActions({ status: "stale", page_size: 3, id: row2 as number }).page, 1);
+  db.exec("delete from actions");
+});
+
+test("gp2 → gp3: the target keeps gp2's performance and the saving nets out the extras", async () => {
+  const { gp3Target, gp3Saving } = await import("../actions/ebs_gp3_migrate.js");
+  assert.deepEqual(gp3Target(100), { iops: 3000, throughput_mibps: 125 });
+  assert.deepEqual(gp3Target(500), { iops: 3000, throughput_mibps: 250 });
+  assert.deepEqual(gp3Target(2000), { iops: 6000, throughput_mibps: 250 });
+  assert.deepEqual(gp3Target(8000), { iops: 16000, throughput_mibps: 250 });
+  assert.equal(gp3Saving(100), 2);
+  assert.equal(gp3Saving(500), 5); // 10 − 5 for the 125 extra MiB/s
+  assert.equal(gp3Saving(2000), 20); // 40 − 15 (3,000 extra IOPS) − 5
+  assert.ok(gp3Saving(8000) > 0);
+});
+
+test("ecr: the policy expires untagged only, and the tally counts what goes on the first run", async () => {
+  const { policyText, tallyUntagged, MARKER } = await import("../actions/ecr_lifecycle.js");
+  const p = JSON.parse(policyText(30));
+  assert.equal(p.rules.length, 1);
+  assert.equal(p.rules[0].selection.tagStatus, "untagged");
+  assert.equal(p.rules[0].selection.countNumber, 30);
+  assert.match(p.rules[0].description, new RegExp(MARKER));
+  const now = Date.parse("2026-09-26T00:00:00Z");
+  const t = tallyUntagged([{ imageSizeInBytes: 5e8, imagePushedAt: new Date(now - 40 * 86400000) }, { imageSizeInBytes: 3e8, imagePushedAt: new Date(now - 10 * 86400000) }, { imageSizeInBytes: 2e8 }], 30, false, now);
+  assert.equal(t.count, 3); assert.equal(t.bytes, 1e9);
+  assert.equal(t.expiring_count, 1); assert.equal(t.expiring_bytes, 5e8);
+  assert.equal(t.oldest_at, new Date(now - 40 * 86400000).toISOString());
+});
+
+test("swarm park: idle only when every signal is quiet every day; a missing signal keeps it running", async () => {
+  const { idleVerdict } = await import("../actions/swarm_park.js");
+  const now = new Date("2026-09-26T12:00:00Z");
+  const quiet = (day: string, over: Partial<import("../actions/swarm_park.js").DayUse> = {}) => ({ day, samples: 4, last_use_at: null, external_connections_max: 0, requests_24h_avg: 0, signal_lines_24h_avg: 0, net_bytes_day: 1e6, container_cpu_avg_max: 0.2, container_cpu_max: 1.5, ...over });
+  const days = (f: (d: string) => any) => Array.from({ length: 8 }, (_, i) => f(new Date(now.getTime() - i * 86400000).toISOString().slice(0, 10)));
+  const all = idleVerdict(days((d) => quiet(d)), { idleDays: 7, minProbes: 7, now });
+  assert.equal(all.idle, true, all.reasons.join("; "));
+  assert.equal(all.days_seen, 8);
+  // one connection on one day
+  const conn = idleVerdict(days((d) => quiet(d, { external_connections_max: d.endsWith("22") ? 2 : 0 })), { idleDays: 7, minProbes: 7, now });
+  assert.equal(conn.idle, false); assert.match(conn.reasons.join(";"), /external connections seen/);
+  // a recent use signal
+  const used = idleVerdict(days((d) => quiet(d, { last_use_at: d === "2026-09-24" ? "2026-09-24T09:00:00Z" : null })), { idleDays: 7, minProbes: 7, now });
+  assert.equal(used.idle, false); assert.match(used.reasons.join(";"), /last use 2026-09-24 09:00/);
+  // an old use signal is fine
+  assert.equal(idleVerdict(days((d) => quiet(d, { last_use_at: "2026-09-01T09:00:00Z" })), { idleDays: 7, minProbes: 7, now }).idle, true);
+  // no front-door log = unknown = alive; missing day = alive; too few probes = alive
+  assert.equal(idleVerdict(days((d) => quiet(d, { requests_24h_avg: null })), { idleDays: 7, minProbes: 7, now }).idle, false);
+  assert.equal(idleVerdict(days((d) => quiet(d)).slice(2), { idleDays: 7, minProbes: 7, now }).idle, false);
+  assert.equal(idleVerdict(days((d) => quiet(d, { samples: 1 })), { idleDays: 7, minProbes: 20, now }).idle, false);
+  // busy containers
+  assert.equal(idleVerdict(days((d) => quiet(d, { container_cpu_max: 40 })), { idleDays: 7, minProbes: 7, now }).idle, false);
+});
+
+test("aurora storage: the newest approval per cluster wins and older ones ride along", async () => {
+  const { targetsFrom } = await import("../actions/aurora_storage.js");
+  const rec = (id: number, action_type: string, resource = "hub") => ({ id, title: `r${id}`, decided_by: "ui", resource, resource_name: resource, action_type, rule: "x", est_monthly_saving: 100, evidence: { region: "us-east-1" } });
+  const t = targetsFrom([rec(9, "aurora_set_storage_iopt"), rec(7, "aurora_set_storage_iopt"), rec(3, "aurora_set_storage_standard"), rec(5, "aurora_set_storage_iopt", "other")], "eu-west-1");
+  assert.equal(t.length, 2);
+  const hub = t.find((x) => x.cluster === "hub")!;
+  assert.equal(hub.target, "aurora-iopt1");
+  assert.deepEqual(hub.recs.map((r) => r.id), [9, 7]);
+  assert.match(hub.conflict!, /#3 \(older\) asks for Standard/);
+  assert.equal(t.find((x) => x.cluster === "other")!.region, "us-east-1");
+});
+
+test("s3 lifecycle: merge replaces a rule with the same id and keeps the rest", async () => {
+  const { mergeRules } = await import("../actions/s3_lifecycle.js");
+  const m = mergeRules([{ ID: "keep", Status: "Enabled" }, { ID: "aws-advisor-x", Status: "Disabled" }], [{ ID: "aws-advisor-x", Status: "Enabled" }, { ID: "aws-advisor-y", Status: "Enabled" }]);
+  assert.deepEqual(m.map((r) => `${r.ID}:${r.Status}`), ["keep:Enabled", "aws-advisor-x:Enabled", "aws-advisor-y:Enabled"]);
+});
+
+test("grace: a fresh proposal waits, an old one does not, and the announcement says what happens", async () => {
+  const { graceLeftMs, formatProposalMessage } = await import("../executor.js");
+  const now = Date.parse("2026-09-26T12:00:00Z");
+  assert.equal(graceLeftMs({ created_at: "2026-09-26 11:00:00" }, 24, now), 23 * 3600000);
+  assert.equal(graceLeftMs({ created_at: "2026-09-24 11:00:00" }, 24, now), 0);
+  assert.equal(graceLeftMs({ created_at: "2026-09-26 11:00:00" }, 0, now), 0);
+  const m = formatProposalMessage({ id: 4, title: "stop swarm-27: idle 7 days", reason: "why", rollback: "start it", est_usd_month: 140 }, 24, "apply", "http://x");
+  assert.match(m, /planned · stop swarm-27/); assert.match(m, /about 24 h unless someone objects/); assert.match(m, /http:\/\/x\/actions\?id=4$/);
+  assert.match(formatProposalMessage({ id: 4, title: "t", reason: "r", rollback: null, est_usd_month: null }, 24, "dry_run", "http://x"), /Dry run/);
+});

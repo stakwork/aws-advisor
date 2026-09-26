@@ -1,19 +1,24 @@
 import React, { Fragment, useEffect, useState } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
-import { Badge, Button, Card, Code, CopyButton, Empty, Td, Th } from "../components/ui";
+import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../components/ui";
 
 const FILTERS = ["proposed", "applied", "verified", "failed", "refused", "reverted", "stale", "all"];
-const KIND_LABEL: Record<string, string> = { acu_window: "Serverless v2 minimum", snapshot_archive: "Snapshot → Archive", ebs_iops_trim: "gp3 IOPS trim", log_retention: "Log retention", s3_request_metrics: "S3 request metrics" };
+const PAGE_SIZE = 25;
+const KIND_LABEL: Record<string, string> = { acu_window: "Serverless v2 minimum", snapshot_archive: "Snapshot → Archive", ebs_iops_trim: "gp3 IOPS trim", log_retention: "Log retention", s3_request_metrics: "S3 request metrics", aurora_storage: "Aurora storage type", s3_lifecycle: "S3 lifecycle rules", ebs_gp3_migrate: "gp2 → gp3", ecr_lifecycle: "ECR lifecycle policy", swarm_park: "Park idle swarm" };
 const STATUS_CLASS: Record<string, string> = { proposed: "text-sky-300", applied: "text-amber-300", verified: "text-emerald-300", failed: "text-red-300", refused: "text-red-200", reverted: "text-zinc-300", stale: "text-zinc-500" };
 
 /** The auto-actions page: what the executor may do (mode, role, identity), what it proposed and what it did, with apply and revert per row. */
 export default function Actions() {
   const [params, setParams] = useSearchParams();
   const filter = FILTERS.includes(params.get("status") || "") ? params.get("status")! : "all";
+  const kind = params.get("kind") || "";
+  const page = Math.max(1, Number(params.get("page")) || 1);
   const selectedId = params.get("id");
+  // A deep link carries an id and no page: the server answers with the page that holds that row.
+  const pageQuery = params.get("page") ? `page=${page}` : selectedId ? `id=${encodeURIComponent(selectedId)}` : "page=1";
   const [status, setStatus] = useState<any>(null);
-  const [data, setData] = useState<{ actions: any[]; counts: Record<string, number> } | null>(null);
+  const [data, setData] = useState<{ actions: any[]; total: number; page: number; page_size: number; counts: Record<string, number>; kinds: Record<string, number> } | null>(null);
   const [preview, setPreview] = useState<any>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
@@ -21,9 +26,23 @@ export default function Actions() {
   const [showPolicy, setShowPolicy] = useState(false);
   const [open, setOpen] = useState<number | null>(selectedId ? Number(selectedId) : null);
 
-  const load = () => { api(`/actions?status=${filter}`).then(setData).catch((e) => setMsg(e.message)); };
+  const load = () => { api(`/actions?status=${filter}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}&${pageQuery}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => setMsg(e.message)); };
   useEffect(() => { api("/actions/status").then(setStatus).catch((e) => setMsg(e.message)); }, []);
-  useEffect(() => { load(); }, [filter]);
+  useEffect(() => { load(); }, [filter, kind, pageQuery]);
+  // Status and kind reset the page; page leaves the rest alone.
+  const set = (k: string, v: string | null) => { const p = new URLSearchParams(params); v ? p.set(k, v) : p.delete(k); if (k !== "page") { p.delete("page"); p.delete("id"); } setParams(p); };
+  // Expands or collapses a row. Once the page was resolved from a deep link's id, it is written to the URL here, so
+  // collapsing the linked row (or a refresh after that) stays on this page instead of falling back to page 1.
+  const toggle = (id: number) => {
+    setOpen(open === id ? null : id);
+    const p = new URLSearchParams(params);
+    p.delete("id");
+    if (!p.get("page") && data) p.set("page", String(data.page));
+    setParams(p, { replace: true });
+  };
+  // The kinds in scope (the status filter, before the kind filter), so the picked kind stays listed with the others.
+  const kinds = Object.entries(data?.kinds || {});
+  if (kind && !kinds.some(([k]) => k === kind)) kinds.push([kind, 0]);
 
   const run = async (path: string, key: string, after?: (r: any) => void) => {
     setBusy(key); setMsg("");
@@ -82,16 +101,20 @@ export default function Actions() {
       )}
 
       <Card title={<span>Ledger <span className="font-normal text-zinc-500">· every proposal and what became of it</span></span>}>
-        <div className="mb-3 flex flex-wrap gap-1 text-xs">
-          {FILTERS.map((f) => <button key={f} onClick={() => setParams({ status: f })} className={`rounded px-2 py-1 ${filter === f ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}>{f}{data?.counts && f !== "all" && data.counts[f] ? ` (${data.counts[f]})` : ""}</button>)}
+        <div className="mb-3 flex flex-wrap items-center gap-1 text-xs">
+          {FILTERS.map((f) => <button key={f} onClick={() => set("status", f)} className={`rounded px-2 py-1 ${filter === f ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}>{f}{data?.counts && f !== "all" && data.counts[f] ? ` (${data.counts[f]})` : ""}</button>)}
+          <select value={kind} onChange={(e) => set("kind", e.target.value || null)} className="ml-auto rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-zinc-300" title="only this action's rows">
+            <option value="">all actions</option>
+            {kinds.map(([k, n]) => <option key={k} value={k}>{KIND_LABEL[k] || k} · {n}</option>)}
+          </select>
         </div>
-        {!data ? <div className="text-sm text-zinc-500">Loading…</div> : !data.actions.length ? <Empty>No {filter === "all" ? "" : filter + " "}actions yet. {mode === "off" ? "The executor is off." : lastPass ? "The last pass found nothing to change; its notes above say why." : "Run a pass, or Preview plan, to see what it proposes and why."}</Empty> : (
+        {!data ? <div className="text-sm text-zinc-500">Loading…</div> : !data.actions.length ? <Empty>No {filter === "all" ? "" : filter + " "}{kind ? `${KIND_LABEL[kind] || kind} ` : ""}actions yet. {mode === "off" ? "The executor is off." : lastPass ? "The last pass found nothing to change; its notes above say why." : "Run a pass, or Preview plan, to see what it proposes and why."}</Empty> : (
           <table className="w-full text-sm">
             <thead><tr><Th>When</Th><Th>Action</Th><Th>Change</Th><Th className="text-right">≈ USD/mo</Th><Th>Status</Th><Th></Th></tr></thead>
             <tbody>
               {data.actions.map((a) => (
                 <Fragment key={a.id}>
-                  <tr className={`cursor-pointer border-t border-zinc-800/60 ${open === a.id ? "bg-zinc-900/60" : "hover:bg-zinc-900/40"}`} onClick={() => setOpen(open === a.id ? null : a.id)}>
+                  <tr className={`cursor-pointer border-t border-zinc-800/60 ${open === a.id ? "bg-zinc-900/60" : "hover:bg-zinc-900/40"}`} onClick={() => toggle(a.id)}>
                     <Td className="whitespace-nowrap text-xs text-zinc-400">{when(a.applied_at || a.seen_at)}<div className="text-[11px] text-zinc-600">#{a.id} · {a.trigger}</div></Td>
                     <Td className="text-xs text-zinc-300">{KIND_LABEL[a.kind] || a.kind}</Td>
                     <Td>{a.title}<div className="text-xs text-zinc-500">{a.reason}</div></Td>
@@ -123,6 +146,7 @@ export default function Actions() {
             </tbody>
           </table>
         )}
+        {data && <Pager className="mt-3" page={data.page} pageSize={data.page_size} total={data.total} onPage={(p) => set("page", String(p))} />}
         <div className="mt-3 text-xs text-zinc-500">A <Badge>proposed</Badge> row waits for the next apply pass or your Apply; <Badge>applied</Badge> means the call succeeded and the read-back is pending (a snapshot takes hours to archive); <Badge>verified</Badge> means it was read back; <Badge>stale</Badge> means the latest pass no longer proposes it (the hour moved on).</div>
       </Card>
     </div>

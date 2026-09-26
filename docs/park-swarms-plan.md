@@ -1,6 +1,6 @@
 # Plan: parking idle swarms (stop only, never terminate)
 
-Status: plan, not built. Written 2026-09-25 against the executor shipped the same day
+Status: built 2026-09-26 as `src/actions/swarm_park.ts` (steps 4 and 5 below; the idle score lives in the action, tag-scoped, with the announcement and grace period, and `wake_swarm` in the chat). The morning schedule and the parking page are not built. Written 2026-09-25 against the executor shipped the same day
 (`src/executor.ts`, README "Auto-actions"). A fourth track, S3 lifecycle rules from usage, is at the end.
 
 ## The idea

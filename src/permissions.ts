@@ -458,7 +458,13 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorVolumeIops", Effect: "Allow", Action: ["ec2:ModifyVolume", "ec2:DescribeVolumes", "ec2:DescribeVolumesModifications"], Resource: "*" },
     { Sid: "ActuatorLogRetention", Effect: "Allow", Action: ["logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "logs:DescribeLogGroups", "logs:ListTagsForResource"], Resource: "*" },
     { Sid: "ActuatorS3RequestMetrics", Effect: "Allow", Action: ["s3:PutMetricsConfiguration", "s3:GetMetricsConfiguration", "s3:DeleteMetricsConfiguration"], Resource: "*" },
-    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+    { Sid: "ActuatorS3Lifecycle", Effect: "Allow", Action: ["s3:PutLifecycleConfiguration", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging"], Resource: "*" },
+    { Sid: "ActuatorEcrLifecycle", Effect: "Allow", Action: ["ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ecr:GetLifecyclePolicy", "ecr:DescribeRepositories", "ecr:ListTagsForResource"], Resource: "*" },
+    // Parking: only instances someone tagged advisor:park=auto can be stopped or started, and the only tag the role may write is its own marker.
+    { Sid: "ActuatorSwarmParkDescribe", Effect: "Allow", Action: ["ec2:DescribeInstances", "ec2:DescribeAddresses"], Resource: "*" },
+    { Sid: "ActuatorSwarmPark", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringEquals: { "aws:ResourceTag/advisor:park": "auto" } } },
+    { Sid: "ActuatorSwarmParkMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringEquals: { "aws:ResourceTag/advisor:park": "auto" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
+    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 

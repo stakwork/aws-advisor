@@ -13,7 +13,14 @@ actions.get("/actions/status", async (_req, res) => {
   const read = await sdkIdentity(8000);
   res.json({ ...status, read_identity: read.ok ? read.arn : null, policy: actuatorPolicy(), trust_policy: actuatorTrustPolicy(read.ok ? read.arn.replace(/^arn:aws:sts::(\d+):assumed-role\/([^/]+)\/.*$/, "arn:aws:iam::$1:role/$2") : undefined) });
 });
-actions.get("/actions", (req, res) => res.json(listActions({ status: String(req.query.status || "all"), kind: req.query.kind ? String(req.query.kind) : undefined, limit: Number(req.query.limit) || 200 })));
+// ?status=all (default) | proposed | applied | …, ?kind=<action kind>, ?page (1-based), ?page_size (default 25, max 200),
+// ?id=<row id> without ?page lands on the page holding that row (deep links from Sphinx).
+actions.get("/actions", (req, res) => {
+  const kind = req.query.kind ? String(req.query.kind) : undefined;
+  if (kind && !/^[a-z0-9_]{1,40}$/.test(kind)) return res.status(400).json({ error: "kind must be an action kind (letters, digits, _)" });
+  const id = Number(req.query.id);
+  res.json(listActions({ status: String(req.query.status || "all"), kind, page: Number(req.query.page) || undefined, page_size: Number(req.query.page_size) || undefined, id: Number.isInteger(id) ? id : undefined }));
+});
 actions.get("/actions/preview", async (_req, res) => {
   try { res.json(await previewActions()); } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
