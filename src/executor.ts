@@ -20,7 +20,7 @@ import { config } from "./config.js";
 import { db } from "./db.js";
 import { sdkCredentials } from "./steampipe.js";
 import { describeError } from "./permissions.js";
-import { configured as notifyConfigured, inQuietHours, sendSphinx } from "./notify.js";
+import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
 
 db.exec(`create table if not exists actions (
   id integer primary key autoincrement,
@@ -52,7 +52,7 @@ db.exec(`create table if not exists actions (
 create index if not exists actions_dedupe on actions(dedupe, status);
 create index if not exists actions_status on actions(status, created_at)`);
 
-export type ActionKind = "acu_window" | "snapshot_archive";
+export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -114,6 +114,22 @@ export const actionModules = () => [...modules.values()];
 export const ACU_USD_HOUR = 0.12;
 export const SNAPSHOT_STANDARD_USD_GB_MONTH = 0.05;
 export const SNAPSHOT_ARCHIVE_USD_GB_MONTH = 0.0125;
+
+/**
+ * An approved recommendation of tier `auto` on a resource is the go-ahead for the matching action, whatever the
+ * action's own thresholds say; the row cites it, and a verified change marks the recommendation done.
+ */
+export function approvedFor(rules: string[], resource: string): { id: number; title: string; decided_by: string | null } | null {
+  if (!rules.length) return null;
+  return (db.prepare(`select id, title, decided_by from recommendations where status = 'approved' and tier = 'auto' and resource = ? and rule in (${rules.map(() => "?").join(", ")}) order by id desc limit 1`).get(resource, ...rules) as any) ?? null;
+}
+
+function closeRecommendation(row: ActionRow): void {
+  const recId = Number(row.facts?.recommendation_id); if (!recId) return;
+  const r = db.prepare("update recommendations set status = 'done', decided_at = datetime('now'), decided_by = 'executor', decision_reason = ?, updated_at = datetime('now') where id = ? and status = 'approved'")
+    .run(`applied by the executor: auto-action #${row.id} (${row.title})`, recId);
+  if (r.changes) { console.log(`[executor] recommendation #${recId} marked done by #${row.id}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } }
+}
 
 // ---- credentials ------------------------------------------------------------------------------------------------
 
@@ -238,7 +254,7 @@ export async function verifyAction(id: number, creds?: Creds): Promise<ActionRow
   const mod = modules.get(row.kind); if (!mod) return row;
   try {
     const v = await mod.verify(proposalOf(row), creds || executorCreds());
-    if (v.ok === true) db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id);
+    if (v.ok === true) { db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); closeRecommendation(getAction(id)!); }
     else if (v.ok === false) db.prepare("update actions set status = 'failed', error = ? where id = ?").run(`read-back disagrees: ${v.note}`, id);
     else db.prepare("update actions set result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id);
   } catch (e) {

@@ -150,6 +150,7 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["instance_probe", "probe an instance over SSM: processes, disks, memory"],
   ["activity_signals", "is anyone using this box: per container the use-signal patterns matched with sample lines, connections, front door, logins"],
   ["propose_signal_rule", "propose that a use-signal kind is noise (or real) for an image; a person confirms"],
+  ["s3_usage", "how a bucket is used: bytes by age and class, prefixes, versions, reads per day, and the lifecycle rules that fit"],
   ["graph_systems", "our systems from the knowledge graph"],
   ["graph_system", "one system and everything linked to it"],
   ["graph_bill", "the bill as the graph explains it, per system"],

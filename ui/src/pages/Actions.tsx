@@ -4,7 +4,7 @@ import { api, usd, when } from "../api";
 import { Badge, Button, Card, Code, CopyButton, Empty, Td, Th } from "../components/ui";
 
 const FILTERS = ["proposed", "applied", "verified", "failed", "refused", "reverted", "stale", "all"];
-const KIND_LABEL: Record<string, string> = { acu_window: "Serverless v2 minimum", snapshot_archive: "Snapshot → Archive" };
+const KIND_LABEL: Record<string, string> = { acu_window: "Serverless v2 minimum", snapshot_archive: "Snapshot → Archive", ebs_iops_trim: "gp3 IOPS trim", log_retention: "Log retention", s3_request_metrics: "S3 request metrics" };
 const STATUS_CLASS: Record<string, string> = { proposed: "text-sky-300", applied: "text-amber-300", verified: "text-emerald-300", failed: "text-red-300", refused: "text-red-200", reverted: "text-zinc-300", stale: "text-zinc-500" };
 
 /** The auto-actions page: what the executor may do (mode, role, identity), what it proposed and what it did, with apply and revert per row. */

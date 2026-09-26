@@ -399,6 +399,7 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "support:DescribeSeverityLevels",
         "ssm:DescribeInstanceInformation",
         "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
+        "s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads", "s3:GetMetricsConfiguration",
         "lambda:ListFunctions", "lambda:GetFunction*", "lambda:GetPolicy", "lambda:ListTags",
         "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
         "ecs:Describe*", "ecs:List*",
@@ -454,7 +455,10 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     { Sid: "ActuatorServerlessCapacity", Effect: "Allow", Action: ["rds:ModifyDBCluster", "rds:DescribeDBClusters", "rds:ListTagsForResource"], Resource: "*" },
     { Sid: "ActuatorSnapshotTier", Effect: "Allow", Action: ["ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:DescribeSnapshots", "ec2:DescribeSnapshotTierStatus"], Resource: "*" },
-    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+    { Sid: "ActuatorVolumeIops", Effect: "Allow", Action: ["ec2:ModifyVolume", "ec2:DescribeVolumes", "ec2:DescribeVolumesModifications"], Resource: "*" },
+    { Sid: "ActuatorLogRetention", Effect: "Allow", Action: ["logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "logs:DescribeLogGroups", "logs:ListTagsForResource"], Resource: "*" },
+    { Sid: "ActuatorS3RequestMetrics", Effect: "Allow", Action: ["s3:PutMetricsConfiguration", "s3:GetMetricsConfiguration", "s3:DeleteMetricsConfiguration"], Resource: "*" },
+    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 

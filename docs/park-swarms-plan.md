@@ -138,6 +138,11 @@ Four ways in, cheapest first:
 
 ## Fourth track: S3 lifecycle rules recommended from usage
 
+Built on 2026-09-25 as `src/s3_usage.ts` and the `s3_request_metrics` executor action (README "S3 lifecycle rules
+from usage"). What follows is the design it was built from; the deviation is that the age distribution comes from a
+sampled listing rather than S3 Inventory (no destination bucket to create), which S3 Inventory can replace later
+for buckets with millions of objects.
+
 The idea (added 2026-09-25): instead of the fixed "bucket without a lifecycle policy" finding, look at how each
 bucket is actually used and propose the rule that fits it.
 
