@@ -9,6 +9,7 @@ import { isBusy, runEvents, startRun } from "../collector.js";
 import { ALL_BENCHMARKS, DEFAULT_BENCHMARKS } from "../powerpipe.js";
 import { clearConnection, credentialsMeta, hasConnectionFile, sdkIdentity, testConnection, updateCredentialsMeta, writeConnection } from "../steampipe.js";
 import { CREDENTIAL_SOURCES, DEFAULT_CREDENTIAL_SOURCE, PROFILE_NAME_RE, ROLE_ARN_RE, validateSettings } from "../aws_config.js";
+import { memberConnections } from "../accounts.js";
 import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } from "../agent.js";
 import { getRunChanges } from "../changes.js";
 import { postRejectionLearning } from "../learnings.js";
@@ -142,7 +143,7 @@ api.put("/settings/aws", async (req, res) => {
   let settings;
   try { settings = validateSettings(req.body || {}); }
   catch (e: any) { return res.status(400).json({ error: e.message }); }
-  const meta = writeConnection(settings);
+  const meta = writeConnection(settings, memberConnections());
   const [test, sdk] = await Promise.all([testConnection(45_000), sdkIdentity(20_000)]);
   if (test.ok) updateCredentialsMeta({ accountId: test.accountId });
   else if (sdk.ok && sdk.accountId) updateCredentialsMeta({ accountId: sdk.accountId });

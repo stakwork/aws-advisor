@@ -14,6 +14,9 @@ import { checkCli } from "./step_runner.js";
 import { startScheduler } from "./scheduler.js";
 import { loadTasks } from "./tasks.js";
 import { actions } from "./routes/actions.js";
+import { swarms } from "./routes/swarms.js";
+import { tags } from "./routes/tags.js";
+import { accounts } from "./routes/accounts.js";
 import "./actions/index.js";
 loadTasks();
 
@@ -41,6 +44,9 @@ app.use("/api", knowledge);
 app.use("/api", graph);
 app.use("/api", prompts);
 app.use("/api", actions);
+app.use("/api", swarms);
+app.use("/api", tags);
+app.use("/api", accounts);
 app.use("/api", api);
 mountMcp(app, "/mcp");
 

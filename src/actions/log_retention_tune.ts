@@ -65,11 +65,11 @@ export function lastQueryAt(group: string): string | null {
   return (db.prepare("select max(create_time) as at from log_query_history where log_group = ?").get(group) as { at: string | null }).at ?? null;
 }
 
-interface Candidate { name: string; region: string; retention_days: number; stored_bytes: number; ingest_bytes_day: number | null; set_by: { id: number; days: number } }
+interface Candidate { name: string; region: string; account_id?: string | null; retention_days: number; stored_bytes: number; ingest_bytes_day: number | null; set_by: { id: number; days: number } }
 
 /** Groups whose current retention is exactly what a verified log_retention row set and above the target. */
 export function candidates(target: number): Candidate[] {
-  const rows = db.prepare(`select g.name, g.region, g.retention_days, g.stored_bytes, g.ingest_bytes_day, a.id as action_id, a.after_json
+  const rows = db.prepare(`select g.name, g.region, g.account_id, g.retention_days, g.stored_bytes, g.ingest_bytes_day, a.id as action_id, a.after_json
     from log_groups g join actions a on a.kind = 'log_retention' and a.resource = g.name and a.status = 'verified'
     where g.retention_days is not null and g.retention_days > ? order by g.stored_bytes desc`).all(target) as any[];
   const out: Candidate[] = []; const seen = new Set<string>();
@@ -79,7 +79,7 @@ export function candidates(target: number): Candidate[] {
     try { setDays = Number(JSON.parse(r.after_json || "{}").retention_days); } catch { /* malformed row */ }
     if (setDays == null || !Number.isFinite(setDays) || setDays !== Number(r.retention_days)) continue;
     seen.add(r.name);
-    out.push({ name: r.name, region: r.region, retention_days: Number(r.retention_days), stored_bytes: Number(r.stored_bytes || 0), ingest_bytes_day: r.ingest_bytes_day != null ? Number(r.ingest_bytes_day) : null, set_by: { id: Number(r.action_id), days: setDays } });
+    out.push({ name: r.name, region: r.region, account_id: r.account_id ?? null, retention_days: Number(r.retention_days), stored_bytes: Number(r.stored_bytes || 0), ingest_bytes_day: r.ingest_bytes_day != null ? Number(r.ingest_bytes_day) : null, set_by: { id: Number(r.action_id), days: setDays } });
   }
   return out;
 }
@@ -93,12 +93,12 @@ export const logRetentionTuneAction: ActionModule = {
     const quietDays = Math.max(30, Math.round(config.actLogQuietDays));
     const target = snapRetention(config.actLogQuietRetentionDays);
     const cands = candidates(target);
-    const regions = [...new Set([creds.region, ...cands.map((c) => c.region).filter(Boolean)])];
+    const regions = [...new Set([...creds.accounts.map((a) => a.region), ...cands.map((c) => c.region).filter(Boolean)])];
     let since = getJsonSetting<string | null>(HISTORY_SINCE_KEY, null);
     if (!since) { since = new Date().toISOString(); setSetting(HISTORY_SINCE_KEY, JSON.stringify(since)); }
     let recorded = 0;
-    for (const region of regions) {
-      const logs = new CloudWatchLogsClient({ region, credentials: creds.read });
+    for (const acct of creds.accounts) for (const region of regions) {
+      const logs = new CloudWatchLogsClient({ region, credentials: acct.read });
       try { recorded += await recordQueries(logs, region); }
       catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: DescribeQueries: ${m.slice(0, 160)}`); log(`${region}: DescribeQueries: ${m}`); }
       finally { logs.destroy(); }
@@ -108,9 +108,10 @@ export const logRetentionTuneAction: ActionModule = {
     const probe = quietVerdict({ historySince: since, quietDays, lastQueryAt: null, hasSubscription: false });
     if (!probe.quiet) { notes.push(`${cands.length} candidate group(s) wait: ${probe.reason}`); return { proposals, notes }; }
     const byRegion = new Map<string, Candidate[]>();
-    for (const c of cands.slice(0, MAX_PER_PLAN)) { const region = c.region || creds.region; if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(c); }
-    for (const [region, list] of byRegion) {
-      const logs = new CloudWatchLogsClient({ region, credentials: creds.read });
+    for (const c of cands.slice(0, MAX_PER_PLAN)) { const key = `${c.account_id || ""}|${c.region || creds.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(c); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const logs = new CloudWatchLogsClient({ region, credentials: creds.forAccount(account || null).read });
       try {
         for (const c of list) {
           const skip = (why: string) => { notes.push(`${c.name}: ${why}`); log(`${c.name}: ${why}`); };
@@ -130,7 +131,7 @@ export const logRetentionTuneAction: ActionModule = {
           const stored = g.storedBytes ?? c.stored_bytes;
           const gb = stored / 1e9;
           proposals.push({
-            kind: KIND, resource: c.name, resource_name: c.name, region,
+            kind: KIND, resource: c.name, resource_name: c.name, region, account_id: c.account_id ?? null,
             dedupe: `${KIND}:${c.name}:${target}`,
             title: `${c.name}: retention ${c.retention_days} → ${target} days (${gb.toFixed(2)} GB stored, unqueried for ${quietDays} days)`,
             reason: `the executor set ${c.retention_days} days (auto-action #${c.set_by.id}) when nothing was known about who reads the group; ${v.reason} (history since ${since.slice(0, 10)}). ${gb.toFixed(2)} GB stored${c.ingest_bytes_day != null ? `, ${(c.ingest_bytes_day / 1e6).toFixed(1)} MB/day ingested` : ""}; events older than ${target} days are purged from then on.`,

@@ -104,13 +104,24 @@ export function spcProfile(s: CredentialSettings, managedProfile: string): strin
   return null;
 }
 
-/** The Steampipe connection file for the settings. */
-export function renderSpc(s: CredentialSettings, p: Pick<CredentialPaths, "connection" | "managedProfile">): string {
+/**
+ * A member account reached from the parent's credentials through a role (Organizations: one parent, N children).
+ * Steampipe reaches it through a managed AWS profile that chains the member role onto the parent's identity, and
+ * the connection named after it joins an aggregator that keeps the app's schema name, so every query spans all
+ * accounts unchanged (rows carry `account_id`). Names that are only unique per account (log groups, RDS
+ * identifiers) can collide across members; inventories keyed by name merge those (a known phase-2 item).
+ */
+export interface MemberConnection { account_id: string; role_arn: string; regions?: string[]; default_region?: string }
+export const parentConnectionName = (connection: string) => `${connection}_p`;
+export const memberConnectionName = (connection: string, accountId: string) => `${connection}_${accountId}`;
+export const memberProfileName = (managed: string, accountId: string) => `${managed}-${accountId}`;
+
+/** The connection block for the parent's own settings, under `name`. */
+function connectionBlock(name: string, s: CredentialSettings, p: Pick<CredentialPaths, "managedProfile">): string[] {
   const regions = s.regions?.length ? s.regions : ["*"];
   const defaultRegion = s.defaultRegion || "us-east-1";
   const lines = [
-    `# Managed by aws-advisor. Edit through the Settings page, not by hand.`,
-    `connection ${lit(p.connection)} {`,
+    `connection ${lit(name)} {`,
     `  plugin         = "aws"`,
     `  regions        = [${regions.map(lit).join(", ")}]`,
     `  default_region = ${lit(defaultRegion)}`,
@@ -124,26 +135,70 @@ export function renderSpc(s: CredentialSettings, p: Pick<CredentialPaths, "conne
   } else {
     lines.push(`  # no credentials: the plugin uses the default chain (environment, instance profile, container)`);
   }
-  lines.push(`}`, ``);
+  lines.push(`}`);
+  return lines;
+}
+
+/**
+ * The Steampipe connection file for the settings. Without members, one connection named after the schema, as
+ * always. With members, that name becomes an aggregator over the parent (`<schema>_p`) and one connection per
+ * member (`<schema>_<account id>`, through its managed profile), so `S.aws_*` spans every account.
+ */
+export function renderSpc(s: CredentialSettings, p: Pick<CredentialPaths, "connection" | "managedProfile">, members: MemberConnection[] = []): string {
+  const lines = [`# Managed by aws-advisor. Edit through the Settings page, not by hand.`];
+  if (!members.length) return [...lines, ...connectionBlock(p.connection, s, p), ``].join("\n");
+  const names = [parentConnectionName(p.connection), ...members.map((m) => memberConnectionName(p.connection, m.account_id))];
+  lines.push(
+    `# Aggregator: the app queries this schema and sees every account below (rows carry account_id).`,
+    `connection ${lit(p.connection)} {`, `  plugin      = "aws"`, `  type        = "aggregator"`, `  connections = [${names.map(lit).join(", ")}]`, `}`, ``,
+    `# The parent (the credentials from Settings).`, ...connectionBlock(parentConnectionName(p.connection), s, p), ``,
+  );
+  for (const m of members) {
+    const regions = m.regions?.length ? m.regions : (s.regions?.length ? s.regions : ["*"]);
+    lines.push(
+      `# Member account ${m.account_id}: ${m.role_arn} assumed from the parent (profile in the AWS config file).`,
+      `connection ${lit(memberConnectionName(p.connection, m.account_id))} {`,
+      `  plugin         = "aws"`,
+      `  regions        = [${regions.map(lit).join(", ")}]`,
+      `  default_region = ${lit(m.default_region || s.defaultRegion || "us-east-1")}`,
+      `  profile        = ${lit(memberProfileName(p.managedProfile, m.account_id))}`,
+      `}`, ``,
+    );
+  }
   return lines.join("\n");
 }
 
-/** The managed profile section(s) for the AWS shared config file, or null when none is needed. */
-export function renderManagedConfig(s: CredentialSettings, p: Pick<CredentialPaths, "managedProfile">): string | null {
-  if (!s.roleArn) return null;
+/**
+ * The managed profile section(s) for the AWS shared config file, or null when none is needed. A member's profile
+ * chains its role onto the parent's effective identity: the managed profile when the parent assumes a role, the
+ * keys' source profile, the user's own profile, or the credential source of the default chain.
+ */
+export function renderManagedConfig(s: CredentialSettings, p: Pick<CredentialPaths, "managedProfile">, members: MemberConnection[] = []): string | null {
+  if (!s.roleArn && !members.length) return null;
   const region = s.defaultRegion || "us-east-1";
-  const lines = [`[profile ${p.managedProfile}]`, `role_arn = ${s.roleArn}`, `role_session_name = aws-advisor`];
-  if (s.mode === "keys") lines.push(`source_profile = ${sourceProfileName(p.managedProfile)}`);
-  else if (s.mode === "profile") lines.push(`source_profile = ${s.profile}`);
-  else lines.push(`credential_source = ${s.credentialSource || DEFAULT_CREDENTIAL_SOURCE}`);
-  lines.push(`region = ${region}`);
-  if (s.mode === "keys") lines.push(``, `[profile ${sourceProfileName(p.managedProfile)}]`, `region = ${region}`);
+  const lines: string[] = [];
+  if (s.roleArn) {
+    lines.push(`[profile ${p.managedProfile}]`, `role_arn = ${s.roleArn}`, `role_session_name = aws-advisor`);
+    if (s.mode === "keys") lines.push(`source_profile = ${sourceProfileName(p.managedProfile)}`);
+    else if (s.mode === "profile") lines.push(`source_profile = ${s.profile}`);
+    else lines.push(`credential_source = ${s.credentialSource || DEFAULT_CREDENTIAL_SOURCE}`);
+    lines.push(`region = ${region}`);
+  }
+  if (s.mode === "keys" && (s.roleArn || members.length)) lines.push(...(lines.length ? [``] : []), `[profile ${sourceProfileName(p.managedProfile)}]`, `region = ${region}`);
+  for (const m of members) {
+    lines.push(``, `[profile ${memberProfileName(p.managedProfile, m.account_id)}]`, `role_arn = ${m.role_arn}`, `role_session_name = aws-advisor`);
+    if (s.roleArn) lines.push(`source_profile = ${p.managedProfile}`);
+    else if (s.mode === "keys") lines.push(`source_profile = ${sourceProfileName(p.managedProfile)}`);
+    else if (s.mode === "profile") lines.push(`source_profile = ${s.profile}`);
+    else lines.push(`credential_source = ${s.credentialSource || DEFAULT_CREDENTIAL_SOURCE}`);
+    lines.push(`region = ${m.default_region || region}`);
+  }
   return lines.join("\n");
 }
 
-/** The managed section for the AWS shared credentials file (keys chained into a role), or null. */
-export function renderManagedCredentials(s: CredentialSettings, p: Pick<CredentialPaths, "managedProfile">): string | null {
-  if (s.mode !== "keys" || !s.roleArn) return null;
+/** The managed section for the AWS shared credentials file (keys chained into a role or into member accounts), or null. */
+export function renderManagedCredentials(s: CredentialSettings, p: Pick<CredentialPaths, "managedProfile">, members: MemberConnection[] = []): string | null {
+  if (s.mode !== "keys" || (!s.roleArn && !members.length)) return null;
   const lines = [`[${sourceProfileName(p.managedProfile)}]`, `aws_access_key_id = ${s.accessKey}`, `aws_secret_access_key = ${s.secretKey}`];
   if (s.sessionToken) lines.push(`aws_session_token = ${s.sessionToken}`);
   return lines.join("\n");
@@ -202,10 +257,10 @@ export interface WrittenFiles {
 }
 
 /** Writes the .spc and the managed sections for the settings (removing managed sections the mode does not use). */
-export function writeCredentialFiles(s: CredentialSettings, p: CredentialPaths): WrittenFiles {
-  const spc = renderSpc(s, p);
-  const managedConfig = renderManagedConfig(s, p);
-  const managedCredentials = renderManagedCredentials(s, p);
+export function writeCredentialFiles(s: CredentialSettings, p: CredentialPaths, members: MemberConnection[] = []): WrittenFiles {
+  const spc = renderSpc(s, p, members);
+  const managedConfig = renderManagedConfig(s, p, members);
+  const managedCredentials = renderManagedCredentials(s, p, members);
   fs.mkdirSync(path.dirname(p.spcFile), { recursive: true });
   fs.writeFileSync(p.spcFile, spc, { mode: 0o600 });
   fs.chmodSync(p.spcFile, 0o600);

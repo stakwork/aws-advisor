@@ -21,6 +21,7 @@ export function costScopeFor(actionType: string, resource: { instance_type?: str
     case "retire_kms_key": return { service: "AWS Key Management Service", usage_like: ["%KMS-Keys%"], note: "KMS key-months of the whole account" };
     case "delete_load_balancer": return { service: "Amazon Elastic Load Balancing", usage_like: ["%LoadBalancerUsage%"], note: "load balancer hours of the whole account" };
     case "set_dynamodb_capacity_mode": return { service: "Amazon DynamoDB", usage_like: ["%CapacityUnit-Hrs%", "%RequestUnits%"], note: "DynamoDB provisioned capacity and request units of the whole account" };
+    case "set_lambda_memory": return { service: "AWS Lambda", usage_like: ["%Lambda-GB-Second%"], note: "Lambda GB-seconds of the whole account" };
     case "set_credit_specification": return { service: "Amazon Elastic Compute Cloud - Compute", usage_like: ["%CPUCredits:%"], note: "T-family surplus credit charges of the whole account" };
     default: return null;
   }

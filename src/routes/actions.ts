@@ -3,7 +3,7 @@ import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
-import { applyAction, dispatchActionNotifications, executorStatus, getAction, listActions, previewActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
+import { applyAction, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
 
 export const actions = Router();
 actions.use(authMiddleware);
@@ -27,6 +27,21 @@ actions.get("/actions/preview", async (_req, res) => {
 actions.post("/actions/run", async (_req, res) => {
   try { const r = await runExecutorPass("manual"); dispatchActionNotifications().catch(() => {}); res.json(r); } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
+// The kill switch: { reason?, until? (ISO date or hours as a number) } pauses planning and applying; revert stays allowed.
+actions.post("/actions/pause", (req, res) => {
+  try {
+    const b = req.body || {};
+    const reason = typeof b.reason === "string" ? b.reason.slice(0, 300) : "";
+    let until: string | undefined;
+    if (b.until != null && b.until !== "") {
+      const n = Number(b.until);
+      until = Number.isFinite(n) && typeof b.until !== "string" ? new Date(Date.now() + n * 3600000).toISOString() : String(b.until);
+    }
+    res.json(pauseActions("page", reason, until));
+  } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
+});
+actions.post("/actions/resume", (_req, res) => { res.json(resumeActions("page")); });
+actions.get("/actions/pause", (_req, res) => { res.json(pauseState()); });
 actions.get("/actions/:id", (req, res) => { const a = getAction(Number(req.params.id)); if (!a) return res.status(404).json({ error: "no such action" }); res.json(a); });
 actions.post("/actions/:id/apply", async (req, res) => {
   try { const a = await applyAction(Number(req.params.id), "manual"); dispatchActionNotifications().catch(() => {}); res.json(a); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }

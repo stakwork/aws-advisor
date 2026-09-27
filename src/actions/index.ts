@@ -22,6 +22,8 @@ import { cpuCreditSpecAction } from "./cpu_credit_spec.js";
 import { efsLifecycleAction } from "./efs_lifecycle.js";
 import { alarmCleanupAction } from "./alarm_cleanup.js";
 import { logRetentionTuneAction } from "./log_retention_tune.js";
+import { s3MultipartAbortAction } from "./s3_multipart_abort.js";
+import { lambdaMemoryAction } from "./lambda_memory.js";
 
 registerAction(acuWindowAction);
 registerAction(snapshotArchiveAction);
@@ -45,3 +47,5 @@ registerAction(cpuCreditSpecAction);
 registerAction(efsLifecycleAction);
 registerAction(alarmCleanupAction);
 registerAction(logRetentionTuneAction);
+registerAction(s3MultipartAbortAction);
+registerAction(lambdaMemoryAction);

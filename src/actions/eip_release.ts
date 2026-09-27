@@ -54,9 +54,12 @@ export const eipReleaseAction: ActionModule = {
     const recs = approvedRecs(ACTION_TYPES);
     if (!recs.length) { notes.push("no approved recommendation to release an Elastic IP"); return { proposals, notes }; }
     const byRegion = new Map<string, typeof recs>();
-    for (const r of recs) { const region = String(r.evidence?.region || creds.region); if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(r); }
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    // Grouped per (account, region): the finding row behind the recommendation carries the account it came from.
+    for (const r of recs) { const key = `${r.evidence?.account_id || ""}|${String(r.evidence?.region || creds.region)}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const acct = creds.forAccount(account || null);
+      const ec2 = new EC2Client({ region, credentials: acct.read });
       try {
         // One approval per allocation id; describe each on its own so a released one does not fail the whole batch.
         const seen = new Set<string>();
@@ -75,7 +78,7 @@ export const eipReleaseAction: ActionModule = {
           const why = eipSkipReason(f);
           if (why) { skip(why); continue; }
           proposals.push({
-            kind: KIND, resource: f.allocation_id, resource_name: f.name || f.public_ip, region,
+            kind: KIND, resource: f.allocation_id, resource_name: f.name || f.public_ip, region, account_id: acct.is_parent ? null : acct.account_id,
             dedupe: `${KIND}:${f.allocation_id}`,
             title: `release Elastic IP ${f.public_ip}${f.name ? ` (${f.name})` : ""}: allocated, attached to nothing`,
             reason: `${rec.title}. Approved as recommendation #${rec.id}${rec.decided_by ? ` by ${rec.decided_by}` : ""}. Still unattached when the executor looked. Releasing loses the address: anything outside AWS that points at ${f.public_ip} (DNS, an allow-list) stops working. Recovery is possible only while nobody else has been allocated it.`,

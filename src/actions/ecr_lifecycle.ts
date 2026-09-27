@@ -66,8 +66,9 @@ export const ecrLifecycleAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const days = Math.max(1, Math.round(config.actEcrUntaggedDays));
     let scanned = 0, withPolicy = 0, small = 0;
-    for (const region of regions(creds.region)) {
-      const ecr = new ECRClient({ region, credentials: creds.read });
+    // Per account (src/accounts.ts), per region: a member's repositories are read through its own credentials.
+    for (const acct of creds.accounts) for (const region of regions(acct.region)) {
+      const ecr = new ECRClient({ region, credentials: acct.read });
       try {
         const repos: Repository[] = [];
         let token: string | undefined;
@@ -87,7 +88,7 @@ export const ecrLifecycleAction: ActionModule = {
             }
             const gb = (b: number) => (b / 1e9).toFixed(2);
             proposals.push({
-              kind: KIND, resource: name, resource_name: name, region,
+              kind: KIND, resource: name, resource_name: name, region, account_id: acct.is_parent ? null : acct.account_id,
               dedupe: `${KIND}:${region}:${name}:${days}`,
               title: `${name}: expire untagged images after ${days} days (${t.count}${t.sampled ? "+" : ""} untagged, ${gb(t.bytes)} GB)`,
               reason: `no lifecycle policy; ${t.count}${t.sampled ? "+" : ""} untagged image(s) hold ${gb(t.bytes)} GB${t.oldest_at ? `, the oldest pushed ${t.oldest_at.slice(0, 10)}` : ""}. ${t.expiring_count} of them (${gb(t.expiring_bytes)} GB) are already older than ${days} days and go on the first run; tagged images are never touched. Removing the policy later does not bring deleted images back.`,

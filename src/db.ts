@@ -356,7 +356,10 @@ for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache"]) add
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");
 
-function addColumn(table: string, column: string, type: string) {
+// Member accounts (src/accounts.ts): the inventories and the executor's ledger remember which account a row belongs to.
+for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache", "inventory_ebs", "inventory_s3", "inventory_lambda", "log_groups"]) { try { addColumn(t, "account_id", "text"); } catch { /* table created by a module that has not loaded yet: it adds the column itself */ } }
+
+export function addColumn(table: string, column: string, type: string) {
   const cols = db.pragma(`table_info(${table})`) as { name: string }[];
   if (cols.some((c) => c.name === column)) return;
   // Two processes on one file (the test runner) can both pass the check; the second alter is then a no-op.

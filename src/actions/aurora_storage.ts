@@ -48,7 +48,8 @@ export const auroraStorageAction: ActionModule = {
     for (const t of targets) {
       const skip = (why: string) => { notes.push(`${t.cluster}: ${why}`); log(`${t.cluster}: ${why}`); };
       if (t.conflict) notes.push(`${t.cluster}: ${t.conflict}`);
-      const rds = new RDSClient({ region: t.region, credentials: creds.read });
+      const accountId = (db.prepare("select max(account_id) as account_id from inventory_rds where cluster = ? and gone = 0").get(t.cluster) as { account_id: string | null } | undefined)?.account_id ?? null;
+      const rds = new RDSClient({ region: t.region, credentials: creds.forAccount(accountId).read });
       try {
         const c = await describe(rds, t.cluster);
         if (!c) { skip("no such cluster (DescribeDBClusters)"); continue; }
@@ -65,7 +66,7 @@ export const auroraStorageAction: ActionModule = {
         const inv = db.prepare("select count(*) as n from inventory_rds where cluster = ? and gone = 0").get(t.cluster) as { n: number };
         const members = c.DBClusterMembers?.length ?? inv.n;
         proposals.push({
-          kind: KIND, resource: t.cluster, resource_name: t.cluster, region: t.region,
+          kind: KIND, resource: t.cluster, resource_name: t.cluster, region: t.region, account_id: accountId,
           dedupe: `${KIND}:${t.cluster}:${t.target}`,
           title: `${t.cluster}: storage ${label(current)} → ${label(t.target)} (${c.Engine || "aurora"}, ${members} instance${members === 1 ? "" : "s"})`,
           reason: `${lead.title}. Approved as recommendation #${lead.id}${lead.decided_by ? ` by ${lead.decided_by}` : ""}${t.recs.length > 1 ? ` (and #${t.recs.slice(1).map((r) => r.id).join(", #")})` : ""}. ModifyDBCluster applied immediately: online, no failover, the bill changes from the next hour.${t.target === "aurora-iopt1" ? " Switching back to Standard is allowed at any time; another switch to I/O-Optimized only after 30 days." : " Switching back to I/O-Optimized is allowed once every 30 days."}`,

@@ -100,7 +100,7 @@ async function creditMetrics(cw: CloudWatchClient, ids: string[], now = Date.now
   return out;
 }
 
-interface Candidate { instance_id: string; name: string | null; instance_type: string; region: string; monthly_usd: number | null; pool_kind: string | null }
+interface Candidate { instance_id: string; account_id?: string | null; name: string | null; instance_type: string; region: string; monthly_usd: number | null; pool_kind: string | null }
 
 export const cpuCreditSpecAction: ActionModule = {
   kind: KIND,
@@ -108,16 +108,18 @@ export const cpuCreditSpecAction: ActionModule = {
 
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
-    const rows = (db.prepare("select instance_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state = 'running' and instance_type is not null order by name").all() as Candidate[]).filter((r) => BURSTABLE.test(r.instance_type));
+    const rows = (db.prepare("select instance_id, account_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state = 'running' and instance_type is not null order by name").all() as Candidate[]).filter((r) => BURSTABLE.test(r.instance_type));
     if (!rows.length) { notes.push("no running burstable (t2/t3/t3a/t4g) instance in the inventory"); return { proposals, notes }; }
     const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     const byRegion = new Map<string, Candidate[]>();
-    for (const r of rows) { const region = r.region || creds.region; if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(r); }
+    for (const r of rows) { const key = `${r.account_id || ""}|${r.region || creds.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }
     let filed = 0;
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
-      const cw = new CloudWatchClient({ region, credentials: creds.read });
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const read = creds.forAccount(account || null).read;
+      const ec2 = new EC2Client({ region, credentials: read });
+      const cw = new CloudWatchClient({ region, credentials: read });
       try {
         const ids = list.map((r) => r.instance_id);
         const specs = new Map<string, CreditSpec>();
@@ -154,7 +156,7 @@ export const cpuCreditSpecAction: ActionModule = {
           const target = (String(rec.evidence?.target || v.target) as CreditSpec);
           if (spec === target) { skip(`already ${target}`); continue; }
           proposals.push({
-            kind: KIND, resource: r.instance_id, resource_name: r.name, region,
+            kind: KIND, resource: r.instance_id, resource_name: r.name, region, account_id: r.account_id ?? null,
             dedupe: `${KIND}:${r.instance_id}:${target}`,
             title: `${name} (${type}): credit specification ${spec} → ${target}`,
             reason: `${v.reason}. Approved as recommendation #${rec.id}${rec.decided_by ? ` by ${rec.decided_by}` : ""}. Online, no restart.`,

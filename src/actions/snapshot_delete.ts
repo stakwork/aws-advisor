@@ -61,9 +61,12 @@ export const snapshotDeleteAction: ActionModule = {
     const recs = approvedRecs(ACTION_TYPES);
     if (!recs.length) { notes.push("no approved recommendation to delete a snapshot"); return { proposals, notes }; }
     const byRegion = new Map<string, typeof recs>();
-    for (const r of recs) { const region = String(r.evidence?.region || creds.region); if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(r); }
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    // Grouped per (account, region): the finding row behind the recommendation carries the account it came from.
+    for (const r of recs) { const key = `${r.evidence?.account_id || ""}|${String(r.evidence?.region || creds.region)}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const acct = creds.forAccount(account || null);
+      const ec2 = new EC2Client({ region, credentials: acct.read });
       try {
         const seen = new Set<string>();
         for (const rec of list) {
@@ -83,7 +86,7 @@ export const snapshotDeleteAction: ActionModule = {
           if (why) { skip(why); continue; }
           const tierLabel = f.tier === "archive" ? "archived" : "standard tier";
           proposals.push({
-            kind: KIND, resource: f.snapshot_id, resource_name: f.name || f.description || f.snapshot_id, region,
+            kind: KIND, resource: f.snapshot_id, resource_name: f.name || f.description || f.snapshot_id, region, account_id: acct.is_parent ? null : acct.account_id,
             dedupe: `${KIND}:${f.snapshot_id}`,
             title: `delete snapshot ${f.snapshot_id}${f.name ? ` (${f.name})` : ""}: ${f.size_gb} GB, ${tierLabel}${f.started ? `, from ${f.started.slice(0, 10)}` : ""}`,
             reason: `${rec.title}. Approved as recommendation #${rec.id}${rec.decided_by ? ` by ${rec.decided_by}` : ""}. Not behind an AMI, not managed by Backup or DLM, ${f.volume_id ? `source volume ${f.volume_id}` : "source volume gone"}. A deleted snapshot cannot be recovered${f.tier === "archive" ? "; an archived one still bills its 90-day minimum" : ""}.`,

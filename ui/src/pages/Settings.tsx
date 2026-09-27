@@ -138,6 +138,8 @@ export default function Settings() {
         </form>
       </Card>
 
+      <MemberAccountsCard parentAccountId={aws.accountId} />
+
       <PermissionsCard />
 
       <Card title="Thrifty benchmarks to run">
@@ -185,5 +187,69 @@ export default function Settings() {
         <div className="flex gap-2"><input className="flex-1" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} placeholder="paste API_TOKEN" /><Button variant="ghost" onClick={() => { localStorage.setItem("advisor_token", tokenInput); location.reload(); }}>Use</Button></div>
       </Card>
     </div>
+  );
+}
+
+
+type MemberAccount = { account_id: string; name: string; role_arn: string; act_role_arn: string | null; regions: string[] | null; enabled: boolean; is_parent: boolean; last_test?: { ok: boolean; arn?: string; error?: string; at: string } | null };
+
+/** Member accounts: the children the parent reaches through a role (Steampipe and the SDK alike), with the trust policy their roles need. */
+function MemberAccountsCard({ parentAccountId }: { parentAccountId?: string }) {
+  const empty = { account_id: "", name: "", role_arn: "", act_role_arn: "", regions: "" };
+  const [d, setD] = useState<{ accounts: MemberAccount[]; parent_identity: { ok: boolean; arn?: string; error?: string }; trust_policy: any } | null>(null);
+  const [form, setForm] = useState(empty);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [showPolicy, setShowPolicy] = useState(false);
+  const load = () => api("/accounts").then(setD).catch((e) => setMsg({ ok: false, text: e.message }));
+  useEffect(() => { load(); }, []);
+  const set = (patch: Partial<typeof empty>) => setForm((f) => ({ ...f, ...patch }));
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setBusy(true); setMsg(null);
+    try {
+      const r = await api("/accounts", { method: "POST", body: JSON.stringify({ ...form, act_role_arn: form.act_role_arn || undefined, regions: form.regions || undefined }) });
+      setMsg(r.test?.ok ? { ok: true, text: `saved and tested: the parent assumed ${r.test.arn}${r.files_rewritten ? "; Steampipe connection rewritten (it reloads within seconds)" : "; save the parent's credentials first so the connection can be rewritten"}` } : { ok: false, text: `saved, but the test failed: ${r.test?.error}` });
+      setForm(empty); load();
+    } catch (e: any) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); }
+  };
+  const test = async (id: string) => { setBusy(true); setMsg(null); try { const r = await api(`/accounts/${id}/test`, { method: "POST" }); setMsg({ ok: r.test.ok, text: r.test.ok ? `ok: ${r.test.arn}` : r.test.error }); load(); } catch (e: any) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); } };
+  const remove = async (id: string) => { setBusy(true); setMsg(null); try { await api(`/accounts/${id}`, { method: "DELETE" }); setMsg({ ok: true, text: `${id} removed; Steampipe connection rewritten` }); load(); } catch (e: any) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); } };
+  const members = (d?.accounts || []).filter((a) => !a.is_parent);
+  return (
+    <Card title="Member accounts">
+      <p className="mb-3 text-sm text-zinc-400">
+        One parent, the children it reaches through a role. The credentials above are the parent{parentAccountId ? <> (account <span className="text-zinc-200">{parentAccountId}</span>)</> : ""}. In each child create two roles that trust the parent's read identity{d?.parent_identity?.ok ? <> (<span className="text-zinc-200">{d.parent_identity.arn}</span>)</> : ""}: a read role with the advisor's read policy (Permissions below), and an actuator role with the actuator policy (Auto-actions page) if the executor may change that account. Steampipe then queries every account through one schema (rows carry the account id), the inventories and rules span them, and the executor acts in a child under that child's actuator role only.
+        {" "}<button type="button" className="text-sky-300 hover:underline" onClick={() => setShowPolicy((v) => !v)}>{showPolicy ? "Hide" : "Show"} the trust policy</button>
+      </p>
+      {showPolicy && d?.trust_policy && <pre className="mb-3 max-h-60 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2 text-xs text-zinc-300">{JSON.stringify(d.trust_policy, null, 2)}</pre>}
+      {members.length > 0 && (
+        <table className="mb-3 w-full text-sm">
+          <thead><tr className="text-left text-xs text-zinc-500"><th className="py-1 pr-3">Account</th><th className="py-1 pr-3">Name</th><th className="py-1 pr-3">Read role</th><th className="py-1 pr-3">Actuator role</th><th className="py-1 pr-3">Last test</th><th /></tr></thead>
+          <tbody>
+            {members.map((m) => (
+              <tr key={m.account_id} className="border-t border-zinc-800/60 align-top">
+                <td className="py-1 pr-3 font-mono text-zinc-200">{m.account_id}{!m.enabled && <span className="ml-1 text-xs text-zinc-500">(disabled)</span>}</td>
+                <td className="py-1 pr-3">{m.name}</td>
+                <td className="py-1 pr-3 break-all font-mono text-xs text-zinc-300">{m.role_arn}</td>
+                <td className="py-1 pr-3 break-all font-mono text-xs text-zinc-300">{m.act_role_arn || <span className="text-zinc-500">none: dry runs only</span>}</td>
+                <td className="py-1 pr-3 text-xs">{m.last_test ? <span className={m.last_test.ok ? "text-emerald-300" : "text-red-300"} title={m.last_test.arn || m.last_test.error}>{m.last_test.ok ? "ok" : "failed"} · {when(m.last_test.at)}</span> : <span className="text-zinc-500">never</span>}</td>
+                <td className="py-1 text-right whitespace-nowrap"><Button type="button" variant="ghost" onClick={() => test(m.account_id)} disabled={busy}>Test</Button> <Button type="button" variant="danger" onClick={() => remove(m.account_id)} disabled={busy}>Remove</Button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <form onSubmit={save} className="grid gap-3">
+        <div className="grid grid-cols-2 gap-3">
+          <label className="grid gap-1 text-sm"><span className="text-zinc-400">Account id (12 digits)</span><input value={form.account_id} onChange={(e) => set({ account_id: e.target.value })} required pattern="\d{12}" /></label>
+          <label className="grid gap-1 text-sm"><span className="text-zinc-400">Name</span><input value={form.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. production" /></label>
+        </div>
+        <label className="grid gap-1 text-sm"><span className="text-zinc-400">Read role ARN in the child</span><input value={form.role_arn} onChange={(e) => set({ role_arn: e.target.value })} required placeholder="arn:aws:iam::<child>:role/aws-advisor-read" /></label>
+        <label className="grid gap-1 text-sm"><span className="text-zinc-400">Actuator role ARN in the child (optional: without it the executor only dry-runs there)</span><input value={form.act_role_arn} onChange={(e) => set({ act_role_arn: e.target.value })} placeholder="arn:aws:iam::<child>:role/aws-advisor-act" /></label>
+        <label className="grid gap-1 text-sm"><span className="text-zinc-400">Regions (comma separated; empty = the parent's)</span><input value={form.regions} onChange={(e) => set({ regions: e.target.value })} /></label>
+        <div className="flex items-center gap-2"><Button type="submit" disabled={busy}>{busy ? "Saving and testing…" : "Add and test"}</Button></div>
+        {msg && <div className={`text-sm ${msg.ok ? "text-emerald-300" : "text-red-300"}`}>{msg.text}</div>}
+      </form>
+    </Card>
   );
 }

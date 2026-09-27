@@ -35,7 +35,7 @@ const sqliteNow = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 // ---- Steampipe queries ------------------------------------------------------------------------------
 
 const EC2_SQL = `
-  select i.instance_id, i.arn, i.tags ->> 'Name' as name, i.tags, i.instance_type, i.instance_state as state, i.region,
+  select i.instance_id, i.account_id, i.arn, i.tags ->> 'Name' as name, i.tags, i.instance_type, i.instance_state as state, i.region,
          i.placement_availability_zone as az, i.launch_time, i.private_ip_address as private_ip, i.public_ip_address as public_ip,
          i.private_dns_name as private_dns, i.public_dns_name as public_dns, i.platform, i.platform_details, i.architecture,
          i.iam_instance_profile_arn, i.vpc_id, i.subnet_id, i.root_device_name, i.root_device_type, i.image_id, i.key_name,
@@ -63,7 +63,7 @@ const EC2_CPU_SQL = `
   group by 1`;
 
 const RDS_SQL = `
-  select db_instance_identifier, arn, class, engine, engine_version, multi_az, storage_type, allocated_storage, max_allocated_storage,
+  select db_instance_identifier, account_id, arn, class, engine, engine_version, multi_az, storage_type, allocated_storage, max_allocated_storage,
          iops, storage_throughput, status, region, availability_zone, create_time, db_cluster_identifier, license_model,
          endpoint_address, endpoint_port, publicly_accessible, storage_encrypted, backup_retention_period, deletion_protection,
          performance_insights_enabled, vpc_id, read_replica_source_db_instance_identifier, tags
@@ -95,7 +95,7 @@ const RDS_CPU_SQL = `
   group by 1`;
 
 const ELASTICACHE_SQL = `
-  select cache_cluster_id, arn, cache_node_type, engine, engine_version, num_cache_nodes, cache_cluster_status, replication_group_id,
+  select cache_cluster_id, account_id, arn, cache_node_type, engine, engine_version, num_cache_nodes, cache_cluster_status, replication_group_id,
          preferred_availability_zone, region, cache_cluster_create_time, cache_subnet_group_name, transit_encryption_enabled,
          at_rest_encryption_enabled, auto_minor_version_upgrade, snapshot_retention_limit, tags
   from ${S}.aws_elasticache_cluster`;
@@ -114,6 +114,8 @@ const upsertEc2 = db.prepare(`
     open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0, snapshot = excluded.snapshot,
     pool_kind = excluded.pool_kind, pool = excluded.pool`);
 const goneEc2 = db.prepare("update inventory_ec2 set gone = 1 where last_seen <> ?");
+// Member accounts (src/accounts.ts): which account a row came from, written next to the upsert so the prepared statements above stay as they are.
+const setAccount = { ec2: db.prepare("update inventory_ec2 set account_id = ? where instance_id = ?"), rds: db.prepare("update inventory_rds set account_id = ? where db_instance_identifier = ?"), elasticache: db.prepare("update inventory_elasticache set account_id = ? where cache_cluster_id = ?") };
 
 const upsertRds = db.prepare(`
   insert into inventory_rds(db_instance_identifier, class, engine, engine_version, multi_az, storage_type, storage_gb, status, region, created, cluster,
@@ -262,6 +264,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
           open_recs: counters.recs(r.instance_id), findings: counters.findings(r.instance_id), now, snapshot: JSON.stringify(snapshot),
           pool_kind: pool?.kind ?? null, pool: pool?.name ?? null,
         });
+        if (r.account_id) setAccount.ec2.run(String(r.account_id), r.instance_id);
         ec2++;
       }
       goneEc2.run(now);
@@ -291,6 +294,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
           cpu_30d: num(cpu?.avg_max), cpu_days: num(cpu?.days) ?? 0, monthly_usd: price?.monthly ?? null,
           open_recs: counters.recs(id), findings: counters.findings(id), now, snapshot: JSON.stringify(snapshot),
         });
+        if (r.account_id) setAccount.rds.run(String(r.account_id), id);
         rds++;
       }
       goneRds.run(now);
@@ -317,6 +321,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
           region: r.region, created: iso(r.cache_cluster_create_time), replication_group: r.replication_group_id || null, monthly_usd: monthly,
           open_recs: counters.recs(id), findings: counters.findings(id), now, snapshot: JSON.stringify(snapshot),
         });
+        if (r.account_id) setAccount.elasticache.run(String(r.account_id), id);
         elasticache++;
       }
       goneElasticache.run(now);

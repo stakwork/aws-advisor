@@ -14,6 +14,30 @@ export { summarizeSpend } from "./spend_math.js";
  * call per page view. One call per refresh, at most every 6 hours: every call is billed.
  */
 
+/** Member accounts (src/accounts.ts): the payer's Cost Explorer sees every linked account; kept per month here for the Bill page's "By account". */
+db.exec(`create table if not exists spend_by_account_monthly (month text not null, account_id text not null, usd real not null, fetched_at text not null, primary key (month, account_id))`);
+
+export interface AccountSpendRow { month: string; account_id: string; usd: number }
+/** The last `months` months per linked account, newest first. */
+export function spendByAccount(months = 6): AccountSpendRow[] {
+  return db.prepare("select month, account_id, usd from spend_by_account_monthly where month >= ? order by month desc, usd desc").all(monthsAgo(months)) as AccountSpendRow[];
+}
+const monthsAgo = (n: number) => { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - n); return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`; };
+
+/** One Cost Explorer call: unblended cost per linked account per month (aws_cost_by_account_monthly). Errors are returned, not thrown: a member's line is a nicety. */
+export async function refreshSpendByAccount(log: (l: string) => void = () => {}): Promise<{ rows: number; error?: string }> {
+  const sql = `select linked_account_id as account_id, to_char(period_start at time zone 'UTC', 'YYYY-MM') as month, sum(unblended_cost_amount) as usd
+    from ${S}.aws_cost_by_account_monthly where period_start >= date_trunc('month', now() - interval '6 months') group by 1, 2 order by 2, 1`;
+  let rows: { account_id: string | null; month: string; usd: string | null }[];
+  try { rows = await query(sql); } catch (e) { const error = describeError(e, "spend by account (aws_cost_by_account_monthly)"); log(`by account failed: ${error}`); return { rows: 0, error }; }
+  const at = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const up = db.prepare("insert into spend_by_account_monthly(month, account_id, usd, fetched_at) values (?, ?, ?, ?) on conflict(month, account_id) do update set usd = excluded.usd, fetched_at = excluded.fetched_at");
+  let n = 0;
+  db.transaction(() => { for (const r of rows) { if (!r.account_id) continue; up.run(r.month, String(r.account_id), Number(r.usd ?? 0), at); n++; } })();
+  log(`${n} account-month rows stored`);
+  return { rows: n };
+}
+
 export const SPEND_DAYS = 45;
 export const SPEND_MIN_INTERVAL_MS = 6 * 3600_000;
 /** Record types that are real usage (what the account consumed), as opposed to credits, refunds, tax, fees, support. */
@@ -76,5 +100,6 @@ export async function refreshSpend(opts: { force?: boolean; onLog?: (line: strin
     for (const r of rows) upsert.run(r.day, num(r.net_unblended), num(r.unblended), num(r.amortized), num(r.usage_only), fetchedAt);
   })();
   log(`${rows.length} days stored (${rows[0]?.day ?? "—"} to ${rows[rows.length - 1]?.day ?? "—"})`);
+  await refreshSpendByAccount(log);
   return { refreshed: true, days: rows.length, fetched_at: fetchedAt };
 }

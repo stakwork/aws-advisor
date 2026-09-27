@@ -5,7 +5,7 @@ import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../
 
 const FILTERS = ["proposed", "applied", "verified", "failed", "refused", "reverted", "stale", "all"];
 const PAGE_SIZE = 25;
-const KIND_LABEL: Record<string, string> = { acu_window: "Serverless v2 minimum", snapshot_archive: "Snapshot → Archive", ebs_iops_trim: "gp3 IOPS trim", log_retention: "Log retention", s3_request_metrics: "S3 request metrics", aurora_storage: "Aurora storage type", s3_lifecycle: "S3 lifecycle rules", ebs_gp3_migrate: "gp2 → gp3", ecr_lifecycle: "ECR lifecycle policy", swarm_park: "Park idle swarm", eip_release: "EIP release", vpc_gateway_endpoint: "Gateway endpoint", kms_key_retire: "KMS key retire", dynamodb_capacity_mode: "DynamoDB capacity mode", snapshot_delete: "Snapshot delete", idle_load_balancer: "Idle load balancer", schedule_hours: "Office hours", ebs_throughput_trim: "gp3 throughput trim", cpu_credit_spec: "Credit specification", efs_lifecycle: "EFS lifecycle", alarm_cleanup: "Stale alarms", log_retention_tune: "Log retention tune" };
+const KIND_LABEL: Record<string, string> = { acu_window: "Serverless v2 minimum", snapshot_archive: "Snapshot → Archive", ebs_iops_trim: "gp3 IOPS trim", log_retention: "Log retention", s3_request_metrics: "S3 request metrics", aurora_storage: "Aurora storage type", s3_lifecycle: "S3 lifecycle rules", ebs_gp3_migrate: "gp2 → gp3", ecr_lifecycle: "ECR lifecycle policy", swarm_park: "Park idle swarm", eip_release: "EIP release", vpc_gateway_endpoint: "Gateway endpoint", kms_key_retire: "KMS key retire", dynamodb_capacity_mode: "DynamoDB capacity mode", snapshot_delete: "Snapshot delete", idle_load_balancer: "Idle load balancer", schedule_hours: "Office hours", ebs_throughput_trim: "gp3 throughput trim", cpu_credit_spec: "Credit specification", efs_lifecycle: "EFS lifecycle", alarm_cleanup: "Stale alarms", log_retention_tune: "Log retention tune", s3_multipart_abort: "Multipart abort", lambda_memory: "Lambda memory" };
 const STATUS_CLASS: Record<string, string> = { proposed: "text-sky-300", applied: "text-amber-300", verified: "text-emerald-300", failed: "text-red-300", refused: "text-red-200", reverted: "text-zinc-300", stale: "text-zinc-500" };
 
 /** The auto-actions page: what the executor may do (mode, role, identity), what it proposed and what it did, with apply and revert per row. */
@@ -53,14 +53,30 @@ export default function Actions() {
   const doPreview = async () => { setBusy("preview"); setMsg(""); try { setPreview(await api("/actions/preview")); } catch (e: any) { setMsg(e.message); } finally { setBusy(""); } };
 
   const mode = status?.mode || "…";
+  const paused = status?.paused?.paused ? status.paused : null;
+  const reloadStatus = () => api("/actions/status").then(setStatus).catch((e) => setMsg(e.message));
+  const doPause = async () => {
+    const reason = window.prompt("Pause auto-actions: nothing is planned or applied until someone resumes (Revert keeps working). Why?", "");
+    if (reason === null) return;
+    setBusy("pause"); setMsg("");
+    try { await api("/actions/pause", { method: "POST", body: JSON.stringify({ reason }) }); await reloadStatus(); } catch (e: any) { setMsg(e.message); } finally { setBusy(""); }
+  };
+  const doResume = async () => { setBusy("resume"); setMsg(""); try { await api("/actions/resume", { method: "POST", body: "{}" }); await reloadStatus(); } catch (e: any) { setMsg(e.message); } finally { setBusy(""); } };
   return (
     <div className="space-y-4">
+      {paused && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-amber-700 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+          <span>⏸ Auto-actions paused by <span className="font-mono">{paused.by}</span> since {String(paused.at || "").slice(0, 16).replace("T", " ")} UTC{paused.reason ? `: ${paused.reason}` : ""}{paused.until ? ` (resumes ${String(paused.until).slice(0, 16).replace("T", " ")} UTC)` : ""}. Nothing is planned or applied; Revert still works.</span>
+          <Button onClick={doResume} disabled={busy === "resume"} title="lift the pause; the next pass runs on schedule">{busy === "resume" ? "Resuming…" : "Resume"}</Button>
+        </div>
+      )}
       <Card title={<span>Auto-actions <span className="font-normal text-zinc-500">· the executor: micro-adjustments the agent makes on a schedule, ledgered and reversible</span></span>}>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <span>mode <span className={`font-mono ${mode === "apply" ? "text-emerald-300" : mode === "off" ? "text-red-300" : "text-amber-300"}`}>{mode}</span></span>
           <span>pass <span className="font-mono text-zinc-300">{status?.cron || "…"}</span></span>
           <span>acts as {status?.identity?.ok ? <span className="font-mono text-emerald-300" title={status.identity.arn}>{String(status.identity.arn).split(":").pop()}</span> : <span className="text-amber-300" title={status?.identity?.error}>{status?.identity?.error || "…"}</span>}</span>
           <span className="ml-auto flex gap-2">
+            {!paused && <Button variant="ghost" onClick={doPause} disabled={busy === "pause" || mode === "off"} title="the kill switch: the executor plans and applies nothing until someone resumes (page, API or chat); Revert keeps working">{busy === "pause" ? "Pausing…" : "Pause"}</Button>}
             <Button variant="ghost" onClick={doPreview} disabled={busy === "preview"} title="what the pass would propose now, without recording it">{busy === "preview" ? "Planning…" : "Preview plan"}</Button>
             <Button onClick={() => run("/actions/run", "run", (r) => { setLastPass(r); setMsg(""); })} disabled={busy === "run" || mode === "off"} title="run the pass now, as the cron would (dry_run records, apply acts)">{busy === "run" ? "Running…" : "Run pass now"}</Button>
           </span>

@@ -170,9 +170,9 @@ export const dynamodbCapacityModeAction: ActionModule = {
     const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     let scanned = 0, filed = 0;
-    for (const region of regions(creds.region)) {
-      const ddb = new DynamoDBClient({ region, credentials: creds.read });
-      const cw = new CloudWatchClient({ region, credentials: creds.read });
+    for (const acct of creds.accounts) for (const region of regions(acct.region)) {
+      const ddb = new DynamoDBClient({ region, credentials: acct.read });
+      const cw = new CloudWatchClient({ region, credentials: acct.read });
       try {
         const names: string[] = [];
         let token: string | undefined;
@@ -218,7 +218,7 @@ export const dynamodbCapacityModeAction: ActionModule = {
           if (target === "PROVISIONED" && !provision) { skip("no provisioned units to set"); continue; }
           const after = target === "PROVISIONED" ? { billing_mode: target, read_units: provision.read_units, write_units: provision.write_units, gsis: provision.gsis } : { billing_mode: target };
           proposals.push({
-            kind: KIND, resource: f.name, resource_name: f.name, region,
+            kind: KIND, resource: f.name, resource_name: f.name, region, account_id: acct.is_parent ? null : acct.account_id,
             dedupe: `${KIND}:${region}:${f.name}:${target}`,
             title: `${f.name}: ${f.billing_mode === "PROVISIONED" ? "provisioned" : "on-demand"} → ${target === "PROVISIONED" ? `provisioned ${provision.read_units} RCU / ${provision.write_units} WCU` : "on-demand"}`,
             reason: `${v.reason}. Approved as recommendation #${rec.id}${rec.decided_by ? ` by ${rec.decided_by}` : ""}. UpdateTable: online, no downtime.`,

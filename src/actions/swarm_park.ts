@@ -81,13 +81,14 @@ export const swarmParkAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const idleDays = Math.max(2, Math.round(config.actParkIdleDays));
     const minProbes = Math.max(5, idleDays);
-    const rows = db.prepare("select instance_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state = 'running' order by name").all() as { instance_id: string; name: string | null; instance_type: string | null; region: string | null; monthly_usd: number | null; pool_kind: string | null }[];
+    const rows = db.prepare("select instance_id, account_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state = 'running' order by name").all() as { instance_id: string; account_id: string | null; name: string | null; instance_type: string | null; region: string | null; monthly_usd: number | null; pool_kind: string | null }[];
     const byRegion = new Map<string, typeof rows>();
-    for (const r of rows) { const region = r.region || creds.region; if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(r); }
+    for (const r of rows) { const key = `${r.account_id || ""}|${r.region || creds.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }
     let tagged = 0, swarmNamed = 0;
     const aliveWhy = new Map<string, number>();
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const ec2 = new EC2Client({ region, credentials: creds.forAccount(account || null).read });
       try {
         // Tags come from EC2 itself: the opt-in tag is the scope, and the inventory does not carry tags.
         const live = new Map<string, Instance>();
@@ -126,7 +127,7 @@ export const swarmParkAction: ActionModule = {
           const approved = approvedRecs(["stop_instance"]).find((a) => a.resource === r.instance_id) ?? null;
           const containers = (db.prepare("select containers_running_avg from instance_daily where instance_id = ? order by day desc limit 1").get(r.instance_id) as { containers_running_avg: number | null } | undefined)?.containers_running_avg ?? null;
           proposals.push({
-            kind: KIND, resource: r.instance_id, resource_name: r.name, region,
+            kind: KIND, resource: r.instance_id, resource_name: r.name, region, account_id: r.account_id ?? null,
             dedupe: `${KIND}:${r.instance_id}`,
             title: `stop ${name} (${r.instance_type || inst.InstanceType}): idle ${idleDays} days`,
             reason: `${v.last_use_at ? `last use ${v.last_use_at.slice(0, 16).replace("T", " ")} UTC` : "no use signal recorded"}; over ${v.days_seen} days and ${v.probes} probes: no external connection, no front-door request, no use-signal line in any container log, under ${Math.round(MAX_NET_BYTES_DAY / 1e6)} MB/day out, every container under ${MAX_CONTAINER_CPU_AVG} % CPU. Stop only: volumes, data and the Elastic IP stay; nothing is terminated.${approved ? ` Approved as recommendation #${approved.id}${approved.decided_by ? ` by ${approved.decided_by}` : ""}.` : ""}`,

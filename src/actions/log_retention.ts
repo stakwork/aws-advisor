@@ -28,15 +28,16 @@ export const logRetentionAction: ActionModule = {
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const days = snapRetention(config.actLogRetentionDays);
-    const rows = db.prepare("select name, region, stored_bytes, ingest_bytes_day from log_groups where retention_days is null order by stored_bytes desc").all() as { name: string; region: string; stored_bytes: number; ingest_bytes_day: number | null }[];
+    const rows = db.prepare("select name, account_id, region, stored_bytes, ingest_bytes_day from log_groups where retention_days is null order by stored_bytes desc").all() as { name: string; account_id: string | null; region: string; stored_bytes: number; ingest_bytes_day: number | null }[];
     if (!rows.length) { notes.push("every log group has a retention policy"); return { proposals, notes }; }
     const cands = rows.map((r) => ({ ...r, approved: approvedFor(["log_group_no_retention"], r.name) })).filter((r) => r.stored_bytes >= MIN_STORED_BYTES || r.approved);
     const small = rows.length - cands.length;
     if (small) notes.push(`${small} group(s) with no retention under 100 MB left alone`);
     const byRegion = new Map<string, typeof cands>();
-    for (const c of cands.slice(0, MAX_PER_PLAN)) { if (!byRegion.has(c.region)) byRegion.set(c.region, []); byRegion.get(c.region)!.push(c); }
-    for (const [region, list] of byRegion) {
-      const logs = new CloudWatchLogsClient({ region, credentials: creds.read });
+    for (const c of cands.slice(0, MAX_PER_PLAN)) { const key = `${c.account_id || ""}|${c.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(c); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const logs = new CloudWatchLogsClient({ region, credentials: creds.forAccount(account || null).read });
       try {
         for (const c of list) {
           const skip = (why: string) => { notes.push(`${c.name}: ${why}`); log(`${c.name}: ${why}`); };
@@ -49,7 +50,7 @@ export const logRetentionAction: ActionModule = {
           }
           const gb = (g.storedBytes ?? c.stored_bytes) / 1e9;
           proposals.push({
-            kind: KIND, resource: c.name, resource_name: c.name, region,
+            kind: KIND, resource: c.name, resource_name: c.name, region, account_id: c.account_id ?? null,
             dedupe: `${KIND}:${c.name}:${days}`,
             title: `${c.name}: retention none → ${days} days (${gb.toFixed(2)} GB stored)`,
             reason: `no retention policy, ${gb.toFixed(2)} GB stored${c.ingest_bytes_day != null ? `, ${(c.ingest_bytes_day / 1e6).toFixed(1)} MB/day ingested` : ""}; events older than ${days} days are purged from then on, storage stops growing past ${days} days of ingestion.${c.approved ? ` Approved as recommendation #${c.approved.id}${c.approved.decided_by ? ` by ${c.approved.decided_by}` : ""}.` : ""}`,

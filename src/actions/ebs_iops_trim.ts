@@ -24,10 +24,10 @@ export const MODIFY_COOLDOWN_HOURS = 6;
 export const targetIops = (peak: number) => Math.max(GP3_BASELINE_IOPS, Math.ceil((peak * 2) / 500) * 500);
 export const iopsSaving = (from: number, to: number) => Math.round(Math.max(0, from - to) * GP3_IOPS_USD_MONTH * 100) / 100;
 
-interface Candidate { volume_id: string; region: string; name: string | null; instance_id: string | null; iops: number; iops_max: number; metric_days: number; approved: { id: number; title: string; decided_by: string | null } | null }
+interface Candidate { volume_id: string; region: string; account_id?: string | null; name: string | null; instance_id: string | null; iops: number; iops_max: number; metric_days: number; approved: { id: number; title: string; decided_by: string | null } | null }
 
 function candidates(): Candidate[] {
-  const rows = db.prepare("select volume_id, region, name, instance_id, iops, iops_max, metric_days from inventory_ebs where gone = 0 and volume_type = 'gp3' and iops > ? order by iops desc").all(GP3_BASELINE_IOPS) as any[];
+  const rows = db.prepare("select volume_id, account_id, region, name, instance_id, iops, iops_max, metric_days from inventory_ebs where gone = 0 and volume_type = 'gp3' and iops > ? order by iops desc").all(GP3_BASELINE_IOPS) as any[];
   const out: Candidate[] = [];
   for (const r of rows) {
     const approved = approvedFor(["review_ebs_iops", "ebs_overprovisioned_iops"], r.volume_id);
@@ -45,10 +45,12 @@ export const ebsIopsTrimAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const cands = candidates();
     if (!cands.length) { notes.push("no gp3 volume above 3,000 IOPS whose 30-day peak stays under 30 % of it"); return { proposals, notes }; }
+    // Grouped per (account, region): a member account's volumes are read through its own credentials.
     const byRegion = new Map<string, Candidate[]>();
-    for (const c of cands) { if (!byRegion.has(c.region)) byRegion.set(c.region, []); byRegion.get(c.region)!.push(c); }
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    for (const c of cands) { const key = `${c.account_id || ""}|${c.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(c); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const ec2 = new EC2Client({ region, credentials: creds.forAccount(account || null).read });
       try {
         const ids = list.map((c) => c.volume_id);
         const live = new Map((await ec2.send(new DescribeVolumesCommand({ VolumeIds: ids }))).Volumes?.map((v) => [v.VolumeId!, v]) ?? []);
@@ -67,7 +69,7 @@ export const ebsIopsTrimAction: ActionModule = {
           if (m && ["modifying", "optimizing"].includes(m.ModificationState || "")) { skip(`a modification is ${m.ModificationState}`); continue; }
           if (m?.EndTime && Date.now() - new Date(m.EndTime).getTime() < MODIFY_COOLDOWN_HOURS * 3600000) { skip(`modified ${Math.round((Date.now() - new Date(m.EndTime).getTime()) / 3600000)} h ago; EBS allows one change per ${MODIFY_COOLDOWN_HOURS} h`); continue; }
           proposals.push({
-            kind: KIND, resource: c.volume_id, resource_name: c.name, region,
+            kind: KIND, resource: c.volume_id, resource_name: c.name, region, account_id: c.account_id ?? null,
             dedupe: `${KIND}:${c.volume_id}:${target}`,
             title: `${c.volume_id}${c.name ? ` (${c.name})` : ""}: ${current.toLocaleString()} → ${target.toLocaleString()} provisioned IOPS`,
             reason: `${c.iops_max != null ? `30-day peak ${Math.round(c.iops_max).toLocaleString()} IOPS over ${c.metric_days} days of metrics (${Math.round((c.iops_max / current) * 100)} % of what is provisioned)` : "no IOPS metrics"}; target is twice the peak rounded up to 500, never under the free 3,000. Online, no downtime.${c.approved ? ` Approved as recommendation #${c.approved.id}${c.approved.decided_by ? ` by ${c.approved.decided_by}` : ""}.` : ""}`,

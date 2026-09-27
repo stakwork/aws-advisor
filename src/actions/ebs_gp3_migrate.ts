@@ -28,7 +28,7 @@ export function gp3Saving(sizeGb: number): number {
   return Math.round(s * 100) / 100;
 }
 
-interface Candidate { volume_id: string; region: string; name: string | null; instance_id: string | null; size_gb: number }
+interface Candidate { volume_id: string; region: string; account_id?: string | null; name: string | null; instance_id: string | null; size_gb: number }
 
 export const ebsGp3MigrateAction: ActionModule = {
   kind: KIND,
@@ -36,13 +36,14 @@ export const ebsGp3MigrateAction: ActionModule = {
 
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
-    const rows = db.prepare("select volume_id, region, name, instance_id, size_gb from inventory_ebs where gone = 0 and volume_type = 'gp2' order by size_gb desc").all() as Candidate[];
+    const rows = db.prepare("select volume_id, account_id, region, name, instance_id, size_gb from inventory_ebs where gone = 0 and volume_type = 'gp2' order by size_gb desc").all() as Candidate[];
     if (!rows.length) { notes.push("no gp2 volume in the inventory"); return { proposals, notes }; }
     if (rows.length > MAX_PER_PLAN) notes.push(`${rows.length - MAX_PER_PLAN} gp2 volume(s) wait for a later pass`);
     const byRegion = new Map<string, Candidate[]>();
-    for (const c of rows.slice(0, MAX_PER_PLAN)) { if (!byRegion.has(c.region)) byRegion.set(c.region, []); byRegion.get(c.region)!.push(c); }
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    for (const c of rows.slice(0, MAX_PER_PLAN)) { const key = `${c.account_id || ""}|${c.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(c); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const ec2 = new EC2Client({ region, credentials: creds.forAccount(account || null).read });
       try {
         const ids = list.map((c) => c.volume_id);
         const live = new Map((await ec2.send(new DescribeVolumesCommand({ VolumeIds: ids }))).Volumes?.map((v) => [v.VolumeId!, v]) ?? []);
@@ -61,7 +62,7 @@ export const ebsGp3MigrateAction: ActionModule = {
           const target = gp3Target(size); const saving = gp3Saving(size);
           if (saving <= 0) { skip(`${size} GiB: gp3 with matching performance would not be cheaper`); continue; }
           proposals.push({
-            kind: KIND, resource: c.volume_id, resource_name: c.name, region,
+            kind: KIND, resource: c.volume_id, resource_name: c.name, region, account_id: c.account_id ?? null,
             dedupe: `${KIND}:${c.volume_id}`,
             title: `${c.volume_id}${c.name ? ` (${c.name})` : ""}: gp2 → gp3, ${size} GiB, ${target.iops.toLocaleString()} IOPS, ${target.throughput_mibps} MiB/s`,
             reason: `gp2 bills ${GP2_USD_GB_MONTH} USD/GB-month, gp3 ${GP3_USD_GB_MONTH}; the target provisions at least what gp2 gave (three IOPS per GiB above the 3,000 baseline, 250 MiB/s from 170 GiB). Online, no downtime, ${c.instance_id ? `attached to ${c.instance_id}` : "not attached"}.`,
