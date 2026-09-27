@@ -59,7 +59,7 @@ function GraphMirrorCard() {
               </div>
             )}
             {sync.error && <div className="text-xs text-red-300">resync failed: {sync.error}</div>}
-            {sync.result && <div className="text-xs text-zinc-400">Resynced in {sync.result.took_ms} ms: {sync.result.resources} resources, {sync.result.recommendations} recommendations, {sync.result.runs} runs, {sync.result.flagged} flagged findings, {sync.result.alerts} alerts, {sync.result.incidents} incidents, {sync.result.playbooks} playbooks.</div>}
+            {sync.result && <div className="text-xs text-zinc-400">Resynced in {sync.result.took_ms} ms: {sync.result.resources} resources, {sync.result.recommendations} recommendations, {sync.result.runs} runs, {sync.result.flagged} flagged findings, {sync.result.alerts} alerts, {sync.result.incidents} incidents, {sync.result.actions} auto-actions, {sync.result.playbooks} playbooks.</div>}
             <div>
               <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Cypher to start from</div>
               <div className="grid gap-2 lg:grid-cols-3">

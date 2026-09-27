@@ -325,3 +325,25 @@ test("grace: a fresh proposal waits, an old one does not, and the announcement s
   assert.match(m, /planned · stop swarm-27/); assert.match(m, /about 24 h unless someone objects/); assert.match(m, /http:\/\/x\/actions\?id=4$/);
   assert.match(formatProposalMessage({ id: 4, title: "t", reason: "r", rollback: null, est_usd_month: null }, 24, "dry_run", "http://x"), /Dry run/);
 });
+
+test("capabilities: every registered kind declares what the role needs, all of it inside the actuator policy", async () => {
+  await import("../actions/index.js");
+  const { actionModules, computeCapabilities } = await import("../executor.js");
+  const { ACTUATOR_NEEDS, actuatorPolicy } = await import("../permissions.js");
+  const allowed = new Set(actuatorPolicy().Statement.filter((s: any) => s.Effect === "Allow").flatMap((s: any) => s.Action));
+  for (const m of actionModules()) {
+    const n = ACTUATOR_NEEDS[m.kind];
+    assert.ok(n, `${m.kind} has no ACTUATOR_NEEDS entry`);
+    for (const a of [...n.apply, ...n.revert]) assert.ok(allowed.has(a), `${m.kind} needs ${a}, which the actuator policy does not allow`);
+  }
+  // simulated: a role without ECR write or RDS modify
+  const sim = new Set([...allowed].filter((a) => !/^ecr:|rds:ModifyDBCluster/.test(a)));
+  const caps = computeCapabilities(sim, {});
+  assert.deepEqual(caps.ecr_lifecycle, { apply: false, revert: false, missing: ["ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy"], source: "simulated" });
+  assert.equal(caps.acu_window.apply, false); assert.equal(caps.aurora_storage.apply, false);
+  assert.deepEqual(caps.swarm_park, { apply: true, revert: true, missing: [], source: "simulated" });
+  // no simulation: unknown, except what a denied apply taught
+  const learned = computeCapabilities(null, { "logs:PutRetentionPolicy": { kind: "log_retention", last_seen: "x", message: "m" } });
+  assert.deepEqual(learned.log_retention, { apply: false, revert: null, missing: ["logs:PutRetentionPolicy"], source: "learned" });
+  assert.deepEqual(learned.ebs_iops_trim, { apply: null, revert: null, missing: [], source: "unknown" });
+});

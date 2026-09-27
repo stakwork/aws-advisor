@@ -417,7 +417,7 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "apigateway:GET",
         "tag:GetResources",
         "sts:GetCallerIdentity",
-        "iam:ListAccountAliases",
+        "iam:ListAccountAliases", "iam:SimulatePrincipalPolicy",
       ],
       Resource: "*",
     },
@@ -449,6 +449,24 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
  * tag whatever the executor thinks. The read-only role never gets any of this: the executor assumes this role from
  * the read credentials only for the change itself.
  */
+/**
+ * What the actuator role must be allowed to do for each action kind: the calls apply makes and the calls revert
+ * makes. The executor checks these against the role (iam:SimulatePrincipalPolicy from the read identity) and
+ * learns them from denied applies, so a role narrower than the policy below hides Apply instead of failing.
+ */
+export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
+  acu_window: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
+  snapshot_archive: { apply: ["ec2:ModifySnapshotTier"], revert: ["ec2:RestoreSnapshotTier"] },
+  ebs_iops_trim: { apply: ["ec2:ModifyVolume"], revert: ["ec2:ModifyVolume"] },
+  ebs_gp3_migrate: { apply: ["ec2:ModifyVolume"], revert: ["ec2:ModifyVolume"] },
+  log_retention: { apply: ["logs:PutRetentionPolicy"], revert: ["logs:DeleteRetentionPolicy"] },
+  s3_request_metrics: { apply: ["s3:PutMetricsConfiguration"], revert: ["s3:DeleteMetricsConfiguration"] },
+  s3_lifecycle: { apply: ["s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration"], revert: ["s3:PutLifecycleConfiguration"] },
+  aurora_storage: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
+  ecr_lifecycle: { apply: ["ecr:PutLifecyclePolicy"], revert: ["ecr:DeleteLifecyclePolicy"] },
+  swarm_park: { apply: ["ec2:StopInstances"], revert: ["ec2:StartInstances"] },
+};
+
 export const actuatorPolicy = (): IamPolicy => ({
   Version: "2012-10-17",
   Statement: [

@@ -15,13 +15,16 @@
  */
 import { fromTemporaryCredentials } from "@aws-sdk/credential-providers";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
+import { IAMClient, SimulatePrincipalPolicyCommand } from "@aws-sdk/client-iam";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { config } from "./config.js";
-import { db } from "./db.js";
+import { db, getJsonSetting, setSetting } from "./db.js";
 import { sdkCredentials } from "./steampipe.js";
-import { describeError } from "./permissions.js";
+import { ACTUATOR_NEEDS, describeError, explainPermissionError } from "./permissions.js";
 import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
 import { canonicalResource } from "./resource_id.js";
+import { mirrorActionsInBackground, mirrorRecommendationsInBackground } from "./graph_mirror.js";
+import { syncDecisionConceptInBackground } from "./concepts.js";
 
 db.exec(`create table if not exists actions (
   id integer primary key autoincrement,
@@ -147,17 +150,20 @@ export function markRecommendationsDone(ids: number[], reason: string): number {
   let n = 0;
   for (const recId of ids) {
     const r = db.prepare("update recommendations set status = 'done', decided_at = datetime('now'), decided_by = 'executor', decision_reason = ?, updated_at = datetime('now') where id = ? and status = 'approved'").run(reason, recId);
-    if (r.changes) { n++; console.log(`[executor] recommendation #${recId} marked done: ${reason}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } }
+    if (r.changes) { n++; console.log(`[executor] recommendation #${recId} marked done: ${reason}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } decisionHooks(recId); }
   }
   return n;
 }
+
+/** What a decision from the page also does (src/routes/browse.ts): the decision Concept in repo2graph and the recommendation node in the graph. */
+function decisionHooks(recId: number): void { syncDecisionConceptInBackground(recId); mirrorRecommendationsInBackground([recId]); }
 
 function closeRecommendation(row: ActionRow): void {
   const ids = [Number(row.facts?.recommendation_id), ...(Array.isArray(row.facts?.recommendation_ids) ? row.facts.recommendation_ids.map(Number) : [])].filter((n, i, a) => n > 0 && a.indexOf(n) === i);
   for (const recId of ids) {
     const r = db.prepare("update recommendations set status = 'done', decided_at = datetime('now'), decided_by = 'executor', decision_reason = ?, updated_at = datetime('now') where id = ? and status = 'approved'")
       .run(`applied by the executor: auto-action #${row.id} (${row.title})`, recId);
-    if (r.changes) { console.log(`[executor] recommendation #${recId} marked done by #${row.id}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } }
+    if (r.changes) { console.log(`[executor] recommendation #${recId} marked done by #${row.id}`); try { noteDecision(recId, "done", "executor"); } catch { /* notification only */ } decisionHooks(recId); }
   }
 }
 
@@ -193,6 +199,77 @@ export async function actuatorIdentity(timeoutMs = 15_000): Promise<{ ok: true; 
     if (/AccessDenied|not authorized to perform: sts:AssumeRole/i.test(msg)) return { ok: false, error: `${msg}. The advisor's read identity is not allowed to assume ${config.actRoleArn}: put it in the role's trust policy (Auto-actions page shows the JSON).` };
     return { ok: false, error: msg };
   } finally { client.destroy(); }
+}
+
+// ---- what the role may do ---------------------------------------------------------------------------------------------
+
+export interface Capability { apply: boolean | null; revert: boolean | null; missing: string[]; source: "simulated" | "learned" | "unknown"; note?: string }
+type Learned = Record<string, { kind: string; last_seen: string; message: string }>;
+const DENIALS_KEY = "act:denials";
+const CAP_TTL_MS = 10 * 60_000;
+
+const learnedDenials = (): Learned => getJsonSetting<Learned>(DENIALS_KEY, {});
+function learnDenial(action: string, kind: string, message: string): void {
+  const d = learnedDenials(); d[action] = { kind, last_seen: new Date().toISOString(), message: message.slice(0, 200) }; setSetting(DENIALS_KEY, JSON.stringify(d)); capCache = null;
+}
+function forgetDenials(actions: string[]): void {
+  const d = learnedDenials(); let changed = false;
+  for (const a of actions) if (d[a]) { delete d[a]; changed = true; }
+  if (changed) { setSetting(DENIALS_KEY, JSON.stringify(d)); capCache = null; }
+}
+
+/** Per kind, from what the simulation allowed (null when it could not run) and what denied applies taught. Pure. */
+export function computeCapabilities(allowed: Set<string> | null, learned: Learned, needs = ACTUATOR_NEEDS): Record<string, Capability> {
+  const out: Record<string, Capability> = {};
+  for (const [kind, n] of Object.entries(needs)) {
+    const missing = (list: string[]) => list.filter((a) => (allowed ? !allowed.has(a) : false) || Boolean(learned[a]));
+    const ma = missing(n.apply), mr = missing(n.revert);
+    const all = [...new Set([...ma, ...mr])];
+    const source: Capability["source"] = allowed ? "simulated" : all.length ? "learned" : "unknown";
+    out[kind] = { apply: allowed || ma.length ? ma.length === 0 : null, revert: allowed || mr.length ? mr.length === 0 : null, missing: all, source };
+  }
+  return out;
+}
+
+let capCache: { role: string; at: number; caps: Record<string, Capability>; note?: string } | null = null;
+
+/**
+ * What the actuator role can actually do, per action kind: iam:SimulatePrincipalPolicy on the role from the read
+ * identity (cached ten minutes), overlaid with denials learned from failed applies. Without the simulate permission
+ * only the learned denials are known and the rest is "unknown", which the page treats as allowed.
+ */
+export async function actuatorCapabilities(force = false): Promise<{ caps: Record<string, Capability>; note?: string }> {
+  const role = config.actRoleArn;
+  if (!role) return { caps: computeCapabilities(null, {}), note: "no actuator role configured" };
+  if (!force && capCache && capCache.role === role && Date.now() - capCache.at < CAP_TTL_MS) return { caps: capCache.caps, note: capCache.note };
+  const actions = [...new Set(Object.values(ACTUATOR_NEEDS).flatMap((n) => [...n.apply, ...n.revert]))];
+  let allowed: Set<string> | null = null; let note: string | undefined;
+  try {
+    const base = sdkCredentials();
+    const iam = new IAMClient({ region: base.region, credentials: base.provider });
+    try {
+      const r = await iam.send(new SimulatePrincipalPolicyCommand({ PolicySourceArn: role, ActionNames: actions, MaxItems: 200,
+        ContextEntries: [{ ContextKeyName: "aws:ResourceTag/advisor:park", ContextKeyValues: ["auto"], ContextKeyType: "string" }] }));
+      allowed = new Set((r.EvaluationResults ?? []).filter((e) => e.EvalDecision === "allowed").map((e) => String(e.EvalActionName)));
+      const learned = learnedDenials();
+      forgetDenials(Object.keys(learned).filter((a) => allowed!.has(a)));
+    } finally { iam.destroy(); }
+  } catch (e: any) {
+    const m = String(e?.message || e);
+    note = /AccessDenied|not authorized/i.test(m) ? "the read identity may not simulate the role's policy (iam:SimulatePrincipalPolicy): what the role lacks is learned from denied applies instead" : `policy simulation failed: ${m.slice(0, 160)}`;
+  }
+  const caps = computeCapabilities(allowed, learnedDenials());
+  capCache = { role, at: Date.now(), caps, note };
+  return { caps, note };
+}
+
+/** The message a denied apply or revert leaves on the row, and what it teaches. */
+function actuatorDenied(e: unknown, kind: string, verb: "apply" | "revert"): string | null {
+  const issue = explainPermissionError(e, `${kind} ${verb}`);
+  if (!issue) return null;
+  const action = issue.action !== "unknown" ? issue.action : (ACTUATOR_NEEDS[kind]?.[verb] ?? [])[0] ?? "unknown";
+  if (action !== "unknown") learnDenial(action, kind, String((e as any)?.message || e));
+  return `the actuator role is not allowed ${action}: add it to the role's policy (the Auto-actions page prints the full policy), or leave this action to a person`;
 }
 
 // ---- the ledger ---------------------------------------------------------------------------------------------------
@@ -256,11 +333,11 @@ function recordProposal(p: Proposal, mode: string, trigger: string): { row: Acti
 }
 
 /** Open proposals of a kind that this pass did not propose again no longer apply (the hour moved on, the snapshot is gone). */
-function closeStale(kind: ActionKind, keep: Set<string>): number {
+function closeStale(kind: ActionKind, keep: Set<string>): number[] {
   const open = db.prepare("select id, dedupe from actions where kind = ? and status = 'proposed'").all(kind) as { id: number; dedupe: string }[];
-  let n = 0;
-  for (const o of open) if (!keep.has(o.dedupe)) { db.prepare("update actions set status = 'stale', result = 'no longer proposed by the latest pass' where id = ?").run(o.id); n++; }
-  return n;
+  const ids: number[] = [];
+  for (const o of open) if (!keep.has(o.dedupe)) { db.prepare("update actions set status = 'stale', result = 'no longer proposed by the latest pass' where id = ?").run(o.id); ids.push(o.id); }
+  return ids;
 }
 
 const recentFailures = (dedupe: string) => (db.prepare("select count(*) as n from actions where dedupe = ? and status = 'failed' and datetime(created_at) > datetime('now', '-1 day')").get(dedupe) as { n: number }).n;
@@ -272,6 +349,12 @@ const recentFailures = (dedupe: string) => (db.prepare("select count(*) as n fro
  * happened; the function never throws for an AWS failure (that is a `failed` row), only for a bad id or state.
  */
 export async function applyAction(id: number, trigger = "manual"): Promise<ActionRow> {
+  const row = await applyActionInner(id, trigger);
+  mirrorActionsInBackground([id]);
+  return row;
+}
+
+async function applyActionInner(id: number, trigger: string): Promise<ActionRow> {
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
   if (row.status !== "proposed") throw new Error(`action #${id} is ${row.status}, not proposed`);
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
@@ -280,6 +363,8 @@ export async function applyAction(id: number, trigger = "manual"): Promise<Actio
     db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(`failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow`, trigger, id);
     return getAction(id)!;
   }
+  const cap = (await actuatorCapabilities()).caps[row.kind];
+  if (cap?.apply === false) throw new Error(`the actuator role is not allowed ${cap.missing.join(", ")}; #${id} can only be done by a person (or widen the role's policy)`);
   const p = proposalOf(row);
   let creds: Creds;
   try { creds = executorCreds(); creds.act(); }
@@ -287,9 +372,10 @@ export async function applyAction(id: number, trigger = "manual"): Promise<Actio
   console.log(`[executor] applying #${id} ${row.kind} ${row.resource}: ${row.title}`);
   try {
     const result = await mod.apply(p, creds);
+    forgetDenials(ACTUATOR_NEEDS[row.kind]?.apply ?? []);
     db.prepare("update actions set status = 'applied', mode = 'apply', trigger = ?, result = ?, error = null, applied_at = datetime('now') where id = ?").run(trigger, result, id);
   } catch (e) {
-    const error = describeError(e, `${row.kind} ${row.resource}`);
+    const error = actuatorDenied(e, row.kind, "apply") ?? describeError(e, `${row.kind} ${row.resource}`);
     db.prepare("update actions set status = 'failed', mode = 'apply', trigger = ?, error = ?, applied_at = datetime('now') where id = ?").run(trigger, error, id);
     console.error(`[executor] #${id} failed: ${error}`);
     return getAction(id)!;
@@ -303,6 +389,11 @@ export async function verifyAction(id: number, creds?: Creds): Promise<ActionRow
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
   if (row.status !== "applied") return row;
   const mod = modules.get(row.kind); if (!mod) return row;
+  try { return await verifyInner(row, mod, creds); } finally { mirrorActionsInBackground([id]); }
+}
+
+async function verifyInner(row: ActionRow, mod: ActionModule, creds?: Creds): Promise<ActionRow> {
+  const id = row.id;
   try {
     const v = await mod.verify(proposalOf(row), creds || executorCreds());
     if (v.ok === true) { db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); closeRecommendation(getAction(id)!); }
@@ -319,16 +410,19 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
   if (!["applied", "verified"].includes(row.status)) throw new Error(`action #${id} is ${row.status}; only an applied or verified change can be reverted`);
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
+  const cap = (await actuatorCapabilities()).caps[row.kind];
+  if (cap?.revert === false) throw new Error(`the actuator role is not allowed ${cap.missing.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
   const creds = executorCreds(); creds.act();
   console.log(`[executor] reverting #${id} ${row.kind} ${row.resource} (${by})`);
   try {
     const result = await mod.revert(proposalOf(row), creds);
+    forgetDenials(ACTUATOR_NEEDS[row.kind]?.revert ?? []);
     db.prepare("update actions set status = 'reverted', reverted_at = datetime('now'), result = coalesce(result, '') || ' · reverted: ' || ?, notified_at = null, notify_result = null where id = ?").run(result, id);
   } catch (e) {
-    const error = describeError(e, `${row.kind} revert ${row.resource}`);
+    const error = actuatorDenied(e, row.kind, "revert") ?? describeError(e, `${row.kind} revert ${row.resource}`);
     db.prepare("update actions set error = ? where id = ?").run(`revert failed: ${error}`, id);
     throw new Error(error);
-  }
+  } finally { mirrorActionsInBackground([id]); }
   return getAction(id)!;
 }
 
@@ -352,7 +446,10 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
     // Rows applied earlier and still unverified (a snapshot still archiving) get read back first.
     for (const r of db.prepare("select id from actions where status = 'applied' order by id").all() as { id: number }[]) { const v = await verifyAction(r.id, creds); if (v.status === "verified") out.verified++; }
     const budget = { left: Math.max(1, config.actMaxPerPass) };
+    const touched = new Set<number>();
+    const caps = mode === "apply" ? (await actuatorCapabilities()).caps : {};
     for (const mod of modules.values()) {
+      const blocked = caps[mod.kind]?.apply === false ? caps[mod.kind].missing : null;
       let plan: PlanResult;
       try { plan = await mod.plan(creds, (l) => log(`${mod.kind}: ${l}`)); }
       catch (e) { const m = describeError(e, `${mod.kind} plan`); out.errors.push(`${mod.kind}: ${m}`); log(`${mod.kind}: plan failed: ${m}`); continue; }
@@ -361,10 +458,12 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
       for (const p of plan.proposals) {
         keep.add(p.dedupe);
         const { row, fresh } = recordProposal(p, mode, trigger);
+        touched.add(row.id);
         out.proposed++; if (fresh) out.fresh++;
         log(`${fresh ? "proposed" : "still proposed"} #${row.id} ${p.title}${p.est_usd_month != null ? ` (≈ ${p.est_usd_month.toFixed(2)} USD/month)` : ""}`);
         if (fresh && mod.announce) announceProposal(row, mod.grace_hours?.() ?? 0, mode).catch(() => {});
         if (mode !== "apply") continue;
+        if (blocked) { if (fresh) out.notes.push(`${mod.kind}: #${row.id} left for a person: the actuator role is not allowed ${blocked.join(", ")}`); continue; }
         const wait = graceLeftMs(row, mod.grace_hours?.() ?? 0);
         if (wait > 0) { const n = `#${row.id} waits ${Math.ceil(wait / 3600000)} h more (grace period; Apply on the page skips it)`; out.notes.push(`${mod.kind}: ${n}`); log(n); continue; }
         if (budget.left <= 0) { log(`cap of ${config.actMaxPerPass} changes per pass reached; #${row.id} waits`); continue; }
@@ -375,8 +474,10 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
         else if (done.status === "failed") out.failed++;
         else if (done.status === "refused") out.refused++;
       }
-      out.stale += closeStale(mod.kind, keep);
+      const stale = closeStale(mod.kind, keep);
+      out.stale += stale.length; for (const id of stale) touched.add(id);
     }
+    if (touched.size) mirrorActionsInBackground([...touched]);
     out.took_ms = Date.now() - t0;
     log(`${mode}: ${out.proposed} proposed (${out.fresh} new), ${out.applied} applied, ${out.verified} verified, ${out.failed} failed, ${out.refused} refused, ${out.stale} stale in ${out.took_ms} ms${out.errors.length ? `; errors: ${out.errors.join("; ")}` : ""}`);
     return out;
@@ -451,7 +552,8 @@ export async function dispatchActionNotifications(): Promise<{ sent: number; ski
 }
 
 /** The Auto-actions page header: mode, role, who it acts as, the modules and their labels. */
-export async function executorStatus(): Promise<{ mode: string; role_arn: string; cron: string; identity: { ok: boolean; arn?: string; error?: string }; modules: { kind: string; label: string }[]; counts: Record<string, number> }> {
+export async function executorStatus(): Promise<{ mode: string; role_arn: string; cron: string; identity: { ok: boolean; arn?: string; error?: string }; modules: { kind: string; label: string }[]; counts: Record<string, number>; capabilities: Record<string, Capability>; capabilities_note?: string }> {
   const identity = config.actRoleArn ? await actuatorIdentity() : { ok: false as const, error: "no actuator role configured: dry runs only" };
-  return { mode: config.actMode, role_arn: config.actRoleArn, cron: config.actCron, identity, modules: actionModules().map((m) => ({ kind: m.kind, label: m.label })), counts: listActions({ page_size: 1 }).counts };
+  const cap = identity.ok ? await actuatorCapabilities() : { caps: computeCapabilities(null, learnedDenials()), note: undefined };
+  return { mode: config.actMode, role_arn: config.actRoleArn, cron: config.actCron, identity, modules: actionModules().map((m) => ({ kind: m.kind, label: m.label })), counts: listActions({ page_size: 1 }).counts, capabilities: cap.caps, capabilities_note: cap.note };
 }

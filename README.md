@@ -1405,7 +1405,14 @@ ever created, changed or deleted), every node carries `account_id` and `updated_
    │                                        └─[:INVESTIGATES]▶ (:AdvisorAlert {id, kind, level, message, created_at, acknowledged, acknowledged_by})
    ◀─[:ABOUT]────────────────────────────────────────────────────┘        (alerts point at an AdvisorResource or an AdvisorResourceRef)
    ◀─[:FLAGGED {run_id, reason}]── (:AdvisorControl {id, title}) ─[:HAS_PLAYBOOK]─▶ (:AdvisorPlaybook {control_id, title, tier, effort})
+   ◀─[:TARGETS]──── (:AdvisorAction {id, kind, status, mode, trigger, title, reason, rollback, est_usd_month, result, error,
+                      created_at, applied_at, verified_at, reverted_at})   the executor's ledger: planned, made, read back, undone, retired
+                      └─[:CARRIES_OUT]▶ (:AdvisorRecommendation)           when the change executes an approved recommendation
 ```
+
+Everything the advisor plans, does or decides is in the graph, always: the ledger is mirrored on every pass, apply,
+read-back and revert (proposals included, so a future agent sees what was planned and why it was left alone), and a
+recommendation the executor closes fires the same Concept sync and re-mirror as a decision from the page.
 
 Findings are not mirrored one node per row (thousands per run); instead the latest completed run's alarm findings
 whose resource is in the inventory become `FLAGGED` edges from the control to the resource, one per control and
@@ -1432,10 +1439,11 @@ of an ARN (`arn:...:instance/i-abc` → `i-abc`); anything else becomes an `Advi
 | a decision or batch decision (`src/routes/browse.ts`), alert ack / reopen (`src/routes/api.ts`) | `mirrorRecommendations([ids])` / `mirrorAlertsAndIncidents` |
 | `completeIncident` (`src/investigate.ts`, any outcome) | `mirrorAlertsAndIncidents`, then the fixes' recommendations (`FROM_INCIDENT`) |
 | a concept sync wrote its row (`src/concepts.ts`) | `mirrorRecommendations([id])`, so the `DECIDED_AS` edge appears once repo2graph has the Concept |
+| an executor pass, apply, verify or revert (`src/executor.ts`) | `mirrorActions([ids])` for the rows touched; a recommendation the executor marks done also gets `syncDecisionConcept` + `mirrorRecommendations([id])` |
 
 Endpoints (`src/routes/graph.ts`): `GET /api/graph` → `{ configured, uri (host only), connected, server, error, stats: { nodes,
 relationships, total_nodes, total_relationships }, account_id }`; `POST /api/graph/sync[?wipe=1]` → the counts of
-`mirrorAll` (`resources`, `recommendations`, `runs`, `flagged`, `controls`, `playbooks`, `alerts`, `incidents`), `wiped`,
+`mirrorAll` (`resources`, `recommendations`, `runs`, `flagged`, `controls`, `playbooks`, `alerts`, `incidents`, `actions`), `wiped`,
 `took_ms` and the fresh `stats`; `GET /api/graph/resource/:id` → the resource node with its role, pool, recommendations
 (each with its Concept when decided), alerts (latest 25), incidents, flagged controls and `counts`.
 
@@ -1855,6 +1863,13 @@ role. The pass runs on `ACT_CRON` (hourly at :45, so a change is in place before
 **Run pass now** on the page and from Run now on the Settings row; **Preview plan** shows what a pass would
 propose without recording it. Every applied, failed or reverted row is posted to Sphinx (quiet hours respected)
 with what changed, why, the estimate, how to undo and a link to the row.
+
+**A role narrower than the policy.** The page prints the full policy, but the role may carry less. The executor
+checks what the role can actually do per action (`ACTUATOR_NEEDS` in `src/permissions.ts`: the calls apply and
+revert make), through `iam:SimulatePrincipalPolicy` from the read identity when it has that permission (it is in the
+read policy; cached ten minutes) and, whatever the case, from denied applies (a denial is remembered per IAM
+action until the role allows it again). A kind the role cannot apply shows "by hand: role lacks …" instead of
+Apply, the pass leaves its rows for a person with a note, and the API refuses them; the same for Revert.
 
 **The actuator role.** `ACT_ROLE_ARN` is the only identity that ever changes AWS. The executor assumes it from the
 read credentials for the change itself and for nothing else; the read role never gains a write action. The page

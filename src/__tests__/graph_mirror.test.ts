@@ -246,3 +246,18 @@ test("live: mirrorAll into the local Neo4j, graphStats, DECIDED_AS to an existin
     await gm.closeGraph();
   }
 });
+
+test("action nodes resolve their target and the recommendations they carry out", async () => {
+  const { actionNode } = await import("../graph_mirror.js");
+  const inv = new Set(["i-1", "hub"]);
+  const a = actionNode({ id: 3, kind: "aurora_storage", status: "verified", mode: "apply", trigger: "schedule", title: "t", reason: "r", rollback: "back", est_usd_month: 351, result: "ok", error: null,
+    resource: "hub", resource_name: "hub", region: "us-east-1", created_at: "2026-09-26 10:00:00", seen_at: "2026-09-26 11:00:00", applied_at: "2026-09-26 11:00:00", verified_at: "2026-09-26 11:01:00", reverted_at: null,
+    facts_json: JSON.stringify({ recommendation_id: 77, recommendation_ids: [77, 63, 59], engine: "aurora-postgresql" }) }, inv);
+  assert.equal(a.resource_id, "hub");
+  assert.deepEqual(a.recommendation_ids, [77, 63, 59]);
+  assert.equal(a.est_usd_month, 351);
+  const b = actionNode({ id: 4, kind: "ecr_lifecycle", status: "proposed", mode: "dry_run", trigger: "manual", title: "t", reason: "r", resource: "whisper-engine", region: "us-east-1", created_at: "2026-09-26 10:00:00", facts_json: "{}" }, inv);
+  assert.equal(b.resource_id, null);
+  assert.deepEqual(b.recommendation_ids, []);
+  assert.equal(b.rollback, null);
+});
