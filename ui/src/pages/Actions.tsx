@@ -78,6 +78,10 @@ export default function Actions() {
           </div>
         )}
         {status?.modules && <div className="mt-2 text-xs text-zinc-500">Actions: {status.modules.map((m: any) => m.label).join(" · ")}</div>}
+        {status?.capabilities && Object.values(status.capabilities).some((c: any) => c.apply === false || c.revert === false) && (
+          <div className="mt-1 text-xs text-amber-300">The role is narrower than the policy, so these stay with a person: {Object.entries(status.capabilities).filter(([, c]: any) => c.apply === false || c.revert === false).map(([k, c]: any) => `${KIND_LABEL[k] || k} (${c.apply === false ? "apply" : "revert"}: ${c.missing.join(", ")})`).join(" · ")}</div>
+        )}
+        {status?.capabilities_note && <div className="mt-1 text-xs text-zinc-500">{status.capabilities_note}</div>}
         {msg && <div className="mt-2 text-xs text-amber-300">{msg}</div>}
         {lastPass && (
           <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
@@ -121,9 +125,13 @@ export default function Actions() {
                     <Td className="text-right text-emerald-300">{a.est_usd_month != null ? usd(a.est_usd_month, 2) : "—"}</Td>
                     <Td className={`text-xs ${STATUS_CLASS[a.status] || ""}`}>{a.status}{a.notify_result && <div className="text-[11px] text-zinc-600" title={a.notify_result}>sphinx: {a.notify_result.split(":")[0]}</div>}</Td>
                     <td className="whitespace-nowrap px-2 py-2 text-right align-top" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
-                      {a.status === "proposed" && <Button className="!px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/apply`, `apply-${a.id}`)} disabled={busy === `apply-${a.id}` || mode === "off" || !status?.identity?.ok} title={!status?.identity?.ok ? "the actuator role is not usable yet" : "make this change now under the actuator role"}>{busy === `apply-${a.id}` ? "Applying…" : "Apply"}</Button>}
+                      {a.status === "proposed" && (status?.capabilities?.[a.kind]?.apply === false
+                        ? <span className="text-[11px] text-amber-300" title={`the actuator role is not allowed ${status.capabilities[a.kind].missing.join(", ")}; do it by hand, or widen the role`}>by hand: role lacks {status.capabilities[a.kind].missing.join(", ")}</span>
+                        : <Button className="!px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/apply`, `apply-${a.id}`)} disabled={busy === `apply-${a.id}` || mode === "off" || !status?.identity?.ok} title={!status?.identity?.ok ? "the actuator role is not usable yet" : "make this change now under the actuator role"}>{busy === `apply-${a.id}` ? "Applying…" : "Apply"}</Button>)}
                       {a.status === "applied" && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/verify`, `verify-${a.id}`)} disabled={busy === `verify-${a.id}`}>Check</Button>}
-                      {(a.status === "applied" || a.status === "verified") && <Button variant="danger" className="ml-1 !px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/revert`, `revert-${a.id}`)} disabled={busy === `revert-${a.id}` || mode === "off"} title={a.rollback}>{busy === `revert-${a.id}` ? "Reverting…" : "Revert"}</Button>}
+                      {(a.status === "applied" || a.status === "verified") && (status?.capabilities?.[a.kind]?.revert === false
+                        ? <span className="ml-1 text-[11px] text-amber-300" title={`the actuator role is not allowed ${status.capabilities[a.kind].missing.join(", ")}`}>undo by hand: role lacks {status.capabilities[a.kind].missing.join(", ")}</span>
+                        : <Button variant="danger" className="ml-1 !px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/revert`, `revert-${a.id}`)} disabled={busy === `revert-${a.id}` || mode === "off"} title={a.rollback}>{busy === `revert-${a.id}` ? "Reverting…" : "Revert"}</Button>)}
                     </td>
                   </tr>
                   {open === a.id && (

@@ -22,7 +22,7 @@ export const BATCH = 250;
 export const QUERY_TIMEOUT_MS = 5_000;
 export const QUERY_ROW_CAP = 200;
 
-export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident"] as const;
+export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction"] as const;
 
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
@@ -35,6 +35,7 @@ export const SCHEMA_SUMMARY = [
   "(:AdvisorRecommendation)-[:PROPOSED_IN]->(:AdvisorRun {id, started_at, finished_at, status, trigger, findings_count, recommendations_count})",
   "(:AdvisorRecommendation)-[:FROM_INCIDENT]->(:AdvisorIncident {id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at})-[:INVESTIGATES]->(:AdvisorAlert {id, kind, level, message, created_at, acknowledged, acknowledged_by})-[:ABOUT]->(:AdvisorResource | :AdvisorResourceRef)",
   "(:AdvisorControl {id, title})-[:FLAGGED {run_id, reason}]->(:AdvisorResource) for the latest completed run's alarm findings; (:AdvisorControl)-[:HAS_PLAYBOOK]->(:AdvisorPlaybook {control_id, title, tier, effort})",
+  "(:AdvisorAction {id, kind, status: proposed|applied|verified|failed|refused|reverted|stale, mode, trigger, title, reason, rollback, est_usd_month, result, error, created_at, applied_at, verified_at, reverted_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef) the executor's ledger: every change the agent planned, made, read back or undid; (:AdvisorAction)-[:CARRIES_OUT]->(:AdvisorRecommendation) when it executes an approved recommendation",
 ].join("\n");
 
 export const enabled = () => Boolean(config.neo4jUri);
@@ -166,6 +167,22 @@ export interface AlertNode { id: number; kind: string; level: string; message: s
 export function alertNode(row: any, inventoryIds: Set<string>, level: string): AlertNode {
   return { id: Number(row.id), kind: String(row.kind), level, message: String(row.message || "").slice(0, 500), created_at: String(row.created_at), acknowledged: Boolean(row.acknowledged),
     acknowledged_by: str(row.acknowledged_by), resource: str(row.resource), resource_id: inventoryIdOf(row.resource, inventoryIds) };
+}
+
+export interface ActionNode {
+  id: number; kind: string; status: string; mode: string; trigger: string; title: string; reason: string; rollback: string | null; est_usd_month: number | null; result: string | null; error: string | null;
+  resource: string; resource_name: string | null; resource_id: string | null; region: string | null; created_at: string; seen_at: string | null; applied_at: string | null; verified_at: string | null; reverted_at: string | null;
+  recommendation_ids: number[];
+}
+
+/** One executor ledger row (src/executor.ts) as a node; the recommendations it carries out come from its facts. */
+export function actionNode(row: any, inventoryIds: Set<string>): ActionNode {
+  const facts = safeJson(row.facts_json) || {};
+  const ids = [num(facts.recommendation_id), ...(Array.isArray(facts.recommendation_ids) ? facts.recommendation_ids.map(num) : [])].filter((n, i, a): n is number => n != null && n > 0 && a.indexOf(n) === i);
+  return { id: Number(row.id), kind: String(row.kind), status: String(row.status), mode: String(row.mode), trigger: String(row.trigger), title: String(row.title), reason: String(row.reason || "").slice(0, 1000),
+    rollback: str(row.rollback), est_usd_month: num(row.est_usd_month), result: row.result ? String(row.result).slice(0, 500) : null, error: row.error ? String(row.error).slice(0, 500) : null,
+    resource: String(row.resource), resource_name: str(row.resource_name), resource_id: inventoryIdOf(row.resource, inventoryIds), region: str(row.region), created_at: String(row.created_at), seen_at: str(row.seen_at),
+    applied_at: str(row.applied_at), verified_at: str(row.verified_at), reverted_at: str(row.reverted_at), recommendation_ids: ids };
 }
 
 export interface IncidentNode { id: number; alert_id: number; status: string; cause: string | null; confidence: number | null; episode_cost_usd: number | null; monthly_run_rate_usd: number | null; created_at: string }
@@ -512,10 +529,49 @@ export async function mirrorAlertsAndIncidents(): Promise<{ alerts: number; inci
   return { alerts: alerts.length, incidents: incidents.length };
 }
 
+// ---- the executor's ledger ---------------------------------------------------------------------------------------------------
+
+const ACTION_CYPHER = `
+UNWIND $rows AS row
+MERGE (x:AdvisorAction {id: row.id})
+SET x += {kind: row.kind, status: row.status, mode: row.mode, trigger: row.trigger, title: row.title, reason: row.reason, rollback: row.rollback, est_usd_month: row.est_usd_month,
+          result: row.result, error: row.error, resource: row.resource, resource_name: row.resource_name, region: row.region, created_at: row.created_at, seen_at: row.seen_at,
+          applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, account_id: $account, updated_at: $now}
+WITH x, row
+OPTIONAL MATCH (x)-[t:TARGETS]->() DELETE t
+WITH DISTINCT x, row
+FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [] ELSE [1] END |
+  MERGE (res:AdvisorResource {id: row.resource_id})
+  MERGE (x)-[:TARGETS]->(res))
+FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [1] ELSE [] END |
+  MERGE (ref:AdvisorResourceRef {id: row.resource}) SET ref.account_id = $account, ref.updated_at = $now
+  MERGE (x)-[:TARGETS]->(ref))
+WITH x, row
+UNWIND (CASE WHEN size(row.recommendation_ids) = 0 THEN [null] ELSE row.recommendation_ids END) AS rid
+OPTIONAL MATCH (rec:AdvisorRecommendation {id: rid})
+FOREACH (_ IN CASE WHEN rec IS NULL THEN [] ELSE [1] END | MERGE (x)-[:CARRIES_OUT]->(rec))`;
+
+/** Every ledger row, or the given ids: proposals included, so the graph shows what the agent planned as well as what it did. */
+export async function mirrorActions(ids?: number[]): Promise<{ actions: number }> {
+  if (!enabled()) return { actions: 0 };
+  if (ids && !ids.length) return { actions: 0 };
+  await ensureSchema();
+  const account = accountId();
+  await mirrorAccount(account);
+  const inv = inventoryIds();
+  let raw: any[] = [];
+  try { raw = ids ? db.prepare(`select * from actions where id in (${ids.map(() => "?").join(",")})`).all(...ids) : db.prepare("select * from actions").all(); }
+  catch { return { actions: 0 }; /* the executor has not created its table yet */ }
+  const rows = raw.map((r) => actionNode(r, inv));
+  const stamp = now();
+  for (const batch of chunks(rows)) await write(ACTION_CYPHER, { rows: batch, account, now: stamp });
+  return { actions: rows.length };
+}
+
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
 export interface MirrorCounts {
-  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; took_ms: number }
+  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; took_ms: number }
 
 /** Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. */
 export async function mirrorAll(): Promise<MirrorCounts | null> {
@@ -531,9 +587,10 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const ctl = await mirrorControls();
   const { recommendations } = await mirrorRecommendations();
   const { alerts, incidents } = await mirrorAlertsAndIncidents();
+  const { actions } = await mirrorActions();
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
-  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, took_ms: Date.now() - t0 };
+  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, took_ms: Date.now() - t0 };
 }
 
 export interface GraphStats { nodes: Record<string, number>; relationships: Record<string, number>; decided_as: number; total_nodes: number; total_relationships: number }
@@ -555,7 +612,7 @@ export async function graphStats(): Promise<GraphStats> {
  */
 export async function wipeMirror(account = accountId()): Promise<{ deleted: number }> {
   if (!enabled()) return { deleted: 0 };
-  const owned = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRecommendation", "AdvisorRun", "AdvisorAlert", "AdvisorIncident", "KnSystem", "KnLogGroup", "KnPricingOverlay"];
+  const owned = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRecommendation", "AdvisorRun", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "KnSystem", "KnLogGroup", "KnPricingOverlay"];
   const del = async (cypher: string, params: Record<string, unknown>) => {
     let total = 0;
     for (;;) {
@@ -590,7 +647,8 @@ export interface ResourceView {
   resource: Record<string, unknown>; role: string | null; pool: string | null;
   recommendations: { rec: Record<string, unknown>; concept: { id: string; name: string | null } | null }[];
   alerts: Record<string, unknown>[]; incidents: Record<string, unknown>[]; controls: { id: string; title: string | null; run_id: number | null; reason: string | null }[];
-  counts: { recommendations: number; alerts: number; incidents: number; controls: number };
+  actions: Record<string, unknown>[];
+  counts: { recommendations: number; alerts: number; incidents: number; controls: number; actions: number };
 }
 
 /** One resource node with everything linked to it; null when the graph has no such node. Alerts are capped at 25 (instance_state alerts pile up). */
@@ -606,16 +664,18 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
     OPTIONAL MATCH (i:AdvisorIncident)-[:INVESTIGATES]->(a)
     WITH r, role, pool, recs, collect(DISTINCT properties(a)) AS alerts, collect(DISTINCT properties(i)) AS incidents
     OPTIONAL MATCH (ctl:AdvisorControl)-[f:FLAGGED]->(r)
-    RETURN properties(r) AS resource, role.name AS role, pool.name AS pool, recs, alerts, incidents,
-           collect(DISTINCT CASE WHEN ctl IS NULL THEN null ELSE {id: ctl.id, title: ctl.title, run_id: f.run_id, reason: f.reason} END) AS controls`, { id }, { rowCap: 1 });
+    WITH r, role, pool, recs, alerts, incidents, collect(DISTINCT CASE WHEN ctl IS NULL THEN null ELSE {id: ctl.id, title: ctl.title, run_id: f.run_id, reason: f.reason} END) AS controls
+    OPTIONAL MATCH (x:AdvisorAction)-[:TARGETS]->(r)
+    RETURN properties(r) AS resource, role.name AS role, pool.name AS pool, recs, alerts, incidents, controls, collect(DISTINCT properties(x)) AS actions`, { id }, { rowCap: 1 });
   const row = r.rows[0];
   if (!row) return null;
   const recs = (row.recs as any[]).filter(Boolean);
   const alerts = (row.alerts as any[]).filter(Boolean).sort((a, b) => Number(b.id) - Number(a.id));
   const incidents = (row.incidents as any[]).filter(Boolean);
   const controls = (row.controls as any[]).filter(Boolean);
-  return { resource: row.resource, role: row.role ?? null, pool: row.pool ?? null, recommendations: recs, alerts: alerts.slice(0, 25), incidents, controls,
-    counts: { recommendations: recs.length, alerts: alerts.length, incidents: incidents.length, controls: controls.length } };
+  const actions = (row.actions as any[]).filter(Boolean).sort((a, b) => Number(b.id) - Number(a.id));
+  return { resource: row.resource, role: row.role ?? null, pool: row.pool ?? null, recommendations: recs, alerts: alerts.slice(0, 25), incidents, controls, actions,
+    counts: { recommendations: recs.length, alerts: alerts.length, incidents: incidents.length, controls: controls.length, actions: actions.length } };
 }
 
 // ---- fire-and-forget hooks -----------------------------------------------------------------------------------------------
@@ -625,3 +685,5 @@ export const mirrorAfterRunInBackground = (runId: number) => inBackground(`mirro
 export const mirrorResourcesInBackground = () => inBackground("resource mirror", mirrorResources);
 export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackground(`recommendation mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorRecommendations(ids));
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
+/** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */
+export const mirrorActionsInBackground = (ids?: number[]) => inBackground(`action mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorActions(ids));
