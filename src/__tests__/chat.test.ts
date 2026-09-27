@@ -146,7 +146,7 @@ test("a recommendation thread carries the plan again only after a re-plan", asyn
 });
 
 test("sessionFor: a thread without a session, or whose last agent turn is not completed, gets a new one", async () => {
-  const base = { id: 99, recommendation_id: null, title: null, created_by: null, created_at: "", updated_at: "", session_state: null, messages: 0, last_at: null, pending: false };
+  const base = { id: 99, recommendation_id: null, action_id: null, title: null, created_by: null, created_at: "", updated_at: "", session_state: null, messages: 0, last_at: null, pending: false };
   const fresh = await sessionFor({ ...base, session_id: null }, []);
   assert.equal(fresh.resumed, false);
   assert.ok(fresh.sessionId.startsWith("aws-advisor-chat-99-"));

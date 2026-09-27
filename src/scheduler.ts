@@ -20,6 +20,7 @@ import { refreshS3Inventory } from "./s3_inventory.js";
 import { s3UsagePass } from "./s3_usage.js";
 import { dispatchNotifications } from "./notify.js";
 import { dispatchActionNotifications, runExecutorPass } from "./executor.js";
+import { dispatchPassReports } from "./pass_report.js";
 import { refreshSwarmCosts } from "./swarm_costs.js";
 import { refreshTagHygiene } from "./tag_hygiene.js";
 import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
@@ -124,6 +125,7 @@ export async function runJobNow(key: string, trigger = "manual"): Promise<string
     // Whatever the job raised goes out now (src/notify.ts); a failure there is logged, never the job's.
     dispatchNotifications().catch((e: any) => console.error(`[notify] dispatch failed: ${e?.message || e}`));
     dispatchActionNotifications().catch((e: any) => console.error(`[executor] notify failed: ${e?.message || e}`));
+    dispatchPassReports().catch((e: any) => console.error(`[pass-report] notify failed: ${e?.message || e}`));
   }
 }
 

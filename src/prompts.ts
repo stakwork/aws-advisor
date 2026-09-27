@@ -4,13 +4,14 @@
  */
 import { getSetting, setSetting, db } from "./db.js";
 
-export type PromptKind = "findings" | "incident" | "resolution" | "observe" | "chat";
-export const PROMPT_KINDS: PromptKind[] = ["findings", "incident", "resolution", "observe", "chat"];
+export type PromptKind = "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report";
+export const PROMPT_KINDS: PromptKind[] = ["findings", "incident", "resolution", "observe", "chat", "pass_report"];
 export const PROMPT_LABELS: Record<PromptKind, { title: string; when: string }> = {
   findings: { title: "Findings batch", when: "sent after a collection run, with the findings, the rules' drafts, the diff and the team's decisions" },
   incident: { title: "Incident investigation", when: "sent when an alert is investigated, with the alert, its attribution and the resource facts" },
   resolution: { title: "Tailored resolution", when: "sent when Resolve is pressed on a recommendation, with the playbook, the graph context and the resource facts" },
   observe: { title: "Daily observation", when: "sent every morning after the review, with what changed in the last day: review findings, alerts, spend against baseline, pools, run changes" },
+  pass_report: { title: "Narrated executor pass", when: "sent after an executor pass whose outcome differs from the last narrated one (ACT_NARRATE), with the rows it touched, every module's notes and errors; the answer is posted to Sphinx and shown on the Auto-actions page" },
   chat: { title: "Recommendation chat", when: "sent when someone writes in a thread; the first message carries the brief (the recommendation, its plan, the step outcomes, or the account header), later ones go in the same session with only what changed" },
 };
 

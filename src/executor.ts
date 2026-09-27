@@ -26,6 +26,7 @@ import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx 
 import { canonicalResource } from "./resource_id.js";
 import { mirrorActionsInBackground, mirrorRecommendationsInBackground } from "./graph_mirror.js";
 import { syncDecisionConceptInBackground } from "./concepts.js";
+import { checkLine, checkProposals, parseCheck, reusableCheck, type ProposalCheck } from "./proposal_check.js";
 
 db.exec(`create table if not exists actions (
   id integer primary key autoincrement,
@@ -58,6 +59,8 @@ create index if not exists actions_dedupe on actions(dedupe, status);
 create index if not exists actions_status on actions(status, created_at)`);
 // Member accounts (src/accounts.ts): the account a row's resource lives in; null = the parent (rows from before there were members).
 addColumn("actions", "account_id", "text");
+// Jev's second opinion on the proposal (src/proposal_check.ts): verdict, scores and reason, asked once per change.
+addColumn("actions", "check_json", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
   | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory";
@@ -89,6 +92,8 @@ export interface ActionRow {
   id: number; kind: ActionKind; resource: string; resource_name: string | null; region: string | null; account_id: string | null; dedupe: string; status: ActionStatus; mode: string; trigger: string;
   title: string; reason: string; before: any; after: any; facts: any; rollback: string | null; est_usd_month: number | null; result: string | null; error: string | null;
   created_at: string; seen_at: string; applied_at: string | null; verified_at: string | null; reverted_at: string | null; notified_at: string | null; notify_result: string | null;
+  /** Jev's second opinion on the proposal; null while unchecked (no key, no answer, or the check is off). */
+  check: ProposalCheck | null;
 }
 
 /** One account's credentials: the read provider and the actuator role assumed from it. */
@@ -364,7 +369,47 @@ export function resumeActions(by: string): PauseState {
 // ---- the ledger ---------------------------------------------------------------------------------------------------
 
 const safeJson = (s: string | null) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
-const rowOf = (r: any): ActionRow => ({ ...r, before: safeJson(r.before_json), after: safeJson(r.after_json), facts: safeJson(r.facts_json), before_json: undefined, after_json: undefined, facts_json: undefined });
+const rowOf = (r: any): ActionRow => ({ ...r, before: safeJson(r.before_json), after: safeJson(r.after_json), facts: safeJson(r.facts_json), check: parseCheck(r.check_json), before_json: undefined, after_json: undefined, facts_json: undefined, check_json: undefined });
+
+// ---- the second opinion --------------------------------------------------------------------------------------------
+
+/** Writes Jev's verdict on a row. */
+export function setCheck(id: number, check: ProposalCheck): void {
+  db.prepare("update actions set check_json = ? where id = ?").run(JSON.stringify(check), id);
+}
+
+/** Kinds the executor cannot undo: no revert call, or a grace period (the deletes that are announced first). */
+const irreversibleKinds = () => new Set([...modules.values()].filter((m) => !(ACTUATOR_NEEDS[m.kind]?.revert ?? []).length || m.grace_hours).map((m) => m.kind));
+
+/**
+ * Jev's second opinion for the rows of one module in one pass: the rows still unchecked get a verdict, first from
+ * an earlier row for the same change (same dedupe, account and target state, within 30 days: no call), else
+ * from one Jev call for the whole batch. Returns the rows that changed, re-read. Never throws.
+ */
+async function secondOpinion(rows: ActionRow[], mod: ActionModule, mode: string, note: (n: string) => void): Promise<Map<number, ActionRow>> {
+  const changed = new Map<number, ActionRow>();
+  const setting = config.actJevCheck;
+  if (setting === "off") return changed;
+  const unchecked = rows.filter((r) => !r.check && r.status === "proposed");
+  if (!unchecked.length) return changed;
+  const ask: ActionRow[] = [];
+  for (const r of unchecked) {
+    const earlier = db.prepare("select id, dedupe, account_id, after_json, check_json from actions where dedupe = ? and check_json is not null and id != ? order by id desc limit 20").all(r.dedupe, r.id) as { id: number; dedupe: string; account_id: string | null; after_json: string | null; check_json: string }[];
+    const reuse = reusableCheck(earlier.map((e) => ({ ...e, check: parseCheck(e.check_json) })), { id: r.id, dedupe: r.dedupe, account_id: r.account_id, after_json: JSON.stringify(r.after ?? {}) });
+    if (reuse) { setCheck(r.id, reuse.check); changed.set(r.id, getAction(r.id)!); continue; }
+    ask.push(r);
+  }
+  if (!ask.length) return changed;
+  // In dry run the verdict is for the page; only what is new gets asked so the same change is never asked twice.
+  try {
+    const { checks, note: n } = await checkProposals(ask, { irreversibleKinds: irreversibleKinds(), mode: setting });
+    if (n) note(n);
+    for (const [id, c] of checks) { setCheck(id, c); changed.set(id, getAction(id)!); }
+    if (mode !== "apply" && checks.size) note(`${checks.size} proposal(s) checked by Jev (dry run: recorded on the rows)`);
+  } catch (e: any) { note(`Jev check failed: ${String(e?.message || e).slice(0, 160)}; proposals left unchecked`); }
+  void mod;
+  return changed;
+}
 
 export function getAction(id: number): ActionRow | null {
   const r = db.prepare("select * from actions where id = ?").get(id);
@@ -465,8 +510,10 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   try { creds = credsForAccount(executorCreds(), row.account_id); creds.act(); }
   catch (e: any) { db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(e?.message || String(e), trigger, id); return getAction(id)!; }
   console.log(`[executor] applying #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""}: ${row.title}`);
+  // A person's Apply overrides a Jev hold (that is the human decision); the objection stays on record with the result.
+  const overrode = row.check?.verdict === "hold" ? ` · applied by ${trigger} over Jev's hold: ${row.check.reason}` : "";
   try {
-    const result = await mod.apply(p, creds);
+    const result = (await mod.apply(p, creds)) + overrode;
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.apply ?? []);
     db.prepare("update actions set status = 'applied', mode = 'apply', trigger = ?, result = ?, error = null, applied_at = datetime('now') where id = ?").run(trigger, result, id);
   } catch (e) {
@@ -524,7 +571,7 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
 
 // ---- the pass -----------------------------------------------------------------------------------------------------
 
-export interface PassResult { mode: string; proposed: number; fresh: number; applied: number; verified: number; failed: number; refused: number; stale: number; notes: string[]; errors: string[]; took_ms: number }
+export interface PassResult { mode: string; proposed: number; fresh: number; applied: number; verified: number; failed: number; refused: number; held: number; stale: number; notes: string[]; errors: string[]; took_ms: number }
 
 let passInFlight: Promise<PassResult> | null = null;
 
@@ -534,7 +581,7 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
   passInFlight = (async () => {
     const t0 = Date.now();
     const mode = config.actMode;
-    const out: PassResult = { mode, proposed: 0, fresh: 0, applied: 0, verified: 0, failed: 0, refused: 0, stale: 0, notes: [], errors: [], took_ms: 0 };
+    const out: PassResult = { mode, proposed: 0, fresh: 0, applied: 0, verified: 0, failed: 0, refused: 0, held: 0, stale: 0, notes: [], errors: [], took_ms: 0 };
     const log = (l: string) => console.log(`[executor] ${l}`);
     if (mode === "off") { out.notes.push("mode off: nothing planned"); out.took_ms = Date.now() - t0; return out; }
     const paused = pauseState();
@@ -553,15 +600,24 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
       catch (e) { const m = describeError(e, `${mod.kind} plan`); out.errors.push(`${mod.kind}: ${m}`); log(`${mod.kind}: plan failed: ${m}`); continue; }
       out.notes.push(...plan.notes.map((n) => `${mod.kind}: ${n}`));
       const keep = new Set<string>();
+      // Record first, then one Jev call for the module's unchecked rows, then the apply decisions: the second
+      // opinion (src/proposal_check.ts) is on the row before anything is applied and is asked once per change.
+      const recorded: { row: ActionRow; fresh: boolean; p: Proposal }[] = [];
       for (const p of plan.proposals) {
         keep.add(keepKey(p.dedupe, p.account_id));
         const { row, fresh } = recordProposal(p, mode, trigger);
         touched.add(row.id);
         out.proposed++; if (fresh) out.fresh++;
         log(`${fresh ? "proposed" : "still proposed"} #${row.id} ${p.title}${p.est_usd_month != null ? ` (≈ ${p.est_usd_month.toFixed(2)} USD/month)` : ""}`);
+        recorded.push({ row, fresh, p });
+      }
+      const checked = await secondOpinion(recorded.map((r) => r.row), mod, mode, (n) => { out.notes.push(`${mod.kind}: ${n}`); log(`${mod.kind}: ${n}`); });
+      for (const r of recorded) if (checked.has(r.row.id)) r.row = checked.get(r.row.id)!;
+      for (const { row, fresh } of recorded) {
         if (fresh && mod.announce) announceProposal(row, mod.grace_hours?.() ?? 0, mode).catch(() => {});
         if (mode !== "apply") continue;
         if (blocked) { if (fresh) out.notes.push(`${mod.kind}: #${row.id} left for a person: the actuator role is not allowed ${blocked.join(", ")}`); continue; }
+        if (row.check?.verdict === "hold" && config.actJevCheck === "hold") { const n = `#${row.id} held by Jev: ${row.check.reason} (Apply on the page proceeds)`; out.notes.push(`${mod.kind}: ${n}`); log(n); out.held++; continue; }
         const wait = graceLeftMs(row, mod.grace_hours?.() ?? 0);
         if (wait > 0) { const n = `#${row.id} waits ${Math.ceil(wait / 3600000)} h more (grace period; Apply on the page skips it)`; out.notes.push(`${mod.kind}: ${n}`); log(n); continue; }
         if (budget.left <= 0) { log(`cap of ${config.actMaxPerPass} changes per pass reached; #${row.id} waits`); continue; }
@@ -577,7 +633,9 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
     }
     if (touched.size) mirrorActionsInBackground([...touched]);
     out.took_ms = Date.now() - t0;
-    log(`${mode}: ${out.proposed} proposed (${out.fresh} new), ${out.applied} applied, ${out.verified} verified, ${out.failed} failed, ${out.refused} refused, ${out.stale} stale in ${out.took_ms} ms${out.errors.length ? `; errors: ${out.errors.join("; ")}` : ""}`);
+    log(`${mode}: ${out.proposed} proposed (${out.fresh} new), ${out.applied} applied, ${out.verified} verified, ${out.failed} failed, ${out.refused} refused, ${out.held} held by Jev, ${out.stale} stale in ${out.took_ms} ms${out.errors.length ? `; errors: ${out.errors.join("; ")}` : ""}`);
+    // The narrated pass (src/pass_report.ts): the agent writes the short version once per distinct outcome. Dynamic import: that module imports this one.
+    import("./pass_report.js").then(({ narratePass }) => narratePass(out, trigger)).then((r) => { if (r && "skipped" in r) log(`narrate: ${r.skipped}`); }).catch((e: any) => log(`narrate: ${e?.message || e}`));
     return out;
   })().finally(() => { passInFlight = null; });
   return passInFlight;
@@ -604,9 +662,10 @@ export function graceLeftMs(row: Pick<ActionRow, "created_at">, graceHours: numb
   return Math.max(0, created + graceHours * 3600000 - now);
 }
 
-export function formatProposalMessage(r: Pick<ActionRow, "id" | "title" | "reason" | "rollback" | "est_usd_month">, graceHours: number, mode: string, publicUrl: string): string {
+export function formatProposalMessage(r: Pick<ActionRow, "id" | "title" | "reason" | "rollback" | "est_usd_month"> & { check?: ProposalCheck | null }, graceHours: number, mode: string, publicUrl: string): string {
   const lines = [`📋 Auto-action planned · ${r.title}`, r.reason];
   if (r.est_usd_month != null && r.est_usd_month > 0) lines.push(`≈ ${r.est_usd_month.toFixed(2)} USD/month`);
+  const jev = checkLine(r.check); if (jev) lines.push(jev);
   lines.push(mode === "apply" ? `It happens in about ${graceHours} h unless someone objects: tag the resource advisor:hands-off, or say so here.` : `Dry run: nothing happens unless someone presses Apply on the page.`);
   if (r.rollback) lines.push(`Undo afterwards: ${r.rollback}`);
   lines.push(`${publicUrl}/actions?id=${r.id}`);
@@ -621,10 +680,11 @@ async function announceProposal(row: ActionRow, graceHours: number, mode: string
 
 const ICON: Record<string, string> = { applied: "⚙️", verified: "✅", failed: "❌", reverted: "↩️" };
 
-export function formatActionMessage(r: Pick<ActionRow, "id" | "status" | "kind" | "title" | "reason" | "rollback" | "result" | "error" | "est_usd_month">, publicUrl: string): string {
+export function formatActionMessage(r: Pick<ActionRow, "id" | "status" | "kind" | "title" | "reason" | "rollback" | "result" | "error" | "est_usd_month"> & { check?: ProposalCheck | null }, publicUrl: string): string {
   const head = r.status === "failed" ? "Auto-action failed" : r.status === "reverted" ? "Auto-action reverted" : r.status === "verified" ? "Auto-action applied and verified" : "Auto-action applied";
   const lines = [`${ICON[r.status] || "⚙️"} ${head} · ${r.title}`, r.reason];
   if (r.est_usd_month != null && r.est_usd_month > 0) lines.push(`≈ ${r.est_usd_month.toFixed(2)} USD/month`);
+  const jev = checkLine(r.check); if (jev) lines.push(jev);
   if (r.status === "failed" && r.error) lines.push(`Error: ${r.error}`);
   else if (r.rollback && r.status !== "reverted") lines.push(`Undo: ${r.rollback} (button on the page)`);
   lines.push(`${publicUrl}/actions?id=${r.id}`);
