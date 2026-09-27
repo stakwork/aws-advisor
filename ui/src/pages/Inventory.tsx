@@ -90,10 +90,10 @@ function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, r
 import { RdsLoadPanel } from "../components/rdsLoad";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3", "route53"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3", "route53", "tags"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", ebs: "EBS", s3: "S3", route53: "Route 53" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name", route53: "id" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", ebs: "EBS", s3: "S3", route53: "Route 53", tags: "Tags" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name", route53: "id", tags: "resource" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
@@ -230,6 +230,8 @@ export default function Inventory() {
     const seq = ++rowsRequest.current;
     if (tableRef.current) tableHeight.current = tableRef.current.offsetHeight;
     setRows(null);
+    // The Tags tab is its own report (src/tag_hygiene.ts): nothing to fetch here.
+    if (tab === "tags") { setRows([]); return Promise.resolve(); }
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (tab === "ebs" && state) qs.set("state", state);
@@ -290,10 +292,12 @@ export default function Inventory() {
       <div className="flex gap-1 border-b border-zinc-800">
         {TABS.map((t) => (
           <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
-            {TAB_LABEL[t]}{s && <span className="ml-1 text-xs text-zinc-500">{s[t].total}</span>}
+            {TAB_LABEL[t]}{s && s[t] && <span className="ml-1 text-xs text-zinc-500">{s[t].total}</span>}
           </button>
         ))}
       </div>
+
+      {tab === "tags" && <TagsPanel />}
 
       {tab === "ec2" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
@@ -356,7 +360,7 @@ export default function Inventory() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
+      {tab !== "tags" && <div className="flex flex-wrap items-center gap-2">
         {tab === "ec2" && (
           <>
             <select value={state} onChange={(e) => set({ state: e.target.value })}>
@@ -385,9 +389,9 @@ export default function Inventory() {
         <form onSubmit={(e) => { e.preventDefault(); set({ q }); }}><input placeholder={tab === "ec2" ? "search name, id, type or IP" : tab === "route53" ? "search name, target or resource" : "search"} value={q} onChange={(e) => setQ(e.target.value)} className="w-64" /></form>
         <label className="flex items-center gap-1 text-sm text-zinc-400"><input type="checkbox" checked={gone} onChange={(e) => set({ gone: e.target.checked ? "1" : null })} /> include gone</label>
         {rows && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
-      </div>
+      </div>}
 
-      <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
+      {tab !== "tags" && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
         {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>{s?.refreshed_at ? "Nothing matches." : "No snapshot yet."}</Empty> : (
           <div className="min-w-0 overflow-x-auto self-start">
             <table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
@@ -551,12 +555,75 @@ export default function Inventory() {
             </table>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 10, s3: 8, route53: 6 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 10, s3: 8, route53: 6, tags: 5 };
+
+/**
+ * Tag hygiene (src/tag_hygiene.ts): which resources lack the required tags (owner and env by default), the value the
+ * advisor would suggest from the name and the tags there, the CLI to set them, and the EC2 instances that could
+ * opt into parking or office hours but carry no tag. The advisor never writes a tag: the person copies the command.
+ */
+function TagsPanel() {
+  const [report, setReport] = useState<any>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [kind, setKind] = useState("");
+  const load = () => api("/tags/hygiene").then(setReport).catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const refresh = async () => {
+    setBusy(true); setErr("");
+    try { const r = await api("/tags/hygiene/refresh", { method: "POST" }); setReport(r.report); if (r.errors?.length) setErr(`Some tables could not be read: ${r.errors.join("; ")}`); }
+    catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  if (!report) return <Empty>{err || "Loading…"}</Empty>;
+  const rows: any[] = kind ? report.rows.filter((r: any) => r.kind === kind) : report.rows;
+  const parks = report.opt_in.filter((o: any) => o.opt === "park"), schedules = report.opt_in.filter((o: any) => o.opt === "schedule");
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm text-zinc-500">Required tags: {report.required.map((k: string) => <Code key={k} className="mr-1">{k}</Code>)} (aliases such as Environment or team count) · {report.checked_at ? `checked ${when(report.checked_at)}` : "never checked: press Refresh"}</div>
+        <Button variant="ghost" onClick={refresh} disabled={busy}>{busy ? "Reading tags…" : "Refresh tags"}</Button>
+      </div>
+      {err && <div className="text-sm text-red-300">{err}</div>}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <Stat label="Missing a required tag" value={report.total_missing} hint={`${report.kinds.length} resource kind${report.kinds.length === 1 ? "" : "s"}`} />
+        {report.required.map((k: string) => <Stat key={k} label={`Without ${k}`} value={report.kinds.reduce((n: number, x: any) => n + (x.by_key[k] || 0), 0)} />)}
+        <Stat label="Opt-in candidates" value={report.opt_in.length} hint={`${parks.length} for parking · ${schedules.length} for office hours`} />
+      </div>
+      {report.opt_in.length > 0 && (
+        <Card title="Could opt into the executor, once tagged">
+          <div className="text-xs text-zinc-500">Swarm-named instances without <Code>advisor:park</Code> are parking candidates (stopped after 7 idle days, never terminated); running dev, staging and test boxes without <Code>advisor:schedule</Code> could keep office hours. The tag is the consent: nothing happens until someone adds it.</div>
+          <div className="mt-2 overflow-x-auto"><table className="w-full border-collapse rounded-lg border border-zinc-800"><thead className="bg-zinc-900"><tr><Th>Instance</Th><Th>State</Th><Th>Opt-in</Th><Th>Tag to add</Th><Th></Th></tr></thead><tbody>
+            {report.opt_in.map((o: any) => <tr key={o.resource} className="border-t border-zinc-800"><Td><span className="font-medium text-zinc-100">{o.name || o.resource}</span> <span className="text-xs text-zinc-500">{o.resource}</span></Td><Td><Badge>{o.state || "?"}</Badge></Td><Td>{o.opt === "park" ? "parking" : "office hours"}</Td><Td><Code>{o.tag}</Code></Td><Td><CopyButton text={o.cli} label="Copy CLI" /></Td></tr>)}
+          </tbody></table></div>
+        </Card>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={kind} onChange={(e) => setKind(e.target.value)}><option value="">All kinds</option>{report.kinds.map((k: any) => <option key={k.kind} value={k.kind}>{k.label} · {k.missing}</option>)}</select>
+        <span className="text-sm text-zinc-500">{rows.length} of {report.total_missing} shown{report.total_missing > report.rows.length ? ` (first ${report.rows.length})` : ""}</span>
+      </div>
+      {rows.length === 0 ? <Empty>{report.checked_at ? "Every resource carries the required tags." : "No report yet."}</Empty> : (
+        <div className="min-w-0 overflow-x-auto"><table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
+          <thead className="bg-zinc-900"><tr><Th>Resource</Th><Th>Kind</Th><Th>Missing</Th><Th>Suggested</Th><Th>Tag it</Th></tr></thead>
+          <tbody>{rows.map((r: any) => (
+            <tr key={r.resource} className="border-t border-zinc-800">
+              <Td><span className="font-medium text-zinc-100">{r.name || r.id}</span>{r.name && r.name !== r.id && <span className="ml-1 text-xs text-zinc-500">{r.id}</span>}{r.region && <span className="ml-1 text-xs text-zinc-500">{r.region}</span>}</Td>
+              <Td className="whitespace-nowrap text-zinc-400">{r.kind}</Td>
+              <Td>{r.missing.map((m: string) => <Badge key={m}>{m}</Badge>)}</Td>
+              <Td className="text-xs">{Object.keys(r.suggested).length ? Object.entries(r.suggested).map(([k, v]) => <div key={k}><span className="text-zinc-500">{k}=</span>{String(v)}</div>) : <span className="text-zinc-500">nothing in the name or tags</span>}</Td>
+              <Td><CopyButton text={r.cli} label="Copy CLI" /></Td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </div>
+  );
+}
 
 /** The expanded detail under a row: scrolls into view when it opens, lays its groups out in two columns on wide screens. */
 /** The instance's baselines: median and p95 per metric, from 14 days of CloudWatch CPU and the probe history. */

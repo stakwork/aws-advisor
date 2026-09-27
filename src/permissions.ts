@@ -392,7 +392,7 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "pi:DescribeDimensionKeys", "pi:GetResourceMetadata",
         "elasticache:Describe*", "elasticache:ListTagsForResource",
         "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData", "cloudwatch:ListMetrics",
-        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks",
+        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks", "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
         "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
         "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
         "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags",
@@ -481,6 +481,8 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   efs_lifecycle: { apply: ["elasticfilesystem:PutLifecycleConfiguration"], revert: ["elasticfilesystem:PutLifecycleConfiguration"] },
   alarm_cleanup: { apply: ["cloudwatch:DeleteAlarms"], revert: ["cloudwatch:PutMetricAlarm"] },
   log_retention_tune: { apply: ["logs:PutRetentionPolicy"], revert: ["logs:PutRetentionPolicy"] },
+  s3_multipart_abort: { apply: ["s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration"], revert: ["s3:PutLifecycleConfiguration"] },
+  lambda_memory: { apply: ["lambda:UpdateFunctionConfiguration"], revert: ["lambda:UpdateFunctionConfiguration"] },
 };
 
 export const actuatorPolicy = (): IamPolicy => ({
@@ -514,9 +516,10 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorScheduleDescribe", Effect: "Allow", Action: ["rds:DescribeDBInstances"], Resource: "*" },
     { Sid: "ActuatorCreditSpec", Effect: "Allow", Action: ["ec2:ModifyInstanceCreditSpecification", "ec2:DescribeInstanceCreditSpecifications"], Resource: "*" },
     { Sid: "ActuatorEfsLifecycle", Effect: "Allow", Action: ["elasticfilesystem:PutLifecycleConfiguration", "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags"], Resource: "*" },
+    { Sid: "ActuatorLambdaMemory", Effect: "Allow", Action: ["lambda:UpdateFunctionConfiguration", "lambda:GetFunctionConfiguration", "lambda:ListTags"], Resource: "*" },
     { Sid: "ActuatorAlarmCleanup", Effect: "Allow", Action: ["cloudwatch:DeleteAlarms", "cloudwatch:PutMetricAlarm", "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource"], Resource: "*" },
     { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances",
-      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 

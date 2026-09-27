@@ -9,7 +9,7 @@ import { S, query, queryReadOnly } from "./steampipe.js";
 import { ProbeError, containerSignals, latestProbe, probeInstance, summarizeProbe, useSummary } from "./ssm.js";
 import { listRules, rulesFor, signalKinds, upsertRule } from "./signal_rules.js";
 import { latestS3Usage, refreshS3Usage } from "./s3_usage.js";
-import { revertAction } from "./executor.js";
+import { pauseActions, pauseState, resumeActions, revertAction } from "./executor.js";
 import { PriceSpec, fetchPrices } from "./prices.js";
 import { inventoryRefreshedAt, listEc2 } from "./inventory.js";
 import { domainsFor, listRoute53 } from "./route53_inventory.js";
@@ -27,6 +27,8 @@ import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
 import { graphBill, listSystems, systemView } from "./graph_knowledge.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
+import { registerSwarmTools } from "./mcp_swarms.js";
+import { registerTagTools } from "./mcp_tags.js";
 
 /**
  * MCP fact server, mounted at /mcp (Streamable HTTP, stateless: one server+transport per request).
@@ -502,9 +504,35 @@ export function createFactServer(): McpServer {
     catch (e: any) { return fail(e?.message || String(e)); }
   });
 
+  server.registerTool("pause_auto_actions", {
+    title: "Pause auto-actions (the kill switch)",
+    description: "Stops the auto-actions executor from planning or applying anything until someone resumes it (here, on the Auto-actions page, or the API). Use it when a person in the chat asks to pause, stop or freeze auto-actions, or when something the executor did looks wrong. Revert of an already applied change keeps working while paused. Say why; optionally for how many hours, after which it resumes by itself.",
+    inputSchema: { reason: z.string().min(2).max(300).describe("why, in the person's words"), hours: z.number().min(0.25).max(24 * 30).optional().describe("resume automatically after this many hours; omit for an open-ended pause") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async (a) => {
+    try {
+      const until = a.hours ? new Date(Date.now() + a.hours * 3600000).toISOString() : undefined;
+      const p = pauseActions("chat", a.reason, until);
+      return text({ ...p, note: `paused; nothing is planned or applied until resumed${until ? ` (automatically at ${until})` : ""}. Revert still works.` });
+    } catch (e: any) { return fail(e?.message || String(e)); }
+  });
+
+  server.registerTool("resume_auto_actions", {
+    title: "Resume auto-actions",
+    description: "Lifts a pause of the auto-actions executor; the next pass runs on schedule. Says whether there was a pause to lift.",
+    inputSchema: {},
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async () => {
+    try {
+      const was = pauseState();
+      const p = resumeActions("chat");
+      return text({ ...p, note: was.paused ? `resumed (was paused by ${was.by} since ${was.at}${was.reason ? `: ${was.reason}` : ""})` : "auto-actions were not paused" });
+    } catch (e: any) { return fail(e?.message || String(e)); }
+  });
+
   server.registerTool("wake_swarm", {
     title: "Wake a swarm the executor parked",
-    description: "Starts an instance the auto-actions executor stopped (a swarm_park row that is applied or verified): the one write the chat may do, and it can only undo. Name the instance by id or by (part of) its name. Nothing happens for an instance the executor did not park.",
+    description: "Starts an instance the auto-actions executor stopped (a swarm_park row that is applied or verified): a write that can only undo (the chat may also pause and resume the executor). Name the instance by id or by (part of) its name. Nothing happens for an instance the executor did not park.",
     inputSchema: { instance: z.string().min(2).max(120).describe("instance id, or part of the name shown in the inventory") },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async (a) => {
@@ -515,6 +543,9 @@ export function createFactServer(): McpServer {
     try { const r = await revertAction(rows[0].id, "chat"); return text({ action_id: r.id, instance: r.resource, name: r.resource_name, status: r.status, result: r.result, note: "started; the Elastic IP keeps the address, the containers come back with the box in a minute or two" }); }
     catch (e: any) { return fail(e?.message || String(e)); }
   });
+
+  registerSwarmTools(server);
+  registerTagTools(server);
 
   server.registerTool("s3_usage", {
     title: "How a bucket is used, and the lifecycle rules that fit",

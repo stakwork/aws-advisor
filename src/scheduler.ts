@@ -20,6 +20,9 @@ import { refreshS3Inventory } from "./s3_inventory.js";
 import { s3UsagePass } from "./s3_usage.js";
 import { dispatchNotifications } from "./notify.js";
 import { dispatchActionNotifications, runExecutorPass } from "./executor.js";
+import { refreshSwarmCosts } from "./swarm_costs.js";
+import { refreshTagHygiene } from "./tag_hygiene.js";
+import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -81,6 +84,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     return `nat ${r.nat}, cpu ${r.cpu}, probes ${r.probes}, spend ${r.spend} in ${r.took_ms} ms${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
   } },
   reviewCron: { label: "Daily review", run: async () => { const r: any = await runReview((l) => console.log(`[review] ${l}`)); return `${r?.instances ?? "?"} instances reviewed, ${r?.recommendations ?? 0} recommendations, ${r?.alerts ?? 0} alerts`; } },
+  swarmCostCron: { label: "Cost per swarm", run: async () => { const r = await refreshSwarmCosts((l) => console.log(`[swarms] ${l}`)); mirrorSwarmCosts().catch((e: any) => console.error(`[graph] swarm costs: ${e?.message || e}`)); return `${r.swarms} swarm(s), ≈ ${r.total_usd.toFixed(2)} USD/month${r.snapshots_known ? "" : " (snapshots unknown)"}`; } },
   observeCron: { label: "Morning observation", run: async () => {
     if (!config.repo2graphUrl) return "skipped: no repo2graph URL (Settings > Agent)";
     const r = await dispatchObservation();
@@ -92,6 +96,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     try { await refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`)); out.push("cloudtrail"); } catch (e: any) { console.error(`[cloudtrail] failed: ${e?.message || e}`); out.push(`cloudtrail failed: ${e?.message || e}`); }
     try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
     try { const r = await s3UsagePass((l) => console.log(`[s3-usage] ${l}`)); out.push(`s3 usage ${r.analysed.length}/${r.candidates}`); } catch (e: any) { console.error(`[s3-usage] failed: ${e?.message || e}`); out.push(`s3 usage failed: ${e?.message || e}`); }
+    try { const r = await refreshTagHygiene((l) => console.log(`[tags] ${l}`)); out.push(`tags ${r.missing} missing, ${r.opt_in} opt-in`); } catch (e: any) { console.error(`[tags] failed: ${e?.message || e}`); out.push(`tags failed: ${e?.message || e}`); }
     return out.join(", ");
   } },
   actCron: { label: "Auto-actions pass", run: async () => {
@@ -101,7 +106,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
   verifyCron: { label: "Saving verification", run: async () => { const r: any = await runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }); return typeof r === "object" && r ? JSON.stringify(r).slice(0, 200) : "done"; } },
 };
 
-const tag: Record<string, string> = { runCron: "scheduler", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor" };
+const tag: Record<string, string> = { swarmCostCron: "swarms", runCron: "scheduler", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor" };
 const jobInFlight = new Set<string>();
 
 /** Runs one job now, as the cron would, and reports what it did or why it did nothing. The credential check is the same. */
@@ -124,8 +129,8 @@ export async function runJobNow(key: string, trigger = "manual"): Promise<string
 
 export function startScheduler(): Record<string, string | null> {
   const out: Record<string, string | null> = {};
-  const crons: Record<string, string> = { runCron: config.runCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron };
-  const names: Record<string, string> = { runCron: "Scheduler (RUN_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)" };
+  const crons: Record<string, string> = { swarmCostCron: config.reviewCron, runCron: config.runCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron };
+  const names: Record<string, string> = { swarmCostCron: "Cost per swarm (REVIEW_CRON)", runCron: "Scheduler (RUN_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)" };
   for (const key of Object.keys(JOBS)) {
     if (key === "observeCron" && !config.repo2graphUrl) { console.log("Observation (OBSERVE_CRON) disabled: no repo2graph URL (Settings > Agent)"); out[key] = null; continue; }
     out[key] = schedule(names[key], crons[key], () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });

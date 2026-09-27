@@ -18,8 +18,9 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { IAMClient, SimulatePrincipalPolicyCommand } from "@aws-sdk/client-iam";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { config } from "./config.js";
-import { db, getJsonSetting, setSetting } from "./db.js";
-import { sdkCredentials } from "./steampipe.js";
+import { addColumn, db, getJsonSetting, setSetting } from "./db.js";
+import { credentialsMeta, sdkCredentials } from "./steampipe.js";
+import { accountCredentials, listMembers } from "./accounts.js";
 import { ACTUATOR_NEEDS, describeError, explainPermissionError } from "./permissions.js";
 import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
 import { canonicalResource } from "./resource_id.js";
@@ -55,9 +56,11 @@ db.exec(`create table if not exists actions (
 );
 create index if not exists actions_dedupe on actions(dedupe, status);
 create index if not exists actions_status on actions(status, created_at)`);
+// Member accounts (src/accounts.ts): the account a row's resource lives in; null = the parent (rows from before there were members).
+addColumn("actions", "account_id", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
-  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune";
+  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -78,20 +81,42 @@ export interface Proposal {
   /** How to undo, in words (the revert verb does it). */
   rollback: string;
   est_usd_month?: number | null;
+  /** The member account the resource lives in (src/accounts.ts); null or absent = the parent. Apply, verify and revert run under that account's credentials. */
+  account_id?: string | null;
 }
 
 export interface ActionRow {
-  id: number; kind: ActionKind; resource: string; resource_name: string | null; region: string | null; dedupe: string; status: ActionStatus; mode: string; trigger: string;
+  id: number; kind: ActionKind; resource: string; resource_name: string | null; region: string | null; account_id: string | null; dedupe: string; status: ActionStatus; mode: string; trigger: string;
   title: string; reason: string; before: any; after: any; facts: any; rollback: string | null; est_usd_month: number | null; result: string | null; error: string | null;
   created_at: string; seen_at: string; applied_at: string | null; verified_at: string | null; reverted_at: string | null; notified_at: string | null; notify_result: string | null;
 }
 
-export interface Creds {
-  /** The advisor's read credentials: every plan and verify. */
+/** One account's credentials: the read provider and the actuator role assumed from it. */
+export interface AccountCreds {
+  account_id: string;
+  name: string;
+  is_parent: boolean;
+  /** The account's read credentials: every plan and verify. */
   read: AwsCredentialIdentityProvider;
-  /** The actuator role, assumed from the read credentials; throws NoActuator when none is configured. */
+  /** The account's actuator role, assumed from its read credentials; throws NoActuator when none is configured. */
   act: () => AwsCredentialIdentityProvider;
   region: string;
+}
+
+/**
+ * What a module gets: `read`, `act` and `region` are the account the call is for (the parent in plan; the row's
+ * account in apply, verify and revert, see `credsForAccount`). `accounts` lists every enabled account so a plan
+ * that discovers with the SDK can loop over them, and `forAccount(id)` picks one (unknown or null = the parent).
+ */
+export interface Creds extends Pick<AccountCreds, "read" | "act" | "region"> {
+  accounts: AccountCreds[];
+  forAccount(accountId: string | null | undefined): AccountCreds;
+}
+
+/** The same Creds with `read`, `act` and `region` switched to one account: what a row's apply, verify and revert run under. */
+export function credsForAccount(creds: Creds, accountId: string | null | undefined): Creds {
+  const a = creds.forAccount(accountId);
+  return { ...creds, read: a.read, act: a.act, region: a.region };
 }
 
 export interface PlanResult { proposals: Proposal[]; notes: string[] }
@@ -170,18 +195,37 @@ function closeRecommendation(row: ActionRow): void {
 
 // ---- credentials ------------------------------------------------------------------------------------------------
 
-export function executorCreds(): Creds {
-  const base = sdkCredentials();
-  const roleArn = config.actRoleArn;
+/** An account's actuator: its role assumed from its read provider, once. */
+function accountCreds(a: { account_id: string; name: string; is_parent: boolean; read: AwsCredentialIdentityProvider; region: string; act_role_arn: string }): AccountCreds {
   let actProvider: AwsCredentialIdentityProvider | null = null;
   return {
-    read: base.provider,
-    region: base.region,
+    account_id: a.account_id, name: a.name, is_parent: a.is_parent, read: a.read, region: a.region,
     act: () => {
-      if (!roleArn) throw new NoActuator("no actuator role is configured (Settings > Auto-actions > Actuator role ARN); nothing can be applied");
-      if (!actProvider) actProvider = fromTemporaryCredentials({ masterCredentials: base.provider, params: { RoleArn: roleArn, RoleSessionName: "aws-advisor-act", DurationSeconds: 900 }, clientConfig: { region: base.region } });
+      if (!a.act_role_arn) throw new NoActuator(a.is_parent ? "no actuator role is configured (Settings > Auto-actions > Actuator role ARN); nothing can be applied" : `member account ${a.name} (${a.account_id}) has no actuator role (Settings > Member accounts); dry runs only there`);
+      if (!actProvider) actProvider = fromTemporaryCredentials({ masterCredentials: a.read, params: { RoleArn: a.act_role_arn, RoleSessionName: "aws-advisor-act", DurationSeconds: 900 }, clientConfig: { region: a.region } });
       return actProvider;
     },
+  };
+}
+
+/**
+ * The parent's credentials plus every enabled member's (src/accounts.ts): `read`/`act`/`region` are the parent's,
+ * so a module that knows nothing about accounts behaves as before. Note that `actuatorCapabilities` simulates the
+ * parent's actuator role only; a member role narrower than the policy is learnt from denied applies.
+ */
+export function executorCreds(): Creds {
+  const base = sdkCredentials();
+  const parentId = credentialsMeta()?.accountId || "";
+  const parent = accountCreds({ account_id: parentId, name: "parent", is_parent: true, read: base.provider, region: base.region, act_role_arn: config.actRoleArn });
+  const accounts: AccountCreds[] = [parent];
+  for (const m of listMembers()) {
+    if (!m.enabled) continue;
+    try { const c = accountCredentials(m.account_id); accounts.push(accountCreds({ account_id: m.account_id, name: m.name, is_parent: false, read: c.provider, region: c.region, act_role_arn: m.act_role_arn || "" })); }
+    catch (e: any) { console.error(`[executor] member ${m.account_id}: ${e?.message || e}`); }
+  }
+  return {
+    read: parent.read, region: parent.region, act: parent.act, accounts,
+    forAccount: (id) => (id ? accounts.find((a) => a.account_id === id) : undefined) ?? parent,
   };
 }
 
@@ -273,6 +317,50 @@ function actuatorDenied(e: unknown, kind: string, verb: "apply" | "revert"): str
   return `the actuator role is not allowed ${action}: add it to the role's policy (the Auto-actions page prints the full policy), or leave this action to a person`;
 }
 
+// ---- the kill switch ----------------------------------------------------------------------------------------------
+
+export interface PauseState { paused: boolean; by?: string; at?: string; reason?: string; until?: string }
+const PAUSE_KEY = "act:paused";
+
+/**
+ * "pause auto-actions": the executor plans and applies nothing until someone resumes it (the page, the API or the
+ * chat). A pause with an `until` in the past counts as resumed. Revert stays allowed while paused: undoing a
+ * change is the safety valve a pause exists for.
+ */
+export function pauseState(now = Date.now()): PauseState {
+  const p = getJsonSetting<PauseState | null>(PAUSE_KEY, null);
+  if (!p || !p.paused) return { paused: false };
+  if (p.until && new Date(p.until).getTime() <= now) return { paused: false };
+  return p;
+}
+
+const pauseLine = (p: PauseState) => `paused by ${p.by || "someone"} since ${(p.at || "").slice(0, 16).replace("T", " ")} UTC${p.reason ? `: ${p.reason}` : ""}${p.until ? ` (until ${p.until.slice(0, 16).replace("T", " ")} UTC)` : ""}`;
+
+async function announcePause(line: string): Promise<void> {
+  // A pause is urgent, so quiet hours are not respected here.
+  if (!notifyConfigured() || config.notifyLevel === "off") return;
+  try { await sendSphinx(line); } catch (e: any) { console.log(`[executor] pause notice failed: ${e?.message || e}`); }
+}
+
+export function pauseActions(by: string, reason: string, untilIso?: string): PauseState {
+  if (untilIso && !Number.isFinite(new Date(untilIso).getTime())) throw new Error(`"${untilIso}" is not a date`);
+  const p: PauseState = { paused: true, by: by || "unknown", at: new Date().toISOString(), reason: (reason || "").slice(0, 300), ...(untilIso ? { until: new Date(untilIso).toISOString() } : {}) };
+  setSetting(PAUSE_KEY, JSON.stringify(p));
+  console.log(`[executor] ${pauseLine(p)}`);
+  announcePause(`⏸️ Auto-actions ${pauseLine(p)}. Nothing is planned or applied until someone resumes (page, API or "resume auto-actions" in the chat). Revert still works.\n${config.notifyLinkUrl}/actions`).catch(() => {});
+  return p;
+}
+
+export function resumeActions(by: string): PauseState {
+  const was = pauseState();
+  setSetting(PAUSE_KEY, JSON.stringify({ paused: false }));
+  if (was.paused) {
+    console.log(`[executor] resumed by ${by} (was ${pauseLine(was)})`);
+    announcePause(`▶️ Auto-actions resumed by ${by || "someone"} (were ${pauseLine(was)}). The next pass runs on schedule.\n${config.notifyLinkUrl}/actions`).catch(() => {});
+  }
+  return { paused: false };
+}
+
 // ---- the ledger ---------------------------------------------------------------------------------------------------
 
 const safeJson = (s: string | null) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
@@ -314,30 +402,34 @@ export function listActions(opts: { status?: string; kind?: string; page?: numbe
   return { actions: rows.map(rowOf), total, page, page_size, counts, kinds };
 }
 
-const proposalOf = (r: ActionRow): Proposal => ({ kind: r.kind, resource: r.resource, resource_name: r.resource_name, region: r.region || "us-east-1", dedupe: r.dedupe, title: r.title, reason: r.reason, before: r.before || {}, after: r.after || {}, facts: r.facts || {}, rollback: r.rollback || "", est_usd_month: r.est_usd_month });
+const proposalOf = (r: ActionRow): Proposal => ({ kind: r.kind, resource: r.resource, resource_name: r.resource_name, region: r.region || "us-east-1", account_id: r.account_id ?? null, dedupe: r.dedupe, title: r.title, reason: r.reason, before: r.before || {}, after: r.after || {}, facts: r.facts || {}, rollback: r.rollback || "", est_usd_month: r.est_usd_month });
 
 const FAILURES_BEFORE_REFUSING = 3;
 
 /** Records a proposal: refreshes the open row with the same dedupe, else inserts one. Returns the row and whether it is new. */
 function recordProposal(p: Proposal, mode: string, trigger: string): { row: ActionRow; fresh: boolean } {
-  const open = db.prepare("select id from actions where dedupe = ? and status = 'proposed' order by id desc limit 1").get(p.dedupe) as { id: number } | undefined;
+  // Same dedupe in another member account is another change: names (repositories, log groups) are unique only per account.
+  const open = db.prepare("select id from actions where dedupe = ? and coalesce(account_id, '') = coalesce(?, '') and status = 'proposed' order by id desc limit 1").get(p.dedupe, p.account_id ?? null) as { id: number } | undefined;
   const json = { before: JSON.stringify(p.before), after: JSON.stringify(p.after), facts: JSON.stringify(p.facts) };
   if (open) {
-    db.prepare("update actions set title = ?, reason = ?, before_json = ?, after_json = ?, facts_json = ?, rollback = ?, est_usd_month = ?, resource_name = ?, seen_at = datetime('now'), mode = ? where id = ?")
-      .run(p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null, p.resource_name ?? null, mode, open.id);
+    db.prepare("update actions set title = ?, reason = ?, before_json = ?, after_json = ?, facts_json = ?, rollback = ?, est_usd_month = ?, resource_name = ?, account_id = coalesce(?, account_id), seen_at = datetime('now'), mode = ? where id = ?")
+      .run(p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null, p.resource_name ?? null, p.account_id ?? null, mode, open.id);
     return { row: getAction(open.id)!, fresh: false };
   }
-  const id = Number(db.prepare(`insert into actions(kind, resource, resource_name, region, dedupe, status, mode, trigger, title, reason, before_json, after_json, facts_json, rollback, est_usd_month)
-    values (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(p.kind, p.resource, p.resource_name ?? null, p.region, p.dedupe, mode, trigger, p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null).lastInsertRowid);
+  const id = Number(db.prepare(`insert into actions(kind, resource, resource_name, region, account_id, dedupe, status, mode, trigger, title, reason, before_json, after_json, facts_json, rollback, est_usd_month)
+    values (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(p.kind, p.resource, p.resource_name ?? null, p.region, p.account_id ?? null, p.dedupe, mode, trigger, p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null).lastInsertRowid);
   return { row: getAction(id)!, fresh: true };
 }
 
 /** Open proposals of a kind that this pass did not propose again no longer apply (the hour moved on, the snapshot is gone). */
+/** The key a pass keeps open proposals by: the dedupe, per account. */
+export const keepKey = (dedupe: string, accountId: string | null | undefined) => `${accountId ?? ""}|${dedupe}`;
+
 function closeStale(kind: ActionKind, keep: Set<string>): number[] {
-  const open = db.prepare("select id, dedupe from actions where kind = ? and status = 'proposed'").all(kind) as { id: number; dedupe: string }[];
+  const open = db.prepare("select id, dedupe, account_id from actions where kind = ? and status = 'proposed'").all(kind) as { id: number; dedupe: string; account_id: string | null }[];
   const ids: number[] = [];
-  for (const o of open) if (!keep.has(o.dedupe)) { db.prepare("update actions set status = 'stale', result = 'no longer proposed by the latest pass' where id = ?").run(o.id); ids.push(o.id); }
+  for (const o of open) if (!keep.has(keepKey(o.dedupe, o.account_id))) { db.prepare("update actions set status = 'stale', result = 'no longer proposed by the latest pass' where id = ?").run(o.id); ids.push(o.id); }
   return ids;
 }
 
@@ -359,6 +451,8 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
   if (row.status !== "proposed") throw new Error(`action #${id} is ${row.status}, not proposed`);
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
+  const paused = pauseState();
+  if (paused.paused) throw new Error(`auto-actions are paused by ${paused.by}${paused.reason ? ` (${paused.reason})` : ""}; resume from the page or the chat`);
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
   if (recentFailures(row.dedupe) >= FAILURES_BEFORE_REFUSING) {
     db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(`failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow`, trigger, id);
@@ -368,9 +462,9 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   if (cap?.apply === false) throw new Error(`the actuator role is not allowed ${cap.missing.join(", ")}; #${id} can only be done by a person (or widen the role's policy)`);
   const p = proposalOf(row);
   let creds: Creds;
-  try { creds = executorCreds(); creds.act(); }
+  try { creds = credsForAccount(executorCreds(), row.account_id); creds.act(); }
   catch (e: any) { db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(e?.message || String(e), trigger, id); return getAction(id)!; }
-  console.log(`[executor] applying #${id} ${row.kind} ${row.resource}: ${row.title}`);
+  console.log(`[executor] applying #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""}: ${row.title}`);
   try {
     const result = await mod.apply(p, creds);
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.apply ?? []);
@@ -396,7 +490,7 @@ export async function verifyAction(id: number, creds?: Creds): Promise<ActionRow
 async function verifyInner(row: ActionRow, mod: ActionModule, creds?: Creds): Promise<ActionRow> {
   const id = row.id;
   try {
-    const v = await mod.verify(proposalOf(row), creds || executorCreds());
+    const v = await mod.verify(proposalOf(row), credsForAccount(creds || executorCreds(), row.account_id));
     if (v.ok === true) { db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); closeRecommendation(getAction(id)!); }
     else if (v.ok === false) db.prepare("update actions set status = 'failed', error = ? where id = ?").run(`read-back disagrees: ${v.note}`, id);
     else db.prepare("update actions set result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id);
@@ -410,11 +504,12 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
   if (!["applied", "verified"].includes(row.status)) throw new Error(`action #${id} is ${row.status}; only an applied or verified change can be reverted`);
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
+  // Deliberately not checked here: a pause (pauseState) stops planning and applying, never undoing. Revert is the safety valve.
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
   const cap = (await actuatorCapabilities()).caps[row.kind];
   if (cap?.revert === false) throw new Error(`the actuator role is not allowed ${cap.missing.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
-  const creds = executorCreds(); creds.act();
-  console.log(`[executor] reverting #${id} ${row.kind} ${row.resource} (${by})`);
+  const creds = credsForAccount(executorCreds(), row.account_id); creds.act();
+  console.log(`[executor] reverting #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""} (${by})`);
   try {
     const result = await mod.revert(proposalOf(row), creds);
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.revert ?? []);
@@ -442,6 +537,8 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
     const out: PassResult = { mode, proposed: 0, fresh: 0, applied: 0, verified: 0, failed: 0, refused: 0, stale: 0, notes: [], errors: [], took_ms: 0 };
     const log = (l: string) => console.log(`[executor] ${l}`);
     if (mode === "off") { out.notes.push("mode off: nothing planned"); out.took_ms = Date.now() - t0; return out; }
+    const paused = pauseState();
+    if (paused.paused) { const n = `${pauseLine(paused)}; nothing planned or applied`; out.notes.push(n); log(n); out.took_ms = Date.now() - t0; return out; }
     let creds: Creds;
     try { creds = executorCreds(); } catch (e: any) { out.errors.push(e?.message || String(e)); out.took_ms = Date.now() - t0; return out; }
     // Rows applied earlier and still unverified (a snapshot still archiving) get read back first.
@@ -457,7 +554,7 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
       out.notes.push(...plan.notes.map((n) => `${mod.kind}: ${n}`));
       const keep = new Set<string>();
       for (const p of plan.proposals) {
-        keep.add(p.dedupe);
+        keep.add(keepKey(p.dedupe, p.account_id));
         const { row, fresh } = recordProposal(p, mode, trigger);
         touched.add(row.id);
         out.proposed++; if (fresh) out.fresh++;
@@ -553,8 +650,8 @@ export async function dispatchActionNotifications(): Promise<{ sent: number; ski
 }
 
 /** The Auto-actions page header: mode, role, who it acts as, the modules and their labels. */
-export async function executorStatus(): Promise<{ mode: string; role_arn: string; cron: string; identity: { ok: boolean; arn?: string; error?: string }; modules: { kind: string; label: string }[]; counts: Record<string, number>; capabilities: Record<string, Capability>; capabilities_note?: string }> {
+export async function executorStatus(): Promise<{ mode: string; role_arn: string; cron: string; identity: { ok: boolean; arn?: string; error?: string }; modules: { kind: string; label: string }[]; counts: Record<string, number>; capabilities: Record<string, Capability>; capabilities_note?: string; paused: PauseState }> {
   const identity = config.actRoleArn ? await actuatorIdentity() : { ok: false as const, error: "no actuator role configured: dry runs only" };
   const cap = identity.ok ? await actuatorCapabilities() : { caps: computeCapabilities(null, learnedDenials()), note: undefined };
-  return { mode: config.actMode, role_arn: config.actRoleArn, cron: config.actCron, identity, modules: actionModules().map((m) => ({ kind: m.kind, label: m.label })), counts: listActions({ page_size: 1 }).counts, capabilities: cap.caps, capabilities_note: cap.note };
+  return { mode: config.actMode, role_arn: config.actRoleArn, cron: config.actCron, identity, modules: actionModules().map((m) => ({ kind: m.kind, label: m.label })), counts: listActions({ page_size: 1 }).counts, capabilities: cap.caps, capabilities_note: cap.note, paused: pauseState() };
 }

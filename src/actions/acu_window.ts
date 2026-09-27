@@ -103,9 +103,9 @@ export function decideAcuWindow(i: AcuDecisionInput): AcuDecision {
 /** What a quiet-hour floor saves per month: the band times the quiet hours, at the ACU-hour price. */
 export const acuWindowSaving = (baseline: number, floor: number, quietHoursPerDay: number) => Math.round((baseline - floor) * ACU_USD_HOUR * quietHoursPerDay * 30.4 * 100) / 100;
 
-const clients = (creds: Creds, region: string) => ({
-  rds: new RDSClient({ region, credentials: creds.read }),
-  cw: new CloudWatchClient({ region, credentials: creds.read }),
+const clients = (creds: Creds, region: string, accountId: string | null = null) => ({
+  rds: new RDSClient({ region, credentials: creds.forAccount(accountId).read }),
+  cw: new CloudWatchClient({ region, credentials: creds.forAccount(accountId).read }),
 });
 
 async function describeCluster(rds: RDSClient, id: string) {
@@ -129,8 +129,8 @@ async function acuNow(cw: CloudWatchClient, cluster: string, now = Date.now()): 
 }
 
 /** Every Serverless v2 cluster the inventory knows, once. */
-function serverlessClusters(): { cluster: string; region: string }[] {
-  const rows = db.prepare("select cluster, region from inventory_rds where gone = 0 and class = 'db.serverless' and cluster is not null group by cluster order by cluster").all() as { cluster: string; region: string }[];
+function serverlessClusters(): { cluster: string; region: string; account_id: string | null }[] {
+  const rows = db.prepare("select cluster, region, max(account_id) as account_id from inventory_rds where gone = 0 and class = 'db.serverless' and cluster is not null group by cluster order by cluster").all() as { cluster: string; region: string; account_id: string | null }[];
   return rows;
 }
 
@@ -152,7 +152,7 @@ export const acuWindowAction: ActionModule = {
       const ageH = (Date.now() - new Date(load.collected_at.endsWith("Z") ? load.collected_at : load.collected_at + "Z").getTime()) / 3600000;
       if (ageH > MAX_PROFILE_AGE_HOURS) { skip(`load profile is ${Math.round(ageH)} h old; waiting for a fresh one`); continue; }
       if (!cap.by_hour) { skip(`fewer than seven days of capacity data (${load.profile.window_days}-day window not filled yet)`); continue; }
-      const { rds, cw } = clients(creds, t.region);
+      const { rds, cw } = clients(creds, t.region, t.account_id);
       let live: Awaited<ReturnType<typeof describeCluster>>;
       try { live = await describeCluster(rds, t.cluster); } finally { rds.destroy(); }
       if (!live) { skip("cluster not found by DescribeDBClusters"); continue; }
@@ -166,7 +166,7 @@ export const acuWindowAction: ActionModule = {
       if (d.wanted == null) { skip(d.reason); continue; }
       const lowering = d.wanted < live.min;
       proposals.push({
-        kind: KIND, resource: t.cluster, resource_name: t.cluster, region: t.region,
+        kind: KIND, resource: t.cluster, resource_name: t.cluster, region: t.region, account_id: t.account_id ?? null,
         dedupe: `${KIND}:${t.cluster}:${d.wanted}`,
         title: `${t.cluster}: minimum capacity ${live.min} → ${d.wanted} ACU${lowering ? " for the quiet hours" : " before the working hours"}`,
         reason: d.reason,

@@ -14,6 +14,7 @@ import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient } from
 import { db } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
+import { credsForAccount } from "../executor.js";
 
 export const KIND = "alarm_cleanup" as const;
 export const ALARM_USD_MONTH = 0.10;
@@ -125,10 +126,11 @@ export const alarmCleanupAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const staleDays = Math.max(7, Math.round(config.actAlarmStaleDays));
     let scanned = 0, insufficient = 0, uncheckable = 0, alive = 0, young = 0;
-    for (const region of regions(creds)) {
+    for (const acct of creds.accounts) for (const region of regions(credsForAccount(creds, acct.account_id))) {
+      const ac = credsForAccount(creds, acct.account_id);
       if (proposals.length >= MAX_PER_PLAN) { notes.push(`${MAX_PER_PLAN} proposals is enough for one pass; ${region} waits`); continue; }
-      const cw = new CloudWatchClient({ region, credentials: creds.read });
-      const checker = goneChecker(region, creds);
+      const cw = new CloudWatchClient({ region, credentials: ac.read });
+      const checker = goneChecker(region, ac);
       try {
         const alarms: MetricAlarm[] = [];
         let NextToken: string | undefined;
@@ -154,7 +156,7 @@ export const alarmCleanupAction: ActionModule = {
           }
           const cost = alarmCost(a);
           proposals.push({
-            kind: KIND, resource: name, resource_name: name, region,
+            kind: KIND, resource: name, resource_name: name, region, account_id: acct.is_parent ? null : acct.account_id,
             dedupe: `${KIND}:${region}:${name}`,
             title: `delete alarm ${name}: ${v.dimension!.name} ${v.dimension!.value} is gone, no data for ${v.age_days} days`,
             reason: `${a.Namespace || "?"}/${a.MetricName || (a.Metrics?.length ? "math expression" : "?")} on ${v.dimension!.name} ${v.dimension!.value}, which no longer exists; in INSUFFICIENT_DATA since ${a.StateUpdatedTimestamp ? new Date(a.StateUpdatedTimestamp).toISOString().slice(0, 10) : "?"} (${v.age_days} days, rule: ${staleDays}+). It can never fire again and bills ${cost.toFixed(2)} USD a month${(a.AlarmActions?.length ?? 0) > 0 ? `; its ${a.AlarmActions!.length} action(s) are kept on the row` : ""}. The definition is saved on the row, so Revert recreates it as it was.`,

@@ -5,7 +5,7 @@
  * the review raises a step in a group's ingestion, the brief lists the top ingesters, and the agent reads it
  * through the log_groups tool. In the graph design this is the "ships logs to" edge with its rate and price.
  */
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
@@ -19,6 +19,7 @@ create table if not exists log_ingest_daily (
   name text not null, day text not null, bytes real not null,
   primary key (name, day)
 )`);
+addColumn("log_groups", "account_id", "text");
 
 export const LOG_INGEST_PRICE = 0.50, LOG_STORAGE_PRICE = 0.03;
 const INGEST_DAYS = 14;
@@ -36,12 +37,13 @@ export async function refreshLogs(onLog: (s: string) => void = () => {}): Promis
   if (!gate.ok) { out.errors.push(gate.error || "credentials not working"); out.took_ms = Date.now() - t0; return out; }
   let groups: any[] = [];
   try {
-    groups = await query(`select name, region, retention_in_days, stored_bytes, log_group_class, creation_time from ${S}.aws_cloudwatch_log_group`);
+    groups = await query(`select name, account_id, region, retention_in_days, stored_bytes, log_group_class, creation_time from ${S}.aws_cloudwatch_log_group`);
   } catch (e) { out.errors.push(describeError(e, "log groups (aws_cloudwatch_log_group)")); out.took_ms = Date.now() - t0; return out; }
   const now = new Date().toISOString();
   const up = db.prepare(`insert into log_groups(name, region, retention_days, stored_bytes, log_class, created_at, last_seen) values (?, ?, ?, ?, ?, ?, ?)
     on conflict(name) do update set region = excluded.region, retention_days = excluded.retention_days, stored_bytes = excluded.stored_bytes, log_class = excluded.log_class, created_at = excluded.created_at, last_seen = excluded.last_seen`);
-  for (const g of groups) { up.run(g.name, g.region, g.retention_in_days ?? null, Number(g.stored_bytes ?? 0), g.log_group_class ?? null, g.creation_time ? new Date(g.creation_time).toISOString() : null, now); out.groups++; }
+  const setLogAccount = db.prepare("update log_groups set account_id = ? where name = ?");
+  for (const g of groups) { up.run(g.name, g.region, g.retention_in_days ?? null, Number(g.stored_bytes ?? 0), g.log_group_class ?? null, g.creation_time ? new Date(g.creation_time).toISOString() : null, now); if (g.account_id) setLogAccount.run(String(g.account_id), g.name); out.groups++; }
   // ingestion per day: the account total (no dimension) plus the biggest groups
   const upIngest = db.prepare("insert into log_ingest_daily(name, day, bytes) values (?, ?, ?) on conflict(name, day) do update set bytes = excluded.bytes");
   const fetchDaily = async (name: string, region: string, dims: string): Promise<Point[]> => {

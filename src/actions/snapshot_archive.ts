@@ -14,7 +14,7 @@
 import { DescribeImagesCommand, DescribeSnapshotTierStatusCommand, DescribeSnapshotsCommand, DescribeVolumesCommand, EC2Client, ModifySnapshotTierCommand, RestoreSnapshotTierCommand, type Snapshot } from "@aws-sdk/client-ec2";
 import { db } from "../db.js";
 import { config } from "../config.js";
-import { SNAPSHOT_ARCHIVE_USD_GB_MONTH, SNAPSHOT_STANDARD_USD_GB_MONTH, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { credsForAccount, SNAPSHOT_ARCHIVE_USD_GB_MONTH, SNAPSHOT_STANDARD_USD_GB_MONTH, type ActionModule, type Creds, type Proposal } from "../executor.js";
 
 export const KIND = "snapshot_archive" as const;
 /** Snapshots copied in from elsewhere carry this placeholder volume id: no lineage to worry about. */
@@ -107,8 +107,8 @@ export const snapshotArchiveAction: ActionModule = {
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const minAge = config.actSnapshotMinAgeDays;
-    for (const region of regions(creds)) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    for (const acct of creds.accounts) for (const region of regions(credsForAccount(creds, acct.account_id))) {
+      const ec2 = new EC2Client({ region, credentials: acct.read });
       let facts: SnapshotFacts[];
       try { facts = await snapshotFacts(ec2); } finally { ec2.destroy(); }
       const { picks, left } = pickSnapshots(facts, minAge);
@@ -118,7 +118,7 @@ export const snapshotArchiveAction: ActionModule = {
       for (const s of picks) {
         const why = s.rule === "orphan_newest" ? `its volume ${s.volume_id && s.volume_id !== NO_VOLUME ? s.volume_id : "(none)"} no longer exists and this is its newest standard snapshot` : `the only snapshot of ${s.volume_id}, which still exists`;
         proposals.push({
-          kind: KIND, resource: s.snapshot_id, resource_name: s.name || s.description?.slice(0, 80) || null, region,
+          kind: KIND, resource: s.snapshot_id, resource_name: s.name || s.description?.slice(0, 80) || null, region, account_id: acct.is_parent ? null : acct.account_id,
           dedupe: `${KIND}:${s.snapshot_id}`,
           title: `${s.snapshot_id}${s.name ? ` (${s.name})` : ""}: ${s.size_gb} GB snapshot, ${s.age_days} days old, standard → archive`,
           reason: `${s.age_days} days old (rule: ${minAge}+), ${why}, not behind an AMI, not managed by Backup or DLM. Archive costs a quarter of standard; restoring takes 24 to 72 hours.`,

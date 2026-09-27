@@ -43,8 +43,8 @@ export const efsLifecycleAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const days = snapEfsDays(config.actEfsIaDays);
     let scanned = 0, withPolicy = 0, small = 0;
-    for (const region of regions(creds.region)) {
-      const efs = new EFSClient({ region, credentials: creds.read });
+    for (const acct of creds.accounts) for (const region of regions(acct.region)) {
+      const efs = new EFSClient({ region, credentials: acct.read });
       try {
         const systems: FileSystemDescription[] = [];
         let Marker: string | undefined;
@@ -62,7 +62,7 @@ export const efsLifecycleAction: ActionModule = {
             if (standard < MIN_STANDARD_BYTES) { small++; continue; }
             const gb = standard / 1e9;
             proposals.push({
-              kind: KIND, resource: id, resource_name: name, region,
+              kind: KIND, resource: id, resource_name: name, region, account_id: acct.is_parent ? null : acct.account_id,
               dedupe: `${KIND}:${region}:${id}:${days}`,
               title: `${name}: files unread for ${days} days move to Infrequent Access (${gb.toFixed(1)} GB in Standard)`,
               reason: `no lifecycle policy; ${gb.toFixed(1)} GB sit in Standard at ${EFS_STANDARD_USD_GB_MONTH} USD/GB-month. Files not read for ${days} days move to IA (${EFS_IA_USD_GB_MONTH} USD/GB-month) and come back to Standard on their first read, so nothing pays IA access charges twice. The estimate is a ceiling (half the bytes turning out cold): how much is cold is unknown until the policy has run.`,

@@ -30,15 +30,15 @@ export const s3RequestMetricsAction: ActionModule = {
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const minGb = config.actS3MinGb;
-    const rows = db.prepare("select name, region, total_gb, objects from inventory_s3 where gone = 0 and total_gb >= ? order by total_gb desc").all(minGb) as { name: string; region: string; total_gb: number; objects: number | null }[];
+    const rows = db.prepare("select name, account_id, region, total_gb, objects from inventory_s3 where gone = 0 and total_gb >= ? order by total_gb desc").all(minGb) as { name: string; account_id: string | null; region: string; total_gb: number; objects: number | null }[];
     if (!rows.length) { notes.push(`no bucket at or above ${minGb} GB`); return { proposals, notes }; }
     for (const b of rows) {
-      const s3 = new S3Client({ region: b.region || creds.region, credentials: creds.read });
+      const s3 = new S3Client({ region: b.region || creds.region, credentials: creds.forAccount(b.account_id).read });
       try {
         const have = await entireBucketMetrics(s3, b.name);
         if (have) { notes.push(`${b.name}: request metrics on (${have})`); continue; }
         proposals.push({
-          kind: KIND, resource: b.name, resource_name: b.name, region: b.region || creds.region,
+          kind: KIND, resource: b.name, resource_name: b.name, region: b.region || creds.region, account_id: b.account_id ?? null,
           dedupe: `${KIND}:${b.name}`,
           title: `${b.name}: enable request metrics (${b.total_gb.toFixed(1)} GB${b.objects ? `, ${Math.round(b.objects).toLocaleString()} objects` : ""})`,
           reason: `no metrics configuration on the bucket, so CloudWatch has no GetRequests or BytesDownloaded for it and the lifecycle analysis cannot tell what is read. Costs about ${METRICS_USD_MONTH} USD/month in CloudWatch metrics; the analysis needs 14 days of them.`,

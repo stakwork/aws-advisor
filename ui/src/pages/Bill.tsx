@@ -118,6 +118,7 @@ export default function ThisMonth() {
         <summary className="cursor-pointer text-zinc-500">
           Price check{pc ? <> · {pc.month}: {pc.reconciliation ? <span className={pcFailed ? "text-amber-300" : "text-emerald-300"}>{pcFailed ? `${pc.reconciliation.eval.filter((e) => !e.pass).length} of ${pc.reconciliation.eval.length} checks failed` : `our prices explain the bill within ${Math.abs(pc.reconciliation.totals.strict_gap_pct).toFixed(1)} %, ${pc.reconciliation.totals.priced_share_pct.toFixed(1)} % of usage priced`}</span> : "not run yet (runs from the 3rd of the month)"}</> : null}
         </summary>
+        <div className="mt-3"><ByAccount /></div>
         <div className="mt-3"><PriceCheck /></div>
       </details>
     </div>
@@ -236,5 +237,29 @@ function PriceCheck() {
         </>
       )}
     </div>
+  );
+}
+
+
+/** The payer's bill per linked account (member accounts, Settings): shown only when more than one account has cost. */
+function ByAccount() {
+  const [d, setD] = useState<{ months: string[]; accounts: { account_id: string; name: string | null; months: Record<string, number>; total: number }[] } | null>(null);
+  useEffect(() => { api("/accounts/bill").then(setD).catch(() => setD(null)); }, []);
+  if (!d || d.accounts.length < 2) return null;
+  const months = d.months.slice(0, 6);
+  return (
+    <Card title={<span>By account <span className="font-normal text-zinc-500">· unblended, the payer's Cost Explorer per linked account</span></span>}>
+      <table className="w-full text-sm">
+        <thead><tr><Th>Account</Th>{months.map((m) => <Th key={m} className="text-right">{m}</Th>)}</tr></thead>
+        <tbody>
+          {d.accounts.map((a) => (
+            <tr key={a.account_id} className="border-t border-zinc-800/60">
+              <Td><span className="font-mono text-zinc-200">{a.account_id}</span>{a.name && <span className="ml-2 text-zinc-400">{a.name}</span>}</Td>
+              {months.map((m) => <Td key={m} className="text-right">{a.months[m] != null ? usd(a.months[m]) : "—"}</Td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
   );
 }

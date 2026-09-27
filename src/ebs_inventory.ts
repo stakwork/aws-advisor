@@ -14,7 +14,7 @@
  * by the device name (/dev/sda1 as attached, /dev/xvda1 in the guest: the same disk). Partitions of one volume
  * are summed. The figures are refreshed after every probe and re-credited after every inventory refresh.
  */
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 
@@ -24,6 +24,7 @@ db.exec(`create table if not exists inventory_ebs (
   read_iops_avg real, write_iops_avg real, iops_max real, metric_days integer,
   monthly_usd real, first_seen text not null, last_seen text not null, gone integer not null default 0
 )`);
+addColumn("inventory_ebs", "account_id", "text");
 for (const [column, type] of [["total_bytes", "real"], ["used_bytes", "real"], ["used_pct", "real"], ["mounts", "text"], ["usage_at", "text"]]) {
   try { db.exec(`alter table inventory_ebs add column ${column} ${type}`); } catch { /* exists */ }
 }
@@ -113,7 +114,7 @@ function applyLatestProbes(): number {
 
 export async function refreshEbsInventory(onError: (m: string) => void = () => {}): Promise<number> {
   let vols: any[];
-  try { vols = await query<any>(`select volume_id, region, volume_type, size, iops, throughput, state, encrypted, attachments, create_time, tags ->> 'Name' as name from ${S}.aws_ebs_volume`); }
+  try { vols = await query<any>(`select volume_id, account_id, region, volume_type, size, iops, throughput, state, encrypted, attachments, create_time, tags ->> 'Name' as name from ${S}.aws_ebs_volume`); }
   catch (e) { onError(describeError(e, "ebs inventory (aws_ebs_volume)")); return 0; }
   const agg = async (table: string) => { try { return new Map((await query<any>(`select volume_id, sum(sum) as total, max(maximum * sample_count / 86400.0) as peak_ps, count(*) as days from ${S}.${table} where timestamp > now() - interval '30 days' group by 1`)).map((r) => [r.volume_id, r])); } catch (e) { onError(describeError(e, `ebs metrics (${table})`)); return new Map<string, any>(); } };
   const [reads, writes] = await Promise.all([agg("aws_ebs_volume_metric_read_ops_daily"), agg("aws_ebs_volume_metric_write_ops_daily")]);
@@ -129,6 +130,7 @@ export async function refreshEbsInventory(onError: (m: string) => void = () => {
       used_pct = case when excluded.instance_id is inventory_ebs.instance_id then inventory_ebs.used_pct end,
       mounts = case when excluded.instance_id is inventory_ebs.instance_id then inventory_ebs.mounts end,
       usage_at = case when excluded.instance_id is inventory_ebs.instance_id then inventory_ebs.usage_at end`);
+  const setAccount = db.prepare("update inventory_ebs set account_id = ? where volume_id = ?");
   let n = 0;
   db.transaction(() => {
     for (const v of vols) {
@@ -144,6 +146,7 @@ export async function refreshEbsInventory(onError: (m: string) => void = () => {
         read_iops_avg: rAvg != null ? Math.round(rAvg * 10) / 10 : null, write_iops_avg: wAvg != null ? Math.round(wAvg * 10) / 10 : null, iops_max: iopsMax != null ? Math.round(iopsMax * 10) / 10 : null, metric_days: Number(r?.days || w?.days || 0),
         monthly_usd: ebsMonthlyCost({ volume_type: v.volume_type, size_gb: Number(v.size || 0), iops: v.iops != null ? Number(v.iops) : null, throughput_mibps: v.throughput != null ? Number(v.throughput) : null }), now };
       up.run(row); n++;
+      if (v.account_id) setAccount.run(String(v.account_id), v.volume_id);
     }
     db.prepare("update inventory_ebs set gone = 1 where last_seen <> ?").run(now);
   })();

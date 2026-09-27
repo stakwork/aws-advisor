@@ -536,7 +536,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "rds:Describe*", "rds:ListTagsForResource",
         "elasticache:Describe*", "elasticache:ListTagsForResource",
         "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData", "cloudwatch:ListMetrics",
-        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks",
+        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks", "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
         "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
         "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
         "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags",
@@ -1908,6 +1908,16 @@ that failed three times in a day is refused until the next day.
 | DynamoDB capacity mode from the 30-day load, once approved (`src/actions/dynamodb_capacity_mode.ts`) | Every table (100 per pass, per region) priced both ways from 30 days of CloudWatch consumed and provisioned units at list (RCU 0.00013 and WCU 0.00065 USD/h; on-demand 0.125 USD per million reads, 0.625 per million writes). Where the other mode is at least 20 % and 5 USD/month cheaper a tier-approve recommendation is filed (rule `dynamodb_capacity_mode`); once approved, `UpdateTable` switches the mode, online. Going to provisioned, table and index units are set to the busiest hour plus 30 %. Estimate: the recommendation's own difference. Revert switches back with the previous units. | fewer than 14 days of metrics (a table's age stands in when it has none); saving under 20 % or 5 USD; table not ACTIVE; a global table; application auto scaling on (or unreadable) when going to on-demand; a switch to on-demand in the last 24 h (AWS allows one per day); `advisor:hands-off` |
 | T-family credit specification from the 30-day credit usage, once approved (`src/actions/cpu_credit_spec.ts`) | Running t2/t3/t3a/t4g instances: from 30 days of CPUSurplusCreditsCharged, CPUCreditBalance and CPUUtilization. Unlimited → standard is recommended where surplus credits cost at least 5 USD and a tenth of the instance's month while the CPU averages under the size's baseline (the bursts are occasional; standard throttles them instead of billing). Standard → unlimited where the credit balance hit zero on three or more days (the instance was throttled; the recommendation carries the cost, no saving claimed). A tier-approve recommendation (rule `cpu_credit_spec`) per instance; once approved, one `ModifyInstanceCreditSpecification`, online, no restart. Estimate: the surplus charge per month (→ standard) or none (→ unlimited). Revert sets it back. | fewer than 14 days of metrics; surplus under the thresholds or CPU above the baseline; balance zero on fewer than 3 days; pool members; `advisor:hands-off` |
 | Office-hours schedules for tagged instances and databases (`src/actions/schedule_hours.ts`) | An EC2 instance, RDS instance or Aurora cluster tagged `advisor:schedule` (e.g. `weekdays 08-20 Europe/Madrid`) runs only in that window: at :45 the pass decides for the top of the coming hour, `StopInstances`/`StopDBInstance`/`StopDBCluster` when it is running outside the window, the matching start when it is stopped inside it. The tag is the consent: no grace, no announcement; the actuator policy allows the calls only on tagged resources. A stopped RDS instance is started by AWS after seven days; the next scheduled stop takes it down again. Revert is the opposite call, and a box a person woke by hand is left running until the window closes. Estimate: the inventory's monthly price × the share of the week outside the window. | no `advisor:schedule` tag; a tag the parser rejects (the note says why); `advisor:hands-off`; EC2 pool members; states other than running/stopped (pending, stopping, modifying wait); RDS read replicas or instances with replicas; Multi-AZ SQL Server; RDS instances inside a cluster (tag the cluster); a cluster whose members are not all available; a resource the executor stopped and someone started by hand in the last 12 h |
+| Incomplete multipart uploads aborted on every bucket (`src/actions/s3_multipart_abort.ts`) | Every bucket in the inventory (100 largest per pass) without an enabled whole-bucket abort rule: `PutBucketLifecycleConfiguration` adding `aws-advisor-abort-incomplete-multipart` (abort after `ACT_MULTIPART_DAYS`, 7) merged with the existing rules, which are kept as they are. The same rule id the usage analysis proposes, so that part of the lifecycle recommendation becomes moot once this has run. Parts of an abandoned upload bill as Standard and never appear in a listing; completed objects are never touched. No estimate is claimed: the analysis counts the uploads but not their bytes. Revert restores the previous configuration; a bucket that had none keeps the rule Disabled. | a whole-bucket abort rule already enabled (a prefixed or disabled one does not count); `advisor:hands-off`; buckets past the 100-per-pass cap wait |
+| Lambda memory right-sized from the REPORT lines, once approved (`src/actions/lambda_memory.ts`) | Functions with `ACT_LAMBDA_MIN_INVOCATIONS` (1,000) or more invocations in 14 days (40 per pass): one Logs Insights query on `/aws/lambda/&lt;name&gt;` over the REPORT lines gives the peak and average memory used, the p95 and average duration and the count. Where the peak stays under half of the configured memory and 100+ reports back it, a tier-approve `lambda_memory` recommendation is filed: target = peak + 50 % headroom rounded up to 64 MB, never under 128, at least one step below the current setting, worth at least 1 USD/month in GB-seconds. Approval-tier because CPU scales with memory, so a lower setting can lengthen the duration. Once approved, `UpdateFunctionConfiguration`, online; Revert puts the old memory back. Estimate: the GB-second difference at the observed average duration and invocation rate. | fewer than 100 REPORT lines; peak over 50 % of configured; already at 128 MB; saving under 1 USD; no log group; function not Active; memory changed since the window; `advisor:hands-off`; no approved recommendation |
+
+**The kill switch.** "Pause auto-actions" stops the executor from planning or applying anything until someone
+resumes it: the Pause button on the Auto-actions page (with a reason), `POST /api/actions/pause` `{ reason, until? }`
+(an ISO date or a number of hours, after which it resumes by itself) and, in the chat, the `pause_auto_actions` and
+`resume_auto_actions` tools ("pause auto-actions, the IOPS trim looks wrong"). While paused the page shows who paused
+it, since when and why; passes record "paused by …; nothing planned or applied" and Apply is refused, but **Revert
+keeps working**: undoing a change is what a pause exists for. Pausing and resuming are posted to Sphinx immediately,
+quiet hours or not.
 
 **Approved recommendations as the go-ahead.** An approved recommendation of tier `auto` on a resource (a log
 group without retention, an over-provisioned volume) is picked up by the matching action whatever its own
@@ -1944,8 +1954,55 @@ and parks idle swarms that were opted in with a tag. On 2026-09-27 twelve more a
   like `mon,tue,wed`; whole hours on a 24-hour clock, `22-06` is an overnight window; the time zone defaults
   to UTC. The actuator policy allows the stop and start calls only on tagged resources.
 
-Still to come: a wake-on-visit parking page, and "wake <name>" in the chat covering scheduled boxes as well as
-parked swarms.
+Later the same day: incomplete multipart uploads aborted on every bucket as a standing action, Lambda memory
+right-sizing from the REPORT lines (approval-tier), and the kill switch below. Still to come: a wake-on-visit
+parking page, and "wake <name>" in the chat covering scheduled boxes as well as parked swarms.
+
+## Member accounts
+
+One parent, the children it reaches through a role. The credentials in Settings are the parent (in an
+Organization, usually the management or payer account). For each child, create two roles that trust the
+parent's read identity (Settings › Member accounts prints the trust policy with that ARN filled in):
+
+- `aws-advisor-read`, with the same read policy as the parent's (Settings › Permissions).
+- `aws-advisor-act`, with the actuator policy (Auto-actions page), only if the executor may change that account;
+  without it the child is dry-run only.
+
+Add the child (id, name, the two ARNs, optional regions) in Settings › Member accounts. Saving rewrites the
+Steampipe connection: the app's schema becomes an aggregator over the parent and one connection per child
+(through a managed AWS profile chaining the child role onto the parent's identity), so every query, inventory,
+finding and rule spans all accounts as is, with `account_id` on the rows. The executor reads a child's resources
+with its read role, acts under that child's actuator role only, and stamps every ledger row with the account
+(`src/accounts.ts`; `GET/POST /api/accounts`, `POST /api/accounts/:id/test`, `GET /api/accounts/bill`). The Bill
+page shows the payer's cost per linked account.
+
+Known gaps in this first cut: names unique only per account (log groups, RDS identifiers, DynamoDB tables, Lambda
+names) merge across children in name-keyed inventories, the last account written wins; the actuator capability
+check simulates the parent's role only, a narrower child role is learnt from denied applies; Settings › Permissions
+checks the parent only; four actions plan in the parent only (gateway endpoints, S3 lifecycle, multipart abort,
+Lambda memory) though apply and revert of every row run under the row's account.
+
+## Cost per swarm
+
+Each swarm is one EC2 box running a customer's stack, so the box's bill is the customer's. `src/swarm_costs.ts`
+writes one row per swarm per day (`swarm_cost_daily`): instance hours while it runs, its volumes whether it runs or
+not, the public IPv4 address (0.005 USD/h, attached or not) and the standard-tier snapshots of its volumes, all at
+list price from the inventory. The Swarms page (`GET /api/swarms/costs?month=`) shows the month-to-date figure per
+swarm (the mean of the month's daily totals), last use and idle days from the probe roll-ups, whether the executor
+parked it, and a **nudge** flag for boxes that run, that nobody has used for `ACT_PARK_IDLE_DAYS`, and that are not
+being parked: the customers to ask. The chat has it as `swarm_costs`; the figures also land on the instance's
+`AdvisorResource` node in the graph (`cost_month_usd`, `idle_days`, `parked`, `nudge`). Refreshed daily with the
+review (`REVIEW_CRON`) and from the page.
+
+## Tag hygiene
+
+Inventory › Tags lists every resource that lacks the required tags (`TAG_KEYS_REQUIRED`, `owner,env` by default;
+`Environment`, `stage`, `team` and the like count as aliases) across EC2, EBS, RDS, S3, Lambda, DynamoDB, load
+balancers, log groups and ECR, with the value the advisor would suggest from the name and the tags already there and
+the CLI to set it. It also names the EC2 instances that could opt into the executor once tagged: swarm-named boxes
+without `advisor:park` and dev, staging or test boxes without `advisor:schedule`. One report-tier recommendation per
+kind (`tag_hygiene`) carries the list; the chat reads it through `tag_hygiene`. The advisor never writes a tag:
+naming an owner is a person's call. Refreshed daily with the logs job (`src/tag_hygiene.ts`).
 
 ## S3 lifecycle rules from usage
 

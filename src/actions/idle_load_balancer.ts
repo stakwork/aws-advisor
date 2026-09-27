@@ -105,9 +105,9 @@ export const idleLoadBalancerAction: ActionModule = {
     const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     let seen = 0, filed = 0;
-    for (const region of regions(creds.region)) {
-      const elb = new ElasticLoadBalancingV2Client({ region, credentials: creds.read });
-      const cw = new CloudWatchClient({ region, credentials: creds.read });
+    for (const acct of creds.accounts) for (const region of regions(acct.region)) {
+      const elb = new ElasticLoadBalancingV2Client({ region, credentials: acct.read });
+      const cw = new CloudWatchClient({ region, credentials: acct.read });
       try {
         const lbs: LoadBalancer[] = [];
         let marker: string | undefined;
@@ -137,7 +137,7 @@ export const idleLoadBalancerAction: ActionModule = {
             if (!v.idle) { notes.push(`${name}: approved as #${approval.id} but not idle any more (${v.reasons.join("; ")}); left alone`); continue; }
             const listeners = (await elb.send(new DescribeListenersCommand({ LoadBalancerArn: arn }))).Listeners ?? [];
             proposals.push({
-              kind: KIND, resource: name, resource_name: name, region,
+              kind: KIND, resource: name, resource_name: name, region, account_id: acct.is_parent ? null : acct.account_id,
               dedupe: `${KIND}:${region}:${name}`,
               title: `delete ${type} load balancer ${name}: no traffic for ${METRIC_DAYS} days`,
               reason: `${approval.title}. Approved as recommendation #${approval.id}${approval.decided_by ? ` by ${approval.decided_by}` : ""}. Every CloudWatch metric summed to zero over ${METRIC_DAYS} days and none of its ${targets.total} target(s) is healthy. The balancer's listeners, target groups and attributes are saved on this row; the target groups themselves are not deleted. DNS names pointing at it stop resolving.`,

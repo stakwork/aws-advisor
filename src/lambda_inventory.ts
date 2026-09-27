@@ -4,7 +4,7 @@
  * requests, scaled to a month). Refreshed with the rest of the inventory; the Inventory page's Lambda tab and
  * the knowledge graph read it from here.
  */
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 import { config } from "./config.js";
@@ -27,6 +27,7 @@ db.exec(`create table if not exists inventory_lambda (
   open_recs integer not null default 0, findings integer not null default 0,
   first_seen text not null, last_seen text not null, gone integer not null default 0
 )`);
+addColumn("inventory_lambda", "account_id", "text");
 
 export interface LambdaFacts { name: string; region: string; memory_mb: number; arm: boolean; invocations_30d: number; duration_ms_30d: number; days: number }
 export const LAMBDA_PRICE = { gb_second_x86: 0.0000166667, gb_second_arm: 0.0000133334, per_request: 0.20 / 1e6 };
@@ -42,7 +43,7 @@ export function lambdaMonthlyCost(f: LambdaFacts): { gb_seconds_month: number; i
 
 export async function refreshLambdaInventory(onError: (m: string) => void = () => {}): Promise<number> {
   let fns: any[];
-  try { fns = await query<any>(`select name, arn, region, runtime, memory_size, architectures, timeout from ${S}.aws_lambda_function`); }
+  try { fns = await query<any>(`select name, account_id, arn, region, runtime, memory_size, architectures, timeout from ${S}.aws_lambda_function`); }
   catch (e) { onError(describeError(e, "lambda inventory (aws_lambda_function)")); return 0; }
   const agg = async (table: string, col: string) => { try { return new Map((await query<any>(`select name, sum(sum) as v, count(*) as days from ${S}.${table} where timestamp > now() - interval '30 days' group by 1`)).map((r) => [r.name, { v: Number(r.v || 0), days: Number(r.days || 0) }])); } catch (e) { onError(describeError(e, `lambda metrics (${table})`)); return new Map<string, { v: number; days: number }>(); } };
   const inv = await agg("aws_lambda_function_metric_invocations_daily", "sum");
@@ -51,6 +52,7 @@ export async function refreshLambdaInventory(onError: (m: string) => void = () =
   const findingsFor = db.prepare("select count(*) as n from findings where run_id = (select max(run_id) from findings) and resource = ?");
   const recsFor = db.prepare("select count(*) as n from recommendations where status = 'open' and resource = ?");
   const now = new Date().toISOString();
+  const setLambdaAccount = db.prepare("update inventory_lambda set account_id = ? where name = ?");
   const up = db.prepare(`insert into inventory_lambda(name, arn, region, runtime, memory_mb, arm, timeout_s, invocations_30d, duration_ms_30d, errors_30d, days, invocations_month, gb_seconds_month, avg_duration_ms, monthly_usd, open_recs, findings, first_seen, last_seen, gone)
     values (@name, @arn, @region, @runtime, @memory_mb, @arm, @timeout_s, @invocations_30d, @duration_ms_30d, @errors_30d, @days, @invocations_month, @gb_seconds_month, @avg_duration_ms, @monthly_usd, @open_recs, @findings, @now, @now, 0)
     on conflict(name) do update set arn = excluded.arn, region = excluded.region, runtime = excluded.runtime, memory_mb = excluded.memory_mb, arm = excluded.arm, timeout_s = excluded.timeout_s,
@@ -70,6 +72,7 @@ export async function refreshLambdaInventory(onError: (m: string) => void = () =
       up.run({ name: f.name, arn: f.arn, region: f.region, runtime: f.runtime ?? null, memory_mb: facts.memory_mb, arm: facts.arm ? 1 : 0, timeout_s: f.timeout ?? null, invocations_30d: facts.invocations_30d, duration_ms_30d: facts.duration_ms_30d, errors_30d: err.get(f.name)?.v ?? 0, days: facts.days,
         invocations_month: cost.invocations_month, gb_seconds_month: cost.gb_seconds_month, avg_duration_ms: facts.invocations_30d > 0 ? Math.round(facts.duration_ms_30d / facts.invocations_30d) : null, monthly_usd: cost.usd_month,
         open_recs: (recsFor.get(f.arn) as any).n, findings: (findingsFor.get(f.arn) as any).n, now });
+      if (f.account_id) setLambdaAccount.run(String(f.account_id), f.name);
       n++;
     }
     db.prepare("update inventory_lambda set gone = 1 where last_seen <> ?").run(now);

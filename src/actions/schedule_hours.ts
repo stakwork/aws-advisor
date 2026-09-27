@@ -124,7 +124,7 @@ function wokenByHand(resource: string): boolean {
   return r.n > 0;
 }
 
-interface Target { kind: ResourceKind; resource: string; name: string | null; region: string; state: string; tag: string; monthly_usd: number | null; elastic_ip?: boolean; detail: string }
+interface Target { kind: ResourceKind; resource: string; name: string | null; region: string; account_id?: string | null; state: string; tag: string; monthly_usd: number | null; elastic_ip?: boolean; detail: string }
 
 function propose(t: Target, s: Schedule, d: Decision, notes: string[], log: (l: string) => void): Proposal | null {
   const name = t.name && t.name !== t.resource ? `${t.name} (${t.resource})` : t.resource;
@@ -138,7 +138,7 @@ function propose(t: Target, s: Schedule, d: Decision, notes: string[], log: (l: 
   const verb = d.action === "stop" ? "stop" : "start";
   const after = d.action === "stop" ? "stopped" : "running";
   return {
-    kind: KIND, resource: t.resource, resource_name: t.name, region: t.region,
+    kind: KIND, resource: t.resource, resource_name: t.name, region: t.region, account_id: t.account_id ?? null,
     dedupe: `${KIND}:${t.resource}:${d.action}:${hourKey(d.target)}`,
     title: `${verb} ${name} (${t.detail}): ${d.reason}`,
     reason: `Tagged ${SCHEDULE_TAG}=${s.text}. ${d.reason}; off ${off} of ${HOURS_PER_WEEK} hours a week.${ipNote}${rdsNote}`,
@@ -171,12 +171,14 @@ export const scheduleHoursAction: ActionModule = {
     };
 
     // EC2: the inventory lists the instances, EC2 itself carries the tags and the state of the moment.
-    const ec2Rows = db.prepare("select instance_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state in ('running', 'stopped', 'pending', 'stopping') order by name")
-      .all() as { instance_id: string; name: string | null; instance_type: string | null; region: string | null; monthly_usd: number | null; pool_kind: string | null }[];
+    const ec2Rows = db.prepare("select instance_id, account_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state in ('running', 'stopped', 'pending', 'stopping') order by name")
+      .all() as { instance_id: string; account_id: string | null; name: string | null; instance_type: string | null; region: string | null; monthly_usd: number | null; pool_kind: string | null }[];
+    // Grouped per (account, region): a member account's instances are read through its own credentials.
     const byRegion = new Map<string, typeof ec2Rows>();
-    for (const r of ec2Rows) { const region = r.region || creds.region; if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(r); }
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    for (const r of ec2Rows) { const key = `${r.account_id || ""}|${r.region || creds.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const ec2 = new EC2Client({ region, credentials: creds.forAccount(account || null).read });
       try {
         const live: Instance[] = [];
         for (let i = 0; i < list.length; i += 100) {
@@ -193,17 +195,21 @@ export const scheduleHoursAction: ActionModule = {
           const name = row.name || inst.InstanceId!;
           if (tagOf(inst.Tags, "advisor:hands-off") != null) { notes.push(`${name}: tagged advisor:hands-off`); continue; }
           if (row.pool_kind) { notes.push(`${name}: member of a ${row.pool_kind} pool: its controller decides`); continue; }
-          consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, state: ec2State(inst), tag: tagOf(inst.Tags, SCHEDULE_TAG)!, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, detail: row.instance_type || inst.InstanceType || "ec2" });
+          consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, account_id: row.account_id ?? null, state: ec2State(inst), tag: tagOf(inst.Tags, SCHEDULE_TAG)!, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, detail: row.instance_type || inst.InstanceType || "ec2" });
         }
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { ec2.destroy(); }
     }
 
     // RDS: instances and clusters, per region the inventory knows plus the configured one.
-    const rdsRegions = new Set<string>([creds.region]);
-    try { for (const r of db.prepare("select distinct region from inventory_rds where gone = 0 and region is not null").all() as { region: string }[]) rdsRegions.add(r.region); } catch { /* older inventory without a region column */ }
-    for (const region of rdsRegions) {
-      const rds = new RDSClient({ region, credentials: creds.read });
+    // Per account, per region the inventory knows plus the configured one.
+    const rdsScopes = new Set<string>();
+    for (const a of creds.accounts) rdsScopes.add(`${a.account_id}|${a.region}`);
+    try { for (const r of db.prepare("select distinct account_id, region from inventory_rds where gone = 0 and region is not null").all() as { account_id: string | null; region: string }[]) rdsScopes.add(`${r.account_id || creds.accounts[0]?.account_id || ""}|${r.region}`); } catch { /* older inventory without a region column */ }
+    for (const scope of rdsScopes) {
+      const [account, region] = scope.split("|");
+      const acct = creds.forAccount(account || null);
+      const rds = new RDSClient({ region, credentials: acct.read });
       try {
         const instances: DBInstance[] = [];
         let marker: string | undefined;
@@ -220,7 +226,7 @@ export const scheduleHoursAction: ActionModule = {
           if (i.ReadReplicaSourceDBInstanceIdentifier || i.ReadReplicaSourceDBClusterIdentifier) { notes.push(`${id}: a read replica cannot be stopped`); continue; }
           if (i.ReadReplicaDBInstanceIdentifiers?.length || i.ReadReplicaDBClusterIdentifiers?.length) { notes.push(`${id}: has read replicas, so it cannot be stopped`); continue; }
           if (/sqlserver/i.test(i.Engine || "") && i.MultiAZ) { notes.push(`${id}: a Multi-AZ SQL Server instance cannot be stopped`); continue; }
-          consider({ kind: "rds_instance", resource: id, name: id, region, state: rdsInstanceState(i), tag, monthly_usd: monthly(id), detail: `${i.Engine || "rds"} ${i.DBInstanceClass || ""}`.trim() });
+          consider({ kind: "rds_instance", resource: id, name: id, region, account_id: acct.is_parent ? null : acct.account_id, state: rdsInstanceState(i), tag, monthly_usd: monthly(id), detail: `${i.Engine || "rds"} ${i.DBInstanceClass || ""}`.trim() });
         }
         for (const c of clusters) {
           const tag = tagOf(c.TagList, SCHEDULE_TAG); if (tag == null) continue;
@@ -232,7 +238,7 @@ export const scheduleHoursAction: ActionModule = {
           const state = rdsClusterState(c);
           if (state === "available" && memberStates.some((s) => s !== "available")) { notes.push(`${id}: members are ${memberStates.join(", ")}; waiting until all are available`); continue; }
           const usd = members.reduce((s, m) => s + (monthly(m.DBInstanceIdentifier || "") ?? 0), 0);
-          consider({ kind: "rds_cluster", resource: id, name: id, region, state, tag, monthly_usd: members.length && usd > 0 ? usd : null, detail: `${c.Engine || "aurora"}, ${members.length} instance${members.length === 1 ? "" : "s"}` });
+          consider({ kind: "rds_cluster", resource: id, name: id, region, account_id: acct.is_parent ? null : acct.account_id, state, tag, monthly_usd: members.length && usd > 0 ? usd : null, detail: `${c.Engine || "aurora"}, ${members.length} instance${members.length === 1 ? "" : "s"}` });
         }
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region} (RDS): ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { rds.destroy(); }

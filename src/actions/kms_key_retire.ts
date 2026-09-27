@@ -21,7 +21,7 @@ import { db } from "../db.js";
 import { config } from "../config.js";
 import { upsertRecommendations } from "../collector.js";
 import type { RecInput } from "../rules.js";
-import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { credsForAccount, approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
 
 export const KIND = "kms_key_retire" as const;
 export const ACTION_TYPE = "retire_kms_key";
@@ -120,9 +120,10 @@ export const kmsKeyRetireAction: ActionModule = {
     const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     let lookups = 0, seen = 0, filed = 0, unread = false;
-    for (const region of regions(creds.region)) {
-      const kms = new KMSClient({ region, credentials: creds.read });
-      const trail = new CloudTrailClient({ region, credentials: creds.read });
+    for (const acct of creds.accounts) for (const region of regions(acct.region)) {
+      const ac = credsForAccount(creds, acct.account_id);
+      const kms = new KMSClient({ region, credentials: ac.read });
+      const trail = new CloudTrailClient({ region, credentials: ac.read });
       try {
         const ids: string[] = [];
         let marker: string | undefined;
@@ -132,7 +133,7 @@ export const kmsKeyRetireAction: ActionModule = {
         let aliasMarker: string | undefined;
         do { const r = await kms.send(new ListAliasesCommand({ Limit: 100, Marker: aliasMarker })); for (const a of r.Aliases ?? []) if (a.TargetKeyId && a.AliasName) aliases.set(a.TargetKeyId, [...(aliases.get(a.TargetKeyId) ?? []), a.AliasName]); aliasMarker = r.Truncated ? r.NextMarker : undefined; } while (aliasMarker);
         let refs: Map<string, KeyRefs>;
-        try { refs = await referencedKeys(creds, region, log); } catch (e: any) { notes.push(`${region}: references unreadable (${String(e?.message || e).slice(0, 100)}); nothing filed`); continue; }
+        try { refs = await referencedKeys(ac, region, log); } catch (e: any) { notes.push(`${region}: references unreadable (${String(e?.message || e).slice(0, 100)}); nothing filed`); continue; }
         const recs: RecInput[] = [];
         for (const id of ids) {
           seen++;
@@ -151,7 +152,7 @@ export const kmsKeyRetireAction: ActionModule = {
             if (handsOff) { notes.push(`${name}: tagged advisor:hands-off`); continue; }
             const days = Math.min(30, Math.max(7, Math.round(config.actKmsPendingDays)));
             proposals.push({
-              kind: KIND, resource: id, resource_name: name, region,
+              kind: KIND, resource: id, resource_name: name, region, account_id: acct.is_parent ? null : acct.account_id,
               dedupe: `${KIND}:${region}:${id}`,
               title: `${name}: schedule KMS key deletion (${days}-day waiting period)`,
               reason: `${approval.title}. Approved as recommendation #${approval.id}${approval.decided_by ? ` by ${approval.decided_by}` : ""}. ScheduleKeyDeletion, never an outright delete: the key is unusable from now and gone after ${days} days; until then CancelKeyDeletion brings it back with every grant and policy intact. Anything still encrypted under it becomes unreadable once the key is gone.`,

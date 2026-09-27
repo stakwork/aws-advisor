@@ -4,7 +4,7 @@
  * refresh), lifecycle and versioning, and the monthly storage cost at the class's list price. The review flags
  * big buckets that keep everything in Standard with no lifecycle rule.
  */
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 
@@ -13,6 +13,7 @@ db.exec(`create table if not exists inventory_s3 (
   sizes text, total_gb real, objects real, standard_gb real, monthly_usd real, metric_day text,
   first_seen text not null, last_seen text not null, gone integer not null default 0
 )`);
+addColumn("inventory_s3", "account_id", "text");
 
 /** USD per GB-month per CloudWatch storage type (us-east-1 list). */
 export const S3_CLASS_PRICE: Record<string, number> = {
@@ -71,7 +72,7 @@ export async function refreshS3Inventory(onLog: (s: string) => void = () => {}):
   // Every hydrated column is a separate S3 call with its own permission; a denied one fails the whole scan,
   // so drop the column that needs the missing action and retry, reporting what is unknown.
   const optional: Array<[col: string, action: string]> = [["bucket_policy_is_public", "s3:GetBucketPolicyStatus"], ["versioning_enabled", "s3:GetBucketVersioning"], ["lifecycle_rules", "s3:GetLifecycleConfiguration"]];
-  let cols = ["name", "region", "creation_date", ...optional.map((o) => o[0])];
+  let cols = ["name", "account_id", "region", "creation_date", ...optional.map((o) => o[0])];
   const missing: string[] = [];
   for (;;) {
     try { buckets = await query<any>(`select ${cols.join(", ")} from ${S}.aws_s3_bucket`); break; }
@@ -86,6 +87,7 @@ export async function refreshS3Inventory(onLog: (s: string) => void = () => {}):
   if (missing.length) out.errors.push(`S3 columns skipped, missing IAM permission ${missing.join(", ")}; add them to the advisor's policy (see Settings > Permissions)`);
   const known = (col: string) => cols.includes(col);
   const now = new Date().toISOString();
+  const setS3Account = db.prepare("update inventory_s3 set account_id = ? where name = ?");
   const up = db.prepare(`insert into inventory_s3(name, region, created, versioning, lifecycle_rules, public, sizes, total_gb, objects, standard_gb, monthly_usd, metric_day, first_seen, last_seen, gone)
     values (@name, @region, @created, @versioning, @lifecycle_rules, @public, @sizes, @total_gb, @objects, @standard_gb, @monthly_usd, @metric_day, @now, @now, 0)
     on conflict(name) do update set region = excluded.region, created = excluded.created, versioning = excluded.versioning, lifecycle_rules = excluded.lifecycle_rules, public = excluded.public,
@@ -101,6 +103,7 @@ export async function refreshS3Inventory(onLog: (s: string) => void = () => {}):
     let rules: number | null = 0; if (!known("lifecycle_rules")) rules = null; else try { const lr = typeof b.lifecycle_rules === "string" ? JSON.parse(b.lifecycle_rules) : b.lifecycle_rules; rules = Array.isArray(lr) ? lr.length : 0; } catch { rules = 0; }
     up.run({ name: b.name, region, created: b.creation_date ? new Date(b.creation_date).toISOString() : null, versioning: known("versioning_enabled") ? (b.versioning_enabled ? 1 : 0) : null, lifecycle_rules: rules, public: known("bucket_policy_is_public") ? (b.bucket_policy_is_public ? 1 : 0) : null,
       sizes: JSON.stringify(sizes), total_gb: Math.round(total * 1000) / 1000, objects, standard_gb: sizes.StandardStorage ?? 0, monthly_usd: s3MonthlyCost(sizes), metric_day: now.slice(0, 10), now });
+    if (b.account_id) setS3Account.run(String(b.account_id), b.name);
     out.buckets++; if (Object.keys(sizes).length) out.metered++;
   };
   for (const b of buckets) worker(b);

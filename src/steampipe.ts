@@ -6,7 +6,7 @@ import { config } from "./config.js";
 import { getSetting, setSetting } from "./db.js";
 import { describeError, hasOpenIssues, noteSuccessForTables, tablesIn } from "./permissions.js";
 import {
-  CredentialMode, CredentialPaths, CredentialSettings, CredentialSource, DEFAULT_CREDENTIAL_SOURCE, NoSdkCredentials, ProviderKind, SdkCredentials,
+  CredentialMode, CredentialPaths, CredentialSettings, CredentialSource, DEFAULT_CREDENTIAL_SOURCE, MemberConnection, NoSdkCredentials, ProviderKind, SdkCredentials,
   credentialRemedy, describeSettings, readStaticKeys, removeCredentialFiles, sdkCredentialsFor, writeCredentialFiles,
 } from "./aws_config.js";
 
@@ -95,8 +95,8 @@ export const credentialPaths = (): CredentialPaths => ({
  * sections in the AWS shared config / credentials files. Steampipe watches its config dir and picks the
  * connection up within seconds. Returns the meta (no secrets) that is kept in settings.
  */
-export function writeConnection(c: CredentialSettings): CredentialsMeta {
-  const written = writeCredentialFiles(c, credentialPaths());
+export function writeConnection(c: CredentialSettings, members: MemberConnection[] = []): CredentialsMeta {
+  const written = writeCredentialFiles(c, credentialPaths(), members);
   const base = {
     ...(c.mode === "keys" ? { accessKeyMasked: mask(c.accessKey) } : {}),
     ...(c.mode === "profile" ? { profile: c.profile } : {}),
@@ -115,6 +115,20 @@ export function writeConnection(c: CredentialSettings): CredentialsMeta {
   };
   setSetting("aws_credentials_meta", JSON.stringify(meta));
   return meta;
+}
+
+/**
+ * The saved settings rebuilt from the meta and the files the writer left (the keys are read back from the .spc
+ * or the credentials file), so the connection can be rewritten when member accounts change. Null when nothing is
+ * configured or the keys cannot be read back.
+ */
+export function currentCredentialSettings(): CredentialSettings | null {
+  const meta = credentialsMeta();
+  if (!meta || !hasConnectionFile()) return null;
+  const common = { regions: meta.regions?.length ? meta.regions : ["*"], defaultRegion: meta.defaultRegion || "us-east-1", ...(meta.roleArn ? { roleArn: meta.roleArn } : {}) };
+  if (meta.mode === "keys") { const k = readStaticKeys(credentialPaths()); return k ? { mode: "keys", ...k, ...common } : null; }
+  if (meta.mode === "profile") return meta.profile ? { mode: "profile", profile: meta.profile, ...common } : null;
+  return { mode: "chain", credentialSource: meta.credentialSource || DEFAULT_CREDENTIAL_SOURCE, ...common };
 }
 
 /** Removes the connection file and the managed sections of the AWS files; the rest of those files is untouched. */
