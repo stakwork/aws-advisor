@@ -392,7 +392,10 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "pi:DescribeDimensionKeys", "pi:GetResourceMetadata",
         "elasticache:Describe*", "elasticache:ListTagsForResource",
         "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData", "cloudwatch:ListMetrics",
-        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource",
+        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks",
+        "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
+        "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
+        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags",
         "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization", "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
@@ -465,6 +468,19 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   aurora_storage: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
   ecr_lifecycle: { apply: ["ecr:PutLifecyclePolicy"], revert: ["ecr:DeleteLifecyclePolicy"] },
   swarm_park: { apply: ["ec2:StopInstances"], revert: ["ec2:StartInstances"] },
+  // Irreversible deletes (EIP, snapshot, load balancer) have no revert call: the row says so and Revert explains.
+  eip_release: { apply: ["ec2:ReleaseAddress"], revert: ["ec2:AllocateAddress"] },
+  vpc_gateway_endpoint: { apply: ["ec2:CreateVpcEndpoint"], revert: ["ec2:DeleteVpcEndpoints"] },
+  kms_key_retire: { apply: ["kms:ScheduleKeyDeletion"], revert: ["kms:CancelKeyDeletion", "kms:EnableKey"] },
+  dynamodb_capacity_mode: { apply: ["dynamodb:UpdateTable"], revert: ["dynamodb:UpdateTable"] },
+  snapshot_delete: { apply: ["ec2:DeleteSnapshot"], revert: [] },
+  idle_load_balancer: { apply: ["elasticloadbalancing:DeleteLoadBalancer"], revert: [] },
+  schedule_hours: { apply: ["ec2:StopInstances", "ec2:StartInstances", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster"], revert: ["ec2:StopInstances", "ec2:StartInstances", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster"] },
+  ebs_throughput_trim: { apply: ["ec2:ModifyVolume"], revert: ["ec2:ModifyVolume"] },
+  cpu_credit_spec: { apply: ["ec2:ModifyInstanceCreditSpecification"], revert: ["ec2:ModifyInstanceCreditSpecification"] },
+  efs_lifecycle: { apply: ["elasticfilesystem:PutLifecycleConfiguration"], revert: ["elasticfilesystem:PutLifecycleConfiguration"] },
+  alarm_cleanup: { apply: ["cloudwatch:DeleteAlarms"], revert: ["cloudwatch:PutMetricAlarm"] },
+  log_retention_tune: { apply: ["logs:PutRetentionPolicy"], revert: ["logs:PutRetentionPolicy"] },
 };
 
 export const actuatorPolicy = (): IamPolicy => ({
@@ -482,7 +498,25 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorSwarmParkDescribe", Effect: "Allow", Action: ["ec2:DescribeInstances", "ec2:DescribeAddresses"], Resource: "*" },
     { Sid: "ActuatorSwarmPark", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringEquals: { "aws:ResourceTag/advisor:park": "auto" } } },
     { Sid: "ActuatorSwarmParkMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringEquals: { "aws:ResourceTag/advisor:park": "auto" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
-    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+    // Approved deletes: an Elastic IP nobody uses, a snapshot a person approved deleting, an idle load balancer. AllocateAddress is the EIP recovery path (the same address, while nobody else has it).
+    { Sid: "ActuatorEipRelease", Effect: "Allow", Action: ["ec2:ReleaseAddress", "ec2:AllocateAddress", "ec2:DescribeAddresses"], Resource: "*" },
+    { Sid: "ActuatorSnapshotDelete", Effect: "Allow", Action: ["ec2:DeleteSnapshot", "ec2:DescribeImages"], Resource: "*" },
+    { Sid: "ActuatorLoadBalancerDelete", Effect: "Allow", Action: ["elasticloadbalancing:DeleteLoadBalancer", "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:DescribeListeners", "elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:DescribeTargetHealth", "elasticloadbalancing:DescribeTags", "elasticloadbalancing:DescribeLoadBalancerAttributes"], Resource: "*" },
+    // Gateway endpoints for S3 and DynamoDB: free, and the route tables they go on come from the endpoint call itself.
+    { Sid: "ActuatorGatewayEndpoint", Effect: "Allow", Action: ["ec2:CreateVpcEndpoint", "ec2:DeleteVpcEndpoints", "ec2:DescribeVpcEndpoints", "ec2:DescribeRouteTables", "ec2:DescribeVpcs", "ec2:DescribeNatGateways"], Resource: "*" },
+    { Sid: "ActuatorGatewayEndpointTag", Effect: "Allow", Action: ["ec2:CreateTags"], Resource: "arn:aws:ec2:*:*:vpc-endpoint/*", Condition: { StringEquals: { "ec2:CreateAction": "CreateVpcEndpoint" } } },
+    // KMS: schedule (never immediate) and cancel; a cancelled key comes back disabled, so EnableKey completes the revert.
+    { Sid: "ActuatorKmsRetire", Effect: "Allow", Action: ["kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:EnableKey", "kms:DescribeKey", "kms:ListResourceTags"], Resource: "*" },
+    { Sid: "ActuatorDynamoCapacity", Effect: "Allow", Action: ["dynamodb:UpdateTable", "dynamodb:DescribeTable", "dynamodb:ListTagsOfResource"], Resource: "*" },
+    // Office hours: only instances and databases someone tagged advisor:schedule can be stopped or started on it.
+    { Sid: "ActuatorScheduleEc2", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:schedule": "*" } } },
+    { Sid: "ActuatorScheduleRds", Effect: "Allow", Action: ["rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:schedule": "*" } } },
+    { Sid: "ActuatorScheduleDescribe", Effect: "Allow", Action: ["rds:DescribeDBInstances"], Resource: "*" },
+    { Sid: "ActuatorCreditSpec", Effect: "Allow", Action: ["ec2:ModifyInstanceCreditSpecification", "ec2:DescribeInstanceCreditSpecifications"], Resource: "*" },
+    { Sid: "ActuatorEfsLifecycle", Effect: "Allow", Action: ["elasticfilesystem:PutLifecycleConfiguration", "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags"], Resource: "*" },
+    { Sid: "ActuatorAlarmCleanup", Effect: "Allow", Action: ["cloudwatch:DeleteAlarms", "cloudwatch:PutMetricAlarm", "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource"], Resource: "*" },
+    { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances",
+      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 

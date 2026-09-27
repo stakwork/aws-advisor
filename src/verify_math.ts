@@ -18,6 +18,10 @@ export function costScopeFor(actionType: string, resource: { instance_type?: str
     case "rightsize_instance": case "stop_instance": case "migrate_to_graviton": return { service: "Amazon Elastic Compute Cloud - Compute", usage_like: [t], note: resource.instance_type ? `on-demand hours of ${resource.instance_type}` : "on-demand instance hours" };
     case "add_pull_through_cache": case "add_vpc_endpoint": case "move_workload": case "reschedule_job": return { service: "EC2 - Other", usage_like: ["%NatGateway-Bytes%"], note: "NAT gateway data processing of the whole account" };
     case "change_storage_class": return { service: "Amazon Simple Storage Service", usage_like: ["%TimedStorage%"], note: "S3 storage by class" };
+    case "retire_kms_key": return { service: "AWS Key Management Service", usage_like: ["%KMS-Keys%"], note: "KMS key-months of the whole account" };
+    case "delete_load_balancer": return { service: "Amazon Elastic Load Balancing", usage_like: ["%LoadBalancerUsage%"], note: "load balancer hours of the whole account" };
+    case "set_dynamodb_capacity_mode": return { service: "Amazon DynamoDB", usage_like: ["%CapacityUnit-Hrs%", "%RequestUnits%"], note: "DynamoDB provisioned capacity and request units of the whole account" };
+    case "set_credit_specification": return { service: "Amazon Elastic Compute Cloud - Compute", usage_like: ["%CPUCredits:%"], note: "T-family surplus credit charges of the whole account" };
     default: return null;
   }
 }

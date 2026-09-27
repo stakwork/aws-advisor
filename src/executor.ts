@@ -56,7 +56,8 @@ db.exec(`create table if not exists actions (
 create index if not exists actions_dedupe on actions(dedupe, status);
 create index if not exists actions_status on actions(status, created_at)`);
 
-export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park";
+export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
+  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -249,7 +250,7 @@ export async function actuatorCapabilities(force = false): Promise<{ caps: Recor
     const iam = new IAMClient({ region: base.region, credentials: base.provider });
     try {
       const r = await iam.send(new SimulatePrincipalPolicyCommand({ PolicySourceArn: role, ActionNames: actions, MaxItems: 200,
-        ContextEntries: [{ ContextKeyName: "aws:ResourceTag/advisor:park", ContextKeyValues: ["auto"], ContextKeyType: "string" }] }));
+        ContextEntries: [{ ContextKeyName: "aws:ResourceTag/advisor:park", ContextKeyValues: ["auto"], ContextKeyType: "string" }, { ContextKeyName: "aws:ResourceTag/advisor:schedule", ContextKeyValues: ["weekdays 08-20"], ContextKeyType: "string" }] }));
       allowed = new Set((r.EvaluationResults ?? []).filter((e) => e.EvalDecision === "allowed").map((e) => String(e.EvalActionName)));
       const learned = learnedDenials();
       forgetDenials(Object.keys(learned).filter((a) => allowed!.has(a)));
