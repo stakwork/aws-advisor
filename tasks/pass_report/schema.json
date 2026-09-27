@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string", "description": "two to five sentences: what this pass did and what it means" },
+    "next": { "type": "array", "items": { "type": "string" }, "description": "what happens at the next pass and when (the pass runs at :45 every hour)" },
+    "waiting": { "type": "array", "items": { "type": "string" }, "description": "what waits on an approval, a grace period or a person, with the row ids (#id)" },
+    "left_alone": { "type": "array", "items": { "type": "string" }, "description": "the notable skips and why, grouped by reason, not one line per resource" },
+    "concerns": { "type": "array", "items": { "type": "string" }, "description": "anything that looks wrong: errors, a module that stopped proposing, a saving claim that looks off; empty when nothing does" },
+    "sphinx": { "type": "string", "description": "the 3 to 6 line message to post in the team chat: plain text, no markdown, under 900 characters" }
+  },
+  "required": ["summary", "next", "waiting", "left_alone", "concerns", "sphinx"]
+}

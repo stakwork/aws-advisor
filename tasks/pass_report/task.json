@@ -1,0 +1,22 @@
+{
+  "kind": "pass_report",
+  "title": "Narrated executor pass",
+  "when": "after an executor pass whose outcome differs from the last narrated one (ACT_NARRATE): the proposals it made, applied, verified or closed, every module's notes and errors, the pause state",
+  "tools": [
+    "open_recommendations",
+    "recommendation_history",
+    "findings_for_resource",
+    "instance_inventory",
+    "graph_system",
+    "graph_query",
+    "price_lookup"
+  ],
+  "max_turns": 6,
+  "rubric": [
+    { "check": "required", "path": "summary", "label": "summary present" },
+    { "check": "required", "path": "sphinx", "label": "sphinx message present" },
+    { "check": "max_sentences", "path": "summary", "max": 5, "label": "summary is five sentences or fewer" },
+    { "check": "max_items", "path": "left_alone", "max": 12, "label": "left_alone is grouped, not one line per resource" }
+  ],
+  "retry": { "on_score_below": 0.75, "max": 1 }
+}

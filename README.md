@@ -1919,6 +1919,41 @@ it, since when and why; passes record "paused by …; nothing planned or applied
 keeps working**: undoing a change is what a pause exists for. Pausing and resuming are posted to Sphinx immediately,
 quiet hours or not.
 
+**Where the agent comes in.** The pass itself stays deterministic: every module reads facts and applies its own
+rules, and no model decides what to change. The agent and Jev come in three places around it, each asked once per
+distinct thing so a pass that repeats itself costs nothing.
+
+**A second opinion.** Before a pass applies anything, Jev (`src/proposal_check.ts`, purpose `proposal_check`) sees
+every new proposal with the record around its resource (its role, open alerts, what the team approved or rejected on
+it, other changes in flight) and answers three typed questions: could it destroy something that cannot be recovered,
+what would users notice, does it contradict what the team decided. The verdict lands on the row (`check_json`, the
+"Jev ok" / "held by Jev" badge, a `Jev:` line in the Sphinx message). `ACT_JEV_CHECK`: `hold` (default) makes the
+pass leave a proposal Jev objects to for a person, `advise` only records, `off` skips it. Apply on the page proceeds
+anyway (that is the human decision) and the objection stays on the row's result. Jev is asked once per distinct
+change: a proposal refreshed pass after pass keeps its first verdict, and a new row for the same change within 30
+days reuses it ("same change as #id"). Without a TypeSafe key the rows go unchecked and the pass says so.
+
+**The narrated pass.** After a pass, the agent writes the short version (`src/pass_report.ts`, task
+`tasks/pass_report/`): what the pass did, what happens at the next one and when, what waits on an approval or a
+grace period (with row ids), what was left alone grouped by reason, and anything that looks wrong. It gets the
+complete record, every row touched with its status and Jev verdict, every module's notes and the errors, and may use
+the read-only fact tools only to explain a skip. The agent is asked once per distinct outcome: `ACT_NARRATE=changes`
+(default) digests the pass and skips one whose outcome matches the last narrated pass, `always` narrates every pass,
+`off` never. The answer is graded (row ids must exist, no change may be claimed in a pass that applied nothing, the
+message stays under 900 characters and cites numbers when there were proposals); a note under the bar is kept on the
+page marked "held back" and not posted. Otherwise its `sphinx` text goes to the chat (quiet hours respected, older
+unsent notes superseded) and the Auto-actions page shows it under "Last narrated pass" with its grade and a Resend
+button (`GET /api/actions/pass-reports`, `POST /api/actions/pass-reports/:id/resend`).
+
+**Ask about a row.** Every ledger row has an Ask button that opens a thread with the agent on that row: why the
+executor proposed it, what happens if it is applied, what the revert does. The agent gets the row as recorded
+(reason, before and after, the facts it decided on, the undo, what became of it, Jev's second opinion when there is
+one), what else the advisor knows about the resource (inventory facts, recommendations and the team's decisions on
+them, open alerts, the other rows on it) and the fact tools, including `auto_actions`, the ledger itself with the
+executor's mode and pause state. One thread per row, kept for as long as the row; `GET`/`POST
+/api/actions/:id/messages`. The thread is for understanding, not deciding: Apply and Revert stay buttons a person
+presses.
+
 **Approved recommendations as the go-ahead.** An approved recommendation of tier `auto` on a resource (a log
 group without retention, an over-provisioned volume) is picked up by the matching action whatever its own
 thresholds say (`approvedFor` in `src/executor.ts`): the row cites "approved as #id by whom", and once the change

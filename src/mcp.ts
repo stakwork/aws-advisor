@@ -9,7 +9,7 @@ import { S, query, queryReadOnly } from "./steampipe.js";
 import { ProbeError, containerSignals, latestProbe, probeInstance, summarizeProbe, useSummary } from "./ssm.js";
 import { listRules, rulesFor, signalKinds, upsertRule } from "./signal_rules.js";
 import { latestS3Usage, refreshS3Usage } from "./s3_usage.js";
-import { pauseActions, pauseState, resumeActions, revertAction } from "./executor.js";
+import { getAction, listActions, pauseActions, pauseState, resumeActions, revertAction } from "./executor.js";
 import { PriceSpec, fetchPrices } from "./prices.js";
 import { inventoryRefreshedAt, listEc2 } from "./inventory.js";
 import { domainsFor, listRoute53 } from "./route53_inventory.js";
@@ -502,6 +502,28 @@ export function createFactServer(): McpServer {
   }, (a) => {
     try { const r = upsertRule({ ...a, decided_by: "agent", status: "proposed" }); return text({ rule: r, note: r.status === "confirmed" ? "a confirmed rule already says the same" : "proposed; a person confirms it in the EC2 drawer (Use signals)" }); }
     catch (e: any) { return fail(e?.message || String(e)); }
+  });
+
+  server.registerTool("auto_actions", {
+    title: "The auto-actions ledger",
+    description: "What the executor proposed, applied, verified, held, failed, reverted or let go stale, with each row's reason, before/after, the facts it decided on, how it is undone, Jev's second opinion when there is one, and the executor's state (mode: off, dry_run or apply; paused or not; whether an actuator role is set). With `id`, one row in full; otherwise a page, newest first, filtered by status, kind or resource id. A dry_run row is a record of what would happen, nothing was touched.",
+    inputSchema: {
+      id: z.number().int().positive().optional().describe("one ledger row, in full"),
+      status: z.enum(["proposed", "applied", "verified", "failed", "refused", "reverted", "stale", "all"]).optional().describe("default all"),
+      kind: z.string().regex(/^[a-z0-9_]{1,40}$/).optional().describe("an action kind, e.g. swarm_park, ebs_iops_trim"),
+      resource: z.string().min(1).max(200).optional().describe("only rows on this resource id"),
+      limit: z.number().int().min(1).max(100).default(20),
+    },
+    annotations: ro,
+  }, async (a) => {
+    const executor = { mode: config.actMode, paused: pauseState(), actuator_role: config.actRoleArn || null, note: config.actMode === "dry_run" ? "dry run: rows record what would happen; nothing is applied unless a person presses Apply" : config.actMode === "off" ? "off: nothing is planned or applied" : "apply: proposals are applied on the pass, up to the cap" };
+    if (a.id != null) {
+      const row = getAction(a.id);
+      return row ? text({ executor, action: row }) : fail(`no auto-action #${a.id}`);
+    }
+    const page = listActions({ status: a.status || "all", kind: a.kind, page_size: a.resource ? 200 : a.limit });
+    const rows = (a.resource ? page.actions.filter((r) => r.resource === a.resource || r.resource_name === a.resource) : page.actions).slice(0, a.limit);
+    return text({ executor, total: a.resource ? rows.length : page.total, counts_by_status: page.counts, counts_by_kind: page.kinds, actions: rows.map((r) => ({ id: r.id, kind: r.kind, status: r.status, mode: r.mode, trigger: r.trigger, resource: r.resource, resource_name: r.resource_name, region: r.region, account_id: r.account_id, title: r.title, reason: r.reason, est_usd_month: r.est_usd_month, rollback: r.rollback, result: r.result, error: r.error, check: (r as any).check ?? null, created_at: r.created_at, applied_at: r.applied_at, verified_at: r.verified_at, reverted_at: r.reverted_at })) });
   });
 
   server.registerTool("pause_auto_actions", {

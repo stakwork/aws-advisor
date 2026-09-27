@@ -25,6 +25,7 @@ import { Progress, outcomesText, parseProgress } from "./progress.js";
 import { ResolutionPlan, RecRow, resourceFacts } from "./resolve.js";
 import { spendSummary } from "./spend.js";
 import { credentialsMeta } from "./steampipe.js";
+import { actionModules, getAction, type ActionRow } from "./executor.js";
 
 db.exec(`create table if not exists chat_threads (
   id integer primary key autoincrement,
@@ -76,13 +77,16 @@ db.exec("create index if not exists recommendation_messages_thread on recommenda
   const cols = (db.pragma("table_info(chat_threads)") as { name: string }[]).map((c) => c.name);
   if (!cols.includes("session_id")) db.exec("alter table chat_threads add column session_id text");
   if (!cols.includes("session_state")) db.exec("alter table chat_threads add column session_state text");
+  // A thread on an auto-actions ledger row ("why does the executor want this?"): one per row, ever.
+  if (!cols.includes("action_id")) db.exec("alter table chat_threads add column action_id integer references actions(id) on delete cascade");
+  db.exec("create unique index if not exists chat_threads_action on chat_threads(action_id) where action_id is not null");
 }
 
 export const MAX_MESSAGE = 8000;
 export const THREAD_CONTEXT = 12;
 
 export interface Message { id: number; recommendation_id: number | null; thread_id: number; role: "user" | "agent"; author: string | null; content: string; extra: { suggest_replan?: boolean; step_fixes?: { step: number; step_text: string; command?: string; verify?: string }[] } | null; request_id: string | null; status: "pending" | "completed" | "failed"; error: string | null; created_at: string; finished_at: string | null }
-export interface Thread { id: number; recommendation_id: number | null; title: string | null; created_by: string | null; created_at: string; updated_at: string; session_id: string | null; session_state: SessionState | null; messages: number; last_at: string | null; pending: boolean }
+export interface Thread { id: number; recommendation_id: number | null; action_id: number | null; title: string | null; created_by: string | null; created_at: string; updated_at: string; session_id: string | null; session_state: SessionState | null; messages: number; last_at: string | null; pending: boolean }
 /** What the session has already been told, so a follow-up turn repeats none of it: the plan's resolution id and the step outcomes text. */
 export interface SessionState { resolutionId: number | null; outcomes: string }
 
@@ -93,9 +97,9 @@ const threadRow = db.prepare(`select t.*, (select count(*) from recommendation_m
   exists(select 1 from recommendation_messages m where m.thread_id = t.id and m.status = 'pending') as pending from chat_threads t`);
 const asThread = (r: any): Thread => ({ ...r, session_state: safeJson(r.session_state), pending: Boolean(r.pending) });
 
-/** The general threads (no recommendation), most recently active first. */
+/** The general threads (no recommendation, no ledger row), most recently active first. */
 export function listThreads(): Thread[] {
-  return (db.prepare(`${threadRow.source} where t.recommendation_id is null order by coalesce(last_at, t.created_at) desc, t.id desc`).all() as any[]).map(asThread);
+  return (db.prepare(`${threadRow.source} where t.recommendation_id is null and t.action_id is null order by coalesce(last_at, t.created_at) desc, t.id desc`).all() as any[]).map(asThread);
 }
 export function getThread(id: number): Thread | null {
   const r = db.prepare(`${threadRow.source} where t.id = ?`).get(id);
@@ -110,7 +114,7 @@ export function renameThread(id: number, title: string): Thread | null {
   return r.changes ? getThread(id) : null;
 }
 export function deleteThread(id: number): boolean {
-  return db.prepare("delete from chat_threads where id = ? and recommendation_id is null").run(id).changes > 0;
+  return db.prepare("delete from chat_threads where id = ? and recommendation_id is null and action_id is null").run(id).changes > 0;
 }
 /** A recommendation's own thread, made on first use when `create` is set. */
 export function threadForRecommendation(recId: number, create: boolean): Thread | null {
@@ -119,6 +123,14 @@ export function threadForRecommendation(recId: number, create: boolean): Thread 
   if (!create) return null;
   if (!db.prepare("select 1 from recommendations where id = ?").get(recId)) return null;
   return getThread(Number(db.prepare("insert into chat_threads(recommendation_id) values (?)").run(recId).lastInsertRowid));
+}
+/** A ledger row's own thread (src/executor.ts `actions`), made on first use when `create` is set; the existing one is always found first. */
+export function threadForAction(actionId: number, create: boolean): Thread | null {
+  const r = db.prepare("select id from chat_threads where action_id = ?").get(actionId) as { id: number } | undefined;
+  if (r) return getThread(r.id);
+  if (!create) return null;
+  if (!db.prepare("select 1 from actions where id = ?").get(actionId)) return null;
+  return getThread(Number(db.prepare("insert into chat_threads(action_id) values (?)").run(actionId).lastInsertRowid));
 }
 
 /** The messages of one thread, oldest first. */
@@ -152,6 +164,7 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["propose_signal_rule", "propose that a use-signal kind is noise (or real) for an image; a person confirms"],
   ["s3_usage", "how a bucket is used: bytes by age and class, prefixes, versions, reads per day, and the lifecycle rules that fit"],
   ["wake_swarm", "start a swarm the executor parked (a write that can only undo a parking)"],
+  ["auto_actions", "the executor's ledger: what it proposed, applied, held or reverted, with each row's facts and Jev verdict"],
   ["swarm_costs", "what each swarm (customer) costs this month, last use, idle days, parked, who to nudge"],
   ["tag_hygiene", "resources missing owner/env tags with suggested values, and the instances that could opt into parking or office hours"],
   ["pause_auto_actions", "the kill switch: the executor plans and applies nothing until someone resumes; say why, optionally for how many hours"],
@@ -196,6 +209,56 @@ export function buildAccountPrompt(header: AccountHeader, tools: [string, string
   if (!past.length) lines.push("- this is the first message");
   for (const m of past) lines.push(`**${m.role === "agent" ? "advisor" : m.author || "engineer"}:** ${m.content.slice(0, 2500)}`, "");
   lines.push("## The new message to answer", message, "", "Answer with the JSON object described by the schema: reply (step_fixes and suggest_replan stay empty here; there is no plan).");
+  return lines.join("\n");
+}
+
+/** What else the advisor knows about a ledger row's resource: recommendations and their decisions, open alerts, the other rows on it. */
+export interface ActionContext { facts: unknown; recommendations: any[]; alerts: any[]; other_rows: any[] }
+export function actionContext(row: ActionRow): ActionContext {
+  const out: ActionContext = { facts: null, recommendations: [], alerts: [], other_rows: [] };
+  try { out.facts = resourceFacts({ resource: row.resource, resource_name: row.resource_name, rule: row.kind }); } catch { /* no inventory yet */ }
+  try { out.recommendations = db.prepare("select id, rule, title, action_type, tier, status, est_monthly_saving, decided_by, decided_at, decision_reason from recommendations where resource = ? order by id desc limit 10").all(row.resource); } catch { /* */ }
+  try { out.alerts = db.prepare("select id, kind, message, created_at from alerts where resource = ? and acknowledged = 0 order by id desc limit 5").all(row.resource); } catch { /* */ }
+  try { out.other_rows = db.prepare("select id, kind, status, title, created_at, applied_at, reverted_at, result, error from actions where resource = ? and id != ? order by id desc limit 10").all(row.resource, row.id); } catch { /* */ }
+  return out;
+}
+
+/**
+ * The brief for a thread on a ledger row: the row as the executor recorded it (what changes, why, the facts it decided
+ * on, how to undo, what became of it), what else is known about the resource, the thread and the new message. Pure.
+ * With `resumed` the brief is the new message alone: repo2graph replays the rest.
+ */
+export function buildActionPrompt(row: ActionRow, ctx: ActionContext, thread: Pick<Message, "role" | "author" | "content" | "status">[], message: string, resumed = false): string {
+  const answer = ["", "Answer with the JSON object described by the schema: reply (step_fixes and suggest_replan stay empty here; there is no plan)."];
+  if (resumed) return [`## The new message to answer (the thread on auto-action #${row.id} so far is in front of you; the row may have moved on since, aws_auto_actions with id ${row.id} has its current state)`, message, ...answer].join("\n");
+  const label = actionModules().find((m) => m.kind === row.kind)?.label ?? row.kind;
+  const j = (v: unknown, max = 3000) => JSON.stringify(v ?? null, null, 1).slice(0, max);
+  const check = (row as any).check;
+  const lines: string[] = [
+    `# Thread on auto-action #${row.id}: ${row.title}`,
+    `Action: ${label} (kind ${row.kind}). Status ${row.status}, mode ${row.mode}, trigger ${row.trigger}${row.account_id ? `, account ${row.account_id}` : ""}${row.region ? `, region ${row.region}` : ""}. Estimate ${row.est_usd_month != null ? `${row.est_usd_month.toFixed(2)} USD/month` : "none claimed"}.`,
+    `Proposed ${row.created_at}, last seen ${row.seen_at}${row.applied_at ? `, applied ${row.applied_at}` : ""}${row.verified_at ? `, verified ${row.verified_at}` : ""}${row.reverted_at ? `, reverted ${row.reverted_at}` : ""}.`,
+    `Resource: ${row.resource}${row.resource_name && row.resource_name !== row.resource ? ` (${row.resource_name})` : ""}`,
+    "", "## Why the executor proposed it (its own reason)", row.reason || "(none)",
+    "", "## Before → after", "```json", j(row.before), "```", "```json", j(row.after), "```",
+    "", "## The facts it decided on", "```json", j(row.facts, 4000), "```",
+    "", "## How it is undone", row.rollback || "(no revert: the row says why)",
+  ];
+  if (row.result || row.error) lines.push("", "## What became of it", ...(row.result ? [`Result: ${row.result}`] : []), ...(row.error ? [`Error: ${row.error}`] : []));
+  if (check) lines.push("", "## Jev's second opinion on this row", "```json", j(check, 1500), "```");
+  lines.push("", "## What else is known about the resource",
+    "The pass notes (why sibling resources were left alone) are not stored; aws_auto_actions and the fact tools cover the rest.",
+    "Resource facts (advisor inventory):", "```json", j(ctx.facts, 3500), "```",
+    `Recommendations on it and the team's decisions: ${ctx.recommendations.length ? "" : "none"}`, ...ctx.recommendations.map((r) => `- #${r.id} ${r.rule} (${r.action_type}, tier ${r.tier}) ${r.status}${r.decided_by ? ` by ${r.decided_by}` : ""}${r.decision_reason ? `: "${String(r.decision_reason).slice(0, 200)}"` : ""}: ${r.title}`),
+    `Open alerts on it: ${ctx.alerts.length ? "" : "none"}`, ...ctx.alerts.map((a) => `- #${a.id} ${a.kind} ${a.created_at}: ${String(a.message).slice(0, 200)}`),
+    `Other ledger rows on it: ${ctx.other_rows.length ? "" : "none"}`, ...ctx.other_rows.map((o) => `- #${o.id} ${o.kind} ${o.status} (${o.created_at}): ${o.title}${o.error ? ` · error: ${String(o.error).slice(0, 120)}` : ""}`),
+    "", "## What you can look up (tools arrive as aws_<name>); pull what the question needs, say what you fetched");
+  for (const [n, w] of FACT_TOOLS) lines.push(`- ${n}: ${w}`);
+  lines.push("", "## The conversation so far");
+  const past = thread.filter((m) => m.status === "completed" && m.content).slice(-THREAD_CONTEXT);
+  if (!past.length) lines.push("- this is the first message");
+  for (const m of past) lines.push(`**${m.role === "agent" ? "advisor" : m.author || "engineer"}:** ${m.content.slice(0, 2500)}`, "");
+  lines.push("## The new message to answer", message, ...answer);
   return lines.join("\n");
 }
 
@@ -278,6 +341,8 @@ export async function ask(threadId: number, message: string, author: string | nu
   const thread = getThread(threadId);
   if (!thread) { const e: any = new Error("not found"); e.code = "not_found"; throw e; }
   const rec = thread.recommendation_id == null ? null : (db.prepare("select * from recommendations where id = ?").get(thread.recommendation_id) as RecRow | undefined) ?? null;
+  const action = thread.action_id == null ? null : getAction(thread.action_id);
+  if (thread.action_id != null && !action) { const e: any = new Error("not found"); e.code = "not_found"; throw e; }
   const text = String(message || "").trim().slice(0, MAX_MESSAGE);
   if (!text) throw new Error("the message is empty");
   if (thread.pending) { const e: any = new Error("the agent is still answering the previous message"); e.code = "pending"; throw e; }
@@ -290,20 +355,22 @@ export async function ask(threadId: number, message: string, author: string | nu
   const userId = Number(db.prepare("insert into recommendation_messages(recommendation_id, thread_id, role, author, content, status) values (?, ?, 'user', ?, ?, 'completed')").run(thread.recommendation_id, threadId, author, text).lastInsertRowid);
   const agentId = Number(db.prepare("insert into recommendation_messages(recommendation_id, thread_id, role, status) values (?, ?, 'agent', 'pending')").run(thread.recommendation_id, threadId).lastInsertRowid);
   // a general thread without a name takes its first message as the title
-  if (!rec && !thread.title) db.prepare("update chat_threads set title = ? where id = ?").run(text.split("\n")[0].slice(0, 80), threadId);
+  if (!rec && !action && !thread.title) db.prepare("update chat_threads set title = ? where id = ?").run(text.split("\n")[0].slice(0, 80), threadId);
   db.prepare("update chat_threads set updated_at = datetime('now') where id = ?").run(threadId);
   try {
     const plan = rec ? latestPlan(rec.id) : null;
     const progress = rec ? parseProgress((rec as any).progress) : null;
     const prompt = rec
       ? buildChatPrompt(rec, resourceFacts(rec), plan, progress, past, text, session.resumed ? thread.session_state ?? { resolutionId: null, outcomes: "" } : null)
-      : buildAccountPrompt(accountHeader(), FACT_TOOLS, past, text, thread.title, session.resumed);
+      : action
+        ? buildActionPrompt(action, actionContext(action), past, text, session.resumed)
+        : buildAccountPrompt(accountHeader(), FACT_TOOLS, past, text, thread.title, session.resumed);
     const { requestId } = await postAgentRequest({
       prompt,
       systemOverride: getPrompt("chat"),
       sessionId: session.sessionId,
-      agentName: rec ? "aws-resolution-chat" : "aws-account-chat",
-      metadata: { threadId, recommendationId: thread.recommendation_id, messageId: agentId },
+      agentName: rec ? "aws-resolution-chat" : action ? "aws-action-chat" : "aws-account-chat",
+      metadata: { threadId, recommendationId: thread.recommendation_id, actionId: thread.action_id, messageId: agentId },
       link: { kind: "chat", recommendationId: thread.recommendation_id },
     });
     db.prepare("update recommendation_messages set request_id = ? where id = ?").run(requestId, agentId);
@@ -320,6 +387,13 @@ export async function ask(threadId: number, message: string, author: string | nu
 /** The recommendation routes: its thread is made on the first message. */
 export async function askAboutRecommendation(recId: number, message: string, author: string | null) {
   const t = threadForRecommendation(recId, true);
+  if (!t) { const e: any = new Error("not found"); e.code = "not_found"; throw e; }
+  return ask(t.id, message, author);
+}
+
+/** The ledger routes: a row's thread is made on the first message. */
+export async function askAboutAction(actionId: number, message: string, author: string | null) {
+  const t = threadForAction(actionId, true);
   if (!t) { const e: any = new Error("not found"); e.code = "not_found"; throw e; }
   return ask(t.id, message, author);
 }

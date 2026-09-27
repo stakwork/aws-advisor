@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useState } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
 import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../components/ui";
+import { Thread } from "../components/thread";
 
 const FILTERS = ["proposed", "applied", "verified", "failed", "refused", "reverted", "stale", "all"];
 const PAGE_SIZE = 25;
@@ -23,8 +24,15 @@ export default function Actions() {
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
   const [lastPass, setLastPass] = useState<any>(null);
+  // The narrated pass (src/pass_report.ts): the newest report; polled every 5 s while the agent is still writing it.
+  const [report, setReport] = useState<any>(null);
+  const loadReport = () => api("/actions/pass-reports?limit=1").then((r) => setReport(Array.isArray(r) ? r[0] ?? null : null)).catch(() => {});
+  useEffect(() => { loadReport(); }, [lastPass]);
+  useEffect(() => { if (report?.status !== "pending") return; const t = setInterval(loadReport, 5000); return () => clearInterval(t); }, [report?.status, report?.id]);
   const [showPolicy, setShowPolicy] = useState(false);
   const [open, setOpen] = useState<number | null>(selectedId ? Number(selectedId) : null);
+  // The row whose thread with the agent is open ("why this?"); one at a time, one thread per row on the server.
+  const [asking, setAsking] = useState<number | null>(null);
 
   const load = () => { api(`/actions?status=${filter}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}&${pageQuery}&page_size=${PAGE_SIZE}`).then(setData).catch((e) => setMsg(e.message)); };
   useEffect(() => { api("/actions/status").then(setStatus).catch((e) => setMsg(e.message)); }, []);
@@ -107,6 +115,28 @@ export default function Actions() {
             {lastPass.errors?.length > 0 && <ul className="mt-1 space-y-0.5 text-red-300">{lastPass.errors.map((n: string, i: number) => <li key={i}>· {n}</li>)}</ul>}
           </div>
         )}
+        {report && (
+          <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs" title="the agent's narration of the last pass whose outcome was new (Settings › Auto-actions › Narrate the pass)">
+            <div className="flex flex-wrap items-center gap-2 text-zinc-200">
+              <span>Last narrated pass</span>
+              <span className="text-zinc-500">{when(report.pass_at)} · {report.trigger} · {report.mode}</span>
+              {report.status === "pending" && <span className="text-amber-300">the agent is writing…</span>}
+              {report.status === "failed" && <span className="text-red-300">failed</span>}
+              {report.status === "completed" && report.score != null && <span className="text-zinc-500" title={(report.grade?.checks || []).map((c: any) => `${c.pass ? "✓" : "✗"} ${c.check}: ${c.detail}`).join("\n")}>grade {Math.round(report.score * 100)} %</span>}
+              {report.sphinx_sent_at ? <span className="text-emerald-300">posted to Sphinx {when(report.sphinx_sent_at)}</span> : report.sphinx_result ? <span className="text-zinc-500">{report.sphinx_result}</span> : null}
+              {report.status === "completed" && <Button variant="ghost" onClick={() => api(`/actions/pass-reports/${report.id}/resend`, { method: "POST", body: "{}" }).then(loadReport).catch((e: any) => setMsg(e.message))}>Resend</Button>}
+            </div>
+            {report.status === "failed" && report.error && <div className="mt-1 text-red-300">{String(report.error).slice(0, 300)}</div>}
+            {report.held_back?.length > 0 && <div className="mt-1 text-amber-300">Held back from Sphinx: {report.held_back.join(", ")}</div>}
+            {report.result?.summary && <div className="mt-1 text-zinc-300">{report.result.summary}</div>}
+            {(["next", "waiting", "left_alone", "concerns"] as const).map((k) => Array.isArray(report.result?.[k]) && report.result[k].length > 0 && (
+              <div key={k} className="mt-1">
+                <div className={k === "concerns" ? "text-amber-300" : "text-zinc-400"}>{k === "next" ? "Next" : k === "waiting" ? "Waiting on a person" : k === "left_alone" ? "Left alone" : "Concerns"}</div>
+                <ul className="space-y-0.5 text-zinc-400">{report.result[k].map((n: string, i: number) => <li key={i}>· {n}</li>)}</ul>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       {preview && (
@@ -139,7 +169,7 @@ export default function Actions() {
                     <Td className="text-xs text-zinc-300">{KIND_LABEL[a.kind] || a.kind}</Td>
                     <Td>{a.title}<div className="text-xs text-zinc-500">{a.reason}</div></Td>
                     <Td className="text-right text-emerald-300">{a.est_usd_month != null ? usd(a.est_usd_month, 2) : "—"}</Td>
-                    <Td className={`text-xs ${STATUS_CLASS[a.status] || ""}`}>{a.status}{a.notify_result && <div className="text-[11px] text-zinc-600" title={a.notify_result}>sphinx: {a.notify_result.split(":")[0]}</div>}</Td>
+                    <Td className={`text-xs ${STATUS_CLASS[a.status] || ""}`}>{a.status}{a.check?.verdict === "hold" && <div className="text-[11px] text-amber-300" title={a.check.reason}>held by Jev</div>}{a.check?.verdict === "proceed" && <div className="text-[11px] text-zinc-500" title={a.check.reason}>Jev ok</div>}{a.notify_result && <div className="text-[11px] text-zinc-600" title={a.notify_result}>sphinx: {a.notify_result.split(":")[0]}</div>}</Td>
                     <td className="whitespace-nowrap px-2 py-2 text-right align-top" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
                       {a.status === "proposed" && (status?.capabilities?.[a.kind]?.apply === false
                         ? <span className="text-[11px] text-amber-300" title={`the actuator role is not allowed ${status.capabilities[a.kind].missing.join(", ")}; do it by hand, or widen the role`}>by hand: role lacks {status.capabilities[a.kind].missing.join(", ")}</span>
@@ -148,8 +178,14 @@ export default function Actions() {
                       {(a.status === "applied" || a.status === "verified") && (status?.capabilities?.[a.kind]?.revert === false
                         ? <span className="ml-1 text-[11px] text-amber-300" title={`the actuator role is not allowed ${status.capabilities[a.kind].missing.join(", ")}`}>undo by hand: role lacks {status.capabilities[a.kind].missing.join(", ")}</span>
                         : <Button variant="danger" className="ml-1 !px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/revert`, `revert-${a.id}`)} disabled={busy === `revert-${a.id}` || mode === "off"} title={a.rollback}>{busy === `revert-${a.id}` ? "Reverting…" : "Revert"}</Button>)}
+                      <Button variant="ghost" className="ml-1 !px-2 !py-1 !text-xs" onClick={() => setAsking(asking === a.id ? null : a.id)} title="ask the advisor about this row: why this change, what happens if it is applied, what the revert does">{asking === a.id ? "Close" : "Ask"}</Button>
                     </td>
                   </tr>
+                  {asking === a.id && (
+                    <tr className="border-t border-zinc-800/40 bg-zinc-900/40"><td colSpan={6} className="p-3">
+                      <Thread base={`/actions/${a.id}/messages`} general title={`Ask the advisor about #${a.id}`} hint="why this change, what happens if it is applied, what the revert does; the agent gets the row's facts, the resource and its history" />
+                    </td></tr>
+                  )}
                   {open === a.id && (
                     <tr className="border-t border-zinc-800/40 bg-zinc-900/40"><td colSpan={6} className="p-3">
                       <div className="grid gap-3 text-xs md:grid-cols-3">
