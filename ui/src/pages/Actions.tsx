@@ -30,6 +30,12 @@ export default function Actions() {
   useEffect(() => { loadReport(); }, [lastPass]);
   useEffect(() => { if (report?.status !== "pending") return; const t = setInterval(loadReport, 5000); return () => clearInterval(t); }, [report?.status, report?.id]);
   const [showPolicy, setShowPolicy] = useState(false);
+  const [showNarrow, setShowNarrow] = useState(false);
+  // The activity log (src/executor_log.ts): every pass with its lines and events, loaded only once shown, refreshed with the ledger.
+  const [showLog, setShowLog] = useState(false);
+  const [log, setLog] = useState<{ passes: any[]; loose: any[] } | null>(null);
+  const [openPass, setOpenPass] = useState<number | null>(null);
+  useEffect(() => { if (showLog) api("/actions/log?limit=40").then(setLog).catch((e) => setMsg(e.message)); }, [showLog, lastPass, data]);
   const [open, setOpen] = useState<number | null>(selectedId ? Number(selectedId) : null);
   // The row whose thread with the agent is open ("why this?"); one at a time, one thread per row on the server.
   const [asking, setAsking] = useState<number | null>(null);
@@ -102,9 +108,22 @@ export default function Actions() {
           </div>
         )}
         {status?.modules && <div className="mt-2 text-xs text-zinc-500">Actions: {status.modules.map((m: any) => m.label).join(" · ")}</div>}
-        {status?.capabilities && Object.values(status.capabilities).some((c: any) => c.apply === false || c.revert === false) && (
-          <div className="mt-1 text-xs text-amber-300">The role is narrower than the policy, so these stay with a person: {Object.entries(status.capabilities).filter(([, c]: any) => c.apply === false || c.revert === false).map(([k, c]: any) => `${KIND_LABEL[k] || k} (${c.apply === false ? "apply" : "revert"}: ${c.missing.join(", ")})`).join(" · ")}</div>
-        )}
+        {status?.capabilities && Object.values(status.capabilities).some((c: any) => c.apply === false || c.revert === false) && (() => {
+          const narrow = Object.entries(status.capabilities).filter(([, c]: any) => c.apply === false || c.revert === false);
+          return (
+            <div className="mt-1 text-xs text-amber-300">
+              The role is narrower than the policy, so {narrow.length} action{narrow.length === 1 ? " stays" : "s stay"} with a person.
+              <button className="ml-2 text-sky-300" onClick={() => setShowNarrow((s) => !s)}>{showNarrow ? "hide" : "show"} which</button>
+              {showNarrow && (
+                <ul className="mt-1 space-y-0.5 text-amber-200/80">
+                  {narrow.map(([k, c]: any) => (
+                    <li key={k}>· {KIND_LABEL[k] || k} <span className="text-zinc-500">({c.apply === false ? "apply" : "revert"}: <span className="font-mono">{c.missing.join(", ")}</span>)</span></li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
         {status?.capabilities_note && <div className="mt-1 text-xs text-zinc-500">{status.capabilities_note}</div>}
         {msg && <div className="mt-2 text-xs text-amber-300">{msg}</div>}
         {lastPass && (
@@ -135,6 +154,56 @@ export default function Actions() {
                 <ul className="space-y-0.5 text-zinc-400">{report.result[k].map((n: string, i: number) => <li key={i}>· {n}</li>)}</ul>
               </div>
             ))}
+          </div>
+        )}
+      </Card>
+
+      <Card title={<span className="flex flex-wrap items-center justify-between gap-2"><span>Activity <span className="font-normal text-zinc-500">· what the actuator did, pass by pass: every plan, apply, read-back and revert</span></span><button className="text-xs text-sky-300" onClick={() => setShowLog((s) => !s)}>{showLog ? "hide" : "show"}</button></span>}>
+        {!showLog ? <div className="text-xs text-zinc-500">Every pass (scheduled or manual, including the ones that did nothing) with the lines it printed, and every Apply, Check and Revert from the page or the chat. Click show.</div>
+        : !log ? <div className="text-sm text-zinc-500">Loading…</div>
+        : !log.passes.length && !log.loose.length ? <Empty>No activity yet. The first pass, or the first Apply, writes the first entry.</Empty>
+        : (
+          <div className="space-y-1 text-xs">
+            {[...log.passes.map((p) => ({ t: p.started_at, pass: p })), ...log.loose.map((e) => ({ t: e.at, ev: e }))].sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0)).map((it: any) => it.pass ? (
+              <div key={`p${it.pass.id}`} className="rounded border border-zinc-800/60">
+                <div className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5 hover:bg-zinc-900/40" onClick={() => setOpenPass(openPass === it.pass.id ? null : it.pass.id)}>
+                  <span className="whitespace-nowrap text-zinc-400">{when(it.pass.started_at)}</span>
+                  <span className="text-zinc-500">pass #{it.pass.id} · {it.pass.trigger}</span>
+                  <span className={`font-mono ${it.pass.mode === "apply" ? "text-emerald-300" : it.pass.mode === "off" ? "text-red-300" : "text-amber-300"}`}>{it.pass.mode}</span>
+                  {!it.pass.finished_at ? <span className="text-amber-300">running…</span> : (
+                    <span className="text-zinc-300">{it.pass.proposed} proposed{it.pass.fresh ? ` (${it.pass.fresh} new)` : ""}, {it.pass.applied} applied, {it.pass.verified} verified{it.pass.failed ? <span className="text-red-300">, {it.pass.failed} failed</span> : null}{it.pass.refused ? <span className="text-red-200">, {it.pass.refused} refused</span> : null}{it.pass.held ? `, ${it.pass.held} held` : ""}{it.pass.stale ? `, ${it.pass.stale} stale` : ""}</span>
+                  )}
+                  {it.pass.errors.length > 0 && <span className="text-red-300">{it.pass.errors.length} error{it.pass.errors.length === 1 ? "" : "s"}</span>}
+                  {it.pass.took_ms != null && <span className="ml-auto text-zinc-600">{(it.pass.took_ms / 1000).toFixed(1)} s · {it.pass.lines.length} lines</span>}
+                </div>
+                {openPass === it.pass.id && (
+                  <div className="space-y-2 border-t border-zinc-800/40 bg-zinc-950/60 p-2">
+                    {it.pass.errors.length > 0 && <ul className="space-y-0.5 text-red-300">{it.pass.errors.map((n: string, i: number) => <li key={i}>· {n}</li>)}</ul>}
+                    {it.pass.events.length > 0 && (
+                      <div>
+                        <div className="mb-1 text-zinc-400">Changes made in this pass</div>
+                        <ul className="space-y-0.5">{it.pass.events.map((e: any) => <li key={e.id}><span className="text-zinc-500">{when(e.at)}</span> <span className="text-zinc-300">{e.event}</span> <span className="text-sky-300 cursor-pointer" onClick={() => set("id", String(e.action_id))}>#{e.action_id}</span> <span className="text-zinc-400">{KIND_LABEL[e.kind] || e.kind}</span> → <span className={STATUS_CLASS[e.outcome] || "text-zinc-300"}>{e.outcome}</span>{e.detail && <span className="text-zinc-500">: {e.detail}</span>}</li>)}</ul>
+                      </div>
+                    )}
+                    <div>
+                      <div className="mb-1 text-zinc-400">What the pass printed</div>
+                      {it.pass.lines.length ? <Code className="max-h-80 overflow-auto whitespace-pre-wrap">{it.pass.lines.join("\n")}</Code> : <div className="text-zinc-500">nothing</div>}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div key={`e${it.ev.id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-zinc-800/60 px-2 py-1.5">
+                <span className="whitespace-nowrap text-zinc-400">{when(it.ev.at)}</span>
+                <span className="text-zinc-500">{it.ev.trigger}</span>
+                <span className="text-zinc-300">{it.ev.event}</span>
+                <span className="cursor-pointer text-sky-300" onClick={() => set("id", String(it.ev.action_id))}>#{it.ev.action_id}</span>
+                <span className="text-zinc-400">{KIND_LABEL[it.ev.kind] || it.ev.kind}</span>
+                <span>→ <span className={STATUS_CLASS[it.ev.outcome] || "text-zinc-300"}>{it.ev.outcome}</span></span>
+                {it.ev.detail && <span className="text-zinc-500">{it.ev.detail}</span>}
+              </div>
+            ))}
+            <div className="pt-1 text-zinc-500">A pass is one run of every action's plan; the rows inside it are what that pass applied, read back or reverted. An entry outside a pass is an Apply, Check or Revert someone made from the page or the chat. The log keeps 90 days.</div>
           </div>
         )}
       </Card>

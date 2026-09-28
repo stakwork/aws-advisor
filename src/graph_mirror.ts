@@ -22,7 +22,7 @@ export const BATCH = 250;
 export const QUERY_TIMEOUT_MS = 5_000;
 export const QUERY_ROW_CAP = 200;
 
-export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction"] as const;
+export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass"] as const;
 
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
@@ -36,6 +36,7 @@ export const SCHEMA_SUMMARY = [
   "(:AdvisorRecommendation)-[:FROM_INCIDENT]->(:AdvisorIncident {id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at})-[:INVESTIGATES]->(:AdvisorAlert {id, kind, level, message, created_at, acknowledged, acknowledged_by})-[:ABOUT]->(:AdvisorResource | :AdvisorResourceRef)",
   "(:AdvisorControl {id, title})-[:FLAGGED {run_id, reason}]->(:AdvisorResource) for the latest completed run's alarm findings; (:AdvisorControl)-[:HAS_PLAYBOOK]->(:AdvisorPlaybook {control_id, title, tier, effort})",
   "(:AdvisorAction {id, kind, status: proposed|applied|verified|failed|refused|reverted|stale, mode, trigger, title, reason, rollback, est_usd_month, result, error, created_at, applied_at, verified_at, reverted_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef) the executor's ledger: every change the agent planned, made, read back or undid; (:AdvisorAction)-[:CARRIES_OUT]->(:AdvisorRecommendation) when it executes an approved recommendation",
+  "(:AdvisorAction)-[:TOUCHED_IN {event: apply|verify|revert, outcome, at, detail}]->(:AdvisorPass {id, started_at, finished_at, trigger: schedule|manual, mode, proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors}) the executor's activity log: one node per pass (including the ones that did nothing), an edge per apply, read-back or revert made in it",
 ].join("\n");
 
 export const enabled = () => Boolean(config.neo4jUri);
@@ -568,10 +569,49 @@ export async function mirrorActions(ids?: number[]): Promise<{ actions: number }
   return { actions: rows.length };
 }
 
+// ---- executor passes ------------------------------------------------------------------------------------------------------
+
+const PASS_CYPHER = `
+MERGE (p:AdvisorPass {id: $pass.id})
+SET p += $pass, p.account_id = $account, p.updated_at = $now
+WITH p
+MATCH (acc:AdvisorAccount {id: $account}) MERGE (p)-[:IN_ACCOUNT]->(acc)
+WITH p
+OPTIONAL MATCH (p)<-[t:TOUCHED_IN]-() DELETE t
+WITH DISTINCT p
+UNWIND $events AS ev
+MERGE (a:AdvisorAction {id: ev.action_id})
+CREATE (a)-[:TOUCHED_IN {event: ev.event, outcome: ev.outcome, at: ev.at, trigger: ev.trigger, detail: ev.detail}]->(p)`;
+
+/** One executor pass (src/executor_log.ts) with an edge from every ledger row it applied, read back or reverted. */
+export async function mirrorPass(passId: number): Promise<{ pass: number | null; events: number }> {
+  if (!enabled()) return { pass: null, events: 0 };
+  const { getPass } = await import("./executor_log.js");
+  const p = getPass(passId);
+  if (!p) return { pass: null, events: 0 };
+  await ensureSchema();
+  const account = accountId();
+  await mirrorAccount(account);
+  const pass = { id: p.id, started_at: p.started_at, finished_at: p.finished_at, trigger: p.trigger, mode: p.mode, proposed: p.proposed, fresh: p.fresh, applied: p.applied, verified: p.verified,
+    failed: p.failed, refused: p.refused, held: p.held, stale: p.stale, took_ms: p.took_ms, errors: p.errors.join("; ").slice(0, 1000) || null };
+  const events = p.events.map((e) => ({ action_id: e.action_id, event: e.event, outcome: e.outcome, at: e.at, trigger: e.trigger, detail: e.detail ? e.detail.slice(0, 300) : null }));
+  await write(PASS_CYPHER, { pass, events, account, now: now() });
+  return { pass: passId, events: events.length };
+}
+
+/** Every pass still in the activity log (it keeps LOG_KEEP_DAYS). */
+export async function mirrorPasses(): Promise<{ passes: number }> {
+  if (!enabled()) return { passes: 0 };
+  let ids: { id: number }[] = [];
+  try { ids = db.prepare("select id from executor_passes order by id").all() as { id: number }[]; } catch { return { passes: 0 }; }
+  for (const r of ids) await mirrorPass(r.id);
+  return { passes: ids.length };
+}
+
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
 export interface MirrorCounts {
-  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; took_ms: number }
+  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; took_ms: number }
 
 /** Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. */
 export async function mirrorAll(): Promise<MirrorCounts | null> {
@@ -588,9 +628,10 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const { recommendations } = await mirrorRecommendations();
   const { alerts, incidents } = await mirrorAlertsAndIncidents();
   const { actions } = await mirrorActions();
+  const { passes } = await mirrorPasses();
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
-  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, took_ms: Date.now() - t0 };
+  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes, took_ms: Date.now() - t0 };
 }
 
 export interface GraphStats { nodes: Record<string, number>; relationships: Record<string, number>; decided_as: number; total_nodes: number; total_relationships: number }
@@ -612,7 +653,7 @@ export async function graphStats(): Promise<GraphStats> {
  */
 export async function wipeMirror(account = accountId()): Promise<{ deleted: number }> {
   if (!enabled()) return { deleted: 0 };
-  const owned = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRecommendation", "AdvisorRun", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "KnSystem", "KnLogGroup", "KnPricingOverlay"];
+  const owned = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRecommendation", "AdvisorRun", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass", "KnSystem", "KnLogGroup", "KnPricingOverlay"];
   const del = async (cypher: string, params: Record<string, unknown>) => {
     let total = 0;
     for (;;) {
@@ -687,3 +728,5 @@ export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackgroun
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */
 export const mirrorActionsInBackground = (ids?: number[]) => inBackground(`action mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorActions(ids));
+/** At the end of every executor pass: the pass node and its edges to the rows it touched (src/executor_log.ts). */
+export const mirrorPassInBackground = (passId: number) => inBackground(`pass mirror (${passId})`, () => mirrorPass(passId));
