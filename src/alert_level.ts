@@ -24,7 +24,7 @@ export function alertLevel(a: { kind: string; triage?: unknown }): AlertLevel {
   if (a.kind === "instance_state") return triage && Number(triage.expected) >= 0.7 ? "info" : "warning";
   if (a.kind === "disk_fill" || a.kind === "quota" || a.kind === "disk_full") return "alarm";
   if (a.kind === "disk_high" || a.kind === "memory_high" || a.kind === "swap_in_use" || a.kind === "load_high" || a.kind === "reboot") return "warning";
-  if (a.kind === "memory_full") return "alarm";
+  if (a.kind === "memory_full" || a.kind === "status_check_failed") return "alarm";
   if (a.kind === "lambda_errors" || a.kind === "commitment_underused" || a.kind === "cache_memory_high" || a.kind === "rds_memory_low" || a.kind === "network_step") return "warning";
   if (a.kind === "commitment_expiring") return "alarm";
   if (a.kind === "spend_step" || a.kind === "memory_pressure" || a.kind === "log_step" || a.kind === "app_gone") return "warning";

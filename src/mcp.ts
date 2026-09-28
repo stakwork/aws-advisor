@@ -27,6 +27,7 @@ import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
 import { graphBill, listSystems, logAttributionReport, systemView } from "./graph_knowledge.js";
 import { appEvents, appsOn, appsSummary, fleetApps, whereRuns } from "./instance_apps.js";
+import { instanceStatusOf, listInstanceStatus, statusEvents, statusSummary } from "./status_checks.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 import { registerSwarmTools } from "./mcp_swarms.js";
 import { registerTagTools } from "./mcp_tags.js";
@@ -487,6 +488,18 @@ export function createFactServer(): McpServer {
     if (a.instance_id) { const p = latestProbe(a.instance_id); return text({ instance_id: a.instance_id, probed_at: p?.collected_at ?? null, has_process_list: Array.isArray(p?.data.processes), apps: appsOn(a.instance_id, a.include_gone), events: appEvents({ instance_id: a.instance_id, limit: 50 }), log_shipping: p?.data.log_shipping ?? [] }); }
     if (a.name) return text({ name: a.name, where: whereRuns(a.name), events: appEvents({ name: a.name, limit: 50 }) });
     return text({ summary: appsSummary(), apps: fleetApps(), recent_events: appEvents({ limit: 50 }) });
+  });
+
+  server.registerTool("status_checks", {
+    title: "EC2 status checks: system, instance and attached EBS",
+    description: "The built-in, free EC2 status checks of every running instance, read every watcher cycle: system (hardware and network under the box), instance (the OS is reachable) and attached-EBS (volumes complete I/O), each ok, impaired, insufficient-data, initializing or not-applicable, plus the events AWS has scheduled for the box (retirement, reboot, maintenance) with their dates. Also the recent status changes. A box with a failing check has an open status_check_failed alert. With instance_id, that box only.",
+    inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]+$/).optional(), only: z.enum(["all", "impaired", "events"]).default("impaired").describe("impaired = boxes with a failing check; events = boxes with an AWS scheduled event; all = every instance") },
+    annotations: ro,
+  }, (a) => {
+    if (a.instance_id) { const s = instanceStatusOf(a.instance_id); return s ? text({ ...s, events_log: statusEvents({ instance_id: a.instance_id, limit: 30 }) }) : fail(`no status reading for ${a.instance_id} yet (not running, or the watcher has not run since it started)`); }
+    const summary = statusSummary();
+    if (!summary.checked_at) return fail("status checks not read yet: the watcher reads them every cycle (POST /api/status-checks/refresh runs it now)");
+    return text({ summary, instances: listInstanceStatus(a.only), recent_events: statusEvents({ limit: 30 }) });
   });
 
   server.registerTool("instance_probe", {

@@ -25,6 +25,7 @@ import { refreshSwarmCosts } from "./swarm_costs.js";
 import { refreshTagHygiene } from "./tag_hygiene.js";
 import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
 import { mirrorKnowledgeInBackground } from "./graph_mirror.js";
+import { refreshStatusChecks } from "./status_checks.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -70,7 +71,14 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
   watchCron: { label: "Watcher", run: async () => {
     if (watching) return "skipped: previous sample still collecting";
     watching = true;
-    try { const r = await watchOnce(); return `sample ${r.sample_id}: ${r.samples} values, ${r.alerts} alerts${r.errors.length ? `, errors: ${r.errors.join("; ")}` : ""}`; }
+    try {
+      const r = await watchOnce();
+      // the EC2 status checks (system, instance, EBS) on the same cadence: an alert when a box is impaired
+      let status = "";
+      try { const s = await refreshStatusChecks((l) => console.log(`[status-checks] ${l}`)); status = `; status checks: ${s.instances} instances, ${s.impaired} impaired, ${s.raised} raised${s.errors.length ? `, errors: ${s.errors.length}` : ""}`; }
+      catch (e: any) { console.error(`[status-checks] failed: ${e?.message || e}`); status = `; status checks failed: ${e?.message || e}`; }
+      return `sample ${r.sample_id}: ${r.samples} values, ${r.alerts} alerts${r.errors.length ? `, errors: ${r.errors.join("; ")}` : ""}${status}`;
+    }
     finally { watching = false; }
   } },
   probeCron: { label: "Probe pass", run: async () => { const r = await probePass(); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates${r.databases ? `; ${r.databases.refreshed.length} database(s) profiled${r.databases.failed.length ? `, ${r.databases.failed.length} failed` : ""}` : ""}`; } },

@@ -783,6 +783,7 @@ bearer token (unset = open, like `API_TOKEN`). All tools are read-only:
 | `domain_inventory` | the Route 53 snapshot: every record with where it leads in this account (`linked` with the resources reached, `unmatched` for AWS names the account does not have, `external`, `none`), filterable by search, zone, state or type; or one resource's domains by kind and id |
 | `instance_probe` | runs the SSM probe below and returns the parsed JSON |
 | `instance_apps` | what runs on an instance (the apps, the OS set aside, with first/last seen and appear/disappear events, and where its log agents ship), where a program runs across the fleet, or every program running anywhere |
+| `status_checks` | the free EC2 status checks of every running instance (system, instance, attached EBS), the events AWS has scheduled for the boxes, and the recent status changes |
 | `graph_log_groups` | every log group with the system it was attributed to and how, the instances seen shipping to it, and the unattributed ones with their closest candidates |
 | `nat_attribution` | instances in a NAT gateway's VPC ranked by NetworkIn/NetworkOut over the last 1 to 24 hours (what the watcher attaches to a NAT alert as `top_receivers`) |
 | `alert_context` | one watcher alert with its parsed details, the watcher samples for the same resource over the last N hours, and the incidents already investigated for it |
@@ -1470,6 +1471,7 @@ ever created, changed or deleted), every node carries `account_id` and `updated_
                       ├─[:CARRIES_OUT]▶ (:AdvisorRecommendation)           when the change executes an approved recommendation
                       └─[:TOUCHED_IN {event, outcome, at, trigger, detail}]▶ (:AdvisorPass {id, started_at, finished_at, trigger, mode,
                             proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors})   the executor's activity log, one node per pass
+   │   (an EC2 resource also carries its status checks: system_status, instance_status, ebs_status, scheduled_events, status_checked_at)
    ├─[:RUNS {user, count, cpu_pct, rss_bytes, oldest_seconds, command, first_seen, last_seen, probes, gone}]─▶ (:AdvisorApp {id, name, kind: app|infra})
    │                                                          what runs on the box, from the probe's process list (probe 1.6), the OS set aside; gone = it left
    └─[:SHIPS_LOGS_TO {via, source, observed_at}]─▶ (:KnLogGroup)   what the box's own log agent config says it writes to (probe 1.6)
@@ -1505,6 +1507,7 @@ of an ARN (`arn:...:instance/i-abc` → `i-abc`); anything else becomes an `Advi
 | `completeIncident` (`src/investigate.ts`, any outcome) | `mirrorAlertsAndIncidents`, then the fixes' recommendations (`FROM_INCIDENT`) |
 | a concept sync wrote its row (`src/concepts.ts`) | `mirrorRecommendations([id])`, so the `DECIDED_AS` edge appears once repo2graph has the Concept |
 | a probe stored what runs on a box (`src/ssm.ts`, probe 1.6) | `mirrorApps([instance])`: the `RUNS` edges to `AdvisorApp` |
+| the watcher read the EC2 status checks (`src/status_checks.ts`, every cycle and 20 s after server start) | `mirrorStatusChecks`: the three statuses and the scheduled-event count on each `AdvisorResource` |
 | end of a collection run, end of a probe pass, the daily logs refresh (manual too), and 15 s after server start | `mirrorKnowledge` (`mirrorKnowledgeInBackground`): the whole `Kn` layer, systems, types, overlays, traffic and log attribution, rebuilt from the database; overlapping triggers are coalesced into one more pass, so the `Kn` labels are always there without a manual resync |
 | an executor pass, apply, verify or revert (`src/executor.ts`) | `mirrorActions([ids])` for the rows touched; a recommendation the executor marks done also gets `syncDecisionConcept` + `mirrorRecommendations([id])` |
 
@@ -1586,6 +1589,32 @@ The same pass judges memory, swap, load and reboots (`src/host_alerts.ts`): `mem
 `LOAD_PER_CORE` (1.5), a sustained saturation rather than a spike; `reboot` when a probe's uptime is lower than
 the previous probe's, with the reboot time worked back from the uptime. Hysteresis and system acknowledgement as
 for disks. All thresholds are runtime settings under Probe pass.
+
+## Status checks: system, instance and attached EBS
+
+`src/status_checks.ts` reads, on the watcher's cadence (`WATCH_CRON`, every 30 minutes by default) and 20 seconds
+after server start, the built-in EC2 status checks of every running instance, per account and region
+(`DescribeInstanceStatus`; free, on every instance): the **system** check (the hardware and network under the
+box), the **instance** check (the OS is reachable) and the **attached-EBS** check (volumes complete I/O), each
+`ok | impaired | insufficient-data | initializing | not-applicable`, plus the events AWS has scheduled for the box
+(retirement, reboot, maintenance) with their dates.
+
+Every reading goes to `instance_status`; every change of a status is a row in `instance_status_events` (180 days).
+One alert, an alarm, one open per instance, closed by the system when the checks pass again:
+`status_check_failed`, whose message says which check fails and what that means (a system failure is AWS-side and a
+stop/start moves the box; an instance failure is the OS, and a reboot usually clears it) and lists the scheduled
+events. Insufficient data neither raises nor closes.
+
+Read it on the Inventory drawer ("Status checks" line with the three statuses, the scheduled events and the status
+changes), `GET /api/status-checks?only=impaired|events|all`, `POST /api/status-checks/refresh`, and the agent's
+`status_checks` tool. The graph carries the statuses on the `AdvisorResource`. The read-only policy's `ec2:Describe*`
+already covers the call.
+
+The application-level status checks EC2 added in August 2026 (AWS probes an HTTP port and path on the box every
+60 seconds) are deliberately not used: they bill 0.01 USD per hour for a managed network interface per subnet and
+security group combination, which on this fleet, where many boxes sit in a security group of their own, would be
+hundreds of dollars a month. The probe's front-door reading (requests in the last 24 hours, the last real request)
+gives a free, slower answer to the same question.
 
 ## Lambda errors, commitments, RDS and ElastiCache
 

@@ -382,9 +382,23 @@ api.get("/instances/:id/metrics", (req, res) => {
 // One instance: its apps (current, and with ?gone=1 the ones that left), its recent appear/disappear events and where its agents ship logs.
 api.get("/instances/:id/apps", async (req, res) => {
   const { appsOn, appEvents } = await import("../instance_apps.js");
+  const { instanceStatusOf, statusEvents } = await import("../status_checks.js");
   const id = String(req.params.id);
   const latest = latestProbe(id);
-  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), apps: appsOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [] });
+  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), apps: appsOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [],
+    status: instanceStatusOf(id), status_events: statusEvents({ instance_id: id, limit: 20 }) });
+});
+
+// ---- EC2 status checks: system, instance and attached EBS (src/status_checks.ts) -------------------------------------------
+// ?only=impaired|events|all; the summary and the recent status changes come along.
+api.get("/status-checks", async (req, res) => {
+  const { statusSummary, listInstanceStatus, statusEvents } = await import("../status_checks.js");
+  const only = req.query.only === "impaired" || req.query.only === "events" ? req.query.only : "all";
+  res.json({ summary: statusSummary(), instances: listInstanceStatus(only), recent_events: statusEvents({ limit: 50 }) });
+});
+api.post("/status-checks/refresh", async (_req, res) => {
+  const { refreshStatusChecks } = await import("../status_checks.js");
+  try { res.json(await refreshStatusChecks((l) => console.log(`[status-checks] ${l}`))); } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 // The fleet: every program running anywhere (?kind=app|infra), or where one program runs (?name=), or the counts.
 api.get("/apps", async (req, res) => {
