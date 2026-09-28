@@ -5,9 +5,13 @@ import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
 import { applyAction, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
+import { eventsForAction, listExecutorLog } from "../executor_log.js";
 
 export const actions = Router();
 actions.use(authMiddleware);
+
+// The activity log (src/executor_log.ts): the newest passes with their lines and events, and the events made outside a pass. ?limit (default 30, max 200).
+actions.get("/actions/log", (req, res) => { res.json(listExecutorLog({ limit: Number(req.query.limit) || undefined })); });
 
 actions.get("/actions/status", async (_req, res) => {
   const status = await executorStatus();
@@ -43,7 +47,8 @@ actions.post("/actions/pause", (req, res) => {
 });
 actions.post("/actions/resume", (_req, res) => { res.json(resumeActions("page")); });
 actions.get("/actions/pause", (_req, res) => { res.json(pauseState()); });
-actions.get("/actions/:id", (req, res) => { const a = getAction(Number(req.params.id)); if (!a) return res.status(404).json({ error: "no such action" }); res.json(a); });
+// One row with its history from the activity log (every apply, read-back and revert on it, oldest first).
+actions.get("/actions/:id", (req, res) => { const a = getAction(Number(req.params.id)); if (!a) return res.status(404).json({ error: "no such action" }); res.json({ ...a, events: eventsForAction(a.id) }); });
 // The thread on a ledger row (src/chat.ts): every message, oldest first; none until the first message.
 actions.get("/actions/:id/messages", (req, res) => {
   const id = Number(req.params.id);

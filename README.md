@@ -1410,7 +1410,9 @@ ever created, changed or deleted), every node carries `account_id` and `updated_
    ◀─[:FLAGGED {run_id, reason}]── (:AdvisorControl {id, title}) ─[:HAS_PLAYBOOK]─▶ (:AdvisorPlaybook {control_id, title, tier, effort})
    ◀─[:TARGETS]──── (:AdvisorAction {id, kind, status, mode, trigger, title, reason, rollback, est_usd_month, result, error,
                       created_at, applied_at, verified_at, reverted_at})   the executor's ledger: planned, made, read back, undone, retired
-                      └─[:CARRIES_OUT]▶ (:AdvisorRecommendation)           when the change executes an approved recommendation
+                      ├─[:CARRIES_OUT]▶ (:AdvisorRecommendation)           when the change executes an approved recommendation
+                      └─[:TOUCHED_IN {event, outcome, at, trigger, detail}]▶ (:AdvisorPass {id, started_at, finished_at, trigger, mode,
+                            proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors})   the executor's activity log, one node per pass
 ```
 
 Everything the advisor plans, does or decides is in the graph, always: the ledger is mirrored on every pass, apply,
@@ -1873,6 +1875,16 @@ revert make), through `iam:SimulatePrincipalPolicy` from the read identity when 
 read policy; cached ten minutes) and, whatever the case, from denied applies (a denial is remembered per IAM
 action until the role allows it again). A kind the role cannot apply shows "by hand: role lacks …" instead of
 Apply, the pass leaves its rows for a person with a note, and the API refuses them; the same for Revert.
+
+**The activity log.** The ledger says what each proposal became; the log says what the actuator did, in order.
+`src/executor_log.ts` records every pass, scheduled or manual, including the ones that did nothing because the
+mode was off or the executor was paused, with its counts, its module notes and every line it printed (what each
+action looked at, what it proposed, what waited on the cap, the grace period or Jev), and every apply, read-back
+and revert on a row with its outcome and who triggered it (`schedule`, `manual`, the chat). Auto-actions › Activity
+shows it, collapsed by default: click a pass for its changes and its lines; an entry outside a pass is an Apply,
+Check or Revert someone made by hand. `GET /actions/log` returns it, `GET /actions/:id` carries the row's own
+history as `events`, and the log keeps 90 days. Every pass is mirrored into the graph as an `AdvisorPass` node with
+a `TOUCHED_IN` edge from each row it applied, read back or reverted.
 
 **The actuator role.** `ACT_ROLE_ARN` is the only identity that ever changes AWS. The executor assumes it from the
 read credentials for the change itself and for nothing else; the read role never gains a write action. The page

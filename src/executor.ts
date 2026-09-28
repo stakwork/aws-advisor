@@ -26,6 +26,8 @@ import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx 
 import { canonicalResource } from "./resource_id.js";
 import { mirrorActionsInBackground, mirrorRecommendationsInBackground } from "./graph_mirror.js";
 import { syncDecisionConceptInBackground } from "./concepts.js";
+import { beginPass, endPass, logEvent } from "./executor_log.js";
+import { mirrorPassInBackground } from "./graph_mirror.js";
 import { checkLine, checkProposals, parseCheck, reusableCheck, type ProposalCheck } from "./proposal_check.js";
 
 db.exec(`create table if not exists actions (
@@ -500,7 +502,9 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   if (paused.paused) throw new Error(`auto-actions are paused by ${paused.by}${paused.reason ? ` (${paused.reason})` : ""}; resume from the page or the chat`);
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
   if (recentFailures(row.dedupe) >= FAILURES_BEFORE_REFUSING) {
-    db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(`failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow`, trigger, id);
+    const why = `failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow`;
+    db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(why, trigger, id);
+    logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "refused", trigger, detail: why });
     return getAction(id)!;
   }
   const cap = (await actuatorCapabilities()).caps[row.kind];
@@ -508,7 +512,12 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   const p = proposalOf(row);
   let creds: Creds;
   try { creds = credsForAccount(executorCreds(), row.account_id); creds.act(); }
-  catch (e: any) { db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(e?.message || String(e), trigger, id); return getAction(id)!; }
+  catch (e: any) {
+    const why = e?.message || String(e);
+    db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(why, trigger, id);
+    logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "refused", trigger, detail: why });
+    return getAction(id)!;
+  }
   console.log(`[executor] applying #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""}: ${row.title}`);
   // A person's Apply overrides a Jev hold (that is the human decision); the objection stays on record with the result.
   const overrode = row.check?.verdict === "hold" ? ` · applied by ${trigger} over Jev's hold: ${row.check.reason}` : "";
@@ -516,33 +525,38 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
     const result = (await mod.apply(p, creds)) + overrode;
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.apply ?? []);
     db.prepare("update actions set status = 'applied', mode = 'apply', trigger = ?, result = ?, error = null, applied_at = datetime('now') where id = ?").run(trigger, result, id);
+    logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "applied", trigger, detail: result });
   } catch (e) {
     const error = actuatorDenied(e, row.kind, "apply") ?? describeError(e, `${row.kind} ${row.resource}`);
     db.prepare("update actions set status = 'failed', mode = 'apply', trigger = ?, error = ?, applied_at = datetime('now') where id = ?").run(trigger, error, id);
+    logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "failed", trigger, detail: error });
     console.error(`[executor] #${id} failed: ${error}`);
     return getAction(id)!;
   }
-  await verifyAction(id, creds);
+  await verifyAction(id, creds, trigger);
   return getAction(id)!;
 }
 
 /** Reads an applied row back; `verified` when the change is in place, left `applied` while it is still in flight. */
-export async function verifyAction(id: number, creds?: Creds): Promise<ActionRow> {
+export async function verifyAction(id: number, creds?: Creds, trigger?: string): Promise<ActionRow> {
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
   if (row.status !== "applied") return row;
   const mod = modules.get(row.kind); if (!mod) return row;
-  try { return await verifyInner(row, mod, creds); } finally { mirrorActionsInBackground([id]); }
+  try { return await verifyInner(row, mod, creds, trigger); } finally { mirrorActionsInBackground([id]); }
 }
 
-async function verifyInner(row: ActionRow, mod: ActionModule, creds?: Creds): Promise<ActionRow> {
+async function verifyInner(row: ActionRow, mod: ActionModule, creds?: Creds, trigger?: string): Promise<ActionRow> {
   const id = row.id;
+  const event = (outcome: "verified" | "failed" | "pending" | "error", detail: string) => logEvent({ action_id: id, kind: row.kind, event: "verify", outcome, trigger, detail });
   try {
     const v = await mod.verify(proposalOf(row), credsForAccount(creds || executorCreds(), row.account_id));
-    if (v.ok === true) { db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); closeRecommendation(getAction(id)!); }
-    else if (v.ok === false) db.prepare("update actions set status = 'failed', error = ? where id = ?").run(`read-back disagrees: ${v.note}`, id);
-    else db.prepare("update actions set result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id);
+    if (v.ok === true) { db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); event("verified", v.note); closeRecommendation(getAction(id)!); }
+    else if (v.ok === false) { db.prepare("update actions set status = 'failed', error = ? where id = ?").run(`read-back disagrees: ${v.note}`, id); event("failed", `read-back disagrees: ${v.note}`); }
+    else { db.prepare("update actions set result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); event("pending", v.note); }
   } catch (e) {
-    db.prepare("update actions set result = coalesce(result, '') || ' · read-back failed: ' || ? where id = ?").run(describeError(e, `${row.kind} verify ${row.resource}`, 200), id);
+    const m = describeError(e, `${row.kind} verify ${row.resource}`, 200);
+    db.prepare("update actions set result = coalesce(result, '') || ' · read-back failed: ' || ? where id = ?").run(m, id);
+    event("error", `read-back failed: ${m}`);
   }
   return getAction(id)!;
 }
@@ -561,9 +575,11 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
     const result = await mod.revert(proposalOf(row), creds);
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.revert ?? []);
     db.prepare("update actions set status = 'reverted', reverted_at = datetime('now'), result = coalesce(result, '') || ' · reverted: ' || ?, notified_at = null, notify_result = null where id = ?").run(result, id);
+    logEvent({ action_id: id, kind: row.kind, event: "revert", outcome: "reverted", trigger: by, detail: result });
   } catch (e) {
     const error = actuatorDenied(e, row.kind, "revert") ?? describeError(e, `${row.kind} revert ${row.resource}`);
     db.prepare("update actions set error = ? where id = ?").run(`revert failed: ${error}`, id);
+    logEvent({ action_id: id, kind: row.kind, event: "revert", outcome: "failed", trigger: by, detail: error });
     throw new Error(error);
   } finally { mirrorActionsInBackground([id]); }
   return getAction(id)!;
@@ -582,14 +598,18 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
     const t0 = Date.now();
     const mode = config.actMode;
     const out: PassResult = { mode, proposed: 0, fresh: 0, applied: 0, verified: 0, failed: 0, refused: 0, held: 0, stale: 0, notes: [], errors: [], took_ms: 0 };
-    const log = (l: string) => console.log(`[executor] ${l}`);
-    if (mode === "off") { out.notes.push("mode off: nothing planned"); out.took_ms = Date.now() - t0; return out; }
+    // The activity log (src/executor_log.ts): every line the pass prints is kept with the pass, and the record closes whichever way the pass ends.
+    const passId = beginPass(trigger, mode);
+    const lines: string[] = [];
+    const log = (l: string) => { console.log(`[executor] ${l}`); lines.push(l); };
+    try {
+    if (mode === "off") { const n = "mode off: nothing planned"; out.notes.push(n); log(n); out.took_ms = Date.now() - t0; return out; }
     const paused = pauseState();
     if (paused.paused) { const n = `${pauseLine(paused)}; nothing planned or applied`; out.notes.push(n); log(n); out.took_ms = Date.now() - t0; return out; }
     let creds: Creds;
     try { creds = executorCreds(); } catch (e: any) { out.errors.push(e?.message || String(e)); out.took_ms = Date.now() - t0; return out; }
     // Rows applied earlier and still unverified (a snapshot still archiving) get read back first.
-    for (const r of db.prepare("select id from actions where status = 'applied' order by id").all() as { id: number }[]) { const v = await verifyAction(r.id, creds); if (v.status === "verified") out.verified++; }
+    for (const r of db.prepare("select id from actions where status = 'applied' order by id").all() as { id: number }[]) { const v = await verifyAction(r.id, creds, trigger); if (v.status === "verified") { out.verified++; log(`#${r.id} read back: verified`); } }
     const budget = { left: Math.max(1, config.actMaxPerPass) };
     const touched = new Set<number>();
     const caps = mode === "apply" ? (await actuatorCapabilities()).caps : {};
@@ -635,8 +655,10 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
     out.took_ms = Date.now() - t0;
     log(`${mode}: ${out.proposed} proposed (${out.fresh} new), ${out.applied} applied, ${out.verified} verified, ${out.failed} failed, ${out.refused} refused, ${out.held} held by Jev, ${out.stale} stale in ${out.took_ms} ms${out.errors.length ? `; errors: ${out.errors.join("; ")}` : ""}`);
     // The narrated pass (src/pass_report.ts): the agent writes the short version once per distinct outcome. Dynamic import: that module imports this one.
-    import("./pass_report.js").then(({ narratePass }) => narratePass(out, trigger)).then((r) => { if (r && "skipped" in r) log(`narrate: ${r.skipped}`); }).catch((e: any) => log(`narrate: ${e?.message || e}`));
+    import("./pass_report.js").then(({ narratePass }) => narratePass(out, trigger)).then((r) => { if (r && "skipped" in r) console.log(`[executor] narrate: ${r.skipped}`); }).catch((e: any) => console.log(`[executor] narrate: ${e?.message || e}`));
     return out;
+    } catch (e: any) { out.errors.push(describeError(e, "executor pass")); throw e; }
+    finally { out.took_ms = Date.now() - t0; endPass(passId, out, lines); mirrorPassInBackground(passId); }
   })().finally(() => { passInFlight = null; });
   return passInFlight;
 }
