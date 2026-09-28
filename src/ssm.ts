@@ -10,7 +10,7 @@ import { checkDiskLevels } from "./disk_alerts.js";
 import { applyProbeDisks } from "./ebs_inventory.js";
 import { checkHostLevels } from "./host_alerts.js";
 import { effectiveSignals } from "./signal_rules.js";
-import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN } from "./signals.js";
+import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN, SIGNALS_MAX_CHARS } from "./signals.js";
 
 /**
  * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
@@ -178,7 +178,7 @@ export function probeDocument() {
     schemaVersion: "2.2",
     description: `aws-advisor read-only probe ${PROBE_VERSION}`,
     parameters: {
-      signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: SIGNALS_ALLOWED_PATTERN },
+      signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: SIGNALS_ALLOWED_PATTERN, maxChars: SIGNALS_MAX_CHARS },
     },
     mainSteps: [
       {

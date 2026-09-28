@@ -6,7 +6,8 @@
       "type": "String",
       "description": "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).",
       "default": "login=log(ged)? ?in|sign(ed)?[- ]?in;;auth=authenticat|authoriz;;payment=payment|invoice|keysend;;message=sent message|new message|received message;;join=joined;;upload=upload;;write_request=\"(POST|PUT|PATCH|DELETE) ;;websocket=websocket|ws open;;subscribe=subscribe|checkout",
-      "allowedPattern": "^(?:[^'\\r\\n]{1,1000}){1,4}$"
+      "allowedPattern": "^[^'\\r\\n]+$",
+      "maxChars": 4000
     }
   },
   "mainSteps": [

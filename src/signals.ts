@@ -25,11 +25,15 @@ export const DEFAULT_SIGNALS_STRING = DEFAULT_SIGNALS.map(([n, re]) => `${n}=${r
 
 /** What the SSM document's parameter accepts: one line, no single quote (the script wraps the value in single quotes). */
 /**
- * Up to 4000 characters without quotes or newlines, for the SSM document only. SSM checks it with RE2, which caps a
- * repeat count at 1000, hence the nested group; RE2 is linear, but a backtracking engine (JavaScript's) can take
- * minutes on a near-miss, so parseSignals checks the length and the characters itself and never uses this pattern.
+ * No quotes or newlines, for the SSM document only; the length cap (4000) is the parameter's maxChars, not the
+ * pattern. Recent SSM agents compile allowedPattern with Go's RE2 before running the document, and RE2 rejects a
+ * repeat count over 1000, counting nested groups by their product: `(?:[^']{1,1000}){1,4}` compiled server-side
+ * but every agent that checks it dropped the job ("invalid repeat count"), so the pattern carries no counts at all.
+ * A backtracking engine (JavaScript's) can take minutes on a near-miss of a counted pattern, which is one more
+ * reason parseSignals checks the length and the characters itself and never uses this pattern.
  */
-export const SIGNALS_ALLOWED_PATTERN = "^(?:[^'\\r\\n]{1,1000}){1,4}$";
+export const SIGNALS_ALLOWED_PATTERN = "^[^'\\r\\n]+$";
+export const SIGNALS_MAX_CHARS = 4000;
 export const NAME_RE = /^[a-z][a-z0-9_]{0,23}$/;
 export const MAX_PATTERNS = 40;
 
@@ -40,7 +44,7 @@ export function parseSignals(value: string): SignalPattern[] {
   // leading whitespace is dropped, trailing whitespace is kept: a pattern may end in a space (`"POST `)
   const v = String(value ?? "").replace(/^\s+/, "");
   if (!v) throw new Error("at least one pattern; the default list is in the placeholder");
-  if (v.length > 4000) throw new Error("at most 4000 characters");
+  if (v.length > SIGNALS_MAX_CHARS) throw new Error(`at most ${SIGNALS_MAX_CHARS} characters`);
   if (/['\r\n]/.test(v)) throw new Error("no single quotes or line breaks (the probe wraps the value in single quotes)");
   const out: SignalPattern[] = []; const seen = new Set<string>();
   for (const part of v.split(SIGNALS_SEP)) {
