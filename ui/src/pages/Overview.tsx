@@ -107,20 +107,6 @@ function ObservationCard() {
   );
 }
 
-/** CloudTrail write events by people and deployments, top actions; heartbeats counted. */
-function ChangesSummary() {
-  const [t, setT] = useState<any>(null);
-  useEffect(() => { api("/trail?hours=24").then(setT).catch(() => setT(null)); }, []);
-  if (!t) return <Empty>Loading…</Empty>;
-  if (!t.last_fetch) return <div className="text-sm text-zinc-500">Not collected yet: needs cloudtrail:LookupEvents, then the 06:50 job or <Link to="/changes" className="underline">Collect now</Link>.</div>;
-  return (
-    <div className="space-y-1 text-sm">
-      <div className="text-xs text-zinc-500">{t.events} by people or deployments · {Number(t.noise).toLocaleString()} machine heartbeats hidden · collected {when(t.last_fetch)}</div>
-      <ul className="space-y-0.5">{t.by_action.slice(0, 7).map((a: any, i: number) => <li key={i} className="flex justify-between gap-2 text-xs"><span className="min-w-0 truncate text-zinc-300"><span className="font-mono text-zinc-100">{a.event_name}</span> <span className="text-zinc-500">by {a.username || "unknown"}</span></span><span className="text-zinc-500">{a.n}</span></li>)}</ul>
-    </div>
-  );
-}
-
 /** Approved savings: claimed against realised, from the daily verification (seven days after a decision). */
 function RealisedLine() {
   const [v, setV] = useState<any>(null);
@@ -175,23 +161,10 @@ function ReviewSummary() {
   );
 }
 
-/** This month so far and where it is heading, priced from what runs now; the price check surfaces only when it fails. */
-function ForecastSummary() {
-  const [d, setD] = useState<any>(null);
-  useEffect(() => { api("/forecast").then(setD).catch(() => setD(null)); }, []);
-  if (!d) return <Empty>Loading…</Empty>;
-  const f = d.forecast; const pc = d.price_check?.reconciliation;
-  const pcFailed = pc && !pc.eval.every((e: any) => e.pass);
-  if (!f) return <div className="text-sm text-zinc-500">Not computed yet. <Link to="/bill" className="underline">Open This month</Link> to run it.</div>;
-  return (
-    <div className="space-y-1 text-sm">
-      <div className="flex justify-between"><span className="text-zinc-400">spent so far, {f.elapsed_days} days</span><span className="text-zinc-100">{usd(f.mtd_net)}</span></div>
-      <div className="flex justify-between"><span className="text-zinc-400">on track for</span><span className="text-zinc-100">{usd(f.forecast_net)}{f.delta_pct != null && <span className={`ml-1 ${f.delta_pct > 5 ? "text-amber-300" : f.delta_pct < -5 ? "text-emerald-300" : "text-zinc-500"}`}>({f.delta_pct > 0 ? "+" : ""}{f.delta_pct.toFixed(1)} % vs last month)</span>}</span></div>
-      <div className="flex justify-between"><span className="text-zinc-400">locked in</span><span>{usd(f.locked_in)}</span></div>
-      {f.movers?.length > 0 && <div className="text-xs text-zinc-500">moved most: {f.movers.slice(0, 3).map((m: any) => `${m.service.replace(/^Amazon |^AWS /, "")} ${m.delta > 0 ? "+" : "−"}${usd(Math.abs(m.delta))}`).join(" · ")}</div>}
-      {pcFailed && <div className="text-xs text-amber-300">Price check failed for {d.price_check.month}: saving estimates may be off. <Link to="/bill" className="underline">See why</Link></div>}
-    </div>
-  );
+
+/** A section title on the overview, with a link to the page that holds the full picture. */
+function SectionHeading({ title, to, label = "open →" }: { title: string; to: string; label?: string }) {
+  return <div className="flex items-baseline justify-between border-b border-zinc-800 pb-1"><h2 className="text-base font-medium text-zinc-100">{title}</h2><Link to={to} className="text-xs text-zinc-500 hover:text-zinc-300">{label}</Link></div>;
 }
 
 export default function Overview() {
@@ -235,7 +208,7 @@ export default function Overview() {
   const hasSpend = Boolean(spend?.as_of);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">Overview</h1>
@@ -247,8 +220,87 @@ export default function Overview() {
         <Button onClick={startRun} disabled={d.busy || !d.awsConfigured}>{d.busy ? "Running…" : "Run now"}</Button>
       </div>
 
-      {/* Spend: today, last 7 days, month to date with its projection, previous month; from spend_daily (Cost Explorer, at most every 6 h). */}
-      <div className="space-y-2">
+      {!d.latestRun && <Empty>{d.awsConfigured ? <>Start a run to collect findings.</> : <>Add AWS credentials in <Link className="underline" to="/settings">Settings</Link>, then start a run.</>}</Empty>}
+
+      {/* Alerts: what is open now, then the agent's morning note and yesterday's statistical review. */}
+      <section className="space-y-4">
+        <SectionHeading title="Alerts" to="/alerts?status=all" />
+        {total > 0 && alerts ? (
+          <Card title={<span className="flex flex-wrap items-center justify-between gap-2">
+            <span className="flex items-center gap-2">Open ({total})
+              {counts.alarm > 0 && <span className="flex items-center gap-1"><Badge>alarm</Badge>{counts.alarm}</span>}
+              {counts.warning > 0 && <span className="flex items-center gap-1"><Badge>warning</Badge>{counts.warning}</span>}
+              {counts.info > 0 && <span className="flex items-center gap-1"><Badge>info</Badge>{counts.info}</span>}
+            </span>
+            <span className="flex items-center gap-3 text-xs font-normal">
+              {total > PREVIEW && <button className="underline" onClick={() => { setExpanded(!expanded); setAlertPage(1); }}>{expanded ? `Show first ${PREVIEW}` : `Show all (${total})`}</button>}
+            </span>
+          </span>} className="border-amber-500/30">
+            <ul className="divide-y divide-zinc-800">
+              {alerts.alerts.map((a: any) => {
+                const inc = incidentOfAlertRow(a);
+                const triage = triageOfAlertRow(a);
+                return (
+                  <li key={a.id} className="py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="flex min-w-0 items-center gap-2"><Badge>{alertLevel(a)}</Badge><Link to={`/alerts?status=all&id=${a.id}`} className="truncate text-zinc-200 hover:underline" title={a.details || ""}>{a.message}</Link><span className="shrink-0 text-xs text-zinc-500">{when(a.created_at)}</span></span>
+                      <span className="flex shrink-0 gap-2">
+                        <InvestigateButton incident={inc} enabled={Boolean(d.agentConfigured) && d.alertInvestigate !== "off"} busy={investigating === a.id} onClick={() => investigate(a.id)} />
+                        <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => ack(a.id)}>Acknowledge</Button>
+                      </span>
+                    </div>
+                    {triage && <div className="mt-1"><TriageLine alert={a} triage={triage} compact /></div>}
+                    {inc && <div className="mt-1 rounded border border-zinc-800 bg-zinc-950/60 p-2"><IncidentView incident={inc} compact /></div>}
+                  </li>
+                );
+              })}
+            </ul>
+            {expanded
+              ? <Pager className="mt-3" page={alerts.page} pageSize={alerts.page_size} total={total} onPage={setAlertPage} always />
+              : total > PREVIEW && <div className="mt-2 text-xs text-zinc-500">{total - alerts.alerts.length} more open · <button className="underline" onClick={() => setExpanded(true)}>show all</button></div>}
+          </Card>
+        ) : alerts && <div className="text-sm text-zinc-500">No open alerts.</div>}
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card title={<span className="flex items-center justify-between">Morning observation <span className="text-xs font-normal text-zinc-500">the agent's read of the day</span></span>}>
+            <ObservationCard />
+          </Card>
+          <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
+            <ReviewSummary />
+          </Card>
+        </div>
+      </section>
+
+      {/* Recommendations: what is open, the largest savings, and what past approvals did to the bill. */}
+      {d.latestRun && (
+        <section className="space-y-4">
+          <SectionHeading title="Recommendations" to="/recommendations" />
+          <div className="grid grid-cols-2 gap-4">
+            <Stat label="Open recommendations" value={recs.open?.n || 0} hint={<>≈ {usd(d.open_saving?.distinct ?? recs.open?.saving)} / month if all applied{d.open_saving?.overlap > 0 ? <span title="Several actions claim the same resource; only the largest claim per resource is counted"> ({usd(d.open_saving.overlap)} more is claimed twice)</span> : null}{recs.pending?.n ? <> · <Link className="underline" to="/recommendations?status=pending">{recs.pending.n} in progress</Link></> : null}</>} />
+            <Stat label="Findings in last run" value={d.latestRun.findings_count} hint={<Link className="underline" to="/findings">browse</Link>} />
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card title={<span className="flex items-center justify-between">Top recommendations by saving <RealisedLine /></span>}>
+              {d.top.length === 0 ? <Empty>None open.</Empty> : (
+                <ul className="divide-y divide-zinc-800">
+                  {d.top.map((r: any) => (
+                    <li key={r.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                      <Link to={`/recommendations?id=${r.id}`} className="truncate hover:underline">{r.title}</Link>
+                      <span className="flex shrink-0 items-center gap-2"><Badge>{r.tier}</Badge><span className="w-20 text-right font-medium text-zinc-100">{usd(r.est_monthly_saving)}</span></span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+            <Card title={<span className="flex items-center justify-between">Impact of your decisions <span className="text-xs font-normal text-zinc-500">what the bill did after each approval, measured from seven days on</span></span>}>
+              <ImpactList />
+            </Card>
+          </div>
+        </section>
+      )}
+
+      {/* Billing: daily spend (Cost Explorer, at most every 6 h), the last full month, list prices of what runs, and commitments. This month's forecast lives on its own page. */}
+      <section className="space-y-4">
+        <SectionHeading title="Billing" to="/bill" label="this month →" />
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Stat label={spend?.today?.usd != null ? "Spend today" : "Latest day"} value={spend?.today?.usd != null ? usd(spend.today.usd, 2) : spend?.latest ? usd(spend.latest.usd, 2) : "—"}
             hint={spend?.today?.usd != null ? `${spend.today.day} · partial day, Cost Explorer is still adding to it` : spend?.latest ? `${spend.latest.day}${spend.latest.partial ? " · still filling in; today is not in Cost Explorer yet" : ""}` : "no spend data yet"} />
@@ -266,119 +318,50 @@ export default function Overview() {
           </div>
           {spend?.series?.length > 0 && <div className="mt-2"><DailyCostChart series={spend.series} today={spend.today.day} asOf={spend.as_of} /></div>}
         </Card>
-      </div>
 
-      {total > 0 && alerts && (
-        <Card title={<span className="flex flex-wrap items-center justify-between gap-2">
-          <span className="flex items-center gap-2">Alerts ({total})
-            {counts.alarm > 0 && <span className="flex items-center gap-1"><Badge>alarm</Badge>{counts.alarm}</span>}
-            {counts.warning > 0 && <span className="flex items-center gap-1"><Badge>warning</Badge>{counts.warning}</span>}
-            {counts.info > 0 && <span className="flex items-center gap-1"><Badge>info</Badge>{counts.info}</span>}
-          </span>
-          <span className="flex items-center gap-3 text-xs font-normal">
-            {total > PREVIEW && <button className="underline" onClick={() => { setExpanded(!expanded); setAlertPage(1); }}>{expanded ? `Show first ${PREVIEW}` : `Show all (${total})`}</button>}
-            <Link className="underline" to="/alerts?status=all">all alerts</Link>
-          </span>
-        </span>} className="border-amber-500/30">
-          <ul className="divide-y divide-zinc-800">
-            {alerts.alerts.map((a: any) => {
-              const inc = incidentOfAlertRow(a);
-              const triage = triageOfAlertRow(a);
-              return (
-                <li key={a.id} className="py-2 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="flex min-w-0 items-center gap-2"><Badge>{alertLevel(a)}</Badge><Link to={`/alerts?status=all&id=${a.id}`} className="truncate text-zinc-200 hover:underline" title={a.details || ""}>{a.message}</Link><span className="shrink-0 text-xs text-zinc-500">{when(a.created_at)}</span></span>
-                    <span className="flex shrink-0 gap-2">
-                      <InvestigateButton incident={inc} enabled={Boolean(d.agentConfigured) && d.alertInvestigate !== "off"} busy={investigating === a.id} onClick={() => investigate(a.id)} />
-                      <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => ack(a.id)}>Acknowledge</Button>
-                    </span>
-                  </div>
-                  {triage && <div className="mt-1"><TriageLine alert={a} triage={triage} compact /></div>}
-                  {inc && <div className="mt-1 rounded border border-zinc-800 bg-zinc-950/60 p-2"><IncidentView incident={inc} compact /></div>}
-                </li>
-              );
-            })}
-          </ul>
-          {expanded
-            ? <Pager className="mt-3" page={alerts.page} pageSize={alerts.page_size} total={total} onPage={setAlertPage} always />
-            : total > PREVIEW && <div className="mt-2 text-xs text-zinc-500">{total - alerts.alerts.length} more open · <button className="underline" onClick={() => setExpanded(true)}>show all</button></div>}
-        </Card>
-      )}
+        {(d.latestRun || d.inventory?.refreshed_at) && (
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            {d.latestRun && <>
+              <Stat label="Last full month invoice" value={usd(invoice)} hint="net unblended" />
+              <Stat label="On-demand usage" value={usd(rt.Usage?.value)} hint={`Savings Plan covered ${usd(rt.SavingsPlanCoveredUsage?.value)} · reserved ${usd(rt.DiscountedUsage?.value)}`} />
+            </>}
+            {d.inventory?.refreshed_at && <>
+              <Stat label="EC2 on-demand list price" value={usd(d.inventory.ec2.monthly_usd_running)} hint={<Link className="underline" to="/inventory?sort=-monthly_usd">running instances / month{d.inventory.ec2.running_unpriced ? ` · ${d.inventory.ec2.running_unpriced} unpriced` : ""}</Link>} />
+              <Stat label="RDS + ElastiCache" value={usd(d.inventory.rds.monthly_usd + d.inventory.elasticache.monthly_usd)} hint={<Link className="underline" to="/inventory?tab=rds">{d.inventory.rds.total} databases · {d.inventory.elasticache.total} cache clusters / month</Link>} />
+            </>}
+          </div>
+        )}
 
-      {!d.latestRun && <Empty>{d.awsConfigured ? <>Start a run to collect findings.</> : <>Add AWS credentials in <Link className="underline" to="/settings">Settings</Link>, then start a run.</>}</Empty>}
-
-      {d.latestRun && (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Stat label="Last full month invoice" value={usd(invoice)} hint="net unblended" />
-          <Stat label="On-demand usage" value={usd(rt.Usage?.value)} hint={`Savings Plan covered ${usd(rt.SavingsPlanCoveredUsage?.value)} · reserved ${usd(rt.DiscountedUsage?.value)}`} />
-          <Stat label="Open recommendations" value={recs.open?.n || 0} hint={<>≈ {usd(d.open_saving?.distinct ?? recs.open?.saving)} / month if all applied{d.open_saving?.overlap > 0 ? <span title="Several actions claim the same resource; only the largest claim per resource is counted"> ({usd(d.open_saving.overlap)} more is claimed twice)</span> : null}{recs.pending?.n ? <> · <Link className="underline" to="/recommendations?status=pending">{recs.pending.n} in progress</Link></> : null}</>} />
-          <Stat label="Findings in last run" value={d.latestRun.findings_count} hint={<Link className="underline" to="/findings">browse</Link>} />
-        </div>
-      )}
-
-      {d.inventory?.refreshed_at && (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Stat label="Running instances" value={d.inventory.ec2.running} hint={<><Link className="underline" to="/inventory">inventory</Link> · {d.inventory.ec2.stopped} stopped · refreshed {when(d.inventory.refreshed_at)}</>} />
-          <Stat label="SSM coverage" value={`${d.inventory.ec2.ssm_online} / ${d.inventory.ec2.running}`} hint={<Link className="underline" to="/inventory?ssm=unmanaged">{d.inventory.ec2.ssm_unmanaged} not managed · {d.inventory.ec2.ssm_lost} connection lost</Link>} />
-          <Stat label="EC2 on-demand list price" value={usd(d.inventory.ec2.monthly_usd_running)} hint={<Link className="underline" to="/inventory?sort=-monthly_usd">running instances / month{d.inventory.ec2.running_unpriced ? ` · ${d.inventory.ec2.running_unpriced} unpriced` : ""}</Link>} />
-          <Stat label="RDS + ElastiCache" value={usd(d.inventory.rds.monthly_usd + d.inventory.elasticache.monthly_usd)} hint={<Link className="underline" to="/inventory?tab=rds">{d.inventory.rds.total} databases · {d.inventory.elasticache.total} cache clusters / month</Link>} />
-        </div>
-      )}
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card title={<span className="flex items-center justify-between">Top recommendations by saving <RealisedLine /></span>}>
-          {d.top.length === 0 ? <Empty>None open.</Empty> : (
-            <ul className="divide-y divide-zinc-800">
-              {d.top.map((r: any) => (
-                <li key={r.id} className="flex items-center justify-between gap-3 py-2 text-sm">
-                  <Link to={`/recommendations?id=${r.id}`} className="truncate hover:underline">{r.title}</Link>
-                  <span className="flex shrink-0 items-center gap-2"><Badge>{r.tier}</Badge><span className="w-20 text-right font-medium text-zinc-100">{usd(r.est_monthly_saving)}</span></span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-        <Card title="On-demand spend by service (last full month)">
-          {metric("on_demand_by_service").length === 0 ? <Empty>No cost data yet.</Empty> : (
-            <ul className="space-y-1">
-              {metric("on_demand_by_service").slice(0, 10).map((m) => {
-                const max = metric("on_demand_by_service")[0].value || 1;
-                return (
-                  <li key={m.label} className="text-sm">
-                    <div className="flex justify-between"><span className="truncate text-zinc-300">{m.label}</span><span className="text-zinc-100">{usd(m.value)}</span></div>
-                    <div className="h-1.5 rounded bg-zinc-800"><div className="h-1.5 rounded bg-orange-500" style={{ width: `${(100 * m.value) / max}%` }} /></div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-        <Card title={<span className="flex items-center justify-between">Changes in the last 24 h <Link to="/changes" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">open →</Link></span>}>
-          <ChangesSummary />
-        </Card>
-        <Card title="Inside EC2 - Other (last full month)">
-          {metric("ec2_other_usage").length === 0 ? <Empty>No data.</Empty> : (
-            <ul className="space-y-1 text-sm">
-              {metric("ec2_other_usage").map((m) => <li key={m.label} className="flex justify-between"><span className="text-zinc-300">{m.label}</span><span>{usd(m.value)}</span></li>)}
-            </ul>
-          )}
-        </Card>
-        <Card title={<span className="flex items-center justify-between">Morning observation <span className="text-xs font-normal text-zinc-500">the agent's read of the day</span></span>}>
-          <ObservationCard />
-        </Card>
-        <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
-          <ReviewSummary />
-        </Card>
-        <Card title={<span className="flex items-center justify-between">This month <Link to="/bill" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">open →</Link></span>}>
-          <ForecastSummary />
-        </Card>
-        <Card title="Commitments">
-          <CommitmentsList fallback={d.commitments} />
-        </Card>
-        <Card className="lg:col-span-2" title={<span className="flex items-center justify-between">Impact of your decisions <span className="text-xs font-normal text-zinc-500">what the bill did after each approval, measured from seven days on</span></span>}>
-          <ImpactList />
-        </Card>
-      </div>
+        {d.latestRun && (
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card title="On-demand spend by service (last full month)">
+              {metric("on_demand_by_service").length === 0 ? <Empty>No cost data yet.</Empty> : (
+                <ul className="space-y-1">
+                  {metric("on_demand_by_service").slice(0, 10).map((m) => {
+                    const max = metric("on_demand_by_service")[0].value || 1;
+                    return (
+                      <li key={m.label} className="text-sm">
+                        <div className="flex justify-between"><span className="truncate text-zinc-300">{m.label}</span><span className="text-zinc-100">{usd(m.value)}</span></div>
+                        <div className="h-1.5 rounded bg-zinc-800"><div className="h-1.5 rounded bg-orange-500" style={{ width: `${(100 * m.value) / max}%` }} /></div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </Card>
+            <Card title="Commitments">
+              <CommitmentsList fallback={d.commitments} />
+            </Card>
+            <Card title="Inside EC2 - Other (last full month)">
+              {metric("ec2_other_usage").length === 0 ? <Empty>No data.</Empty> : (
+                <ul className="space-y-1 text-sm">
+                  {metric("ec2_other_usage").map((m) => <li key={m.label} className="flex justify-between"><span className="text-zinc-300">{m.label}</span><span>{usd(m.value)}</span></li>)}
+                </ul>
+              )}
+            </Card>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
