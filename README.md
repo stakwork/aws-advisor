@@ -1974,7 +1974,10 @@ is read back the recommendation is marked done by the executor, with the decisio
 **The ledger** (`actions`, `GET /api/actions?status=&kind=&page=&page_size=`, 25 a page, `?id=` lands on the page holding that row): `proposed` (waiting for an apply pass or a click),
 `applied` (the call succeeded, read-back pending), `verified`, `failed`, `refused` (no role, or failing
 repeatedly), `reverted`, `stale` (the latest pass no longer proposes it: the hour moved on). An open proposal with
-the same dedupe key is refreshed, not duplicated. `GET /api/actions/status` returns mode, role, who the executor
+the same dedupe key is refreshed, not duplicated: the row keeps its id and its proposal date, and the page shows the
+date it was proposed with the last pass that saw it underneath. A proposal that went stale and comes back revives
+its newest stale row (same id, same date, `revived_at` set) instead of inserting another; the grace period then
+restarts from the revival, since the announcement people saw may be days old. `GET /api/actions/status` returns mode, role, who the executor
 acts as, the policy and the trust policy; `POST /api/actions/run`, `GET /api/actions/preview`,
 `POST /api/actions/:id/apply|verify|revert`.
 

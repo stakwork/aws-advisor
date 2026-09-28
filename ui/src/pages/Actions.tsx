@@ -234,7 +234,7 @@ export default function Actions() {
               {data.actions.map((a) => (
                 <Fragment key={a.id}>
                   <tr className={`cursor-pointer border-t border-zinc-800/60 ${open === a.id ? "bg-zinc-900/60" : "hover:bg-zinc-900/40"}`} onClick={() => toggle(a.id)}>
-                    <Td className="whitespace-nowrap text-xs text-zinc-400">{when(a.applied_at || a.seen_at)}<div className="text-[11px] text-zinc-600">#{a.id} · {a.trigger}</div></Td>
+                    <Td className="whitespace-nowrap text-xs text-zinc-400"><span title={`proposed ${when(a.created_at)} · last seen by a pass ${when(a.seen_at)}${a.revived_at ? ` · proposed again ${when(a.revived_at)}` : ""}`}>{when(a.applied_at || a.created_at)}</span><div className="text-[11px] text-zinc-600">#{a.id} · {a.trigger}{a.status === "proposed" && a.seen_at !== a.created_at && <span> · seen {when(a.seen_at)}</span>}</div></Td>
                     <Td className="text-xs text-zinc-300">{KIND_LABEL[a.kind] || a.kind}</Td>
                     <Td>{a.title}<div className="text-xs text-zinc-500">{a.reason}</div></Td>
                     <Td className="text-right text-emerald-300">{a.est_usd_month != null ? usd(a.est_usd_month, 2) : "—"}</Td>
@@ -265,7 +265,7 @@ export default function Actions() {
                           <div><div className="text-zinc-400">Undo</div><div className="text-zinc-200">{a.rollback}</div></div>
                           {a.result && <div><div className="text-zinc-400">Result</div><div className="text-zinc-200">{a.result}</div></div>}
                           {a.error && <div><div className="text-zinc-400">Error</div><div className="text-red-300">{a.error}</div></div>}
-                          <div className="text-zinc-500">proposed {when(a.created_at)} · last seen {when(a.seen_at)}{a.applied_at && ` · applied ${when(a.applied_at)}`}{a.verified_at && ` · verified ${when(a.verified_at)}`}{a.reverted_at && ` · reverted ${when(a.reverted_at)}`} · mode {a.mode}</div>
+                          <div className="text-zinc-500">proposed {when(a.created_at)}{a.revived_at && ` · went stale, proposed again ${when(a.revived_at)}`} · last seen {when(a.seen_at)}{a.applied_at && ` · applied ${when(a.applied_at)}`}{a.verified_at && ` · verified ${when(a.verified_at)}`}{a.reverted_at && ` · reverted ${when(a.reverted_at)}`} · mode {a.mode}</div>
                         </div>
                       </div>
                     </td></tr>
