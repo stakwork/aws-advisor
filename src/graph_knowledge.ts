@@ -11,10 +11,10 @@ import { HOURS_PER_MONTH } from "./prices.js";
 import { pricebookCatalog, PRICEBOOK_DATE } from "./pricebook.js";
 import { ROLE_OPTIONS } from "./roles.js";
 import { OPERATIONAL_PATTERNS } from "./pools.js";
-import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE } from "./logs.js";
+import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE, logGroupTags, observedLogShipping } from "./logs.js";
 import { getReconciliation, lastFullMonth } from "./reconcile.js";
 import { accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
-import { AttributionContext, attributeLogGroup } from "./log_attribution.js";
+import { AttributionContext, ObservedShipping, attributeLogGroup } from "./log_attribution.js";
 import { LAMBDA_PRICE, lambdaFactsMap, lambdaMonthlyCost } from "./lambda_inventory.js";
 
 export const KN_LABELS = ["KnSystemType", "KnArchetype", "KnPattern", "KnSystem", "KnService", "KnLogGroup", "KnPricingOverlay"] as const;
@@ -79,8 +79,8 @@ export function lambdaSystems(arns: string[]): SystemDef[] {
   return [...out.values()];
 }
 
-/** The attribution context for log groups: systems with their tokens, cluster and Beanstalk maps, lambdas. */
-export function attributionContext(systems: SystemDef[], ec2: any[]): AttributionContext {
+/** The attribution context for log groups: systems with their tokens, cluster and Beanstalk maps, lambdas, and what the probes saw the instances ship. */
+export function attributionContext(systems: SystemDef[], ec2: any[], observed?: Map<string, ObservedShipping[]>): AttributionContext {
   const clusters = new Map<string, string>(); const beanstalk = new Map<string, string>(); const lambdas = new Map<string, string>();
   for (const s of systems) { if (s.kind === "eks_cluster") clusters.set(s.name, s.id); if (s.kind === "lambda") lambdas.set(s.name, s.id); }
   for (const r of ec2) {
@@ -89,7 +89,7 @@ export function attributionContext(systems: SystemDef[], ec2: any[]): Attributio
   }
   const memberNames = new Map<string, string[]>();
   for (const r of ec2) { if (r.gone || !r.name) continue; const key = r.pool_kind && r.pool ? `pool:${r.pool}` : `ec2:${r.instance_id}`; memberNames.set(key, [...(memberNames.get(key) || []), r.name]); const t = tagsOf(r); if (t["elasticbeanstalk:environment-name"]) memberNames.set(key, [...(memberNames.get(key) || []), t["elasticbeanstalk:environment-name"]]); }
-  return { systems: systems.map((s) => ({ id: s.id, name: s.name, kind: s.kind, members: s.members, pool: s.kind === "pool" ? s.name : null, aliases: [...new Set(memberNames.get(s.id) || [])] })), clusters, beanstalk, lambdas };
+  return { systems: systems.map((s) => ({ id: s.id, name: s.name, kind: s.kind, members: s.members, pool: s.kind === "pool" ? s.name : null, aliases: [...new Set(memberNames.get(s.id) || [])] })), clusters, beanstalk, lambdas, observed };
 }
 
 const priceFor = (kind: string, sku: string, region: string): number | null => {
@@ -97,7 +97,7 @@ const priceFor = (kind: string, sku: string, region: string): number | null => {
   return row?.hourly ?? null;
 };
 
-export interface KnowledgeCounts { system_types: number; archetypes: number; patterns: number; systems: number; log_groups: number; log_groups_attributed: number; overlays: number; traffic_edges: number; took_ms: number }
+export interface KnowledgeCounts { system_types: number; archetypes: number; patterns: number; systems: number; log_groups: number; log_groups_attributed: number; log_groups_observed: number; log_groups_unattributed: number; overlays: number; traffic_edges: number; took_ms: number }
 
 /** Writes the general area and our schematic. Idempotent; a system that disappeared is marked gone. */
 export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
@@ -129,7 +129,8 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   const lambdaFacts = lambdaFactsMap();
   const lambdaFromAccount: SystemDef[] = [...lambdaFacts.values()].map((f) => ({ id: `lambda:${f.name}`, name: f.name, kind: "lambda", archetype: "batch_or_worker", members: [f.arn], types: [], ebs_gb: 0, region: f.region }));
   const systems = [...systemsFromInventory(ec2Rows, db.prepare("select * from inventory_rds").all(), db.prepare("select * from inventory_elasticache").all(), roles, nats), ...(lambdaFromAccount.length ? lambdaFromAccount : lambdaSystems(lambdaArns))];
-  const attribution = attributionContext(systems, ec2Rows);
+  const observed = observedLogShipping();
+  const attribution = attributionContext(systems, ec2Rows, observed);
   const rows = systems.map((s) => {
     if (s.kind === "lambda") {
       const f = lambdaFacts.get(s.name);
@@ -201,18 +202,33 @@ MERGE (o)-[:COVERS]->(t)`, { rows: overlays, now });
   if (natEdges.length) { await writeCypher(`UNWIND $rows AS row MATCH (s:KnSystem {id: row.id}) MATCH (i:KnService {id: 'internet'}) MERGE (s)-[e:TRANSFERS_TO]->(i) SET e += {mechanism: 'nat', gb_day: row.gb_day, gb_day_median: row.gb_day_median, p95_gb_hour: row.p95_gb_hour, price_per_gb: row.price_per_gb, usd_month: row.usd_month, window_days: row.window_days, source: row.source, updated_at: $now}`, { rows: natEdges, now }); traffic += natEdges.length; }
   const regional = rec?.lines.find((l) => l.usage_type === "DataTransfer-Regional-Bytes");
   if (regional) { await writeCypher(`MATCH (a:AdvisorAccount {id: $account}) MATCH (r:KnService {id: 'regional'}) MERGE (a)-[e:TRANSFERS_TO]->(r) SET e += {mechanism: 'cross-az', gb_day: $gb, price_per_gb: 0.01, usd_month: $usd, source: $src, updated_at: $now}`, { account, gb: regional.quantity / 30, usd: regional.actual_od, src: `cost explorer ${rec!.month}`, now }); traffic++; }
+  // the biggest groups by ingestion and size, plus every group an instance says it ships to (evidence is worth a node whatever the size)
   const groups = db.prepare("select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where stored_bytes > 0 order by coalesce(ingest_bytes_day, 0) desc, stored_bytes desc limit 300").all() as any[];
-  const lg = groups.map((g) => ({ id: g.name, name: g.name, region: g.region, retention_days: g.retention_days, stored_gb: g.stored_bytes / 1e9, ingest_gb_day: g.ingest_bytes_day != null ? g.ingest_bytes_day / 1e9 : null, ingest_usd_month: g.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30 * LOG_INGEST_PRICE * 100) / 100 : null, storage_usd_month: Math.round((g.stored_bytes / 1e9) * LOG_STORAGE_PRICE * 100) / 100, ...(() => { const a = attributeLogGroup(g.name, attribution); return { owner: a.owner, how: a.how }; })(), account_id: account }));
+  const have = new Set(groups.map((g) => g.name));
+  const observedNames = [...observed.keys()].filter((n) => !have.has(n));
+  if (observedNames.length) for (const chunk of Array.from({ length: Math.ceil(observedNames.length / 200) }, (_, i) => observedNames.slice(i * 200, i * 200 + 200)))
+    groups.push(...(db.prepare(`select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where name in (${chunk.map(() => "?").join(",")})`).all(...chunk) as any[]));
+  const tags = logGroupTags();
+  const lg = groups.map((g) => {
+    const a = attributeLogGroup(g.name, attribution, tags.get(g.name) || {});
+    const t = tags.get(g.name);
+    return { id: g.name, name: g.name, region: g.region, retention_days: g.retention_days, stored_gb: (g.stored_bytes || 0) / 1e9, ingest_gb_day: g.ingest_bytes_day != null ? g.ingest_bytes_day / 1e9 : null,
+      ingest_usd_month: g.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30 * LOG_INGEST_PRICE * 100) / 100 : null, storage_usd_month: Math.round(((g.stored_bytes || 0) / 1e9) * LOG_STORAGE_PRICE * 100) / 100,
+      owner: a.owner, how: a.how, candidates: a.candidates, tags: t ? JSON.stringify(t).slice(0, 2000) : null,
+      observed: (observed.get(g.name) || []).map((o) => ({ instance_id: o.instance_id, via: o.via, source: o.source, at: o.at })), account_id: account };
+  });
   if (lg.length) {
     await writeCypher(`
 UNWIND $rows AS row
-MERGE (g:KnLogGroup {id: row.id}) SET g += {name: row.name, region: row.region, retention_days: row.retention_days, stored_gb: row.stored_gb, ingest_gb_day: row.ingest_gb_day, ingest_usd_month: row.ingest_usd_month, storage_usd_month: row.storage_usd_month, account_id: row.account_id, updated_at: $now}
+MERGE (g:KnLogGroup {id: row.id}) SET g += {name: row.name, region: row.region, retention_days: row.retention_days, stored_gb: row.stored_gb, ingest_gb_day: row.ingest_gb_day, ingest_usd_month: row.ingest_usd_month, storage_usd_month: row.storage_usd_month,
+  owner: row.owner, attributed_by: row.how, candidates: row.candidates, tags: row.tags, account_id: row.account_id, updated_at: $now}
 WITH g, row
 OPTIONAL MATCH ()-[old:SHIPS_LOGS_TO]->(g) DELETE old
 WITH DISTINCT g, row
 OPTIONAL MATCH (s:KnSystem {id: row.owner})
 FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | MERGE (s)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
-FOREACH (_ IN CASE WHEN s IS NULL THEN [1] ELSE [] END | MERGE (a:AdvisorAccount {id: row.account_id}) MERGE (a)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE})`, { rows: lg, now });
+FOREACH (_ IN CASE WHEN s IS NULL THEN [1] ELSE [] END | MERGE (a:AdvisorAccount {id: row.account_id}) MERGE (a)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
+FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE (r)-[e:SHIPS_LOGS_TO]->(g) SET e.via = o.via, e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed')`, { rows: lg, now });
     traffic += lg.length;
   }
   // ---- decisions with an outcome
@@ -220,7 +236,50 @@ FOREACH (_ IN CASE WHEN s IS NULL THEN [1] ELSE [] END | MERGE (a:AdvisorAccount
   if (outcomes.length) await writeCypher(`UNWIND $rows AS row MATCH (r:AdvisorRecommendation {id: row.id}) SET r.verdict = row.verdict, r.realised_usd_month = row.realised_usd_month, r.realised_ratio = row.ratio, r.verified_at = row.checked_at`, { rows: outcomes });
 
   const attributed = lg.filter((g) => g.owner).length;
-  return { system_types: skus.length + usage.length, archetypes: archetypes.length, patterns: patterns.length, systems: rows.length, log_groups: lg.length, log_groups_attributed: attributed, overlays: overlays.length, traffic_edges: traffic, took_ms: Date.now() - t0 };
+  return { system_types: skus.length + usage.length, archetypes: archetypes.length, patterns: patterns.length, systems: rows.length, log_groups: lg.length, log_groups_attributed: attributed,
+    log_groups_observed: lg.filter((g) => g.observed.length).length, log_groups_unattributed: lg.length - attributed, overlays: overlays.length, traffic_edges: traffic, took_ms: Date.now() - t0 };
+}
+
+export interface LogAttributionRow {
+  name: string; region: string | null; retention_days: number | null; ingest_gb_day: number | null; ingest_usd_month: number | null; storage_usd_month: number | null;
+  owner: string | null; owner_name: string | null; how: string | null; candidates: string[];
+  /** The instances whose agent config names the group (probe 1.6), whatever the owner. */
+  shippers: { instance_id: string; name: string | null; via: string | null }[];
+  tags: Record<string, string> | null;
+}
+export interface LogAttributionReport {
+  total: number; attributed: number; observed: number; unattributed: number; usd_month_unattributed: number;
+  /** How many groups each rule decided ("observed", "tag", "lambda function name", "name tokens", ...). */
+  by_rule: Record<string, number>;
+  unattributed_groups: LogAttributionRow[];
+  groups: LogAttributionRow[];
+}
+
+/** The rule family a `how` belongs to, for the counts. */
+const ruleOf = (how: string | null): string => { if (!how) return "none"; const h = how.toLowerCase(); if (h.startsWith("observed")) return "observed"; if (h.startsWith("tag ")) return "tag"; if (h.startsWith("name tokens")) return "name tokens"; if (h.startsWith("ambiguous")) return "ambiguous"; if (h.startsWith("weak match") || h === "no match" || h === "no usable token") return "no match"; return how.replace(/:.*$/, ""); };
+
+/**
+ * Every log group in the graph with the system it was attributed to and how, the instances seen shipping to it,
+ * and, for the unattributed ones, the closest candidates: the list to hand to the team when a group needs a name or a tag.
+ */
+export async function logAttributionReport(limit = 500): Promise<LogAttributionReport> {
+  const r = await readQuery(`MATCH (g:KnLogGroup {account_id: $account})
+    OPTIONAL MATCH (s:KnSystem)-[:SHIPS_LOGS_TO]->(g)
+    OPTIONAL MATCH (res:AdvisorResource)-[o:SHIPS_LOGS_TO]->(g)
+    WITH g, s, collect(DISTINCT CASE WHEN res IS NULL THEN null ELSE {instance_id: res.id, name: res.name, via: o.via} END) AS shippers
+    RETURN g.name AS name, g.region AS region, g.retention_days AS retention_days, g.ingest_gb_day AS ingest_gb_day, g.ingest_usd_month AS ingest_usd_month, g.storage_usd_month AS storage_usd_month,
+      s.id AS owner, s.name AS owner_name, g.attributed_by AS how, g.candidates AS candidates, g.tags AS tags, shippers
+    ORDER BY coalesce(g.ingest_usd_month, 0) + coalesce(g.storage_usd_month, 0) DESC`, { account: accountId() }, { rowCap: limit, timeoutMs: 30_000 });
+  const groups: LogAttributionRow[] = r.rows.map((x) => {
+    let tags: Record<string, string> | null = null; try { tags = x.tags ? JSON.parse(String(x.tags)) : null; } catch { tags = null; }
+    return { name: String(x.name), region: x.region ?? null, retention_days: x.retention_days ?? null, ingest_gb_day: x.ingest_gb_day ?? null, ingest_usd_month: x.ingest_usd_month ?? null, storage_usd_month: x.storage_usd_month ?? null,
+      owner: x.owner ?? null, owner_name: x.owner_name ?? null, how: x.how ?? null, candidates: Array.isArray(x.candidates) ? x.candidates.map(String) : [], shippers: (x.shippers as any[]).filter(Boolean), tags };
+  });
+  const by_rule: Record<string, number> = {};
+  for (const g of groups) by_rule[ruleOf(g.how)] = (by_rule[ruleOf(g.how)] || 0) + 1;
+  const un = groups.filter((g) => !g.owner);
+  return { total: groups.length, attributed: groups.length - un.length, observed: groups.filter((g) => g.shippers.length).length, unattributed: un.length,
+    usd_month_unattributed: Math.round(un.reduce((s, g) => s + (g.ingest_usd_month || 0) + (g.storage_usd_month || 0), 0) * 100) / 100, by_rule, unattributed_groups: un, groups };
 }
 
 // ---- reading it back ----------------------------------------------------------------------------------------------

@@ -25,7 +25,8 @@ import { latestForecast } from "./forecast.js";
 import { poolSummary } from "./inventory.js";
 import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
-import { graphBill, listSystems, systemView } from "./graph_knowledge.js";
+import { graphBill, listSystems, logAttributionReport, systemView } from "./graph_knowledge.js";
+import { appEvents, appsOn, appsSummary, fleetApps, whereRuns } from "./instance_apps.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 import { registerSwarmTools } from "./mcp_swarms.js";
 import { registerTagTools } from "./mcp_tags.js";
@@ -470,9 +471,27 @@ export function createFactServer(): McpServer {
     annotations: ro,
   }, async () => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror"); try { return text(await graphBill()); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
 
+  server.registerTool("graph_log_groups", {
+    title: "CloudWatch log groups and the systems that write them",
+    description: "Every log group in the knowledge graph with the system it was attributed to and how (observed from an instance's agent config, the group's tags, an AWS naming convention, or a token match on the name), the instances seen shipping to it, and the unattributed ones with the closest candidates and their monthly cost. The list to ask the team about when a group needs an owner. Refreshed by the graph sync.",
+    inputSchema: { unattributed_only: z.boolean().default(false).describe("true: only the groups no system claims, with their candidates") },
+    annotations: ro,
+  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { const r = await logAttributionReport(); return text(a.unattributed_only ? { ...r, groups: undefined } : r); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
+
+  server.registerTool("instance_apps", {
+    title: "What runs on the instances",
+    description: "The applications running on EC2 instances, from the probe's process list with the operating system's daemons left out (kind app = the workload, kind infra = container runtime and monitoring agents). With instance_id: that box's apps (name, user, process count, CPU, memory, how long the oldest has run, first and last seen), its recent appear/disappear/return events and where its log agents ship. With name: every instance running a program whose name contains it. With neither: every program running anywhere with how many boxes run it. Only instances probed since probe 1.6 have this; older probes report nothing here.",
+    inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]+$/).optional(), name: z.string().max(100).optional(), include_gone: z.boolean().default(false).describe("with instance_id: also the programs that were there and left") },
+    annotations: ro,
+  }, (a) => {
+    if (a.instance_id) { const p = latestProbe(a.instance_id); return text({ instance_id: a.instance_id, probed_at: p?.collected_at ?? null, has_process_list: Array.isArray(p?.data.processes), apps: appsOn(a.instance_id, a.include_gone), events: appEvents({ instance_id: a.instance_id, limit: 50 }), log_shipping: p?.data.log_shipping ?? [] }); }
+    if (a.name) return text({ name: a.name, where: whereRuns(a.name), events: appEvents({ name: a.name, limit: 50 }) });
+    return text({ summary: appsSummary(), apps: fleetApps(), recent_events: appEvents({ limit: 50 }) });
+  });
+
   server.registerTool("instance_probe", {
     title: "Probe an instance over SSM",
-    description: "Runs the advisor's fixed read-only shell probe on an SSM-managed Linux instance through Run Command and returns memory, disks, load and top processes. Takes 10 to 60 seconds. Fails clearly when the instance is not SSM-managed or the credentials lack SSM permission.",
+    description: "Runs the advisor's fixed read-only shell probe on an SSM-managed Linux instance through Run Command and returns memory, disks, load, top processes, containers, activity and (probe 1.6) the full process list and the log groups its agents ship to. Takes 10 to 60 seconds. Fails clearly when the instance is not SSM-managed or the credentials lack SSM permission.",
     inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]+$/) },
     annotations: { ...ro, openWorldHint: true },
   }, (a) => instanceProbe(a));

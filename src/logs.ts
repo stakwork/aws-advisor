@@ -10,6 +10,7 @@ import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
 import { Point, buildBaseline } from "./baseline_math.js";
+import type { ObservedShipping } from "./log_attribution.js";
 
 db.exec(`create table if not exists log_groups (
   name text primary key, region text, retention_days integer, stored_bytes real, log_class text, created_at text,
@@ -20,6 +21,8 @@ create table if not exists log_ingest_daily (
   primary key (name, day)
 )`);
 addColumn("log_groups", "account_id", "text");
+/** The group's tags as JSON (logs:ListTagsForResource); null until fetched. The log attribution reads them (src/log_attribution.ts). */
+addColumn("log_groups", "tags", "text");
 
 export const LOG_INGEST_PRICE = 0.50, LOG_STORAGE_PRICE = 0.03;
 const INGEST_DAYS = 14;
@@ -44,6 +47,12 @@ export async function refreshLogs(onLog: (s: string) => void = () => {}): Promis
     on conflict(name) do update set region = excluded.region, retention_days = excluded.retention_days, stored_bytes = excluded.stored_bytes, log_class = excluded.log_class, created_at = excluded.created_at, last_seen = excluded.last_seen`);
   const setLogAccount = db.prepare("update log_groups set account_id = ? where name = ?");
   for (const g of groups) { up.run(g.name, g.region, g.retention_in_days ?? null, Number(g.stored_bytes ?? 0), g.log_group_class ?? null, g.creation_time ? new Date(g.creation_time).toISOString() : null, now); if (g.account_id) setLogAccount.run(String(g.account_id), g.name); out.groups++; }
+  // tags in a query of their own: the column costs one ListTagsForResource per group, and a denial must not cost the inventory
+  try {
+    const tagged = await query<{ name: string; tags: Record<string, string> | string | null }>(`select name, tags from ${S}.aws_cloudwatch_log_group where tags is not null`);
+    const setTags = db.prepare("update log_groups set tags = ? where name = ?");
+    for (const g of tagged) { const t = typeof g.tags === "string" ? g.tags : JSON.stringify(g.tags || {}); if (t && t !== "{}") setTags.run(t, g.name); }
+  } catch (e) { out.errors.push(describeError(e, "log group tags (aws_cloudwatch_log_group.tags, logs:ListTagsForResource)")); }
   // ingestion per day: the account total (no dimension) plus the biggest groups
   const upIngest = db.prepare("insert into log_ingest_daily(name, day, bytes) values (?, ?, ?) on conflict(name, day) do update set bytes = excluded.bytes");
   const fetchDaily = async (name: string, region: string, dims: string): Promise<Point[]> => {
@@ -94,6 +103,41 @@ export function topLogGroups(limit = 25): { refreshed_at: string | null; total_g
     groups: rows.map((r) => ({ name: r.name, region: r.region, retention_days: r.retention_days, stored_gb: r.stored_bytes / 1e9, log_class: r.log_class,
       ingest_gb_day: r.ingest_bytes_day != null ? r.ingest_bytes_day / 1e9 : null, ingest_usd_month: r.ingest_bytes_day != null ? (r.ingest_bytes_day / 1e9) * 30 * LOG_INGEST_PRICE : null, storage_usd_month: (r.stored_bytes / 1e9) * LOG_STORAGE_PRICE })),
   };
+}
+
+/** log group name -> its tags, for the groups that have any (from the last refresh). */
+export function logGroupTags(): Map<string, Record<string, string>> {
+  const out = new Map<string, Record<string, string>>();
+  for (const r of db.prepare("select name, tags from log_groups where tags is not null and tags <> '{}'").all() as { name: string; tags: string }[]) {
+    try { const t = JSON.parse(r.tags); if (t && typeof t === "object") out.set(r.name, t); } catch { /* not JSON: skipped */ }
+  }
+  return out;
+}
+
+/**
+ * What the instances say they ship (probe 1.6 `log_shipping`, src/ssm.ts): log group name -> the instances whose
+ * agent configs name it, from each instance's latest probe. Evidence, not a guess: the log attribution takes it
+ * first (src/log_attribution.ts) and the graph draws (:AdvisorResource)-[:SHIPS_LOGS_TO]->(:KnLogGroup) from it.
+ */
+export function observedLogShipping(): Map<string, ObservedShipping[]> {
+  const out = new Map<string, ObservedShipping[]>();
+  let rows: { instance_id: string; collected_at: string; ls: string }[] = [];
+  try {
+    rows = db.prepare(`select instance_id, collected_at, json_extract(json, '$.log_shipping') as ls from instance_metrics
+      where id in (select max(id) from instance_metrics group by instance_id) and json_extract(json, '$.log_shipping') is not null`).all() as typeof rows;
+  } catch { return out; }
+  for (const r of rows) {
+    let list: any[] = [];
+    try { list = JSON.parse(r.ls); } catch { continue; }
+    if (!Array.isArray(list)) continue;
+    for (const s of list) {
+      if (!s || typeof s.group !== "string" || !s.group) continue;
+      const arr = out.get(s.group) || [];
+      if (!arr.some((o) => o.instance_id === r.instance_id && o.via === String(s.via || ""))) arr.push({ instance_id: r.instance_id, via: String(s.via || "unknown"), source: s.source == null ? null : String(s.source), at: r.collected_at });
+      out.set(s.group, arr);
+    }
+  }
+  return out;
 }
 
 /** The last `days` of ingestion for one group, for the review's step check. */

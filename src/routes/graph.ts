@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { accountId, enabled, graphStats, graphUriForDisplay, mirrorAll, resourceView, verifyConnection, wipeMirror } from "../graph_mirror.js";
-import { graphBill, listSystems, mirrorKnowledge, systemView } from "../graph_knowledge.js";
+import { graphBill, listSystems, logAttributionReport, mirrorKnowledge, systemView } from "../graph_knowledge.js";
 
 /**
  * The Neo4j mirror (src/graph_mirror.ts) as the UI sees it: whether it is configured and reachable, what is
@@ -54,3 +54,5 @@ graph.get("/graph/systems", async (req, res) => { if (!enabled()) return off(res
 graph.get("/graph/system/:id", async (req, res) => { if (!enabled()) return off(res); try { const v = await systemView(String(req.params.id)); v ? res.json(v) : res.status(404).json({ error: "no such system" }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 graph.get("/graph/bill", async (_req, res) => { if (!enabled()) return off(res); try { res.json(await graphBill()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 graph.post("/graph/knowledge", async (_req, res) => { if (!enabled()) return off(res); try { res.json(await mirrorKnowledge()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+// Log groups and the systems they belong to: how each was attributed, which instances were seen shipping to it, and the unattributed ones with their closest candidates.
+graph.get("/graph/logs", async (req, res) => { if (!enabled()) return off(res); try { res.json(await logAttributionReport(Math.min(2000, Math.max(50, Number(req.query.limit) || 500)))); } catch (e: any) { res.status(500).json({ error: e.message }); } });

@@ -22,12 +22,14 @@ export const BATCH = 250;
 export const QUERY_TIMEOUT_MS = 5_000;
 export const QUERY_ROW_CAP = 200;
 
-export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass"] as const;
+export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass", "AdvisorApp"] as const;
 
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
   "(:KnSystem {id, name, kind: pool|instance|rds_cluster|rds_instance|cache_group|cache_cluster|nat, pool_kind, archetype, member_count, ebs_gb, monthly_list_usd, gone}) our systems as a schematic; (:AdvisorResource)-[:MEMBER_OF]->(:KnSystem); (:KnSystem)-[:IS_A]->(:KnArchetype {name, description}); (:KnSystem)-[:RUNS_ON {count, hours_month, list_price, list_usd_month}]->(:KnSystemType {id, kind: ec2|rds|elasticache|usage, sku, region, list_price, price_unit, source})",
-  "(:KnPricingOverlay {kind: savings_plan|reservation, discount_rate, commitment_usd_month, sku, count, end})-[:COVERS]->(:KnSystemType); (:KnSystem|:AdvisorAccount)-[:TRANSFERS_TO {mechanism: nat|cross-az, gb_day, price_per_gb, usd_month, source}]->(:KnService {name}); (:KnSystem|:AdvisorAccount)-[:SHIPS_LOGS_TO {gb_day, usd_month}]->(:KnLogGroup {name, retention_days, stored_gb, ingest_gb_day, ingest_usd_month, storage_usd_month}); (:KnPattern {text}) operational rules; AdvisorRecommendation carries verdict, realised_usd_month, realised_ratio once verified",
+  "(:KnPricingOverlay {kind: savings_plan|reservation, discount_rate, commitment_usd_month, sku, count, end})-[:COVERS]->(:KnSystemType); (:KnSystem|:AdvisorAccount)-[:TRANSFERS_TO {mechanism: nat|cross-az, gb_day, price_per_gb, usd_month, source}]->(:KnService {name}); (:KnPattern {text}) operational rules; AdvisorRecommendation carries verdict, realised_usd_month, realised_ratio once verified",
+  "(:KnSystem|:AdvisorAccount)-[:SHIPS_LOGS_TO {gb_day, usd_month, attributed_by}]->(:KnLogGroup {name, region, retention_days, stored_gb, ingest_gb_day, ingest_usd_month, storage_usd_month, owner, attributed_by, candidates, tags}) the system a CloudWatch log group belongs to (attributed_by says how: 'observed: cloudwatch-agent on i-..', 'tag service=x', 'lambda function name', 'name tokens: ..'); a group on the account node is unattributed and its candidates list the closest systems; (:AdvisorResource)-[:SHIPS_LOGS_TO {via: cloudwatch-agent|awslogs|fluent-bit|fluentd|docker-daemon|docker:<container>, source, observed_at}]->(:KnLogGroup) is what an instance's own agent config says it writes to (probe 1.6)",
+  "(:AdvisorResource)-[:RUNS {user, count, cpu_pct, rss_bytes, oldest_seconds, command, first_seen, last_seen, probes, gone}]->(:AdvisorApp {id, name, kind: app|infra}) what runs on an EC2 instance, from the probe's process list with the OS daemons left out (kind infra = container runtime, monitoring agents); gone = true when the program was there and is not any more",
   "(:AdvisorResource {id, kind: ec2|rds|elasticache, name, type, state, region, role, role_confidence, protected_prob, monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})-[:IN_ACCOUNT]->(:AdvisorAccount {id})",
   "(:AdvisorResource)-[:HAS_ROLE]->(:AdvisorRole {name}); (:AdvisorResource)-[:IN_POOL]->(:AdvisorNodePool {name}) for autoscaled EC2 nodes (Karpenter pool, EKS node group, ASG)",
   "(:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule, est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef {id})",
@@ -608,10 +610,37 @@ export async function mirrorPasses(): Promise<{ passes: number }> {
   return { passes: ids.length };
 }
 
+// ---- what runs on the instances ---------------------------------------------------------------------------------------------
+
+const APP_CYPHER = `
+UNWIND $rows AS row
+MERGE (app:AdvisorApp {id: row.name})
+SET app.name = row.name, app.kind = row.kind, app.account_id = coalesce(app.account_id, $account), app.updated_at = $now
+WITH app, row
+MATCH (r:AdvisorResource {id: row.instance_id})
+MERGE (r)-[e:RUNS {user: row.user}]->(app)
+SET e += {count: row.count, cpu_pct: row.cpu_pct, rss_bytes: row.rss_bytes, oldest_seconds: row.oldest_seconds, command: row.command, first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, updated_at: $now}`;
+
+/** Every instance_apps row (src/instance_apps.ts), or the given instances': the program nodes and the RUNS edges, gone ones included so history stays walkable. */
+export async function mirrorApps(instanceIds?: string[]): Promise<{ apps: number }> {
+  if (!enabled()) return { apps: 0 };
+  if (instanceIds && !instanceIds.length) return { apps: 0 };
+  await ensureSchema();
+  const account = accountId();
+  let raw: any[] = [];
+  try { raw = instanceIds ? db.prepare(`select * from instance_apps where instance_id in (${instanceIds.map(() => "?").join(",")})`).all(...instanceIds) : db.prepare("select * from instance_apps").all(); }
+  catch { return { apps: 0 }; /* the table is created by src/instance_apps.ts on first load */ }
+  const rows = raw.map((r) => ({ instance_id: String(r.instance_id), name: String(r.name), user: String(r.user), kind: String(r.kind), count: num(r.count), cpu_pct: num(r.cpu_pct), rss_bytes: num(r.rss_bytes), oldest_seconds: num(r.oldest_seconds),
+    command: str(r.command), first_seen: str(r.first_seen), last_seen: str(r.last_seen), probes: num(r.probes), gone: Boolean(r.gone) }));
+  const stamp = now();
+  for (const batch of chunks(rows)) await write(APP_CYPHER, { rows: batch, account, now: stamp });
+  return { apps: rows.length };
+}
+
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
 export interface MirrorCounts {
-  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; took_ms: number }
+  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; apps: number; took_ms: number }
 
 /** Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. */
 export async function mirrorAll(): Promise<MirrorCounts | null> {
@@ -629,9 +658,10 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const { alerts, incidents } = await mirrorAlertsAndIncidents();
   const { actions } = await mirrorActions();
   const { passes } = await mirrorPasses();
+  const { apps } = await mirrorApps();
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
-  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes, took_ms: Date.now() - t0 };
+  return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes, apps, took_ms: Date.now() - t0 };
 }
 
 export interface GraphStats { nodes: Record<string, number>; relationships: Record<string, number>; decided_as: number; total_nodes: number; total_relationships: number }
@@ -667,7 +697,7 @@ export async function wipeMirror(account = accountId()): Promise<{ deleted: numb
     }
   };
   let deleted = await del("MATCH (n) WHERE any(l IN labels(n) WHERE l IN $owned) AND n.account_id = $account", { owned, account });
-  deleted += await del("MATCH (n) WHERE (n:AdvisorRole OR n:AdvisorNodePool) AND NOT (n)--()", {});
+  deleted += await del("MATCH (n) WHERE (n:AdvisorRole OR n:AdvisorNodePool OR n:AdvisorApp) AND NOT (n)--()", {});
   deleted += await del("MATCH (c:AdvisorControl) WHERE NOT (c)-[:FLAGGED]->() OPTIONAL MATCH (c)-[:HAS_PLAYBOOK]->(p:AdvisorPlaybook) WITH collect(c) + collect(p) AS ns UNWIND ns AS n", {});
   return { deleted };
 }
@@ -689,7 +719,10 @@ export interface ResourceView {
   recommendations: { rec: Record<string, unknown>; concept: { id: string; name: string | null } | null }[];
   alerts: Record<string, unknown>[]; incidents: Record<string, unknown>[]; controls: { id: string; title: string | null; run_id: number | null; reason: string | null }[];
   actions: Record<string, unknown>[];
-  counts: { recommendations: number; alerts: number; incidents: number; controls: number; actions: number };
+  /** What runs on the box (RUNS edges, current ones first) and where its agents ship logs (SHIPS_LOGS_TO edges from the resource). */
+  apps: Record<string, unknown>[];
+  log_groups: Record<string, unknown>[];
+  counts: { recommendations: number; alerts: number; incidents: number; controls: number; actions: number; apps: number; log_groups: number };
 }
 
 /** One resource node with everything linked to it; null when the graph has no such node. Alerts are capped at 25 (instance_state alerts pile up). */
@@ -707,7 +740,12 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
     OPTIONAL MATCH (ctl:AdvisorControl)-[f:FLAGGED]->(r)
     WITH r, role, pool, recs, alerts, incidents, collect(DISTINCT CASE WHEN ctl IS NULL THEN null ELSE {id: ctl.id, title: ctl.title, run_id: f.run_id, reason: f.reason} END) AS controls
     OPTIONAL MATCH (x:AdvisorAction)-[:TARGETS]->(r)
-    RETURN properties(r) AS resource, role.name AS role, pool.name AS pool, recs, alerts, incidents, controls, collect(DISTINCT properties(x)) AS actions`, { id }, { rowCap: 1 });
+    WITH r, role, pool, recs, alerts, incidents, controls, collect(DISTINCT properties(x)) AS actions
+    OPTIONAL MATCH (r)-[ru:RUNS]->(app:AdvisorApp)
+    WITH r, role, pool, recs, alerts, incidents, controls, actions, collect(DISTINCT CASE WHEN app IS NULL THEN null ELSE {name: app.name, kind: app.kind, user: ru.user, count: ru.count, cpu_pct: ru.cpu_pct, rss_bytes: ru.rss_bytes, oldest_seconds: ru.oldest_seconds, command: ru.command, first_seen: ru.first_seen, last_seen: ru.last_seen, gone: ru.gone} END) AS apps
+    OPTIONAL MATCH (r)-[sl:SHIPS_LOGS_TO]->(g:KnLogGroup)
+    RETURN properties(r) AS resource, role.name AS role, pool.name AS pool, recs, alerts, incidents, controls, actions, apps,
+      collect(DISTINCT CASE WHEN g IS NULL THEN null ELSE {name: g.name, via: sl.via, source: sl.source, observed_at: sl.observed_at, ingest_gb_day: g.ingest_gb_day, ingest_usd_month: g.ingest_usd_month, retention_days: g.retention_days} END) AS log_groups`, { id }, { rowCap: 1 });
   const row = r.rows[0];
   if (!row) return null;
   const recs = (row.recs as any[]).filter(Boolean);
@@ -715,8 +753,10 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
   const incidents = (row.incidents as any[]).filter(Boolean);
   const controls = (row.controls as any[]).filter(Boolean);
   const actions = (row.actions as any[]).filter(Boolean).sort((a, b) => Number(b.id) - Number(a.id));
-  return { resource: row.resource, role: row.role ?? null, pool: row.pool ?? null, recommendations: recs, alerts: alerts.slice(0, 25), incidents, controls, actions,
-    counts: { recommendations: recs.length, alerts: alerts.length, incidents: incidents.length, controls: controls.length, actions: actions.length } };
+  const apps = (row.apps as any[]).filter(Boolean).sort((a, b) => Number(Boolean(a.gone)) - Number(Boolean(b.gone)) || (a.kind === b.kind ? Number(b.rss_bytes || 0) - Number(a.rss_bytes || 0) : a.kind === "app" ? -1 : 1));
+  const logGroups = (row.log_groups as any[]).filter(Boolean);
+  return { resource: row.resource, role: row.role ?? null, pool: row.pool ?? null, recommendations: recs, alerts: alerts.slice(0, 25), incidents, controls, actions, apps, log_groups: logGroups,
+    counts: { recommendations: recs.length, alerts: alerts.length, incidents: incidents.length, controls: controls.length, actions: actions.length, apps: apps.length, log_groups: logGroups.length } };
 }
 
 // ---- fire-and-forget hooks -----------------------------------------------------------------------------------------------
@@ -730,3 +770,5 @@ export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirro
 export const mirrorActionsInBackground = (ids?: number[]) => inBackground(`action mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorActions(ids));
 /** At the end of every executor pass: the pass node and its edges to the rows it touched (src/executor_log.ts). */
 export const mirrorPassInBackground = (passId: number) => inBackground(`pass mirror (${passId})`, () => mirrorPass(passId));
+/** After a probe recorded what runs on an instance (src/instance_apps.ts): its RUNS edges. */
+export const mirrorAppsInBackground = (instanceIds?: string[]) => inBackground(`app mirror${instanceIds ? ` (${instanceIds.join(", ")})` : ""}`, () => mirrorApps(instanceIds));

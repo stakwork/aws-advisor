@@ -17,7 +17,7 @@ import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN } from "./signals.js";
  * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
  * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.5";
+export const PROBE_VERSION = "aws-advisor/1.6";
 
 export const PROBE_SCRIPT = [
   "# aws-advisor probe v1 (read-only). Prints exactly one JSON object on the last line.",
@@ -137,9 +137,31 @@ export const PROBE_SCRIPT = [
   "act_logins=\"{\\\"users_now\\\":${users_now:-0},\\\"last_login_user\\\":$(jstr \"$last_user\"),\\\"last_login_at\\\":$(jstr \"$last_at\")}\"",
   "act_net=$(awk -F'[: ]+' 'NR>2 && $2 !~ /^(lo|docker|br-|veth|virbr)/ { rx+=$3; tx+=$11 } END { printf \"{\\\"rx_bytes\\\":%.0f,\\\"tx_bytes\\\":%.0f}\", rx, tx }' /proc/net/dev 2>/dev/null)",
   "activity=\"{\\\"version\\\":1,\\\"containers\\\":[$act_containers],\\\"connections\\\":${act_conns:-null},\\\"front_door\\\":$act_front,\\\"logins\\\":$act_logins,\\\"net\\\":${act_net:-null}}\"",
-  "printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s}\\n' \\",
+  "# ---- log shipping (probe 1.6): the CloudWatch log groups this box's agents are configured to write to, read from their config files",
+  "# ---- (CloudWatch agent, the old awslogs agent, Fluent Bit, Fluentd, the Docker daemon and each running container with the awslogs driver). Templated names are skipped.",
+  "# ---- Quoting note: the setup script embeds this document in a bash heredoc inside $( ), so single quotes must pair up on every line and never sit alone in a comment.",
+  "ship=\"\"; shipn=\"\"; shipseen=\"|\"",
+  "addship() { g=$(printf '%s' \"$1\" | tr -d '\"\\047,; ' | cut -c1-200); [ -n \"$g\" ] || return 0; case \"$g\" in *\\$*|*\\{*|*%*) return 0;; esac",
+  "  case \"$shipseen\" in *\"|$2=$g|\"*) return 0;; esac; shipseen=\"$shipseen$2=$g|\"",
+  "  ship=\"$ship$shipn{\\\"group\\\":\\\"$(esc \"$g\")\\\",\\\"via\\\":\\\"$(esc \"$2\")\\\",\\\"source\\\":\\\"$(esc \"$3\")\\\"}\"; shipn=\",\"; }",
+  "for f in /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/* /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.toml /etc/awslogs/awslogs.conf /var/awslogs/etc/awslogs.conf /etc/fluent-bit/*.conf /etc/fluent-bit/*.yaml /etc/fluent-bit/*.yml /etc/fluent-bit/conf.d/* /etc/td-agent-bit/*.conf /etc/td-agent/td-agent.conf /etc/fluent/fluent.conf /etc/fluentd/fluent.conf; do",
+  "  [ -r \"$f\" ] || continue",
+  "  case \"$f\" in *amazon-cloudwatch-agent*) via=cloudwatch-agent;; *awslogs*) via=awslogs;; *fluent-bit*|*td-agent-bit*) via=fluent-bit;; *) via=fluentd;; esac",
+  "  for g in $(grep -ioE 'log_group_name\"?[[:space:]]*[:=]?[[:space:]]*\"?[^\",[:space:]]+' \"$f\" 2>/dev/null | sed -E 's/^[^:=[:space:]]+[[:space:]]*[:=]?[[:space:]]*\"?//' | head -n 50); do addship \"$g\" \"$via\" \"$f\"; done",
+  "done",
+  "if [ -r /etc/docker/daemon.json ]; then for g in $(grep -oE '\"awslogs-group\"[[:space:]]*:[[:space:]]*\"[^\"]+\"' /etc/docker/daemon.json 2>/dev/null | sed -E 's/^.*:[[:space:]]*\"//; s/\"$//'); do addship \"$g\" docker-daemon /etc/docker/daemon.json; done; fi",
+  "if docker info >/dev/null 2>&1; then for c in $(docker ps --format '{{.Names}}' 2>/dev/null | head -40); do l=$(docker inspect --format '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config \"awslogs-group\"}}' \"$c\" 2>/dev/null); case \"$l\" in \"awslogs \"?*) addship \"${l#awslogs }\" \"docker:$c\" 'log driver';; esac; done; fi",
+  "# ---- processes (probe 1.6): every user-space process grouped by command and user, so the advisor knows what runs on the box. Kernel threads",
+  "# ---- are left out here; the advisor sets the OS daemons aside (src/instance_apps.ts). Names, counts, CPU, memory and age only: no arguments beyond the program and its first words.",
+  "procs=$(ps -eo pid,ppid,user,pcpu,rss,etimes,comm,args --no-headers 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '",
+  "  $1==2 || $2==2 { next }",
+  "  { w=\"\"; if($7 ~ /^(python[0-9.]*|node|nodejs|java|ruby|php[0-9.]*|perl|dotnet|bun|deno|uwsgi|gunicorn|celery|npm|yarn|pnpm)$/){ for(i=9;i<=NF && i<=14;i++) if($i !~ /^-/){ w=$i; sub(/.*\\//,\"\",w); break } }",
+  "    nm=(w==\"\"?$7:$7 \" \" w); k=$3 \"\\t\" nm; n[k]++; cpu[k]+=$4; rss[k]+=$5; if($6+0>old[k]) old[k]=$6+0; if(!(k in a)){ a[k]=$8; for(i=9;i<=NF && i<=12;i++) a[k]=a[k] \" \" $i } }",
+  "  END { for(k in n){ split(k, p, \"\\t\"); cmd=substr(a[k],1,120); gsub(/[\\\\\"]/,\"\",cmd); c=p[2]; gsub(/[\\\\\"]/,\"\",c); u=p[1]; gsub(/[\\\\\"]/,\"\",u);",
+  "    printf \"%012.0f\\t{\\\"name\\\":\\\"%s\\\",\\\"user\\\":\\\"%s\\\",\\\"count\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"oldest_seconds\\\":%d,\\\"command\\\":\\\"%s\\\"}\\n\", rss[k]*1024, c, u, n[k], cpu[k], rss[k]*1024, old[k], cmd } }' | sort -rn | head -n 80 | cut -f2- | paste -sd, -)",
+  "printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s]}\\n' \\",
   "  \"$(esc \"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)\")\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${cpus:-0}\" \"${uptime_s:-0}\" \\",
-  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\""
+  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\""
 ].join("\n");
 
 /** The script with the use-signal patterns inlined: what the stock AWS-RunShellScript path (tests, fallback) sends. */
@@ -208,6 +230,11 @@ export interface ProbeActivity {
   net: { rx_bytes: number; tx_bytes: number } | null;
 }
 
+/** Probe 1.6: one CloudWatch log group an agent on the box is configured to write to, and which agent (cloudwatch-agent, awslogs, fluent-bit, fluentd, docker-daemon, docker:<container>). */
+export interface ProbeLogShipping { group: string; via: string; source: string | null }
+/** Probe 1.6: the processes of one program under one user, summed: how many, CPU now, resident memory, the oldest one's age, the program with its first words. */
+export interface ProbeProcessGroup { name: string; user: string; count: number; cpu_pct: number; rss_bytes: number; oldest_seconds: number; command: string }
+
 export interface ProbeResult {
   probe: string;
   hostname: string;
@@ -224,6 +251,9 @@ export interface ProbeResult {
   containers?: ProbeContainer[];
   /** Present from probe 1.4: the use signals beyond CPU, memory and disk. */
   activity?: ProbeActivity;
+  /** Present from probe 1.6: where the box's log agents ship to, and what runs on it (kernel threads excluded). */
+  log_shipping?: ProbeLogShipping[];
+  processes?: ProbeProcessGroup[];
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -296,6 +326,11 @@ export function parseProbeOutput(stdout: string): ProbeResult {
       net_rx_bytes: c.net_rx_bytes == null ? null : Number(c.net_rx_bytes), net_tx_bytes: c.net_tx_bytes == null ? null : Number(c.net_tx_bytes),
     })) : undefined,
     activity: raw.activity && typeof raw.activity === "object" ? parseActivity(raw.activity) : undefined,
+    log_shipping: Array.isArray(raw.log_shipping) ? raw.log_shipping.filter((s: any) => s && typeof s.group === "string" && s.group).slice(0, 200).map((s: any): ProbeLogShipping => ({
+      group: String(s.group).slice(0, 512), via: String(s.via || "unknown").slice(0, 120), source: s.source == null ? null : String(s.source).slice(0, 200) })) : undefined,
+    processes: Array.isArray(raw.processes) ? raw.processes.filter((p: any) => p && typeof p.name === "string" && p.name).slice(0, 200).map((p: any): ProbeProcessGroup => ({
+      name: String(p.name).slice(0, 64), user: String(p.user ?? "").slice(0, 64), count: Math.max(1, int(p.count)), cpu_pct: Number.isFinite(Number(p.cpu_pct)) ? Number(p.cpu_pct) : 0,
+      rss_bytes: Math.max(0, int(p.rss_bytes)), oldest_seconds: Math.max(0, int(p.oldest_seconds)), command: String(p.command ?? p.name).slice(0, 120) })) : undefined,
   };
 }
 
@@ -516,7 +551,14 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
     const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data)).lastInsertRowid);
     try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }
     try { applyProbeDisks(instanceId, data.disks, collectedAt); } catch (e: any) { console.error(`[probe] disk usage not credited to volumes for ${instanceId}: ${e?.message || e}`); }
-    try { const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null; checkDiskLevels(instanceId, name, data.disks as any, collectedAt); checkHostLevels(instanceId, name, id, collectedAt, data); } catch (e: any) { console.error(`[probe] disk or host levels not checked for ${instanceId}: ${e?.message || e}`); }
+    const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null;
+    try { checkDiskLevels(instanceId, name, data.disks as any, collectedAt); checkHostLevels(instanceId, name, id, collectedAt, data); } catch (e: any) { console.error(`[probe] disk or host levels not checked for ${instanceId}: ${e?.message || e}`); }
+    // probe 1.6: what runs here goes to the apps table and the graph; what the box ships to is read from the probe when the knowledge graph refreshes
+    try {
+      const { recordApps } = await import("./instance_apps.js");
+      const r = recordApps(instanceId, collectedAt, data, name);
+      if (r) { if (r.appeared.length || r.disappeared.length || r.returned.length) console.log(`[probe] ${instanceId} apps: ${r.apps} running${r.appeared.length ? `, appeared ${r.appeared.join(", ")}` : ""}${r.disappeared.length ? `, gone ${r.disappeared.join(", ")}` : ""}${r.returned.length ? `, back ${r.returned.join(", ")}` : ""}`); const { mirrorAppsInBackground } = await import("./graph_mirror.js"); mirrorAppsInBackground([instanceId]); }
+    } catch (e: any) { console.error(`[probe] apps not recorded for ${instanceId}: ${e?.message || e}`); }
     return { id, instance_id: instanceId, collected_at: collectedAt, data };
   } finally {
     client.destroy();

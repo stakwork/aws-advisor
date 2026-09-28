@@ -167,6 +167,45 @@ function SystemsCard() {
   );
 }
 
+/** Log groups and who writes them: the attribution as the graph holds it, the unattributed ones first so they can be named or tagged. */
+function LogGroupsCard() {
+  const [d, setD] = useState<any>(null);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => { api("/graph/logs").then(setD).catch((e) => setD({ error: e.message })); }, []);
+  if (!d) return null;
+  if (d.error) return <Card title="Log groups · who writes them"><div className="text-sm text-zinc-500">{d.error}</div></Card>;
+  const rows: any[] = showAll ? d.groups : d.unattributed_groups;
+  const rules = Object.entries(d.by_rule || {}).sort((a: any, b: any) => b[1] - a[1]);
+  return (
+    <Card title={<span>Log groups · who writes them <span className="font-normal text-zinc-500">· {d.attributed} of {d.total} attributed, {d.observed} seen from an instance's agent config, {d.unattributed} unattributed ({usd(d.usd_month_unattributed)}/mo)</span></span>}>
+      {d.total === 0 ? <div className="text-sm text-zinc-500">Nothing yet: Resync now builds it from the log groups, their tags and the probes.</div> : (
+        <div className="space-y-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+            <span>By rule:</span>{rules.map(([k, n]: any) => <Badge key={k}>{`${k} ${n}`}</Badge>)}
+            <button className="ml-auto text-sky-300 hover:underline" onClick={() => setShowAll(!showAll)}>{showAll ? "unattributed only" : "show all groups"}</button>
+          </div>
+          {rows.length === 0 ? <div className="text-zinc-500">Every group has an owner.</div> : (
+            <table className="w-full border-collapse text-xs">
+              <thead><tr><Th>Group</Th><Th>Owner</Th><Th>How</Th><Th>Shipped from</Th><Th className="text-right">GB/day</Th><Th className="text-right">Cost / mo</Th></tr></thead>
+              <tbody>{rows.slice(0, 150).map((g: any) => (
+                <tr key={g.name} className="border-t border-zinc-800 align-top">
+                  <Td className="max-w-md break-all font-mono text-zinc-200">{g.name}{g.tags ? <div className="font-sans text-zinc-500">{Object.entries(g.tags).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(" · ")}</div> : null}</Td>
+                  <Td className="text-zinc-300">{g.owner_name || g.owner || <span className="text-amber-300/80">none</span>}</Td>
+                  <Td className="text-zinc-400">{g.how || "—"}{!g.owner && g.candidates?.length ? <div className="text-zinc-500">closest: {g.candidates.join("; ")}</div> : null}</Td>
+                  <Td className="text-zinc-400">{g.shippers?.length ? g.shippers.slice(0, 3).map((s: any) => <div key={s.instance_id}><Link to={`/inventory?tab=ec2&id=${s.instance_id}`} className="font-mono hover:underline">{s.instance_id}</Link> {s.name ? <span className="text-zinc-500">{s.name}</span> : null} <span className="text-zinc-600">{s.via}</span></div>) : <span className="text-zinc-600">—</span>}{g.shippers?.length > 3 ? <div className="text-zinc-600">and {g.shippers.length - 3} more</div> : null}</Td>
+                  <Td className="text-right text-zinc-400">{g.ingest_gb_day != null ? Number(g.ingest_gb_day).toFixed(2) : "—"}</Td>
+                  <Td className="text-right text-zinc-400">{usd((g.ingest_usd_month || 0) + (g.storage_usd_month || 0))}</Td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+          <div className="text-xs text-zinc-500">An unattributed group can be claimed by tagging it with a system's name (any tag key), or by the CloudWatch agent config on the instance that writes it, which the probe reads. Both take effect at the next graph sync.</div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function Knowledge() {
   const [d, setD] = useState<any>(null);
   const [err, setErr] = useState("");
@@ -235,6 +274,7 @@ export default function Knowledge() {
         <div className="text-sm text-zinc-500">What the agent reads before it proposes anything: the concept graph under <code className="text-zinc-300">{d.namespace}</code> in repo2graph. Click a concept for the full record.</div>
       </div>
       <SystemsCard />
+      <LogGroupsCard />
       <BaselinesCard />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title={<span>Generic rules · apply to any account ({d.generic.length})</span>}>

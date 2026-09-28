@@ -782,6 +782,8 @@ bearer token (unset = open, like `API_TOKEN`). All tools are read-only:
 | `instance_inventory` | the EC2 inventory snapshot (name, type, state, SSM status, 30-day CPU, probe memory, EBS GB, list price, open recs, findings), filterable by state / SSM status / search, 200-row cap |
 | `domain_inventory` | the Route 53 snapshot: every record with where it leads in this account (`linked` with the resources reached, `unmatched` for AWS names the account does not have, `external`, `none`), filterable by search, zone, state or type; or one resource's domains by kind and id |
 | `instance_probe` | runs the SSM probe below and returns the parsed JSON |
+| `instance_apps` | what runs on an instance (the apps, the OS set aside, with first/last seen and appear/disappear events, and where its log agents ship), where a program runs across the fleet, or every program running anywhere |
+| `graph_log_groups` | every log group with the system it was attributed to and how, the instances seen shipping to it, and the unattributed ones with their closest candidates |
 | `nat_attribution` | instances in a NAT gateway's VPC ranked by NetworkIn/NetworkOut over the last 1 to 24 hours (what the watcher attaches to a NAT alert as `top_receivers`) |
 | `alert_context` | one watcher alert with its parsed details, the watcher samples for the same resource over the last N hours, and the incidents already investigated for it |
 | `graph_query` | one read-only Cypher statement against the Neo4j mirror (see [Graph mirror](#graph-mirror)): must start with `MATCH`, `OPTIONAL MATCH`, `WITH` or `CALL {`, no write clause, no `apoc`/`dbms` procedure, read transaction, 5 s timeout, 200-row cap; says so when the mirror is not configured |
@@ -939,8 +941,9 @@ the only one the policy ever grants; the setup script creates it; see [The SSM p
 to one instance that `aws_ssm_managed_instance` reports as online Linux, using the same
 identity Steampipe uses (the saved keys, the profile or the default chain, with the role when one is set; see
 [Three ways to authenticate](#three-ways-to-authenticate)). It prints one JSON object (memory total and used,
-disk usage per mount, 1/5/15 load, top five processes by CPU and by memory, the containers, and from 1.4 the
-[activity section](#activity-is-anyone-using-this-box)); the app polls the invocation,
+disk usage per mount, 1/5/15 load, top five processes by CPU and by memory, the containers, from 1.4 the
+[activity section](#activity-is-anyone-using-this-box), and from 1.6 the
+[process list and the log shipping](#what-runs-on-the-box-probe-16)); the app polls the invocation,
 validates the output and stores it in `instance_metrics`. The idle-instance rule uses the latest probe to raise
 or lower its confidence and to mention memory and load in the rationale. The credentials need
 `ssm:SendCommand` and `ssm:GetCommandInvocation`; missing permission, an unmanaged instance or a timeout come
@@ -1004,6 +1007,36 @@ has no last use, and the drawer's "last real use" line and the roll-ups follow.
 
 The raw per-kind counts stay on `container_samples.signal_kinds`, so a rule added later can be judged against
 the last thirty days.
+
+### What runs on the box (probe 1.6)
+
+The probe lists every user-space process (`ps -eo pid,ppid,user,pcpu,rss,etimes,comm,args`, kernel threads left
+out) grouped by program and user: how many, CPU now, resident memory, the oldest one's age and the program with
+its first words, 80 groups at most, biggest first. Interpreters are grouped by what they run (`python3 worker.py`,
+`node server.js`, `java app.jar`), not by the interpreter. `src/instance_apps.ts` then sets the operating system
+aside (systemd and its units, sshd, cron, the package managers, the shells and the probe's own utilities, the SSM
+worker…), marks the platform pieces `infra` (containerd, dockerd, kubelet, the CloudWatch and SSM agents,
+Fluent Bit, Datadog, node_exporter, Postfix…) and keeps the rest as `app`. Each program on each box is a row in
+`instance_apps` with first and last seen and how many probes saw it; the graph has the same as
+`(:AdvisorResource)-[:RUNS]->(:AdvisorApp)`.
+
+**Monitoring.** The first probe of a box records its apps without comment. From the second on, a program not
+seen before is an `appeared` event, one that was there and is not any more is `disappeared` (when it had been
+seen on two probes or had run an hour, so a cron job seen once is not news), and one back after leaving is
+`returned`. An `app` that had run for a day and vanishes raises an `app_gone` alert (warning, one open per box
+and program) with the instance, the program, when it was last seen and how long it had run. The events live in
+`instance_app_events` (180 days).
+
+**Reading it.** The instance drawer on the Inventory page shows "Runs" (apps, then infra; "include what left"
+adds the ones that are gone), the app events and "Ships logs to". `GET /api/instances/:id/apps` is the same;
+`GET /api/apps` lists every program running anywhere with how many boxes run it (`?kind=app|infra`) or, with
+`?name=`, where one program runs; `GET /api/apps/events` lists the events. The agent has `instance_apps`.
+Instances probed before 1.6 have no process list until they are probed again.
+
+The probe also reports where the box's log agents ship (`log_shipping`, see
+[Log attribution](#graph-mirror-and-the-knowledge-graph)): the log group names found in the CloudWatch agent,
+awslogs, Fluent Bit and Fluentd configs, in `/etc/docker/daemon.json` and on each running container's `awslogs`
+log driver. Config files are read, never changed, and templated group names are skipped.
 
 ### Testing the probe
 
@@ -1353,15 +1386,32 @@ Read it back: `GET /api/graph/systems?kind=`, `GET /api/graph/system/:id` (id su
 Knowledge page (Systems card, click a system for its types, overlays, members, edges and decisions). The
 agent has the same through `graph_systems`, `graph_system` and `graph_bill`, next to the raw `graph_query`.
 
-**Log attribution** (`src/log_attribution.ts`) works from evidence, in order: the AWS naming conventions
-(`/aws/lambda/<function>`, `/aws/rds/cluster|instance/<name>`, `/aws/eks/<cluster>/cluster`,
-`/aws/elasticbeanstalk/<environment>/…`), the cluster and environment names the members' tags carry, then a
-token match between the group's path and the systems' names, pools, member ids and aliases (the members' Name
-tags), where a compute system beats a database or cache on a tie and a tie between compute systems stays
-unattributed. EKS clusters are systems of their own (`eks:<cluster>`, pools `PART_OF` them) and so are the
-Lambda functions the latest run flagged (`lambda:<name>`), so their log groups have somewhere to attach. Each
-`SHIPS_LOGS_TO` edge records how it was attributed. 97 of 123 groups attach to a system on this account; the
-rest stay on the account node.
+**Log attribution** (`src/log_attribution.ts`) works from evidence, strongest first:
+
+1. **What the instance says it ships.** Probe 1.6 reads the log agent configs on the box (the CloudWatch agent's
+   JSON and TOML, the old `awslogs.conf`, Fluent Bit and Fluentd configs, `/etc/docker/daemon.json` and each
+   running container's `awslogs` log driver) and reports every `log_group_name` it finds, templated names
+   skipped. The graph draws `(:AdvisorResource)-[:SHIPS_LOGS_TO {via, source, observed_at}]->(:KnLogGroup)`
+   from it, and the group belongs to the instance's system (`observed: cloudwatch-agent on i-…`). When members of
+   two systems ship to the same group it stays unattributed and says so (`observed on several systems`).
+2. **The AWS naming conventions**: `/aws/lambda/<function>`, `/aws/rds/cluster|instance/<name>`,
+   `/aws/eks/<cluster>/cluster`, `/aws/elasticbeanstalk/<environment>/…`.
+3. **The group's own tags** (`logs:ListTagsForResource`, fetched with the daily log refresh and kept in
+   `log_groups.tags`): a cluster or environment tag, or any tag whose value is exactly a system's name, pool,
+   alias or member id (`tag service=orion-api`). Ownership tags (`Environment`, `Owner`, `Team`, `Project`,
+   `CostCenter`…) never count, even when their value happens to match. Two tags naming two systems is a tie.
+4. The cluster and environment names the members' tags carry, found in the group's path.
+5. A **token match** between the path and the systems' names, pools, member ids and aliases (the members' Name
+   tags), where a compute system beats a database or cache on a tie and a tie between compute systems stays
+   unattributed.
+
+EKS clusters are systems of their own (`eks:<cluster>`, pools `PART_OF` them) and so are the Lambda functions,
+so their log groups have somewhere to attach. Every `KnLogGroup` carries `attributed_by` (the rule, in words) and,
+when nothing claimed it, `candidates`: the closest systems with their score, so the team can name or tag the group.
+Every group an instance was seen shipping to gets a node whatever its size; otherwise the 300 biggest do.
+`GET /api/graph/logs`, the `graph_log_groups` tool and the Knowledge page's "Log groups · who writes them" card
+list the attribution: counts per rule, the instances seen shipping to each group, and the unattributed groups
+first with their candidates and monthly cost.
 
 **Quantities from our own history** (`src/quantities.ts`, `GET /api/bill/quantities?from&to`, a card on the
 Bill page): instance hours per type from the watcher's running counts (each sample stands for the time to the
@@ -1413,6 +1463,9 @@ ever created, changed or deleted), every node carries `account_id` and `updated_
                       ├─[:CARRIES_OUT]▶ (:AdvisorRecommendation)           when the change executes an approved recommendation
                       └─[:TOUCHED_IN {event, outcome, at, trigger, detail}]▶ (:AdvisorPass {id, started_at, finished_at, trigger, mode,
                             proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors})   the executor's activity log, one node per pass
+   ├─[:RUNS {user, count, cpu_pct, rss_bytes, oldest_seconds, command, first_seen, last_seen, probes, gone}]─▶ (:AdvisorApp {id, name, kind: app|infra})
+   │                                                          what runs on the box, from the probe's process list (probe 1.6), the OS set aside; gone = it left
+   └─[:SHIPS_LOGS_TO {via, source, observed_at}]─▶ (:KnLogGroup)   what the box's own log agent config says it writes to (probe 1.6)
 ```
 
 Everything the advisor plans, does or decides is in the graph, always: the ledger is mirrored on every pass, apply,

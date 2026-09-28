@@ -13,7 +13,7 @@ import { memberConnections } from "../accounts.js";
 import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } from "../agent.js";
 import { getRunChanges } from "../changes.js";
 import { postRejectionLearning } from "../learnings.js";
-import { ProbeError, instanceMetrics, probeDocument, probeDocumentInfo, probeErrorStatus, probeInstance, summarizeProbe } from "../ssm.js";
+import { ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeErrorStatus, probeInstance, summarizeProbe } from "../ssm.js";
 import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy } from "../permissions.js";
 import { checkPermissions, lastPermissionCheck } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
@@ -376,6 +376,26 @@ api.post("/instances/:id/signals/review", async (req, res) => {
 api.get("/instances/:id/metrics", (req, res) => {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   res.json(instanceMetrics(String(req.params.id), limit).map((p) => ({ ...p, summary: summarizeProbe(p.data) })));
+});
+
+// ---- what runs on the instances (probe 1.6, src/instance_apps.ts) ------------------------------------------------
+// One instance: its apps (current, and with ?gone=1 the ones that left), its recent appear/disappear events and where its agents ship logs.
+api.get("/instances/:id/apps", async (req, res) => {
+  const { appsOn, appEvents } = await import("../instance_apps.js");
+  const id = String(req.params.id);
+  const latest = latestProbe(id);
+  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), apps: appsOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [] });
+});
+// The fleet: every program running anywhere (?kind=app|infra), or where one program runs (?name=), or the counts.
+api.get("/apps", async (req, res) => {
+  const { fleetApps, whereRuns, appsSummary } = await import("../instance_apps.js");
+  const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
+  const kind = req.query.kind === "app" || req.query.kind === "infra" ? req.query.kind : undefined;
+  res.json({ summary: appsSummary(), ...(name ? { where: whereRuns(name) } : { apps: fleetApps(kind) }) });
+});
+api.get("/apps/events", async (req, res) => {
+  const { appEvents } = await import("../instance_apps.js");
+  res.json({ events: appEvents({ instance_id: typeof req.query.instance === "string" ? req.query.instance : undefined, name: typeof req.query.name === "string" ? req.query.name : undefined, since: typeof req.query.since === "string" ? req.query.since : undefined, limit: Number(req.query.limit) || 100 }) });
 });
 
 // ---- inventory --------------------------------------------------------------
