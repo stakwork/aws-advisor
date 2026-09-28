@@ -97,7 +97,7 @@ const priceFor = (kind: string, sku: string, region: string): number | null => {
   return row?.hourly ?? null;
 };
 
-export interface KnowledgeCounts { system_types: number; archetypes: number; patterns: number; systems: number; log_groups: number; log_groups_attributed: number; log_groups_observed: number; log_groups_unattributed: number; overlays: number; traffic_edges: number; took_ms: number }
+export interface KnowledgeCounts { system_types: number; archetypes: number; patterns: number; systems: number; log_groups: number; log_groups_attributed: number; log_groups_observed: number; log_groups_jev: number; log_groups_unattributed: number; overlays: number; traffic_edges: number; took_ms: number }
 
 /** Writes the general area and our schematic. Idempotent; a system that disappeared is marked gone. */
 export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
@@ -214,14 +214,30 @@ MERGE (o)-[:COVERS]->(t)`, { rows: overlays, now });
     const t = tags.get(g.name);
     return { id: g.name, name: g.name, region: g.region, retention_days: g.retention_days, stored_gb: (g.stored_bytes || 0) / 1e9, ingest_gb_day: g.ingest_bytes_day != null ? g.ingest_bytes_day / 1e9 : null,
       ingest_usd_month: g.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30 * LOG_INGEST_PRICE * 100) / 100 : null, storage_usd_month: Math.round(((g.stored_bytes || 0) / 1e9) * LOG_STORAGE_PRICE * 100) / 100,
-      owner: a.owner, how: a.how, candidates: a.candidates, tags: t ? JSON.stringify(t).slice(0, 2000) : null,
+      owner: a.owner, how: a.how, candidates: a.candidates, tags: t ? JSON.stringify(t).slice(0, 2000) : null, jev_choice: null as string | null, jev_confidence: null as number | null,
       observed: (observed.get(g.name) || []).map((o) => ({ instance_id: o.instance_id, via: o.via, source: o.source, at: o.at })), account_id: account };
   });
+  // the groups the evidence left unowned go to Jev, which picks a system from the name, the tags and the account's systems, or says none
+  let jevAttributed = 0;
+  const unowned = lg.filter((g) => !g.owner);
+  if (unowned.length) {
+    try {
+      const { jevAttributeLogGroups } = await import("./log_attribution_jev.js");
+      const meta = new Map(systems.map((s) => [s.id, s]));
+      const answers = await jevAttributeLogGroups(unowned.map((g) => ({ name: g.name, tags: tags.get(g.name) || null, candidates: g.candidates, how: g.how })),
+        attribution.systems.map((s) => ({ ...s, region: meta.get(s.id)?.region ?? null, archetype: meta.get(s.id)?.archetype ?? null, member_count: meta.get(s.id)?.members.length })));
+      for (const g of unowned) {
+        const a = answers.get(g.name); if (!a) continue;
+        g.jev_choice = a.owner ?? (Object.entries(a.probabilities).sort((x, y) => y[1] - x[1])[0]?.[0] ?? null); g.jev_confidence = a.confidence;
+        if (a.owner) { g.owner = a.owner; g.how = `jev: ${a.owner} at ${Math.round(a.confidence * 100)}% (rules: ${g.how})`; jevAttributed++; }
+      }
+    } catch (e: any) { console.error(`[graph] jev log attribution skipped: ${e?.message || e}`); }
+  }
   if (lg.length) {
     await writeCypher(`
 UNWIND $rows AS row
 MERGE (g:KnLogGroup {id: row.id}) SET g += {name: row.name, region: row.region, retention_days: row.retention_days, stored_gb: row.stored_gb, ingest_gb_day: row.ingest_gb_day, ingest_usd_month: row.ingest_usd_month, storage_usd_month: row.storage_usd_month,
-  owner: row.owner, attributed_by: row.how, candidates: row.candidates, tags: row.tags, account_id: row.account_id, updated_at: $now}
+  owner: row.owner, attributed_by: row.how, candidates: row.candidates, tags: row.tags, jev_choice: row.jev_choice, jev_confidence: row.jev_confidence, account_id: row.account_id, updated_at: $now}
 WITH g, row
 OPTIONAL MATCH ()-[old:SHIPS_LOGS_TO]->(g) DELETE old
 WITH DISTINCT g, row
@@ -237,12 +253,14 @@ FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE
 
   const attributed = lg.filter((g) => g.owner).length;
   return { system_types: skus.length + usage.length, archetypes: archetypes.length, patterns: patterns.length, systems: rows.length, log_groups: lg.length, log_groups_attributed: attributed,
-    log_groups_observed: lg.filter((g) => g.observed.length).length, log_groups_unattributed: lg.length - attributed, overlays: overlays.length, traffic_edges: traffic, took_ms: Date.now() - t0 };
+    log_groups_observed: lg.filter((g) => g.observed.length).length, log_groups_jev: jevAttributed, log_groups_unattributed: lg.length - attributed, overlays: overlays.length, traffic_edges: traffic, took_ms: Date.now() - t0 };
 }
 
 export interface LogAttributionRow {
   name: string; region: string | null; retention_days: number | null; ingest_gb_day: number | null; ingest_usd_month: number | null; storage_usd_month: number | null;
   owner: string | null; owner_name: string | null; how: string | null; candidates: string[];
+  /** Jev's pick and confidence when the rules found nothing (the owner only above the threshold). */
+  jev_choice: string | null; jev_confidence: number | null;
   /** The instances whose agent config names the group (probe 1.6), whatever the owner. */
   shippers: { instance_id: string; name: string | null; via: string | null }[];
   tags: Record<string, string> | null;
@@ -256,7 +274,7 @@ export interface LogAttributionReport {
 }
 
 /** The rule family a `how` belongs to, for the counts. */
-const ruleOf = (how: string | null): string => { if (!how) return "none"; const h = how.toLowerCase(); if (h.startsWith("observed")) return "observed"; if (h.startsWith("tag ")) return "tag"; if (h.startsWith("name tokens")) return "name tokens"; if (h.startsWith("ambiguous")) return "ambiguous"; if (h.startsWith("weak match") || h === "no match" || h === "no usable token") return "no match"; return how.replace(/:.*$/, ""); };
+const ruleOf = (how: string | null): string => { if (!how) return "none"; const h = how.toLowerCase(); if (h.startsWith("observed")) return "observed"; if (h.startsWith("jev")) return "jev"; if (h.startsWith("tag ")) return "tag"; if (h.startsWith("name tokens")) return "name tokens"; if (h.startsWith("ambiguous")) return "ambiguous"; if (h.startsWith("weak match") || h === "no match" || h === "no usable token") return "no match"; return how.replace(/:.*$/, ""); };
 
 /**
  * Every log group in the graph with the system it was attributed to and how, the instances seen shipping to it,
@@ -268,12 +286,12 @@ export async function logAttributionReport(limit = 500): Promise<LogAttributionR
     OPTIONAL MATCH (res:AdvisorResource)-[o:SHIPS_LOGS_TO]->(g)
     WITH g, s, collect(DISTINCT CASE WHEN res IS NULL THEN null ELSE {instance_id: res.id, name: res.name, via: o.via} END) AS shippers
     RETURN g.name AS name, g.region AS region, g.retention_days AS retention_days, g.ingest_gb_day AS ingest_gb_day, g.ingest_usd_month AS ingest_usd_month, g.storage_usd_month AS storage_usd_month,
-      s.id AS owner, s.name AS owner_name, g.attributed_by AS how, g.candidates AS candidates, g.tags AS tags, shippers
+      s.id AS owner, s.name AS owner_name, g.attributed_by AS how, g.candidates AS candidates, g.tags AS tags, g.jev_choice AS jev_choice, g.jev_confidence AS jev_confidence, shippers
     ORDER BY coalesce(g.ingest_usd_month, 0) + coalesce(g.storage_usd_month, 0) DESC`, { account: accountId() }, { rowCap: limit, timeoutMs: 30_000 });
   const groups: LogAttributionRow[] = r.rows.map((x) => {
     let tags: Record<string, string> | null = null; try { tags = x.tags ? JSON.parse(String(x.tags)) : null; } catch { tags = null; }
     return { name: String(x.name), region: x.region ?? null, retention_days: x.retention_days ?? null, ingest_gb_day: x.ingest_gb_day ?? null, ingest_usd_month: x.ingest_usd_month ?? null, storage_usd_month: x.storage_usd_month ?? null,
-      owner: x.owner ?? null, owner_name: x.owner_name ?? null, how: x.how ?? null, candidates: Array.isArray(x.candidates) ? x.candidates.map(String) : [], shippers: (x.shippers as any[]).filter(Boolean), tags };
+      owner: x.owner ?? null, owner_name: x.owner_name ?? null, how: x.how ?? null, candidates: Array.isArray(x.candidates) ? x.candidates.map(String) : [], jev_choice: x.jev_choice ?? null, jev_confidence: x.jev_confidence ?? null, shippers: (x.shippers as any[]).filter(Boolean), tags };
   });
   const by_rule: Record<string, number> = {};
   for (const g of groups) by_rule[ruleOf(g.how)] = (by_rule[ruleOf(g.how)] || 0) + 1;

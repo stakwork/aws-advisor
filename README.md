@@ -1404,6 +1404,13 @@ agent has the same through `graph_systems`, `graph_system` and `graph_bill`, nex
 5. A **token match** between the path and the systems' names, pools, member ids and aliases (the members' Name
    tags), where a compute system beats a database or cache on a tie and a tie between compute systems stays
    unattributed.
+6. **Jev** (`src/log_attribution_jev.ts`, purpose `log_group_owner`), for what the rules left unowned: in
+   batches of 8, each group's name and path, tags and what the rules found, against the account's systems
+   (the rule candidates first, then the compute systems, then the rest, 50 at most, plus `none`). A pick at
+   60 % or better becomes the owner (`jev: pool:web at 82% (rules: no match)`); a weaker one stays on the node
+   as `jev_choice` / `jev_confidence` so the page can say what Jev leaned to. Answers are cached in
+   `log_group_jev` until the group's name, tags or the set of systems change, or 30 days pass, so the mirror's
+   frequent refreshes do not re-ask.
 
 EKS clusters are systems of their own (`eks:<cluster>`, pools `PART_OF` them) and so are the Lambda functions,
 so their log groups have somewhere to attach. Every `KnLogGroup` carries `attributed_by` (the rule, in words) and,
