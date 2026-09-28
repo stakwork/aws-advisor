@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import { PROBE_SCRIPT, PROBE_VERSION, ProbeError, parseProbeOutput, summarizeProbe, useSummary } from "../ssm.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,16 @@ test("summarizeProbe derives the numbers the idle rule uses", () => {
 test("parseProbeOutput keeps the device and volume id a 1.3 probe reports per mount", () => {
   const p = parseProbeOutput('{"probe":"aws-advisor/1","cpus":2,"uptime_seconds":1,"memory":{"total_bytes":1,"used_bytes":1,"available_bytes":0},"load":{"1m":0,"5m":0,"15m":0},"disks":[{"mount":"/","filesystem":"/dev/nvme0n1p1","device":"nvme0n1","volume_id":"vol-0abc","total_bytes":100,"used_bytes":50,"used_pct":50.0},{"mount":"/data","filesystem":"/dev/xvdf","device":"xvdf","volume_id":null,"total_bytes":100,"used_bytes":1,"used_pct":1.0}]}');
   assert.deepEqual(p.disks.map((d) => [d.device, d.volume_id]), [["nvme0n1", "vol-0abc"], ["xvdf", null]]);
+});
+
+test("parseProbeOutput decodes the compressed line a 1.7 probe prints on a big box, and says when it is cut off", () => {
+  const json = fixture.split("\n").map((l) => l.trim()).find((l) => l.startsWith("{"))!;
+  const packed = "aws-advisor-gz:" + gzipSync(Buffer.from(json, "utf8")).toString("base64");
+  assert.ok(PROBE_SCRIPT.includes("aws-advisor-gz:") && PROBE_SCRIPT.includes("gzip -c -9 | base64"), "the script prints the marked compressed line");
+  const p = parseProbeOutput(`noise before\n${packed}\n`);
+  assert.equal(p.hostname, parseProbeOutput(fixture).hostname);
+  assert.equal(p.cpus, parseProbeOutput(fixture).cpus);
+  assert.throws(() => parseProbeOutput(packed.slice(0, 40) + "\n"), (e: unknown) => e instanceof ProbeError && e.code === "bad_output" && /cut off/.test(e.message));
 });
 
 test("parseProbeOutput rejects output that is not the probe's", () => {
@@ -166,7 +177,7 @@ const probe14 = () => JSON.stringify({
 
 test("probe 1.4: the activity section parses, is tolerant, and the use summary picks the newest real-use signal", () => {
   const p = parseProbeOutput(`noise\n${probe14()}`);
-  assert.equal(PROBE_VERSION, "aws-advisor/1.6");
+  assert.equal(PROBE_VERSION, "aws-advisor/1.7");
   assert.equal(p.containers?.[0].net_rx_bytes, 5000);
   assert.equal(p.containers?.[1].net_rx_bytes, null, "a container without NetIO reports null, not zero");
   const a = p.activity!;

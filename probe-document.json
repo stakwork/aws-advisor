@@ -1,6 +1,6 @@
 {
   "schemaVersion": "2.2",
-  "description": "aws-advisor read-only probe aws-advisor/1.6",
+  "description": "aws-advisor read-only probe aws-advisor/1.7",
   "parameters": {
     "signals": {
       "type": "String",
@@ -156,9 +156,12 @@
           "    nm=(w==\"\"?$7:$7 \" \" w); k=$3 \"\\t\" nm; n[k]++; cpu[k]+=$4; rss[k]+=$5; if($6+0>old[k]) old[k]=$6+0; if(!(k in a)){ a[k]=$8; for(i=9;i<=NF && i<=12;i++) a[k]=a[k] \" \" $i } }",
           "  END { for(k in n){ split(k, p, \"\\t\"); cmd=substr(a[k],1,120); gsub(/[\\\\\"]/,\"\",cmd); c=p[2]; gsub(/[\\\\\"]/,\"\",c); u=p[1]; gsub(/[\\\\\"]/,\"\",u);",
           "    printf \"%012.0f\\t{\\\"name\\\":\\\"%s\\\",\\\"user\\\":\\\"%s\\\",\\\"count\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"oldest_seconds\\\":%d,\\\"command\\\":\\\"%s\\\"}\\n\", rss[k]*1024, c, u, n[k], cpu[k], rss[k]*1024, old[k], cmd } }' | sort -rn | head -n 80 | cut -f2- | paste -sd, -)",
-          "printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s]}\\n' \\",
+          "out=$(printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s]}' \\",
           "  \"$(esc \"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)\")\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${cpus:-0}\" \"${uptime_s:-0}\" \\",
-          "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\""
+          "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\")",
+          "# ---- exactly one JSON object on the last line. GetCommandInvocation returns only the first 24,000 characters of stdout, so a big box (many processes,",
+          "# ---- many containers) prints the object gzip-compressed and base64-encoded on one marked line instead (probe 1.7); the advisor decodes it (parseProbeOutput).",
+          "if [ ${#out} -gt 16000 ] && command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then printf 'aws-advisor-gz:%s\\n' \"$(printf '%s' \"$out\" | gzip -c -9 | base64 | tr -d '\\n')\"; else printf '%s\\n' \"$out\"; fi"
         ]
       }
     }

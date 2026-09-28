@@ -1,3 +1,4 @@
+import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
 import { recordContainerSamples } from "./history.js";
@@ -17,7 +18,11 @@ import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN, SIGNALS_MAX_CHARS } fr
  * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
  * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.6";
+export const PROBE_VERSION = "aws-advisor/1.7";
+/** GetCommandInvocation returns at most this many characters of stdout; the agent appends "---Output truncated---" past it. */
+export const SSM_OUTPUT_CAP = 24000;
+/** A probe whose JSON is large prints it gzip-compressed and base64-encoded on one line after this marker (probe 1.7). */
+export const GZ_MARKER = "aws-advisor-gz:";
 
 export const PROBE_SCRIPT = [
   "# aws-advisor probe v1 (read-only). Prints exactly one JSON object on the last line.",
@@ -159,9 +164,12 @@ export const PROBE_SCRIPT = [
   "    nm=(w==\"\"?$7:$7 \" \" w); k=$3 \"\\t\" nm; n[k]++; cpu[k]+=$4; rss[k]+=$5; if($6+0>old[k]) old[k]=$6+0; if(!(k in a)){ a[k]=$8; for(i=9;i<=NF && i<=12;i++) a[k]=a[k] \" \" $i } }",
   "  END { for(k in n){ split(k, p, \"\\t\"); cmd=substr(a[k],1,120); gsub(/[\\\\\"]/,\"\",cmd); c=p[2]; gsub(/[\\\\\"]/,\"\",c); u=p[1]; gsub(/[\\\\\"]/,\"\",u);",
   "    printf \"%012.0f\\t{\\\"name\\\":\\\"%s\\\",\\\"user\\\":\\\"%s\\\",\\\"count\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"oldest_seconds\\\":%d,\\\"command\\\":\\\"%s\\\"}\\n\", rss[k]*1024, c, u, n[k], cpu[k], rss[k]*1024, old[k], cmd } }' | sort -rn | head -n 80 | cut -f2- | paste -sd, -)",
-  "printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s]}\\n' \\",
+  "out=$(printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s]}' \\",
   "  \"$(esc \"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)\")\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${cpus:-0}\" \"${uptime_s:-0}\" \\",
-  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\""
+  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\")",
+  "# ---- exactly one JSON object on the last line. GetCommandInvocation returns only the first 24,000 characters of stdout, so a big box (many processes,",
+  "# ---- many containers) prints the object gzip-compressed and base64-encoded on one marked line instead (probe 1.7); the advisor decodes it (parseProbeOutput).",
+  "if [ ${#out} -gt 16000 ] && command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then printf 'aws-advisor-gz:%s\\n' \"$(printf '%s' \"$out\" | gzip -c -9 | base64 | tr -d '\\n')\"; else printf '%s\\n' \"$out\"; fi"
 ].join("\n");
 
 /** The script with the use-signal patterns inlined: what the stock AWS-RunShellScript path (tests, fallback) sends. */
@@ -296,7 +304,16 @@ const num = (v: unknown, what: string): number => {
 
 /** Parses the command's stdout: tolerates noise before the JSON line and validates the shape. */
 export function parseProbeOutput(stdout: string): ProbeResult {
-  const line = stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("{") && l.endsWith("}")).pop();
+  const lines = stdout.split("\n").map((l) => l.trim());
+  let line: string | undefined;
+  const packed = lines.filter((l) => l.startsWith(GZ_MARKER)).pop();
+  if (packed) {
+    // Probe 1.7 on a big box: the JSON is gzip-compressed and base64-encoded on one line so it fits under SSM's output cap.
+    let text: string;
+    try { text = gunzipSync(Buffer.from(packed.slice(GZ_MARKER.length), "base64")).toString("utf8").trim(); }
+    catch (e: any) { throw new ProbeError("bad_output", `probe output is compressed but does not decode (${e?.message || e}); the line may have been cut off`); }
+    if (text.startsWith("{") && text.endsWith("}")) line = text;
+  } else line = lines.filter((l) => l.startsWith("{") && l.endsWith("}")).pop();
   if (!line) throw new ProbeError("bad_output", "probe output contained no JSON object");
   let raw: any;
   try { raw = JSON.parse(line); } catch (e: any) { throw new ProbeError("bad_output", `probe output is not valid JSON: ${e.message}`); }
@@ -527,7 +544,7 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
     }
 
     const deadline = Date.now() + timeoutMs;
-    let stdout = "";
+    let stdout = "", stderr = "";
     for (;;) {
       await sleep(2000);
       if (Date.now() > deadline) throw new ProbeError("timeout", `SSM command ${commandId} did not finish within ${Math.round(timeoutMs / 1000)}s`);
@@ -535,7 +552,7 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
       try {
         const inv = await client.send(new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }));
         status = inv.Status || "";
-        if (status === "Success") { stdout = inv.StandardOutputContent || ""; break; }
+        if (status === "Success") { stdout = inv.StandardOutputContent || ""; stderr = inv.StandardErrorContent || ""; break; }
         if (!["Pending", "InProgress", "Delayed", ""].includes(status)) {
           // The agent reports a script that died, or one it could not even stage (root disk full), as a bare "Failed" with
           // nothing on stderr: the reason, when there is one, is at the end of stdout, so that goes into the message too.
@@ -551,7 +568,17 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
       }
     }
 
-    const data = parseProbeOutput(stdout);
+    let data: ProbeResult;
+    try { data = parseProbeOutput(stdout); }
+    catch (e: any) {
+      if (!(e instanceof ProbeError) || e.code !== "bad_output") throw e;
+      // GetCommandInvocation returns the first 24,000 characters of stdout and the JSON is the last line, so a big box
+      // loses the end of it; say so, and show the tail and stderr so the reason is visible without the AWS console.
+      const truncated = stdout.length >= SSM_OUTPUT_CAP || /---Output truncated---/.test(stdout);
+      const tail = stdout.trim().slice(-200).replace(/\s+/g, " ");
+      const detail = [`${stdout.length} chars of stdout${truncated ? ` (SSM caps the command output at ${SSM_OUTPUT_CAP} characters, the probe's JSON line was cut off)` : ""}`, tail ? `tail: ${tail}` : "", stderr.trim() ? `stderr: ${stderr.trim().slice(0, 300)}` : ""].filter(Boolean).join("; ");
+      throw new ProbeError("bad_output", `${e.message}: ${detail}`);
+    }
     const collectedAt = data.collected_at;
     const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data)).lastInsertRowid);
     try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }

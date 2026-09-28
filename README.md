@@ -945,7 +945,9 @@ identity Steampipe uses (the saved keys, the profile or the default chain, with 
 disk usage per mount, 1/5/15 load, top five processes by CPU and by memory, the containers, from 1.4 the
 [activity section](#activity-is-anyone-using-this-box), and from 1.6 the
 [process list and the log shipping](#what-runs-on-the-box-probe-16)); the app polls the invocation,
-validates the output and stores it in `instance_metrics`. The idle-instance rule uses the latest probe to raise
+validates the output and stores it in `instance_metrics`. SSM hands back only the first 24,000 characters of a
+command's output, so from 1.7 a probe whose object is large (a box with many processes and containers) prints it
+gzip-compressed and base64-encoded on one marked line and the app decodes it; a smaller one still prints plain JSON. The idle-instance rule uses the latest probe to raise
 or lower its confidence and to mention memory and load in the rationale. The credentials need
 `ssm:SendCommand` and `ssm:GetCommandInvocation`; missing permission, an unmanaged instance or a timeout come
 back as a clear error code (`permission`, `not_managed`, `no_credentials`, `timeout`, `failed`, `bad_output`). A
