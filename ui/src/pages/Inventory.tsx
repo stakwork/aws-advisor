@@ -40,11 +40,22 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
   const [all, setAll] = useState(false);
   useEffect(() => { api(`/instances/${encodeURIComponent(instanceId)}/apps${all ? "?gone=1" : ""}`).then(setD).catch(() => setD(null)); }, [instanceId, probedAt, all]);
   if (!d) return null;
-  if (!d.has_processes && !d.apps?.length) return <div className="mt-1 text-xs text-zinc-600">No process list yet: this probe predates 1.6 (update the SSM document, Settings › Permissions) or the box has not been probed since.</div>;
+  const st = d.status;
+  const tone = (s: string | null) => (s === "ok" ? "text-emerald-300/80" : s === "impaired" ? "text-red-300" : "text-zinc-500");
+  const statusLine = st ? (
+    <div className="mt-1 text-xs text-zinc-400">
+      Status checks <span className="text-zinc-600">({when(st.checked_at)})</span>: system <span className={tone(st.system_status)}>{st.system_status ?? "?"}</span> · instance <span className={tone(st.instance_status)}>{st.instance_status ?? "?"}</span>{st.ebs_status ? <> · EBS <span className={tone(st.ebs_status)}>{st.ebs_status}</span></> : null}
+      {st.events?.length > 0 && <div className="text-amber-300/80">AWS scheduled: {st.events.map((e: any) => `${e.code}${e.not_before ? ` from ${when(e.not_before)}` : ""}`).join("; ")}</div>}
+      {d.status_events?.length > 0 && <details className="mt-0.5"><summary className="cursor-pointer text-zinc-500">Status changes ({d.status_events.length})</summary>
+        <ul className="mt-0.5 space-y-0.5">{d.status_events.map((e: any) => <li key={e.id} className={e.to_status === "impaired" ? "text-red-300" : "text-zinc-400"}>{when(e.at)} · {e.field.replace("_status", "")} {e.from_status ?? "—"} → {e.to_status}</li>)}</ul></details>}
+    </div>
+  ) : null;
+  if (!d.has_processes && !d.apps?.length) return <>{statusLine}<div className="mt-1 text-xs text-zinc-600">No process list yet: this probe predates 1.6 (update the SSM document, Settings › Permissions) or the box has not been probed since.</div></>;
   const age = (s: number) => (s >= 86400 ? `${Math.round(s / 86400)} d` : s >= 3600 ? `${Math.round(s / 3600)} h` : `${Math.max(1, Math.round(s / 60))} min`);
   const apps = (d.apps || []).filter((a: any) => a.kind === "app"); const infra = (d.apps || []).filter((a: any) => a.kind === "infra");
   const gone = (d.apps || []).filter((a: any) => a.gone);
-  return (
+  return (<>
+    {statusLine}
     <div className="mt-1 text-xs text-zinc-400">
       <div className="flex items-center gap-2">Runs: <span className="text-zinc-500">{apps.filter((a: any) => !a.gone).length} apps, {infra.filter((a: any) => !a.gone).length} infra</span>
         <button className="text-sky-300 hover:underline" onClick={() => setAll(!all)}>{all ? "current only" : "include what left"}</button></div>
@@ -62,7 +73,7 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
         <ul className="mt-0.5 space-y-0.5">{d.events.slice(0, 20).map((e: any) => <li key={e.id} className={e.event === "disappeared" ? "text-amber-300/80" : "text-zinc-400"}>{when(e.at)} · {e.event} <span className="font-mono">{e.name}</span>{e.details?.oldest_seconds ? ` (had run ${age(e.details.oldest_seconds)})` : ""}</li>)}</ul></details>}
       {d.log_shipping?.length > 0 && <div className="mt-0.5">Ships logs to: {d.log_shipping.slice(0, 8).map((s: any) => <span key={`${s.via}|${s.group}`} className="mr-2"><span className="font-mono text-zinc-300">{s.group}</span> <span className="text-zinc-600">({s.via})</span></span>)}{d.log_shipping.length > 8 ? <span className="text-zinc-600">and {d.log_shipping.length - 8} more</span> : null}</div>}
     </div>
-  );
+  </>);
 }
 
 function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, rules, onRules }: { activity: any; summary: any; collectedAt: string; previous?: { collected_at: string; data: any } | null; instanceId: string; rules: any[]; onRules: () => void }) {
@@ -693,8 +704,24 @@ function GraphLine({ id }: { id: string }) {
           : g.state === "off" ? "The Neo4j mirror is not configured (NEO4J_URI)."
           : g.state === "missing" ? "Not in the graph yet: resync from Knowledge, or wait for the next run."
           : g.state === "error" ? <span className="text-red-300">{g.error}</span>
-          : <>{c.recommendations} recommendation{c.recommendations === 1 ? "" : "s"} · {c.alerts} alert{c.alerts === 1 ? "" : "s"} · {c.incidents} incident{c.incidents === 1 ? "" : "s"} · {c.controls} control{c.controls === 1 ? "" : "s"} flagged{g.view.role ? ` · role ${g.view.role}` : ""}{g.view.pool ? ` · pool ${g.view.pool}` : ""}{g.view.recommendations.filter((r: any) => r.concept).length ? ` · ${g.view.recommendations.filter((r: any) => r.concept).length} decided as a Concept` : ""}</>}
+          : <>{c.recommendations} recommendation{c.recommendations === 1 ? "" : "s"} · {c.alerts} alert{c.alerts === 1 ? "" : "s"} · {c.incidents} incident{c.incidents === 1 ? "" : "s"} · {c.controls} control{c.controls === 1 ? "" : "s"} flagged · {c.log_groups} log group{c.log_groups === 1 ? "" : "s"}{g.view.role ? ` · role ${g.view.role}` : ""}{g.view.pool ? ` · pool ${g.view.pool}`: ""}{g.view.recommendations.filter((r: any) => r.concept).length ? ` · ${g.view.recommendations.filter((r: any) => r.concept).length} decided as a Concept` : ""}</>}
       </div>
+      {g.state === "ok" && g.view.log_groups?.length > 0 && (
+        <div className="mt-1 text-xs text-zinc-400">
+          <div className="text-zinc-500">Log groups it writes <span className="text-zinc-600">(observed on the box, or attributed to its system by name, tag or Jev)</span></div>
+          <ul className="mt-0.5 space-y-0.5">
+            {g.view.log_groups.slice(0, 10).map((l: any) => (
+              <li key={l.name} className="flex flex-wrap gap-x-2">
+                <span className="font-mono text-zinc-300">{l.name}</span>
+                <span className="text-zinc-500">{l.ingest_gb_day != null ? `${Number(l.ingest_gb_day).toFixed(2)} GB/day, ${usd(l.ingest_usd_month)}/mo` : "not metered"} · retention {l.retention_days ?? "never"}</span>
+                <span className={l.how === "observed" ? "text-emerald-300/80" : "text-zinc-600"}>{l.how === "observed" ? `seen in ${l.via}` : `${l.how}${l.source ? ` (system ${l.source})` : ""}`}</span>
+              </li>
+            ))}
+          </ul>
+          {g.view.log_groups.length > 10 && <div className="text-zinc-600">and {g.view.log_groups.length - 10} more</div>}
+        </div>
+      )}
+      {g.state === "ok" && !g.view.log_groups?.length && <div className="mt-1 text-xs text-zinc-600">No log group attributed to this box or its system yet: the knowledge layer refreshes after each run, and a probe with the 1.6 document adds what the box's own log agents ship.</div>}
     </Group>
   );
 }

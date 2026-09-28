@@ -29,6 +29,7 @@ export const SCHEMA_SUMMARY = [
   "(:KnSystem {id, name, kind: pool|instance|rds_cluster|rds_instance|cache_group|cache_cluster|nat, pool_kind, archetype, member_count, ebs_gb, monthly_list_usd, gone}) our systems as a schematic; (:AdvisorResource)-[:MEMBER_OF]->(:KnSystem); (:KnSystem)-[:IS_A]->(:KnArchetype {name, description}); (:KnSystem)-[:RUNS_ON {count, hours_month, list_price, list_usd_month}]->(:KnSystemType {id, kind: ec2|rds|elasticache|usage, sku, region, list_price, price_unit, source})",
   "(:KnPricingOverlay {kind: savings_plan|reservation, discount_rate, commitment_usd_month, sku, count, end})-[:COVERS]->(:KnSystemType); (:KnSystem|:AdvisorAccount)-[:TRANSFERS_TO {mechanism: nat|cross-az, gb_day, price_per_gb, usd_month, source}]->(:KnService {name}); (:KnPattern {text}) operational rules; AdvisorRecommendation carries verdict, realised_usd_month, realised_ratio once verified",
   "(:KnSystem|:AdvisorAccount)-[:SHIPS_LOGS_TO {gb_day, usd_month, attributed_by}]->(:KnLogGroup {name, region, retention_days, stored_gb, ingest_gb_day, ingest_usd_month, storage_usd_month, owner, attributed_by, candidates, tags, jev_choice, jev_confidence}) the system a CloudWatch log group belongs to (attributed_by says how: 'observed: cloudwatch-agent on i-..', 'tag service=x', 'lambda function name', 'name tokens: ..', 'jev: <system> at 80%' when the evidence rules found nothing and Jev picked); a group on the account node is unattributed, its candidates list the closest systems and jev_choice what Jev leaned to below the bar; (:AdvisorResource)-[:SHIPS_LOGS_TO {via: cloudwatch-agent|awslogs|fluent-bit|fluentd|docker-daemon|docker:<container>, source, observed_at}]->(:KnLogGroup) is what an instance's own agent config says it writes to (probe 1.6)",
+  "AdvisorResource (EC2) carries the EC2 status checks read on the watcher's cadence: system_status, instance_status, ebs_status (ok|impaired|insufficient-data|not-applicable|initializing), scheduled_events (count of AWS scheduled events: retirement, reboot, maintenance), status_checked_at",
   "(:AdvisorResource)-[:RUNS {user, count, cpu_pct, rss_bytes, oldest_seconds, command, first_seen, last_seen, probes, gone}]->(:AdvisorApp {id, name, kind: app|infra}) what runs on an EC2 instance, from the probe's process list with the OS daemons left out (kind infra = container runtime, monitoring agents); gone = true when the program was there and is not any more",
   "(:AdvisorResource {id, kind: ec2|rds|elasticache, name, type, state, region, role, role_confidence, protected_prob, monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})-[:IN_ACCOUNT]->(:AdvisorAccount {id})",
   "(:AdvisorResource)-[:HAS_ROLE]->(:AdvisorRole {name}); (:AdvisorResource)-[:IN_POOL]->(:AdvisorNodePool {name}) for autoscaled EC2 nodes (Karpenter pool, EKS node group, ASG)",
@@ -637,6 +638,27 @@ export async function mirrorApps(instanceIds?: string[]): Promise<{ apps: number
   return { apps: rows.length };
 }
 
+// ---- EC2 status checks (src/status_checks.ts) ---------------------------------------------------------------------------------
+
+const STATUS_CYPHER = `
+UNWIND $rows AS row
+MATCH (r:AdvisorResource {id: row.instance_id})
+SET r.system_status = row.system_status, r.instance_status = row.instance_status, r.ebs_status = row.ebs_status,
+    r.scheduled_events = row.scheduled_events, r.status_checked_at = row.checked_at, r.updated_at = $now`;
+
+/** The status checks of every running instance onto its resource node (src/status_checks.ts). */
+export async function mirrorStatusChecks(): Promise<{ instances: number }> {
+  if (!enabled()) return { instances: 0 };
+  await ensureSchema();
+  let status: any[] = [];
+  try { status = db.prepare("select * from instance_status").all(); } catch { return { instances: 0 }; }
+  const stamp = now();
+  const rows = status.map((s) => ({ instance_id: String(s.instance_id), system_status: str(s.system_status), instance_status: str(s.instance_status), ebs_status: str(s.ebs_status),
+    scheduled_events: ((safeJson(s.events) || []) as any[]).length, checked_at: str(s.checked_at) }));
+  for (const batch of chunks(rows)) await write(STATUS_CYPHER, { rows: batch, now: stamp });
+  return { instances: rows.length };
+}
+
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
 export interface MirrorCounts {
@@ -659,6 +681,7 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const { actions } = await mirrorActions();
   const { passes } = await mirrorPasses();
   const { apps } = await mirrorApps();
+  await mirrorStatusChecks();
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
   return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes, apps, took_ms: Date.now() - t0 };
@@ -719,8 +742,9 @@ export interface ResourceView {
   recommendations: { rec: Record<string, unknown>; concept: { id: string; name: string | null } | null }[];
   alerts: Record<string, unknown>[]; incidents: Record<string, unknown>[]; controls: { id: string; title: string | null; run_id: number | null; reason: string | null }[];
   actions: Record<string, unknown>[];
-  /** What runs on the box (RUNS edges, current ones first) and where its agents ship logs (SHIPS_LOGS_TO edges from the resource). */
+  /** What runs on the box (RUNS edges, current ones first). */
   apps: Record<string, unknown>[];
+  /** The log groups it writes: the ones its own agent config names (how = observed, from the resource's SHIPS_LOGS_TO edges) and the ones attributed to its system by name, tag or Jev (how = the rule, source = the system). */
   log_groups: Record<string, unknown>[];
   counts: { recommendations: number; alerts: number; incidents: number; controls: number; actions: number; apps: number; log_groups: number };
 }
@@ -744,8 +768,11 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
     OPTIONAL MATCH (r)-[ru:RUNS]->(app:AdvisorApp)
     WITH r, role, pool, recs, alerts, incidents, controls, actions, collect(DISTINCT CASE WHEN app IS NULL THEN null ELSE {name: app.name, kind: app.kind, user: ru.user, count: ru.count, cpu_pct: ru.cpu_pct, rss_bytes: ru.rss_bytes, oldest_seconds: ru.oldest_seconds, command: ru.command, first_seen: ru.first_seen, last_seen: ru.last_seen, gone: ru.gone} END) AS apps
     OPTIONAL MATCH (r)-[sl:SHIPS_LOGS_TO]->(g:KnLogGroup)
+    WITH r, role, pool, recs, alerts, incidents, controls, actions, apps,
+      collect(DISTINCT CASE WHEN g IS NULL THEN null ELSE {name: g.name, how: 'observed', via: sl.via, source: sl.source, observed_at: sl.observed_at, ingest_gb_day: g.ingest_gb_day, ingest_usd_month: g.ingest_usd_month, retention_days: g.retention_days} END) AS observed
+    OPTIONAL MATCH (r)-[:MEMBER_OF]->(sys:KnSystem)-[ss:SHIPS_LOGS_TO]->(sg:KnLogGroup)
     RETURN properties(r) AS resource, role.name AS role, pool.name AS pool, recs, alerts, incidents, controls, actions, apps,
-      collect(DISTINCT CASE WHEN g IS NULL THEN null ELSE {name: g.name, via: sl.via, source: sl.source, observed_at: sl.observed_at, ingest_gb_day: g.ingest_gb_day, ingest_usd_month: g.ingest_usd_month, retention_days: g.retention_days} END) AS log_groups`, { id }, { rowCap: 1 });
+      observed + [x IN collect(DISTINCT CASE WHEN sg IS NULL THEN null ELSE {name: sg.name, how: ss.attributed_by, via: null, source: sys.name, system: sys.id, observed_at: null, ingest_gb_day: sg.ingest_gb_day, ingest_usd_month: sg.ingest_usd_month, retention_days: sg.retention_days} END) WHERE x IS NOT NULL AND NOT x.name IN [o IN observed WHERE o IS NOT NULL | o.name]] AS log_groups`, { id }, { rowCap: 1 });
   const row = r.rows[0];
   if (!row) return null;
   const recs = (row.recs as any[]).filter(Boolean);
@@ -754,7 +781,7 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
   const controls = (row.controls as any[]).filter(Boolean);
   const actions = (row.actions as any[]).filter(Boolean).sort((a, b) => Number(b.id) - Number(a.id));
   const apps = (row.apps as any[]).filter(Boolean).sort((a, b) => Number(Boolean(a.gone)) - Number(Boolean(b.gone)) || (a.kind === b.kind ? Number(b.rss_bytes || 0) - Number(a.rss_bytes || 0) : a.kind === "app" ? -1 : 1));
-  const logGroups = (row.log_groups as any[]).filter(Boolean);
+  const logGroups = (row.log_groups as any[]).filter(Boolean).sort((a, b) => Number(b.ingest_usd_month || 0) - Number(a.ingest_usd_month || 0));
   return { resource: row.resource, role: row.role ?? null, pool: row.pool ?? null, recommendations: recs, alerts: alerts.slice(0, 25), incidents, controls, actions, apps, log_groups: logGroups,
     counts: { recommendations: recs.length, alerts: alerts.length, incidents: incidents.length, controls: controls.length, actions: actions.length, apps: apps.length, log_groups: logGroups.length } };
 }
@@ -795,5 +822,7 @@ export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirro
 export const mirrorActionsInBackground = (ids?: number[]) => inBackground(`action mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorActions(ids));
 /** At the end of every executor pass: the pass node and its edges to the rows it touched (src/executor_log.ts). */
 export const mirrorPassInBackground = (passId: number) => inBackground(`pass mirror (${passId})`, () => mirrorPass(passId));
+/** After the watcher read the EC2 status checks (src/status_checks.ts): the statuses on the resources. */
+export const mirrorStatusChecksInBackground = () => inBackground("status check mirror", mirrorStatusChecks);
 /** After a probe recorded what runs on an instance (src/instance_apps.ts): its RUNS edges. */
 export const mirrorAppsInBackground = (instanceIds?: string[]) => inBackground(`app mirror${instanceIds ? ` (${instanceIds.join(", ")})` : ""}`, () => mirrorApps(instanceIds));
