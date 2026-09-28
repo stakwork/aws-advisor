@@ -63,6 +63,8 @@ create index if not exists actions_status on actions(status, created_at)`);
 addColumn("actions", "account_id", "text");
 // Jev's second opinion on the proposal (src/proposal_check.ts): verdict, scores and reason, asked once per change.
 addColumn("actions", "check_json", "text");
+// When a stale row was proposed again (recordProposal): the same row comes back instead of a duplicate; the grace period restarts here.
+addColumn("actions", "revived_at", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
   | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory";
@@ -93,7 +95,7 @@ export interface Proposal {
 export interface ActionRow {
   id: number; kind: ActionKind; resource: string; resource_name: string | null; region: string | null; account_id: string | null; dedupe: string; status: ActionStatus; mode: string; trigger: string;
   title: string; reason: string; before: any; after: any; facts: any; rollback: string | null; est_usd_month: number | null; result: string | null; error: string | null;
-  created_at: string; seen_at: string; applied_at: string | null; verified_at: string | null; reverted_at: string | null; notified_at: string | null; notify_result: string | null;
+  created_at: string; seen_at: string; revived_at?: string | null; applied_at: string | null; verified_at: string | null; reverted_at: string | null; notified_at: string | null; notify_result: string | null;
   /** Jev's second opinion on the proposal; null while unchecked (no key, no answer, or the check is off). */
   check: ProposalCheck | null;
 }
@@ -453,20 +455,33 @@ const proposalOf = (r: ActionRow): Proposal => ({ kind: r.kind, resource: r.reso
 
 const FAILURES_BEFORE_REFUSING = 3;
 
-/** Records a proposal: refreshes the open row with the same dedupe, else inserts one. Returns the row and whether it is new. */
-function recordProposal(p: Proposal, mode: string, trigger: string): { row: ActionRow; fresh: boolean } {
+/**
+ * Records a proposal: refreshes the open row with the same dedupe (same id, same proposal date, `seen_at` moves), else
+ * revives the newest stale row with that dedupe (the change went away for a pass or two and is back: the same row
+ * and its original date come back, not a duplicate), else inserts one. `fresh` is true for an insert and a revival
+ * (both are announced and counted as new by the pass); `revived` tells the two apart.
+ */
+export function recordProposal(p: Proposal, mode: string, trigger: string): { row: ActionRow; fresh: boolean; revived: boolean } {
   // Same dedupe in another member account is another change: names (repositories, log groups) are unique only per account.
   const open = db.prepare("select id from actions where dedupe = ? and coalesce(account_id, '') = coalesce(?, '') and status = 'proposed' order by id desc limit 1").get(p.dedupe, p.account_id ?? null) as { id: number } | undefined;
   const json = { before: JSON.stringify(p.before), after: JSON.stringify(p.after), facts: JSON.stringify(p.facts) };
   if (open) {
     db.prepare("update actions set title = ?, reason = ?, before_json = ?, after_json = ?, facts_json = ?, rollback = ?, est_usd_month = ?, resource_name = ?, account_id = coalesce(?, account_id), seen_at = datetime('now'), mode = ? where id = ?")
       .run(p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null, p.resource_name ?? null, p.account_id ?? null, mode, open.id);
-    return { row: getAction(open.id)!, fresh: false };
+    return { row: getAction(open.id)!, fresh: false, revived: false };
+  }
+  const stale = db.prepare("select id from actions where dedupe = ? and coalesce(account_id, '') = coalesce(?, '') and status = 'stale' order by id desc limit 1").get(p.dedupe, p.account_id ?? null) as { id: number } | undefined;
+  if (stale) {
+    // The grace period restarts from the revival (graceLeftMs), so a change that comes back after a week is not applied on the spot.
+    db.prepare(`update actions set status = 'proposed', title = ?, reason = ?, before_json = ?, after_json = ?, facts_json = ?, rollback = ?, est_usd_month = ?, resource_name = ?, account_id = coalesce(?, account_id),
+      seen_at = datetime('now'), revived_at = datetime('now'), mode = ?, trigger = ?, result = null, error = null where id = ?`)
+      .run(p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null, p.resource_name ?? null, p.account_id ?? null, mode, trigger, stale.id);
+    return { row: getAction(stale.id)!, fresh: true, revived: true };
   }
   const id = Number(db.prepare(`insert into actions(kind, resource, resource_name, region, account_id, dedupe, status, mode, trigger, title, reason, before_json, after_json, facts_json, rollback, est_usd_month)
     values (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(p.kind, p.resource, p.resource_name ?? null, p.region, p.account_id ?? null, p.dedupe, mode, trigger, p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null).lastInsertRowid);
-  return { row: getAction(id)!, fresh: true };
+  return { row: getAction(id)!, fresh: true, revived: false };
 }
 
 /** Open proposals of a kind that this pass did not propose again no longer apply (the hour moved on, the snapshot is gone). */
@@ -625,10 +640,10 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
       const recorded: { row: ActionRow; fresh: boolean; p: Proposal }[] = [];
       for (const p of plan.proposals) {
         keep.add(keepKey(p.dedupe, p.account_id));
-        const { row, fresh } = recordProposal(p, mode, trigger);
+        const { row, fresh, revived } = recordProposal(p, mode, trigger);
         touched.add(row.id);
         out.proposed++; if (fresh) out.fresh++;
-        log(`${fresh ? "proposed" : "still proposed"} #${row.id} ${p.title}${p.est_usd_month != null ? ` (≈ ${p.est_usd_month.toFixed(2)} USD/month)` : ""}`);
+        log(`${revived ? "proposed again (was stale)" : fresh ? "proposed" : "still proposed"} #${row.id} ${p.title}${p.est_usd_month != null ? ` (≈ ${p.est_usd_month.toFixed(2)} USD/month)` : ""}`);
         recorded.push({ row, fresh, p });
       }
       const checked = await secondOpinion(recorded.map((r) => r.row), mod, mode, (n) => { out.notes.push(`${mod.kind}: ${n}`); log(`${mod.kind}: ${n}`); });
@@ -678,10 +693,12 @@ export async function previewActions(): Promise<{ proposals: Proposal[]; notes: 
 // ---- Sphinx ---------------------------------------------------------------------------------------------------------
 
 /** How long a fresh proposal still has to wait before the pass may apply it (0 when the module has no grace period). */
-export function graceLeftMs(row: Pick<ActionRow, "created_at">, graceHours: number, now = Date.now()): number {
+export function graceLeftMs(row: Pick<ActionRow, "created_at"> & { revived_at?: string | null }, graceHours: number, now = Date.now()): number {
   if (!graceHours) return 0;
-  const created = new Date(row.created_at.includes("T") ? row.created_at : row.created_at.replace(" ", "T") + "Z").getTime();
-  return Math.max(0, created + graceHours * 3600000 - now);
+  // A revived row (recordProposal) counts from its revival: the announcement people saw may be a week old.
+  const since = row.revived_at || row.created_at;
+  const from = new Date(since.includes("T") ? since : since.replace(" ", "T") + "Z").getTime();
+  return Math.max(0, from + graceHours * 3600000 - now);
 }
 
 export function formatProposalMessage(r: Pick<ActionRow, "id" | "title" | "reason" | "rollback" | "est_usd_month"> & { check?: ProposalCheck | null }, graceHours: number, mode: string, publicUrl: string): string {

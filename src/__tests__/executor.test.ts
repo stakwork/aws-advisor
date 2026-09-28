@@ -247,6 +247,32 @@ test("ledger: pages newest first, counts kinds within the status scope, lands on
   db.exec("delete from actions");
 });
 
+test("ledger: a proposal seen again keeps its row and date; one that went stale is revived, not duplicated, and its grace restarts", async () => {
+  const { recordProposal, graceLeftMs } = await import("../executor.js");
+  const { db } = await import("../db.js");
+  db.exec("delete from actions");
+  const p = { kind: "efs_lifecycle" as const, resource: "fs-1", resource_name: "fs-1", region: "us-east-1", account_id: null, dedupe: "efs_lifecycle:us-east-1:fs-1:30", title: "fs-1: cold files to IA after 30 days", reason: "no policy", before: {}, after: {}, facts: {}, rollback: "empty policy", est_usd_month: 1 };
+  const first = recordProposal(p, "dry_run", "schedule");
+  assert.deepEqual([first.fresh, first.revived], [true, false]);
+  db.prepare("update actions set created_at = '2026-09-20 10:00:00', seen_at = '2026-09-20 10:00:00' where id = ?").run(first.row.id);
+  const again = recordProposal({ ...p, title: "fs-1: cold files to IA after 30 days (12 GB)" }, "dry_run", "schedule");
+  assert.deepEqual([again.fresh, again.revived, again.row.id], [false, false, first.row.id]);
+  assert.equal(again.row.created_at, "2026-09-20 10:00:00");
+  assert.notEqual(again.row.seen_at, "2026-09-20 10:00:00");
+  assert.equal(again.row.title, "fs-1: cold files to IA after 30 days (12 GB)");
+  // the pass stops proposing it, then proposes it once more: the same row comes back
+  db.prepare("update actions set status = 'stale', result = 'no longer proposed by the latest pass' where id = ?").run(first.row.id);
+  const back = recordProposal(p, "apply", "manual");
+  assert.deepEqual([back.fresh, back.revived, back.row.id, back.row.status, back.row.result], [true, true, first.row.id, "proposed", null]);
+  assert.equal(back.row.created_at, "2026-09-20 10:00:00");
+  assert.ok(back.row.revived_at);
+  assert.equal((db.prepare("select count(*) as n from actions").get() as { n: number }).n, 1);
+  // grace: from the original date it would have elapsed; from the revival it has not
+  assert.equal(graceLeftMs({ created_at: back.row.created_at }, 24), 0);
+  assert.ok(graceLeftMs(back.row, 24) > 23 * 3600000);
+  db.exec("delete from actions");
+});
+
 test("gp2 → gp3: the target keeps gp2's performance and the saving nets out the extras", async () => {
   const { gp3Target, gp3Saving } = await import("../actions/ebs_gp3_migrate.js");
   assert.deepEqual(gp3Target(100), { iops: 3000, throughput_mibps: 125 });
