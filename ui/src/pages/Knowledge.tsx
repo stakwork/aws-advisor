@@ -1,7 +1,9 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, usd, when } from "../api";
-import { Badge, Button, Card, Code, CopyButton, Empty, Td, Th } from "../components/ui";
+import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../components/ui";
+
+const PAGE_SIZE = 10;
 
 type Concept = { id: string; name: string; description: string; scope: string; synced_at: string | null; sync_error: string | null; recommendation: any | null };
 
@@ -126,17 +128,19 @@ function SystemsCard() {
   const [d, setD] = useState<any>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [view, setView] = useState<any>(null);
+  const [page, setPage] = useState(1);
   useEffect(() => { api("/graph/systems").then(setD).catch((e) => setD({ error: e.message })); }, []);
   useEffect(() => { setView(null); if (open) api(`/graph/system/${encodeURIComponent(open)}`).then(setView).catch((e) => setView({ error: e.message })); }, [open]);
   if (!d) return null;
   if (d.error) return <Card title="Systems · the schematic"><div className="text-sm text-zinc-500">{d.error}</div></Card>;
   const rows: any[] = d.systems || [];
+  const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   return (
     <Card title={<span>Systems · the schematic <span className="font-normal text-zinc-500">· {rows.length} systems, their types at list price, what they move; click one</span></span>}>
-      {rows.length === 0 ? <div className="text-sm text-zinc-500">Nothing yet: Resync now builds it from the inventory, the price cache, the baselines and the log groups.</div> : (
+      {rows.length === 0 ? <div className="text-sm text-zinc-500">Nothing yet: Resync now builds it from the inventory, the price cache, the baselines and the log groups.</div> : (<>
         <table className="w-full border-collapse text-sm">
           <thead><tr><Th>System</Th><Th>Kind</Th><Th>Archetype</Th><Th className="text-right">Members</Th><Th className="text-right">At list / mo</Th><Th className="text-right">Transfer / mo</Th><Th className="text-right">Logs / mo</Th></tr></thead>
-          <tbody>{rows.map((s) => (
+          <tbody>{pageRows.map((s) => (
             <Fragment key={s.id}>
               <tr className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open === s.id ? "bg-zinc-900/40" : ""}`} onClick={() => setOpen(open === s.id ? null : s.id)}>
                 <Td className="text-zinc-100">{s.name}{s.pool_kind ? <span className="ml-1 text-xs text-zinc-500">{s.pool_kind}</span> : null}{s.part_of ? <span className="ml-1 text-xs text-zinc-500">in {s.part_of}</span> : null}</Td>
@@ -162,7 +166,8 @@ function SystemsCard() {
             </Fragment>
           ))}</tbody>
         </table>
-      )}
+        <Pager page={page} pageSize={PAGE_SIZE} total={rows.length} onPage={(p) => { setPage(p); setOpen(null); }} className="mt-2" />
+      </>)}
     </Card>
   );
 }
@@ -171,10 +176,12 @@ function SystemsCard() {
 function LogGroupsCard() {
   const [d, setD] = useState<any>(null);
   const [showAll, setShowAll] = useState(false);
+  const [page, setPage] = useState(1);
   useEffect(() => { api("/graph/logs").then(setD).catch((e) => setD({ error: e.message })); }, []);
   if (!d) return null;
   if (d.error) return <Card title="Log groups · who writes them"><div className="text-sm text-zinc-500">{d.error}</div></Card>;
   const rows: any[] = showAll ? d.groups : d.unattributed_groups;
+  const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const rules = Object.entries(d.by_rule || {}).sort((a: any, b: any) => b[1] - a[1]);
   return (
     <Card title={<span>Log groups · who writes them <span className="font-normal text-zinc-500">· {d.attributed} of {d.total} attributed, {d.observed} seen from an instance's agent config, {d.unattributed} unattributed ({usd(d.usd_month_unattributed)}/mo)</span></span>}>
@@ -182,24 +189,25 @@ function LogGroupsCard() {
         <div className="space-y-2 text-sm">
           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
             <span>By rule:</span>{rules.map(([k, n]: any) => <Badge key={k}>{`${k} ${n}`}</Badge>)}
-            <button className="ml-auto text-sky-300 hover:underline" onClick={() => setShowAll(!showAll)}>{showAll ? "unattributed only" : "show all groups"}</button>
+            <button className="ml-auto text-sky-300 hover:underline" onClick={() => { setShowAll(!showAll); setPage(1); }}>{showAll ? "unattributed only" : "show all groups"}</button>
           </div>
-          {rows.length === 0 ? <div className="text-zinc-500">Every group has an owner.</div> : (
+          {rows.length === 0 ? <div className="text-zinc-500">Every group has an owner.</div> : (<>
             <table className="w-full border-collapse text-xs">
               <thead><tr><Th>Group</Th><Th>Owner</Th><Th>How</Th><Th>Shipped from</Th><Th className="text-right">GB/day</Th><Th className="text-right">Cost / mo</Th></tr></thead>
-              <tbody>{rows.slice(0, 150).map((g: any) => (
+              <tbody>{pageRows.map((g: any) => (
                 <tr key={g.name} className="border-t border-zinc-800 align-top">
                   <Td className="max-w-md break-all font-mono text-zinc-200">{g.name}{g.tags ? <div className="font-sans text-zinc-500">{Object.entries(g.tags).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(" · ")}</div> : null}</Td>
                   <Td className="text-zinc-300">{g.owner_name || g.owner || <span className="text-amber-300/80">none</span>}</Td>
-                  <Td className="text-zinc-400">{g.how || "—"}{!g.owner && g.candidates?.length ? <div className="text-zinc-500">closest: {g.candidates.join("; ")}</div> : null}</Td>
+                  <Td className="text-zinc-400">{g.how || "—"}{!g.owner && g.candidates?.length ? <div className="text-zinc-500">closest: {g.candidates.join("; ")}</div> : null}{!g.owner && g.jev_choice ? <div className="text-zinc-500">Jev leaned {g.jev_choice === "none" ? "to none" : `to ${g.jev_choice}`} at {Math.round((g.jev_confidence || 0) * 100)}%, under the bar</div> : null}</Td>
                   <Td className="text-zinc-400">{g.shippers?.length ? g.shippers.slice(0, 3).map((s: any) => <div key={s.instance_id}><Link to={`/inventory?tab=ec2&id=${s.instance_id}`} className="font-mono hover:underline">{s.instance_id}</Link> {s.name ? <span className="text-zinc-500">{s.name}</span> : null} <span className="text-zinc-600">{s.via}</span></div>) : <span className="text-zinc-600">—</span>}{g.shippers?.length > 3 ? <div className="text-zinc-600">and {g.shippers.length - 3} more</div> : null}</Td>
                   <Td className="text-right text-zinc-400">{g.ingest_gb_day != null ? Number(g.ingest_gb_day).toFixed(2) : "—"}</Td>
                   <Td className="text-right text-zinc-400">{usd((g.ingest_usd_month || 0) + (g.storage_usd_month || 0))}</Td>
                 </tr>
               ))}</tbody>
             </table>
-          )}
-          <div className="text-xs text-zinc-500">An unattributed group can be claimed by tagging it with a system's name (any tag key), or by the CloudWatch agent config on the instance that writes it, which the probe reads. Both take effect at the next graph sync.</div>
+            <Pager page={page} pageSize={PAGE_SIZE} total={rows.length} onPage={setPage} className="mt-2" />
+          </>)}
+          <div className="text-xs text-zinc-500">Evidence first: what the instance's own agent config says, the AWS naming conventions, the group's tags, then the name. What is left goes to Jev, which picks a system or none; only a confident pick counts. An unattributed group can be claimed by tagging it with a system's name (any tag key) or by the agent config on the instance that writes it. All of it takes effect at the next graph sync, which runs after every collection run.</div>
         </div>
       )}
     </Card>

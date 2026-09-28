@@ -24,7 +24,12 @@ export const DEFAULT_SIGNALS: [string, string, string][] = [
 export const DEFAULT_SIGNALS_STRING = DEFAULT_SIGNALS.map(([n, re]) => `${n}=${re}`).join(SIGNALS_SEP);
 
 /** What the SSM document's parameter accepts: one line, no single quote (the script wraps the value in single quotes). */
-export const SIGNALS_ALLOWED_PATTERN = "^[^'\\r\\n]{1,4000}$";
+/**
+ * Up to 4000 characters without quotes or newlines, for the SSM document only. SSM checks it with RE2, which caps a
+ * repeat count at 1000, hence the nested group; RE2 is linear, but a backtracking engine (JavaScript's) can take
+ * minutes on a near-miss, so parseSignals checks the length and the characters itself and never uses this pattern.
+ */
+export const SIGNALS_ALLOWED_PATTERN = "^(?:[^'\\r\\n]{1,1000}){1,4}$";
 export const NAME_RE = /^[a-z][a-z0-9_]{0,23}$/;
 export const MAX_PATTERNS = 40;
 
