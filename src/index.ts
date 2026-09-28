@@ -79,6 +79,8 @@ const onListen = () => {
   checkCli().catch(() => {});
   console.log(`aws-advisor listening on ${config.bindAddr || "all interfaces"}:${config.port}, public URL ${config.publicUrl} (schema "${config.schema}", mod ${config.modDir}); MCP fact server at ${config.publicUrl}/mcp`);
   startScheduler();
+  // the knowledge layer of the graph (Kn labels) is rebuilt from what the database holds, so a deploy never leaves it empty
+  setTimeout(() => import("./graph_mirror.js").then((m) => m.mirrorKnowledgeInBackground("server start")).catch((e) => console.error(`[graph] knowledge layer at start: ${e?.message || e}`)), 15_000).unref();
   // the fleet's latest probes, judged now: a disk that filled while the advisor was down alerts at once
   import("./disk_alerts.js").then((m) => { const r = m.checkAllDiskLevels(); if (r.raised) console.log(`[disk] ${r.raised} disk alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[disk] startup check failed: ${e?.message || e}`));
   import("./host_alerts.js").then((m) => { const r = m.checkAllHostLevels(); if (r.raised) console.log(`[host] ${r.raised} host alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[host] startup check failed: ${e?.message || e}`));

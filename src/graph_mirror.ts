@@ -761,8 +761,33 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
 
 // ---- fire-and-forget hooks -----------------------------------------------------------------------------------------------
 
-/** End of a collection run: the run node, the refreshed inventory and every recommendation (the batch reconciles many). */
-export const mirrorAfterRunInBackground = (runId: number) => inBackground(`mirror of run ${runId}`, async () => { await mirrorRun(runId); await mirrorResources(); await mirrorRecommendations(); });
+/** End of a collection run: the run node, the refreshed inventory, every recommendation (the batch reconciles many), then the knowledge layer on top. */
+export const mirrorAfterRunInBackground = (runId: number) => inBackground(`mirror of run ${runId}`, async () => { await mirrorRun(runId); await mirrorResources(); await mirrorRecommendations(); mirrorKnowledgeInBackground(`run ${runId}`); });
+
+let knowledgeInFlight: Promise<unknown> | null = null;
+let knowledgeAgain: string | null = null;
+/**
+ * The knowledge layer (src/graph_knowledge.ts: systems, types, overlays, traffic and log attribution) is rebuilt from
+ * whatever the advisor holds, so it runs after everything that changes its inputs: a collection run, a probe pass
+ * (log shipping seen on the boxes), the daily logs refresh (new groups and tags) and server start. Triggers that
+ * arrive while it runs are coalesced into one more pass, so the Kn labels are always there and never rebuilt twice.
+ */
+export function mirrorKnowledgeInBackground(why: string): void {
+  if (!enabled()) return;
+  if (knowledgeInFlight) { knowledgeAgain = why; return; }
+  const go = async (reason: string): Promise<void> => {
+    const { mirrorKnowledge } = await import("./graph_knowledge.js");
+    const c = await mirrorKnowledge();
+    if (c) console.log(`[graph] knowledge layer refreshed after ${reason}: ${c.systems} systems, ${c.log_groups} log groups (${c.log_groups_attributed} attributed, ${c.log_groups_observed} observed), ${c.took_ms} ms`);
+  };
+  knowledgeInFlight = (async () => {
+    let reason: string | null = why;
+    while (reason) {
+      try { await go(reason); } catch (e) { logError(`knowledge mirror (${reason})`, e); }
+      reason = knowledgeAgain; knowledgeAgain = null;
+    }
+  })().finally(() => { knowledgeInFlight = null; });
+}
 export const mirrorResourcesInBackground = () => inBackground("resource mirror", mirrorResources);
 export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackground(`recommendation mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorRecommendations(ids));
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);

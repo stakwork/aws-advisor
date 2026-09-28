@@ -109,6 +109,8 @@ async function run(): Promise<ProbePassResult> {
   // the databases: the same hourly cadence, so the load profile behind an RDS recommendation is never older than the last pass
   try { result.databases = await rdsLoadPass(); } catch (e: any) { console.error(`[probe-pass] rds load pass failed: ${e?.message || e}`); }
   result.pruned = pruneHistory().probes;
+  // the probes carry what the boxes ship logs to (probe 1.6): the knowledge layer's log attribution reads it
+  if (result.probed.length) { const { mirrorKnowledgeInBackground } = await import("./graph_mirror.js"); mirrorKnowledgeInBackground(`probe pass (${result.probed.length} probed)`); }
   result.took_ms = Date.now() - t0;
   const byCode = new Map<string, number>(); for (const f of result.failed) byCode.set(f.code, (byCode.get(f.code) || 0) + 1);
   console.log(`[probe-pass] ${result.probed.length} probed, ${result.failed.length} failed of ${result.candidates} candidates in ${result.took_ms} ms${byCode.size ? ` (failures: ${[...byCode].map(([c, n]) => `${n} ${c}`).join(", ")}; first: ${result.failed[0].message})` : ""}`);

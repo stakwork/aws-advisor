@@ -1497,6 +1497,8 @@ of an ARN (`arn:...:instance/i-abc` → `i-abc`); anything else becomes an `Advi
 | a decision or batch decision (`src/routes/browse.ts`), alert ack / reopen (`src/routes/api.ts`) | `mirrorRecommendations([ids])` / `mirrorAlertsAndIncidents` |
 | `completeIncident` (`src/investigate.ts`, any outcome) | `mirrorAlertsAndIncidents`, then the fixes' recommendations (`FROM_INCIDENT`) |
 | a concept sync wrote its row (`src/concepts.ts`) | `mirrorRecommendations([id])`, so the `DECIDED_AS` edge appears once repo2graph has the Concept |
+| a probe stored what runs on a box (`src/ssm.ts`, probe 1.6) | `mirrorApps([instance])`: the `RUNS` edges to `AdvisorApp` |
+| end of a collection run, end of a probe pass, the daily logs refresh (manual too), and 15 s after server start | `mirrorKnowledge` (`mirrorKnowledgeInBackground`): the whole `Kn` layer, systems, types, overlays, traffic and log attribution, rebuilt from the database; overlapping triggers are coalesced into one more pass, so the `Kn` labels are always there without a manual resync |
 | an executor pass, apply, verify or revert (`src/executor.ts`) | `mirrorActions([ids])` for the rows touched; a recommendation the executor marks done also gets `syncDecisionConcept` + `mirrorRecommendations([id])` |
 
 Endpoints (`src/routes/graph.ts`): `GET /api/graph` → `{ configured, uri (host only), connected, server, error, stats: { nodes,
