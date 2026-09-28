@@ -537,7 +537,12 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
         status = inv.Status || "";
         if (status === "Success") { stdout = inv.StandardOutputContent || ""; break; }
         if (!["Pending", "InProgress", "Delayed", ""].includes(status)) {
-          throw new ProbeError("failed", `SSM command ${commandId} ended with ${status}: ${(inv.StandardErrorContent || inv.StatusDetails || "").slice(0, 400)}`);
+          // The agent reports a script that died, or one it could not even stage (root disk full), as a bare "Failed" with
+          // nothing on stderr: the reason, when there is one, is at the end of stdout, so that goes into the message too.
+          const stderr = (inv.StandardErrorContent || "").trim();
+          const tail = (inv.StandardOutputContent || "").trim().slice(-300);
+          const why = [inv.StatusDetails && inv.StatusDetails !== status ? inv.StatusDetails : "", stderr.slice(0, 400), tail ? `stdout tail: ${tail}` : ""].filter(Boolean).join("; ");
+          throw new ProbeError("failed", `SSM command ${commandId} ended with ${status}${why ? `: ${why}` : " and no output (the agent could not run the script: a full root disk is the usual cause)"}`);
         }
       } catch (e: any) {
         if (e instanceof ProbeError) throw e;
