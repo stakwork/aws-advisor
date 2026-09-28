@@ -33,6 +33,46 @@ test("log attribution: AWS naming conventions, tags, then name tokens", () => {
   assert.deepEqual(tokens("/aws/lambda/example-script-lambda"), ["lambda", "example", "script"]);
 });
 
+test("log attribution: an unattributed group says why and lists the closest systems", () => {
+  const r = attributeLogGroup("/orion/nothing-here-xyz", { ...ctx, systems: ctx.systems.filter((s) => s.id !== "ec2:i-8") });
+  assert.equal(r.owner, "rds:orion", "one system left with the token: it wins even as a database");
+  const weak = attributeLogGroup("/zzzz/qqqq", ctx);
+  assert.equal(weak.owner, null); assert.equal(weak.how, "no match"); assert.deepEqual(weak.candidates, []);
+  const amb = attributeLogGroup("/orion/app", { ...ctx, systems: [...ctx.systems, { id: "ec2:i-7", name: "orion-app-2", kind: "instance", members: ["i-7"] }] });
+  assert.equal(amb.owner, null); assert.match(amb.how, /^ambiguous/); assert.equal(amb.candidates.length, 3, "the tied compute systems and the database, best first");
+  assert.match(amb.candidates[0], /^ec2:i-[78] \(1: orion\)$/, "\"app\" is a generic token and does not count");
+});
+
+test("log attribution: the group's tags beat the name, a member id or alias counts, ownership tags do not", () => {
+  assert.equal(attributeLogGroup("/misc/group-1", ctx, { service: "orion-app-1" }).owner, "ec2:i-8");
+  assert.equal(attributeLogGroup("/misc/group-1", ctx, { service: "orion-app-1" }).how, "tag service=orion-app-1");
+  assert.equal(attributeLogGroup("/misc/group-1", ctx, { Instance: "i-3" }).owner, "pool:sysbox-quasar-nodes", "a member id names its pool, not the EKS cluster above it");
+  assert.equal(attributeLogGroup("/misc/group-1", ctx, { "eks:cluster-name": "quasar-cluster" }).owner, "eks:quasar-cluster");
+  assert.equal(attributeLogGroup("/misc/group-1", ctx, { "elasticbeanstalk:environment-name": "AcmecorpProductionDocker-env" }).owner, "pool:awseb-e-x-stack-ASG");
+  assert.equal(attributeLogGroup("/misc/group-1", ctx, { Environment: "orion" }).owner, null, "Environment is not a system name even when its value matches one");
+  const two = attributeLogGroup("/misc/group-1", ctx, { service: "orion-app-1", db: "orion" });
+  assert.equal(two.owner, null); assert.match(two.how, /^ambiguous: tags/);
+  assert.equal(attributeLogGroup("/orion/app", ctx, { service: "swarmab12cd" }).owner, "ec2:i-9", "a tag decides before the name tokens do");
+  assert.equal(attributeLogGroup("/aws/lambda/example-script-lambda", ctx, { service: "orion" }).owner, "lambda:example-script-lambda", "but the AWS naming convention decides before the tags");
+});
+
+test("log attribution: what an instance's agent config says wins over everything, and disagreement is reported", () => {
+  const observed = new Map([
+    ["/orion/app", [{ instance_id: "orion", via: "cloudwatch-agent", source: "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json", at: "2026-09-28T00:00:00Z" }]],
+    ["/shared/app", [{ instance_id: "i-1", via: "fluent-bit", source: null, at: "2026-09-28T00:00:00Z" }, { instance_id: "i-9", via: "docker:web", source: "log driver", at: "2026-09-28T00:00:00Z" }]],
+    ["/orphan/app", [{ instance_id: "i-404", via: "awslogs", source: null, at: "2026-09-28T00:00:00Z" }]],
+  ]);
+  const c = { ...ctx, observed };
+  const r = attributeLogGroup("/orion/app", c);
+  assert.equal(r.owner, "rds:orion", "the name alone would pick the compute box; the config on the database's member says otherwise");
+  assert.equal(r.how, "observed: cloudwatch-agent on orion");
+  const shared = attributeLogGroup("/shared/app", c);
+  assert.equal(shared.owner, null); assert.match(shared.how, /^observed on several systems/); assert.equal(shared.candidates.length, 2);
+  const orphan = attributeLogGroup("/orphan/app", c);
+  assert.equal(orphan.owner, null); assert.match(orphan.how, /in no system/);
+  assert.equal(attributeLogGroup("/swarms/ab12cd", c).owner, "ec2:i-9", "groups nobody was seen shipping to fall through to the other rules");
+});
+
 test("hours from samples: each count stands for the time to the next sample, capped at one hour", () => {
   const h = 3600e3; const t0 = Date.parse("2026-09-20T00:00:00Z");
   assert.equal(hoursFromSamples([{ t: t0, value: 10 }, { t: t0 + h / 2, value: 10 }, { t: t0 + h, value: 12 }]), 5 + 5 + 6);

@@ -34,6 +34,37 @@ function SignalChips({ image, act, rules, onChange }: { image: string; act: any;
   );
 }
 
+/** Probe 1.6: what runs on the box (the OS set aside), its appear/disappear events and where its log agents ship. Reloads when a new probe lands. */
+function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: string }) {
+  const [d, setD] = useState<any>(null);
+  const [all, setAll] = useState(false);
+  useEffect(() => { api(`/instances/${encodeURIComponent(instanceId)}/apps${all ? "?gone=1" : ""}`).then(setD).catch(() => setD(null)); }, [instanceId, probedAt, all]);
+  if (!d) return null;
+  if (!d.has_processes && !d.apps?.length) return <div className="mt-1 text-xs text-zinc-600">No process list yet: this probe predates 1.6 (update the SSM document, Settings › Permissions) or the box has not been probed since.</div>;
+  const age = (s: number) => (s >= 86400 ? `${Math.round(s / 86400)} d` : s >= 3600 ? `${Math.round(s / 3600)} h` : `${Math.max(1, Math.round(s / 60))} min`);
+  const apps = (d.apps || []).filter((a: any) => a.kind === "app"); const infra = (d.apps || []).filter((a: any) => a.kind === "infra");
+  const gone = (d.apps || []).filter((a: any) => a.gone);
+  return (
+    <div className="mt-1 text-xs text-zinc-400">
+      <div className="flex items-center gap-2">Runs: <span className="text-zinc-500">{apps.filter((a: any) => !a.gone).length} apps, {infra.filter((a: any) => !a.gone).length} infra</span>
+        <button className="text-sky-300 hover:underline" onClick={() => setAll(!all)}>{all ? "current only" : "include what left"}</button></div>
+      {apps.length + infra.length === 0 && <div className="text-zinc-600">Only the operating system is running.</div>}
+      <ul className="mt-0.5 space-y-0.5">
+        {[...apps, ...infra].slice(0, 40).map((a: any) => (
+          <li key={`${a.name}|${a.user}`} className={`flex flex-wrap gap-x-2 ${a.gone ? "text-zinc-600 line-through" : a.kind === "infra" ? "text-zinc-500" : "text-zinc-200"}`} title={a.command}>
+            <span className="font-mono">{a.name}</span>
+            <span className="text-zinc-500">{a.user}{a.count > 1 ? ` · ${a.count} procs` : ""} · {Math.round(a.rss_bytes / 1048576)} MB{a.cpu_pct >= 0.5 ? ` · cpu ${Number(a.cpu_pct).toFixed(0)}%` : ""} · up {age(a.oldest_seconds)}{a.probes > 1 ? ` · seen since ${when(a.first_seen)}` : ""}{a.gone ? ` · gone since ${when(a.last_seen)}` : ""}</span>
+          </li>
+        ))}
+      </ul>
+      {gone.length > 0 && !all && <div className="text-zinc-600">{gone.length} left the box</div>}
+      {d.events?.length > 0 && <details className="mt-0.5"><summary className="cursor-pointer text-zinc-500">App events ({d.events.length})</summary>
+        <ul className="mt-0.5 space-y-0.5">{d.events.slice(0, 20).map((e: any) => <li key={e.id} className={e.event === "disappeared" ? "text-amber-300/80" : "text-zinc-400"}>{when(e.at)} · {e.event} <span className="font-mono">{e.name}</span>{e.details?.oldest_seconds ? ` (had run ${age(e.details.oldest_seconds)})` : ""}</li>)}</ul></details>}
+      {d.log_shipping?.length > 0 && <div className="mt-0.5">Ships logs to: {d.log_shipping.slice(0, 8).map((s: any) => <span key={`${s.via}|${s.group}`} className="mr-2"><span className="font-mono text-zinc-300">{s.group}</span> <span className="text-zinc-600">({s.via})</span></span>)}{d.log_shipping.length > 8 ? <span className="text-zinc-600">and {d.log_shipping.length - 8} more</span> : null}</div>}
+    </div>
+  );
+}
+
 function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, rules, onRules }: { activity: any; summary: any; collectedAt: string; previous?: { collected_at: string; data: any } | null; instanceId: string; rules: any[]; onRules: () => void }) {
   const a = activity; const c = a.connections; const f = a.front_door; const l = a.logins;
   const navigate = useNavigate();
@@ -745,6 +776,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         {latest?.data?.disks?.length > 0 && <div className="mt-1 text-xs text-zinc-400">Disks: {latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).join(", ")}</div>}
         {latest?.data?.top_cpu?.length > 0 && <div className="text-xs text-zinc-400">Top CPU: {latest.data.top_cpu.slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
         {latest?.data?.top_mem?.length > 0 && <div className="text-xs text-zinc-400">Top memory: {latest.data.top_mem.slice(0, 3).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ")}</div>}
+        {latest && <AppsBlock instanceId={d.instance_id} probedAt={latest.collected_at} />}
         {latest?.data?.activity && <ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} />}
         {latest?.data?.docker?.available && (
           <div className="mt-1 text-xs text-zinc-400">

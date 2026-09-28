@@ -24,6 +24,7 @@ import { dispatchPassReports } from "./pass_report.js";
 import { refreshSwarmCosts } from "./swarm_costs.js";
 import { refreshTagHygiene } from "./tag_hygiene.js";
 import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
+import { mirrorKnowledgeInBackground } from "./graph_mirror.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -93,7 +94,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
   } },
   logsCron: { label: "Logs and CloudTrail", run: async () => {
     const out: string[] = [];
-    try { await refreshLogs((l) => console.log(`[logs] ${l}`)); out.push("logs"); } catch (e: any) { console.error(`[logs] failed: ${e?.message || e}`); out.push(`logs failed: ${e?.message || e}`); }
+    try { await refreshLogs((l) => console.log(`[logs] ${l}`)); out.push("logs"); mirrorKnowledgeInBackground("logs refresh"); } catch (e: any) { console.error(`[logs] failed: ${e?.message || e}`); out.push(`logs failed: ${e?.message || e}`); }
     try { await refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`)); out.push("cloudtrail"); } catch (e: any) { console.error(`[cloudtrail] failed: ${e?.message || e}`); out.push(`cloudtrail failed: ${e?.message || e}`); }
     try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
     try { const r = await s3UsagePass((l) => console.log(`[s3-usage] ${l}`)); out.push(`s3 usage ${r.analysed.length}/${r.candidates}`); } catch (e: any) { console.error(`[s3-usage] failed: ${e?.message || e}`); out.push(`s3 usage failed: ${e?.message || e}`); }
