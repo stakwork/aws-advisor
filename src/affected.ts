@@ -10,9 +10,9 @@
 import { db } from "./db.js";
 import { shortResourceId } from "./paging.js";
 
-export type Kind = "ec2" | "rds" | "elasticache" | "lambda" | "ebs" | "s3" | "snapshot" | "eip" | "vpc" | "nat" | "log-group" | "other";
+export type Kind = "ec2" | "rds" | "elasticache" | "lambda" | "elb" | "ebs" | "s3" | "snapshot" | "eip" | "vpc" | "nat" | "log-group" | "other";
 /** Inventory tabs that open a resource by id (`/inventory?tab=<tab>&id=<id>`, see ui/src/pages/Inventory.tsx). */
-export const TAB_FOR: Partial<Record<Kind, string>> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", lambda: "lambda", ebs: "ebs", s3: "s3" };
+export const TAB_FOR: Partial<Record<Kind, string>> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", lambda: "lambda", elb: "elb", ebs: "ebs", s3: "s3" };
 
 export interface AffectedResource { id: string; name: string | null; kind: Kind; tab: string | null; found: boolean }
 
@@ -39,6 +39,7 @@ export function kindOfId(id: string): Kind | null {
     if (service === "rds") return "rds";
     if (service === "elasticache") return "elasticache";
     if (service === "lambda") return "lambda";
+    if (service === "elasticloadbalancing") return "elb";
     if (service === "s3") return "s3";
     if (service === "logs") return "log-group";
     return "other";
@@ -90,6 +91,8 @@ function lookup(idOrName: string): Hit | null {
   if (vol) return { kind: "ebs", id: vol.volume_id, name: vol.name };
   const bucket = q<{ name: string }>("select name from inventory_s3 where name = ?", idOrName);
   if (bucket) return { kind: "s3", id: bucket.name, name: null };
+  const lb = q<{ name: string; kind: string }>("select name, kind from inventory_elb where arn = ? or name = ? or dns_name = ? order by gone asc, last_seen desc", idOrName, idOrName, idOrName);
+  if (lb) return { kind: "elb", id: lb.name, name: null };
   return null;
 }
 
@@ -103,7 +106,7 @@ function resolve(rawId: string, name: string | null): AffectedResource {
 /** Every inventory name worth spotting in text, loaded once per call (a few hundred rows). */
 function inventoryNames(): string[] {
   const all = (sql: string) => { try { return (db.prepare(sql).all() as { n: string | null }[]).map((r) => r.n).filter((n): n is string => Boolean(n)); } catch { return []; } };
-  return [...all("select name as n from inventory_ec2"), ...all("select db_instance_identifier as n from inventory_rds"), ...all("select cluster as n from inventory_rds"), ...all("select cache_cluster_id as n from inventory_elasticache"), ...all("select name as n from inventory_lambda")];
+  return [...all("select name as n from inventory_ec2"), ...all("select db_instance_identifier as n from inventory_rds"), ...all("select cluster as n from inventory_rds"), ...all("select cache_cluster_id as n from inventory_elasticache"), ...all("select name as n from inventory_lambda"), ...all("select name as n from inventory_elb")];
 }
 
 /**

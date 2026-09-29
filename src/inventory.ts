@@ -8,6 +8,7 @@ import { lambdaSummary, refreshLambdaInventory } from "./lambda_inventory.js";
 import { ebsSummary, refreshEbsInventory } from "./ebs_inventory.js";
 import { s3Summary } from "./s3_inventory.js";
 import { refreshRoute53Inventory, route53Summary } from "./route53_inventory.js";
+import { elbSummary, refreshElbInventory } from "./elb_inventory.js";
 
 /**
  * Inventory: a snapshot of EC2 instances (with their SSM status, EBS, CPU, latest probe and list price),
@@ -21,7 +22,7 @@ export interface RefreshResult {
   refreshed_at: string;
   ec2: number;
   rds: number;
-  elasticache: number; lambda: number; ebs: number; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
+  elasticache: number; lambda: number; ebs: number; elb: number; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
   prices_fetched: number;
   errors: string[];
   took_ms: number;
@@ -350,11 +351,13 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
 
   const lambda = await refreshLambdaInventory((m) => errors.push(m));
   const ebsVolumes = await refreshEbsInventory((m) => errors.push(m));
+  // after EC2, so instance and IP targets resolve against the rows just written
+  const elb = await refreshElbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   // last, so the DNS links read the EC2, RDS, S3 and Lambda rows just written
   let route53: RefreshResult["route53"] = null;
   if (opts.dns) { const r53 = await refreshRoute53Inventory(); errors.push(...r53.errors); route53 = { zones: r53.zones, records: r53.records, linked: r53.linked, unmatched: r53.unmatched }; }
   if (ec2Rows || rdsRows || cacheRows) setSetting("inventory_refreshed_at", now);
-  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, route53, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
+  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, elb, route53, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
 }
 
 export const inventoryRefreshedAt = () => getSetting("inventory_refreshed_at");
@@ -481,5 +484,5 @@ export function inventorySummary() {
     from inventory_elasticache where gone = 0`).get() as Record<string, number>;
   const cacheGone = (db.prepare("select count(*) as n from inventory_elasticache where gone = 1").get() as { n: number }).n;
   const r1 = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 100) / 100 : v]));
-  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(), ebs: ebsSummary(), s3: s3Summary(), route53: route53Summary() };
+  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(), ebs: ebsSummary(), elb: elbSummary(), s3: s3Summary(), route53: route53Summary() };
 }

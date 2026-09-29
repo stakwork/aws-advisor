@@ -224,8 +224,10 @@ test("probe 1.4: the activity script reads logs and counters only, and the histo
   db.prepare("delete from instance_daily where instance_id = ?").run(id);
   db.prepare("delete from container_daily where instance_id = ?").run(id);
   const day = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
   for (const [h, rx] of [["01", 1000], ["02", 4000], ["03", 500]] as const) {
     const q = JSON.parse(probe14()); q.collected_at = `${day}T${h}:00:00Z`; q.activity.net.rx_bytes = rx; q.containers[0].net_rx_bytes = rx;
+    q.activity.front_door.last_request_at = `${today}T07:12:00Z`; // dated relative to the run, so it stays newer than the probes
     db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(id, q.collected_at, JSON.stringify(q));
     recordContainerSamples(id, q.collected_at, parseProbeOutput(JSON.stringify(q)));
   }
@@ -241,9 +243,9 @@ test("probe 1.4: the activity script reads logs and counters only, and the histo
   assert.equal(proxy.restarts_max, 41);
   const d = (h.daily as any[]).find((x) => x.day === day);
   assert.equal(d.external_connections_max, 1);
-  // the probes are dated yesterday, so the fixture's front-door request (today 07:12) is the newest evidence of that day
+  // the probes are dated yesterday, so the front-door request (today 07:12) is the newest evidence of that day
   assert.equal(d.last_use_kind, "request");
-  assert.equal(d.last_use_at, "2026-09-25T07:12:00.000Z");
+  assert.equal(d.last_use_at, `${today}T07:12:00.000Z`);
   assert.equal(d.net_bytes_day, 3000);
   assert.equal(h.activity.window.days_with_external, 1);
   assert.equal(h.activity.latest.requests_24h, 7);

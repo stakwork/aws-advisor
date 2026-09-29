@@ -10,7 +10,7 @@ import { shortResourceId } from "./paging.js";
 export type EventKind = "seen" | "gone" | "finding" | "recommendation" | "decision" | "resolution" | "verification" | "alert" | "incident" | "probe";
 export interface TimelineEvent { at: string; kind: EventKind; title: string; detail: string | null; href: string | null; badge: string | null }
 
-const ID_COLUMN: Record<string, [table: string, column: string]> = { ec2: ["inventory_ec2", "instance_id"], rds: ["inventory_rds", "db_instance_identifier"], elasticache: ["inventory_elasticache", "cache_cluster_id"], lambda: ["inventory_lambda", "name"], ebs: ["inventory_ebs", "volume_id"], s3: ["inventory_s3", "name"] };
+const ID_COLUMN: Record<string, [table: string, column: string]> = { ec2: ["inventory_ec2", "instance_id"], rds: ["inventory_rds", "db_instance_identifier"], elasticache: ["inventory_elasticache", "cache_cluster_id"], lambda: ["inventory_lambda", "name"], ebs: ["inventory_ebs", "volume_id"], s3: ["inventory_s3", "name"], elb: ["inventory_elb", "name"] };
 export const TIMELINE_KINDS = Object.keys(ID_COLUMN);
 
 const q = <T>(sql: string, ...p: unknown[]): T[] => { try { return db.prepare(sql).all(...p) as T[]; } catch { return []; } };

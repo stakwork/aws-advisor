@@ -18,14 +18,14 @@ import { impactFor, latestVerification, runVerifications, verificationSummary } 
 import { quantitiesFromHistory } from "../quantities.js";
 import { listCommitments, refreshCommitments } from "../commitments.js";
 
-/** The concept graph as the agent sees it: generic rules and internal decisions, with their full records. */
+/** The concept graph as the agent sees it: operational patterns, generic rules and internal decisions, with their full records. */
 export const knowledge = Router();
 knowledge.use(authMiddleware);
 
 const headers = () => ({ "x-api-token": config.repo2graphToken });
 
 knowledge.get("/knowledge", async (_req, res) => {
-  if (!config.repo2graphUrl) return res.json({ configured: false, namespace: CONCEPT_NAMESPACE, generic: [], internal: [], learnings: [] });
+  if (!config.repo2graphUrl) return res.json({ configured: false, namespace: CONCEPT_NAMESPACE, patterns: [], generic: [], internal: [], learnings: [] });
   const concepts = await listDecisionConcepts(500);
   const local = new Map((db.prepare("select concept_id, fingerprint, status, scope, synced_at, error from concepts").all() as any[]).map((r) => [r.concept_id, r]));
   const recs = new Map((db.prepare("select fingerprint, id, title, resource, resource_name, action_type, status, decided_by, decided_at, decision_reason, est_monthly_saving from recommendations").all() as any[]).map((r) => [r.fingerprint, r]));
@@ -42,6 +42,7 @@ knowledge.get("/knowledge", async (_req, res) => {
   res.json({
     configured: true,
     namespace: CONCEPT_NAMESPACE,
+    patterns: concepts.filter((c) => c.scope === "pattern").map(enrich),
     generic: concepts.filter((c) => c.scope === "generic").map(enrich),
     internal: concepts.filter((c) => c.scope === "internal").map(enrich),
     learnings,

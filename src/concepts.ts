@@ -1,26 +1,34 @@
 /**
  * Mirrors every human decision on a recommendation into repo2graph's Concept graph, under the
- * namespace `aws/cost-advisor` with one parent concept ("AWS Cost Decisions") and one child concept
- * per recommendation. The agent reads Concepts natively (list_concepts / learn_concept), and the
+ * namespace `aws/cost-advisor` with one parent concept per scope and one child concept per
+ * recommendation. The agent reads Concepts natively (list_concepts / learn_concept), and the
  * advisor also lists them into the prompt at dispatch time, so past decisions steer future runs.
  *
- * Source of truth stays in SQLite; this is a one-way export. A concept is deleted and recreated on
- * every decision so its description (which carries the current decision) and embedding stay fresh;
- * the id is a deterministic slug of the name, so it never changes.
+ * For decisions the source of truth stays in SQLite; this is a one-way export. A concept is deleted and
+ * recreated on every decision so its description (which carries the current decision) and embedding stay
+ * fresh; the id is a deterministic slug of the name, so it never changes.
+ *
+ * The operational patterns (the rules every agent prompt carries: pool members are not candidates, the
+ * advisor is the monitor, ...) are Concepts only. The code holds a seed for each, written once when the
+ * Concept is missing and never rewritten, so the graph is their record: edit or retire one there and the
+ * prompts follow at the next dispatch (`systemPromptFor`).
  */
 import { config } from "./config.js";
 import { db } from "./db.js";
 import { mirrorRecommendationsInBackground } from "./graph_mirror.js";
+import { PromptKind, getPrompt } from "./prompts.js";
 
 export const CONCEPT_NAMESPACE = process.env.CONCEPT_NAMESPACE || "aws/cost-advisor";
 
 /**
- * Two kinds of concept, under two parents:
+ * Three kinds of concept, under three parents:
  *  - internal: a decision about one specific resource in this account ("keep example-node-1, the founder's node").
  *  - generic: reusable knowledge that transfers to any account ("bitcoind nodes are idle on CPU by design;
  *    never treat them as right-size candidates"). Generic concepts are named by role + action, not resource id.
+ *  - pattern: an operational rule the advisor's own prompts carry (seeded from OPERATIONAL_PATTERN_SEEDS, then
+ *    owned by the graph). The description is the rule as the prompts read it.
  */
-export type ConceptScope = "internal" | "generic";
+export type ConceptScope = "internal" | "generic" | "pattern";
 const PARENTS: Record<ConceptScope, { name: string; id: string; description: string; documentation: string }> = {
   internal: {
     name: "AWS Cost Decisions",
@@ -34,7 +42,43 @@ const PARENTS: Record<ConceptScope, { name: string; id: string; description: str
     description: "Reusable rules learned from cost decisions that apply to any account, e.g. which workload types are idle on CPU by design",
     documentation: "# AWS Cost Knowledge\n\nGeneric rules distilled from team decisions, phrased so they apply to any resource of the same kind in any account. Apply them before proposing anything similar.",
   },
+  pattern: {
+    name: "AWS Operational Patterns",
+    id: `${CONCEPT_NAMESPACE}/aws-operational-patterns`,
+    description: "Operational rules every advisor agent run respects: facts about how this fleet behaves, not guesses",
+    documentation: "# AWS Operational Patterns\n\nOne child concept per rule. Each description is a rule the advisor appends to every agent system prompt (findings, incident, resolution, observation) at dispatch time, so what is written here is what the agents are told. Edit a rule here to change what they are told; delete one to retire it.",
+  },
 };
+
+/**
+ * The operational patterns as first written. Each becomes a Concept under "AWS Operational Patterns" the first
+ * time the advisor finds it missing from the graph and its own `concepts` table; after that the graph owns the
+ * text and this list is only the seed for a fresh graph. Add a rule here with a new key; change an existing
+ * rule in the graph, not here.
+ */
+export const OPERATIONAL_PATTERN_SEEDS: { key: string; name: string; rule: string }[] = [
+  {
+    key: "pool_members_not_candidates",
+    name: "Pool members are not individual candidates",
+    rule: "Pool members are not individual candidates. Instances with a pool (batch = AWS Batch compute environment, karpenter, eks = managed node group, asg) are launched and terminated by their controller. A Batch worker exists only while a job runs: its appearance, its short life, its idle CPU between jobs and a late SSM registration are all expected. Recommend changes to the compute environment, NodePool, node group, launch template or job definition, never \"stop\", \"right-size\" or \"migrate\" one member.",
+  },
+  {
+    key: "ssm_registration_delay",
+    name: "New instances register late with Systems Manager",
+    rule: "New instances take a few minutes to register with Systems Manager; \"not managed\" on an instance younger than fifteen minutes is not a finding.",
+  },
+  {
+    key: "autoscaling_churn_is_normal",
+    name: "Autoscaling churn is normal",
+    rule: "Autoscaling churn (nodes appearing and disappearing) is normal; only a change in the pool's size over days is.",
+  },
+  {
+    key: "advisor_is_the_monitor",
+    name: "The advisor is the monitor for SSM-managed instances",
+    rule: "The advisor is the monitor for SSM-managed instances. It probes memory, disk, load, reboots and containers itself, keeps daily roll-ups, raises disk_high, disk_full and disk_fill (days until full at the current rate), memory and load alerts, and reviews the statistics every day. Never recommend installing the CloudWatch agent, creating CloudWatch alarms or adding external monitoring for these; a monitoring gap (an instance the advisor does not probe, a threshold, a figure it does not compute) goes under needs_from_human or in the rationale, not in a recommendation or a fix.",
+  },
+];
+export const patternFingerprint = (key: string) => `pattern:${key}`;
 
 db.exec(`
 create table if not exists concepts (
@@ -216,11 +260,91 @@ export function syncDecisionConceptInBackground(recommendationId: number): void 
   void syncDecisionConcept(recommendationId).catch((e) => console.error(`[concepts] sync failed for recommendation ${recommendationId}: ${e.message || e}`));
 }
 
+function patternDocumentation(seed: { name: string; rule: string }): string {
+  return [
+    `# ${seed.name}`,
+    ``,
+    `An operational pattern: a fact about how this fleet behaves that every advisor agent run is told to respect. The concept's description is the rule exactly as the agents read it, appended to the system prompt at dispatch time.`,
+    ``,
+    `## Rule`,
+    seed.rule,
+    ``,
+    `## Maintaining it`,
+    `Edit the description to change what the agents are told; delete the concept to retire the rule. The advisor seeds it once and never rewrites it.`,
+  ].join("\n");
+}
+
+/**
+ * Creates the operational-pattern Concepts the graph does not have yet. A pattern already recorded in the
+ * `concepts` table is left alone even when it no longer exists in the graph (the team retired it there); one
+ * that exists in the graph but not in the table (created by hand, or a fresh database) is adopted. Throws on
+ * transport errors; the memoised wrapper below retries on the next call.
+ */
+export async function seedOperationalPatterns(): Promise<{ created: string[]; adopted: string[] }> {
+  const out = { created: [] as string[], adopted: [] as string[] };
+  if (!enabled()) return out;
+  await ensureParent("pattern");
+  const known = new Set((db.prepare("select fingerprint from concepts where scope = 'pattern' and concept_id <> ''").all() as { fingerprint: string }[]).map((r) => r.fingerprint));
+  const record = db.prepare(`insert into concepts(fingerprint, concept_id, status, scope, synced_at, error) values (?, ?, 'seeded', 'pattern', datetime('now'), null)
+    on conflict(fingerprint) do update set concept_id = excluded.concept_id, status = excluded.status, scope = excluded.scope, synced_at = excluded.synced_at, error = null`);
+  for (const seed of OPERATIONAL_PATTERN_SEEDS) {
+    const fp = patternFingerprint(seed.key);
+    if (known.has(fp)) continue;
+    const body = { name: seed.name, repo: CONCEPT_NAMESPACE, parent: PARENTS.pattern.id, description: seed.rule, documentation: patternDocumentation(seed) };
+    const res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+    if (res.status === 409) {
+      const err = (await res.json().catch(() => ({}))) as { conceptId?: string };
+      if (!err.conceptId) throw new Error(`pattern ${seed.key} exists but repo2graph returned no id`);
+      record.run(fp, err.conceptId);
+      out.adopted.push(err.conceptId);
+      continue;
+    }
+    if (!res.ok) throw new Error(`create pattern concept failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+    const data = (await res.json()) as { concept: { id: string } };
+    record.run(fp, data.concept.id);
+    out.created.push(data.concept.id);
+  }
+  return out;
+}
+
+let seeding: Promise<void> | null = null;
+/** Seeds once per process; a failed attempt is forgotten so the next caller tries again. */
+export function ensureOperationalPatterns(): Promise<void> {
+  if (!enabled()) return Promise.resolve();
+  if (!seeding) {
+    seeding = seedOperationalPatterns().then((r) => {
+      if (r.created.length || r.adopted.length) console.log(`[concepts] operational patterns: ${r.created.length} created, ${r.adopted.length} adopted`);
+    }).catch((e) => { seeding = null; console.error(`[concepts] seeding operational patterns failed: ${e.message || e}`); });
+  }
+  return seeding;
+}
+
 export interface DecisionConcept { id: string; name: string; description: string; scope: ConceptScope }
 
-/** Concepts currently in the graph (parents excluded), generic knowledge first, for the agent prompt. */
+/** The block every agent system prompt ends with: the pattern Concepts, one rule per line with its id so a plan can cite it. */
+export function operationalPatternsBlock(concepts: DecisionConcept[]): string {
+  const patterns = concepts.filter((c) => c.scope === "pattern");
+  if (!patterns.length) return "";
+  return "Operational patterns to respect (facts, not guesses):\n" + patterns.map((c) => `- [${c.id}] ${c.description}`).join("\n");
+}
+
+/** The kinds whose system prompt carries the operational patterns; chat and the pass report never did. */
+export const PATTERN_PROMPT_KINDS: ReadonlySet<PromptKind> = new Set<PromptKind>(["findings", "incident", "resolution", "observe"]);
+
+/** The system prompt actually sent: the editable prompt for the kind plus, for the kinds that carry them, the operational patterns from the graph. */
+export async function systemPromptFor(kind: PromptKind, concepts?: DecisionConcept[]): Promise<string> {
+  if (!PATTERN_PROMPT_KINDS.has(kind)) return getPrompt(kind);
+  const block = operationalPatternsBlock(concepts ?? (await listDecisionConcepts()));
+  const base = getPrompt(kind);
+  return block ? `${base}\n${block}` : base;
+}
+
+const SCOPE_ORDER: Record<ConceptScope, number> = { pattern: 0, generic: 1, internal: 2 };
+
+/** Concepts currently in the graph (parents excluded): operational patterns, then generic knowledge, then internal decisions. */
 export async function listDecisionConcepts(limit = 60): Promise<DecisionConcept[]> {
   if (!enabled()) return [];
+  await ensureOperationalPatterns();
   try {
     const r = await fetch(`${config.repo2graphUrl}/gitree/concepts?repo=${encodeURIComponent(CONCEPT_NAMESPACE)}`, { headers: headers() });
     if (!r.ok) return [];
@@ -231,7 +355,7 @@ export async function listDecisionConcepts(limit = 60): Promise<DecisionConcept[
     return items
       .filter((c) => !parents.has(c.id))
       .map((c) => ({ id: c.id, name: c.name, description: c.description, scope: scopes.get(c.id) || "internal" }))
-      .sort((a, b) => (a.scope === b.scope ? 0 : a.scope === "generic" ? -1 : 1))
+      .sort((a, b) => SCOPE_ORDER[a.scope] - SCOPE_ORDER[b.scope])
       .slice(0, limit);
   } catch {
     return [];

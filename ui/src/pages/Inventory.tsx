@@ -6,6 +6,7 @@ import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
+import { UsageProfile } from "../components/usageProfile";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
 /** One chip per matched use-signal kind; click marks it noise for this image (or lifts the rule), so the count stops fooling the last-use line. */
@@ -132,10 +133,10 @@ function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, r
 import { RdsLoadPanel } from "../components/rdsLoad";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache", "lambda", "ebs", "s3", "route53", "tags"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "elb", "ebs", "s3", "route53", "tags"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", ebs: "EBS", s3: "S3", route53: "Route 53", tags: "Tags" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", ebs: "volume_id", s3: "name", route53: "id", tags: "resource" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", elb: "Load balancers", ebs: "EBS", s3: "S3", route53: "Route 53", tags: "Tags" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", tags: "resource" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
@@ -191,8 +192,8 @@ const Tags = ({ tags }: { tags: Record<string, string> | null | undefined }) => 
   );
 };
 
-/** Where a Route 53 link lands in the inventory: the tab and id, or nothing for kinds the inventory does not hold (load balancers, distributions, NAT gateways). */
-const LINK_TAB: Record<string, Tab> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", s3: "s3", lambda: "lambda" };
+/** Where a Route 53 link lands in the inventory: the tab and id, or nothing for kinds the inventory does not hold (distributions, NAT gateways). */
+const LINK_TAB: Record<string, Tab> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", s3: "s3", lambda: "lambda", alb: "elb", nlb: "elb", clb: "elb", lb: "elb" };
 const LINK_KIND: Record<string, string> = { ec2: "instance", rds: "RDS", rds_cluster: "RDS cluster", elasticache: "ElastiCache", elasticache_group: "ElastiCache group", s3: "S3 bucket", lambda: "Lambda", alb: "ALB", nlb: "NLB", clb: "classic LB", lb: "load balancer", cloudfront: "CloudFront", nat: "NAT gateway", eip: "Elastic IP", eni: "interface", apigw: "API Gateway", beanstalk: "Beanstalk" };
 const ResourceLink = ({ l }: { l: { kind: string; id: string; name?: string | null; state?: string | null } }) => {
   const tab = LINK_TAB[l.kind]; const label = l.name && l.name !== l.id ? `${l.name} (${l.id})` : l.id;
@@ -277,6 +278,7 @@ export default function Inventory() {
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (tab === "ebs" && state) qs.set("state", state);
+    if (tab === "elb" && state) qs.set("kind", state);
     if (tab === "route53") { if (zone) qs.set("zone", zone); if (link) qs.set("link", link); }
     if (params.get("q")) qs.set("q", params.get("q")!);
     if (sort) qs.set("sort", sort);
@@ -384,6 +386,15 @@ export default function Inventory() {
           <Stat label="Public" value={inv.public_unknown && !inv.public ? "?" : inv.public} hint={inv.public ? "bucket policy allows public access" : inv.public_unknown ? "unknown: grant s3:GetBucketPolicyStatus" : "none"} />
         </div>
       )}
+      {tab === "elb" && inv && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <Stat label="Load balancers" value={inv.total} hint={`${inv.alb} ALB · ${inv.nlb} NLB · ${inv.clb} classic${inv.gwlb ? ` · ${inv.gwlb} gateway` : ""}${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
+          <Stat label="Internet-facing" value={inv.internet_facing} hint={`${inv.total - inv.internet_facing} internal`} />
+          <Stat label="Targets" value={`${inv.healthy} / ${inv.targets}`} hint={`healthy / registered${inv.unhealthy ? ` · ${inv.unhealthy} unhealthy` : ""}${inv.no_healthy_target ? ` · ${inv.no_healthy_target} balancer${inv.no_healthy_target === 1 ? "" : "s"} with no healthy target` : ""}`} />
+          <Stat label="Traffic, 30 days" value={`${(Number(inv.requests_30d) / 1e6).toFixed(2)}M req`} hint={`${Number(inv.gb_30d).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB processed${inv.beanstalk ? ` · ${inv.beanstalk} made by Beanstalk` : ""}`} />
+          <Stat label="Fixed price / month" value={usd(inv.monthly_usd)} hint="hourly list price × 730; LCU-hours (ALB, NLB) and per-GB (classic) come on top" />
+        </div>
+      )}
       {tab === "route53" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <Stat label="Hosted zones" value={inv.zones} hint={`${inv.private_zones ? `${inv.private_zones} private · ` : ""}${inv.total} records${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
@@ -412,6 +423,11 @@ export default function Inventory() {
               <option value="">Any SSM status</option><option value="online">SSM online</option><option value="lost">SSM connection lost</option><option value="unmanaged">not managed by SSM</option><option value="managed">managed (any status)</option>
             </select>
           </>
+        )}
+        {tab === "elb" && (
+          <select value={state} onChange={(e) => set({ state: e.target.value, id: null })}>
+            <option value="">All kinds</option><option value="alb">ALB</option><option value="nlb">NLB</option><option value="clb">classic</option><option value="gwlb">gateway</option>
+          </select>
         )}
         {tab === "ebs" && (
           <select value={state} onChange={(e) => set({ state: e.target.value, id: null })}>
@@ -468,6 +484,12 @@ export default function Inventory() {
                   <SortTh col="name">Record</SortTh><SortTh col="type">Type</SortTh><SortTh col="target">Value</SortTh><SortTh col="link_state">Leads to</SortTh><SortTh col="zone_name">Zone</SortTh><SortTh col="ttl" className="text-right">TTL</SortTh>
                 </tr></thead>
               )}
+              {tab === "elb" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="name">Load balancer</SortTh><SortTh col="kind">Kind</SortTh><SortTh col="state">State</SortTh><Th>Fronts</Th><SortTh col="healthy" className="text-right">Targets</SortTh>
+                  <SortTh col="requests_30d" className="text-right">Requests 30d</SortTh><SortTh col="gb_30d" className="text-right">GB 30d</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="created">Created</SortTh>
+                </tr></thead>
+              )}
               {tab === "lambda" && (
                 <thead className="bg-zinc-900"><tr>
                   <SortTh col="name">Function</SortTh><SortTh col="runtime">Runtime</SortTh><SortTh col="memory_mb" className="text-right">Memory</SortTh><SortTh col="invocations_month" className="text-right">Invocations / mo</SortTh>
@@ -491,6 +513,7 @@ export default function Inventory() {
                         : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={() => runProbe(detail.instance_id)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
                         : tab === "lambda" ? <LambdaDetail d={detail} />
+                        : tab === "elb" ? <ElbDetail d={detail} />
                         : tab === "ebs" ? <EbsDetail d={detail} />
                         : tab === "s3" ? <S3Detail d={detail} />
                         : tab === "route53" ? <Route53Detail d={detail} />
@@ -565,6 +588,19 @@ export default function Inventory() {
                       </tr>{detailRow}
                     </Fragment>);
                   }
+                  if (tab === "elb") return (<Fragment key={id}>
+                    <tr onClick={() => pick(id)} className={cls}>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name}</span>{r.scheme === "internet-facing" ? <Badge>public</Badge> : r.scheme ? <Badge>internal</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="truncate font-mono text-xs text-zinc-500" title={r.dns_name}>{r.dns_name || r.region}</div></Td>
+                      <Td className="whitespace-nowrap uppercase text-zinc-400">{r.kind === "clb" ? "classic" : r.kind}</Td>
+                      <Td><Badge>{r.state || "?"}</Badge></Td>
+                      <Td className="max-w-sm"><ElbFronts r={r} /></Td>
+                      <Td className={`text-right ${r.targets && !r.healthy ? "text-red-300" : r.unhealthy ? "text-amber-300" : ""}`}>{r.targets ? `${r.healthy} / ${r.targets}` : <span className="text-zinc-600">none</span>}</Td>
+                      <Td className="text-right">{r.requests_30d != null ? Number(r.requests_30d).toLocaleString(undefined, { maximumFractionDigits: 0 }) : r.flows_30d != null ? <span title="peak active flows (NLB)">{Number(r.flows_30d).toLocaleString()} flows</span> : <span className="text-zinc-600">—</span>}</Td>
+                      <Td className="text-right text-zinc-400">{r.gb_30d != null ? Number(r.gb_30d).toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—"}</Td>
+                      <Td className="text-right font-medium text-zinc-100">{usd(r.monthly_usd, 2)}</Td>
+                      <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
+                    </tr>{detailRow}
+                  </Fragment>);
                   if (tab === "lambda") return (<Fragment key={id}>
                     <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.arm ? <Badge>arm64</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{r.region}</div></Td>
@@ -602,7 +638,70 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, ebs: 10, s3: 8, route53: 6, tags: 5 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, elb: 9, ebs: 10, s3: 8, route53: 6, tags: 5 };
+
+/** What a balancer fronts, in one line: the instances (linked), Lambda targets, the Beanstalk environment, ASGs and ECS services. */
+function ElbFronts({ r }: { r: any }) {
+  const targets = (r.target_groups || []).flatMap((g: any) => g.targets || []);
+  const instances = new Map<string, any>(); for (const t of targets) if (t.instance_id && !instances.has(t.instance_id)) instances.set(t.instance_id, t);
+  const lambdas: string[] = [...new Set<string>(targets.filter((t: any) => t.lambda).map((t: any) => String(t.lambda)))];
+  const others = targets.filter((t: any) => !t.instance_id && !t.lambda).length;
+  const parts: ReactNode[] = [];
+  for (const [id, t] of [...instances].slice(0, 4)) parts.push(<Link key={id} className={`hover:underline ${t.health === "unhealthy" ? "text-red-300" : ""}`} to={`/inventory?tab=ec2&id=${encodeURIComponent(id)}`} title={`${id}${t.health ? ` · ${t.health}` : ""}`}>{t.name || id}</Link>);
+  if (instances.size > 4) parts.push(<span key="more-i" className="text-zinc-500">+{instances.size - 4} more</span>);
+  for (const l of lambdas.slice(0, 2)) parts.push(<Link key={`l-${l}`} className="hover:underline" to={`/inventory?tab=lambda&id=${encodeURIComponent(l)}`}>λ {l}</Link>);
+  if (others) parts.push(<span key="others" className="text-zinc-500">{others} other target{others === 1 ? "" : "s"}</span>);
+  if (r.beanstalk_env) parts.push(<span key="eb" className="text-xs text-emerald-300" title="Elastic Beanstalk environment">EB {r.beanstalk_env}</span>);
+  for (const a of r.asgs || []) parts.push(<span key={`a-${a}`} className="text-xs text-sky-300" title="autoscaling group">ASG {a}</span>);
+  for (const s of r.ecs_services || []) parts.push(<span key={`s-${s}`} className="text-xs text-violet-300" title="ECS service">ECS {s}</span>);
+  if (!parts.length) return <span className="text-zinc-600">nothing registered</span>;
+  return <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-sm">{parts}</div>;
+}
+
+function ElbDetail({ d }: { d: any }) {
+  const kindLabel = d.kind === "clb" ? "classic load balancer" : d.kind === "gwlb" ? "gateway load balancer" : String(d.kind).toUpperCase();
+  return (
+    <>
+      <h2 className="text-base font-medium text-zinc-100">{d.name}</h2>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{kindLabel}</Badge>{d.scheme && <Badge>{d.scheme}</Badge>}<Badge>{d.state || "?"}</Badge>{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.arn}</Mono></div>
+      <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <Group title="Network">
+        <Dl rows={[["DNS name", d.dns_name && <Mono>{d.dns_name}</Mono>], ["Region", d.region], ["VPC", d.vpc_id && <Mono>{d.vpc_id}</Mono>], ["Availability zones", d.azs || null], ["Security groups", d.security_groups?.length ? d.security_groups.join(", ") : null], ["Created", day(d.created)]]} />
+      </Group>
+      <Group title={`Listeners · ${(d.listeners || []).length}`}>
+        {(d.listeners || []).length ? <ul className="space-y-0.5 text-sm">{d.listeners.map((l: any, i: number) => <li key={i}><Mono>{l.protocol}:{l.port}</Mono>{l.certificates ? <span className="ml-2 text-xs text-zinc-500">{l.certificates} certificate{l.certificates === 1 ? "" : "s"}</span> : null}{l.default_action && <span className="ml-2 text-zinc-400">{l.default_action}</span>}</li>)}</ul> : <div className="text-sm text-zinc-500">No listener: nothing can reach the targets through this balancer.</div>}
+      </Group>
+      <Group title={`Target groups · ${(d.target_groups || []).length}`}>
+        {(d.target_groups || []).length ? d.target_groups.map((g: any) => (
+          <div key={g.arn} className="mb-2 text-sm">
+            <div className="flex flex-wrap items-center gap-2"><span className="font-medium text-zinc-200">{g.name}</span><span className="text-xs text-zinc-500">{[g.target_type, g.protocol && g.port != null ? `${g.protocol}:${g.port}` : null, g.health_check && `health check ${g.health_check}`].filter(Boolean).join(" · ")}</span>{(g.asgs || []).map((a: string) => <span key={a} className="text-xs text-sky-300">ASG {a}</span>)}{(g.ecs_services || []).map((s: string) => <span key={s} className="text-xs text-violet-300">ECS {s}</span>)}</div>
+            {g.targets?.length ? <ul className="mt-0.5 space-y-0.5 pl-3">{g.targets.map((t: any, i: number) => <li key={`${t.id}-${i}`} className="flex flex-wrap items-center gap-2">
+              {t.instance_id ? <Link className="hover:underline" to={`/inventory?tab=ec2&id=${encodeURIComponent(t.instance_id)}`}>{t.name || t.instance_id}</Link> : t.lambda ? <Link className="hover:underline" to={`/inventory?tab=lambda&id=${encodeURIComponent(t.lambda)}`}>λ {t.lambda}</Link> : <span>{t.name || t.id}</span>}
+              {t.instance_id && t.instance_id !== t.id ? <Mono>{t.id}</Mono> : t.instance_id ? <Mono>{t.instance_id}</Mono> : null}{t.port != null && <span className="text-xs text-zinc-500">:{t.port}</span>}
+              {t.health && <span className={`text-xs ${t.health === "healthy" ? "text-emerald-300" : t.health === "unhealthy" ? "text-red-300" : "text-zinc-500"}`} title={t.reason || undefined}>{t.health}</span>}
+            </li>)}</ul> : <div className="pl-3 text-xs text-zinc-500">no registered target</div>}
+          </div>
+        )) : <div className="text-sm text-zinc-500">No target group: the balancer fronts nothing.</div>}
+      </Group>
+      {(d.beanstalk_env || d.asgs?.length || d.ecs_services?.length) ? <Group title="Owned by">
+        <Dl rows={[["Elastic Beanstalk", d.beanstalk_env && <span>environment <span className="font-medium">{d.beanstalk_env}</span> (Beanstalk owns this balancer; change it through the environment's configuration)</span>], ["Autoscaling groups", d.asgs?.length ? d.asgs.join(", ") : null], ["ECS services", d.ecs_services?.length ? d.ecs_services.join(", ") : null]]} />
+      </Group> : null}
+      <Group title="Traffic, last 30 days">
+        <Dl rows={[
+          ["Requests", d.requests_30d != null ? `${Number(d.requests_30d).toLocaleString(undefined, { maximumFractionDigits: 0 })} over ${d.metric_days} day${d.metric_days === 1 ? "" : "s"} with data` : d.kind === "alb" || d.kind === "clb" ? "no RequestCount datapoint: nothing came through, or the metric is missing" : null],
+          ["Peak active flows", d.flows_30d != null ? Number(d.flows_30d).toLocaleString() : null],
+          ["Processed", d.gb_30d != null ? `${Number(d.gb_30d).toLocaleString(undefined, { maximumFractionDigits: 2 })} GB` : null],
+        ]} />
+      </Group>
+      <Group title="Price">
+        <Dl rows={[["Fixed, at list", `${usd(d.monthly_usd, 2)} / month (hourly × 730)`], ["On top", d.kind === "clb" ? "0.008 USD per GB processed" : d.kind === "gwlb" ? "GLCU-hours" : `${d.kind === "alb" ? "LCU" : "NLCU"}-hours at ${d.kind === "alb" ? "0.008" : "0.006"} USD, from new connections, active connections, bytes and rule evaluations`]]} />
+      </Group>
+      <Domains list={d.domains} empty="No Route 53 record in this account points at this balancer." />
+      <Group title="Tags"><Tags tags={d.tags} /></Group>
+      <Timeline kind="elb" id={d.name} />
+    </>
+  );
+}
 
 /**
  * Tag hygiene (src/tag_hygiene.ts): which resources lack the required tags (owner and env by default), the value the
@@ -769,6 +868,9 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         ]} />
       </Group>
       <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
+      <Group title="Behind">
+        {d.load_balancers?.length ? <ul className="space-y-0.5 text-sm">{d.load_balancers.map((lb: any, i: number) => <li key={`${lb.arn}-${i}`} className="flex flex-wrap items-center gap-2"><Link className="hover:underline" to={`/inventory?tab=elb&id=${encodeURIComponent(lb.name)}`}>{lb.name}</Link><span className="text-xs uppercase text-zinc-500">{lb.kind === "clb" ? "classic" : lb.kind}</span><span className="text-xs text-zinc-500">{lb.target_group}{lb.port != null ? `:${lb.port}` : ""}</span>{lb.health && <span className={`text-xs ${lb.health === "healthy" ? "text-emerald-300" : lb.health === "unhealthy" ? "text-red-300" : "text-zinc-500"}`}>{lb.health}</span>}</li>)}</ul> : <div className="text-sm text-zinc-500">No load balancer in this account has this instance as a target.</div>}
+      </Group>
 
       <Group title={`Storage · ${gb(st.ebs_gb)}`}>
         <Dl rows={[["Root device", st.root_device_name && `${st.root_device_name} (${st.root_device_type})`]]} />
@@ -830,6 +932,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         )}
         {latest?.data?.docker && !latest.data.docker.available && <div className="mt-1 text-xs text-zinc-600">No Docker daemon on this instance (probe 1.2 reports containers where Docker runs).</div>}
         <div className="mt-3"><InstanceCharts instanceId={d.instance_id} /></div>
+        <div className="mt-3"><UsageProfile subject={d.instance_id} running={d.state === "running"} /></div>
         {d.probes?.length > 1 && (
           <details className="mt-1 text-xs"><summary className="cursor-pointer text-zinc-500">Probe history ({d.probes.length})</summary>
             <ul className="mt-1 space-y-0.5 text-zinc-400">{d.probes.map((p: any) => <li key={p.id}>{when(p.collected_at)} · memory {p.summary.memory_used_pct}% · load {p.summary.load_1m}{p.summary.top_process ? ` · ${p.summary.top_process}` : ""}</li>)}</ul>

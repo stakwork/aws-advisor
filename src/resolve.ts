@@ -1,11 +1,10 @@
 import { choice, noul, score } from "@typesafe-ai/sdk";
 import { config } from "./config.js";
-import { getPrompt, registerDefaultPrompt } from "./prompts.js";
-import { OPERATIONAL_PATTERNS } from "./pools.js";
+import { registerDefaultPrompt } from "./prompts.js";
 import { credentialGate } from "./gate.js";
 import { db } from "./db.js";
 import { askJev, jevEnabled } from "./jev.js";
-import { DecisionConcept, listDecisionConcepts } from "./concepts.js";
+import { DecisionConcept, listDecisionConcepts, systemPromptFor } from "./concepts.js";
 import { Playbook, controlForRecommendation, playbookFor } from "./playbooks.js";
 import { AgentRunRow, postAgentRequest } from "./agent.js";
 import { latestProbe } from "./ssm.js";
@@ -117,12 +116,14 @@ export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "
 
 /**
  * The decision concepts that matter for this resource: internal ones that name the resource id or name, and
- * generic rules whose name starts with the resource's role (see src/concepts.ts genericConceptName).
+ * generic rules whose name starts with the resource's role (see src/concepts.ts genericConceptName). The
+ * operational patterns are never here: they go in the system prompt (systemPromptFor).
  */
 export function filterConcepts(concepts: DecisionConcept[], resource: { id: string | null; name: string | null; role: string | null }): DecisionConcept[] {
   const needles = [resource.id, resource.name].filter((s): s is string => Boolean(s && s.length >= 3)).map((s) => s.toLowerCase());
   const role = resource.role?.toLowerCase();
   return concepts.filter((c) => {
+    if (c.scope === "pattern") return false;
     const text = `${c.name} ${c.description}`.toLowerCase();
     if (needles.some((n) => text.includes(n))) return true;
     if (c.scope === "generic" && role && c.name.toLowerCase().startsWith(role)) return true;
@@ -310,7 +311,7 @@ Write for a screen, not a report: in summary, steps, blockers and needs_from_hum
 one to three sentences) and separate them with a blank line; the UI keeps the blank lines and shows nothing else as
 a paragraph break. Never run several ideas together into one long block.
 Emit the JSON object first, then any commentary.`;
-registerDefaultPrompt("resolution", `${RESOLUTION_SYSTEM}\n${OPERATIONAL_PATTERNS}`);
+registerDefaultPrompt("resolution", RESOLUTION_SYSTEM);
 
 const money = (v: number | null | undefined) => (v == null ? "unknown" : `${Number(v).toFixed(2)} USD/month`);
 
@@ -431,7 +432,7 @@ export async function resolveRecommendation(recId: number, opts: { force?: boole
     db.prepare("update resolutions set gate = ?, gate_outcome = ? where id = ?").run(gateJson, verdict.outcome, resolutionId);
     const { requestId } = await postAgentRequest({
       prompt: feedback ? `${buildResolutionPrompt(ctx, gate)}\n\n${feedback}` : buildResolutionPrompt(ctx, gate),
-      systemOverride: getPrompt("resolution"),
+      systemOverride: await systemPromptFor("resolution", concepts),
       sessionId: `aws-advisor-resolution-${resolutionId}-${Date.now().toString(36)}`,
       agentName: "aws-resolution-writer",
       metadata: { recommendationId: recId, resolutionId, rule: rec.rule },

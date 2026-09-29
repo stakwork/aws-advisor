@@ -24,6 +24,8 @@ import { alarmCleanupAction } from "./alarm_cleanup.js";
 import { logRetentionTuneAction } from "./log_retention_tune.js";
 import { s3MultipartAbortAction } from "./s3_multipart_abort.js";
 import { lambdaMemoryAction } from "./lambda_memory.js";
+import { beanstalkScaleAction } from "./beanstalk_scale.js";
+import { usageScheduleAction } from "./usage_schedule.js";
 
 registerAction(acuWindowAction);
 registerAction(snapshotArchiveAction);
@@ -49,3 +51,5 @@ registerAction(alarmCleanupAction);
 registerAction(logRetentionTuneAction);
 registerAction(s3MultipartAbortAction);
 registerAction(lambdaMemoryAction);
+registerAction(beanstalkScaleAction);
+registerAction(usageScheduleAction);

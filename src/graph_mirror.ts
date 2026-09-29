@@ -27,11 +27,13 @@ export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef"
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
   "(:KnSystem {id, name, kind: pool|instance|rds_cluster|rds_instance|cache_group|cache_cluster|nat, pool_kind, archetype, member_count, ebs_gb, monthly_list_usd, gone}) our systems as a schematic; (:AdvisorResource)-[:MEMBER_OF]->(:KnSystem); (:KnSystem)-[:IS_A]->(:KnArchetype {name, description}); (:KnSystem)-[:RUNS_ON {count, hours_month, list_price, list_usd_month}]->(:KnSystemType {id, kind: ec2|rds|elasticache|usage, sku, region, list_price, price_unit, source})",
-  "(:KnPricingOverlay {kind: savings_plan|reservation, discount_rate, commitment_usd_month, sku, count, end})-[:COVERS]->(:KnSystemType); (:KnSystem|:AdvisorAccount)-[:TRANSFERS_TO {mechanism: nat|cross-az, gb_day, price_per_gb, usd_month, source}]->(:KnService {name}); (:KnPattern {text}) operational rules; AdvisorRecommendation carries verdict, realised_usd_month, realised_ratio once verified",
+  "(:KnPricingOverlay {kind: savings_plan|reservation, discount_rate, commitment_usd_month, sku, count, end})-[:COVERS]->(:KnSystemType); (:KnSystem|:AdvisorAccount)-[:TRANSFERS_TO {mechanism: nat|cross-az, gb_day, price_per_gb, usd_month, source}]->(:KnService {name}); the operational patterns are Concepts under the parent 'AWS Operational Patterns'; AdvisorRecommendation carries verdict, realised_usd_month, realised_ratio once verified",
   "(:KnSystem|:AdvisorAccount)-[:SHIPS_LOGS_TO {gb_day, usd_month, attributed_by}]->(:KnLogGroup {name, region, retention_days, stored_gb, ingest_gb_day, ingest_usd_month, storage_usd_month, owner, attributed_by, candidates, tags, jev_choice, jev_confidence}) the system a CloudWatch log group belongs to (attributed_by says how: 'observed: cloudwatch-agent on i-..', 'tag service=x', 'lambda function name', 'name tokens: ..', 'jev: <system> at 80%' when the evidence rules found nothing and Jev picked); a group on the account node is unattributed, its candidates list the closest systems and jev_choice what Jev leaned to below the bar; (:AdvisorResource)-[:SHIPS_LOGS_TO {via: cloudwatch-agent|awslogs|fluent-bit|fluentd|docker-daemon|docker:<container>, source, observed_at}]->(:KnLogGroup) is what an instance's own agent config says it writes to (probe 1.6)",
   "AdvisorResource (EC2) carries the EC2 status checks read on the watcher's cadence: system_status, instance_status, ebs_status (ok|impaired|insufficient-data|not-applicable|initializing), scheduled_events (count of AWS scheduled events: retirement, reboot, maintenance), status_checked_at",
   "(:AdvisorResource)-[:RUNS {user, count, cpu_pct, rss_bytes, oldest_seconds, command, first_seen, last_seen, probes, gone}]->(:AdvisorApp {id, name, kind: app|infra}) what runs on an EC2 instance, from the probe's process list with the OS daemons left out (kind infra = container runtime, monitoring agents); gone = true when the program was there and is not any more",
-  "(:AdvisorResource {id, kind: ec2|rds|elasticache, name, type, state, region, role, role_confidence, protected_prob, monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})-[:IN_ACCOUNT]->(:AdvisorAccount {id})",
+  "(:AdvisorResource {id, kind: ec2|rds|elasticache|elb, name, type, state, region, role, role_confidence, protected_prob, monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})-[:IN_ACCOUNT]->(:AdvisorAccount {id})",
+  "(:AdvisorResource {kind: elb, type: alb|nlb|gwlb|clb, dns_name, scheme, beanstalk_env, targets, healthy, requests_30d, gb_30d, asgs, ecs_services})-[:ROUTES_TO {target_group, port, health}]->(:AdvisorResource | :AdvisorResourceRef) a load balancer (id = its ARN) and what it fronts: the instances behind its target groups, or a Lambda ref",
+  "AdvisorResource (EC2) and AdvisorNodePool (an autoscaling group) carry the usage profile: usage_quiet_hours_week, usage_confidence (0..1), usage_schedule (the advisor:schedule value that keeps it up whenever it was used, UTC), usage_off_hours_week, usage_est_usd_month, usage_quiet_windows (labels), usage_summary, usage_computed_at (src/usage_profile.ts: 28 days of CloudWatch and probes folded into the hours of the week; quiet = every week quiet on CPU, network, connections, use signals, logins, container CPU)",
   "(:AdvisorResource)-[:HAS_ROLE]->(:AdvisorRole {name}); (:AdvisorResource)-[:IN_POOL]->(:AdvisorNodePool {name}) for autoscaled EC2 nodes (Karpenter pool, EKS node group, ASG)",
   "(:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule, est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef {id})",
   "(:AdvisorRecommendation)-[:DECIDED_AS]->(:Concept) when the team's decision was mirrored as a Concept (the Concept holds the decision, its reason and the rule)",
@@ -103,7 +105,7 @@ export interface RoleRow { role: string; role_confidence: number | null; protect
 export type RoleMap = Map<string, RoleRow>;
 
 export interface ResourceNode {
-  id: string; kind: "ec2" | "rds" | "elasticache"; name: string | null; type: string | null; state: string | null; region: string | null;
+  id: string; kind: "ec2" | "rds" | "elasticache" | "elb"; name: string | null; type: string | null; state: string | null; region: string | null;
   role: string | null; role_confidence: number | null; protected_prob: number | null; monthly_usd: number | null; cpu_30d: number | null;
   ssm_status: string | null; gone: boolean; first_seen: string | null; last_seen: string | null; pool: string | null;
 }
@@ -129,6 +131,28 @@ export function resourceFromRds(row: any, roles: RoleMap = new Map()): ResourceN
   return { id: String(row.db_instance_identifier), kind: "rds", name: str(row.db_instance_identifier), type: str(row.class), state: str(row.status), region: str(row.region),
     ...withRole(String(row.db_instance_identifier), roles), monthly_usd: num(row.monthly_usd), cpu_30d: num(row.cpu_30d), ssm_status: null,
     gone: Boolean(row.gone), first_seen: str(row.first_seen), last_seen: str(row.last_seen), pool: null };
+}
+
+/** A load balancer: the ARN is the id (what recommendations and alerts name), the name is the name. */
+export function resourceFromElb(row: any, roles: RoleMap = new Map()): ResourceNode {
+  return { id: String(row.arn), kind: "elb", name: str(row.name), type: str(row.kind), state: str(row.state), region: str(row.region),
+    ...withRole(String(row.arn), roles), monthly_usd: num(row.monthly_usd), cpu_30d: null, ssm_status: null,
+    gone: Boolean(row.gone), first_seen: str(row.first_seen), last_seen: str(row.last_seen), pool: null };
+}
+
+export interface ElbEdges { id: string; dns_name: string | null; scheme: string | null; beanstalk_env: string | null; targets: number; healthy: number; requests_30d: number | null; gb_30d: number | null; asgs: string[]; ecs_services: string[]; ec2_edges: { target: string; target_group: string; port: number | null; health: string | null }[]; ref_edges: { target: string; target_group: string; port: number | null; health: string | null }[] }
+
+/** What a balancer routes to, from its stored target groups: instance targets become ROUTES_TO edges to the instance's AdvisorResource, Lambda targets to an AdvisorResourceRef. */
+export function elbEdges(row: any): ElbEdges {
+  const groups = safeJson(row.target_groups) || [];
+  const ec2_edges: ElbEdges["ec2_edges"] = []; const ref_edges: ElbEdges["ref_edges"] = [];
+  for (const g of Array.isArray(groups) ? groups : []) for (const t of g?.targets || []) {
+    const e = { target_group: String(g.name || ""), port: num(t.port), health: str(t.health) };
+    if (t.instance_id) ec2_edges.push({ target: String(t.instance_id), ...e });
+    else if (t.lambda || String(t.id || "").startsWith("arn:")) ref_edges.push({ target: String(t.id), ...e });
+  }
+  return { id: String(row.arn), dns_name: str(row.dns_name), scheme: str(row.scheme), beanstalk_env: str(row.beanstalk_env), targets: Number(row.targets || 0), healthy: Number(row.healthy || 0), requests_30d: num(row.requests_30d), gb_30d: num(row.gb_30d),
+    asgs: safeJson(row.asgs) || [], ecs_services: safeJson(row.ecs_services) || [], ec2_edges, ref_edges };
 }
 
 export function resourceFromElasticache(row: any, roles: RoleMap = new Map()): ResourceNode {
@@ -360,19 +384,37 @@ FOREACH (_ IN CASE WHEN row.pool IS NULL THEN [] ELSE [1] END |
   MERGE (r)-[:IN_POOL]->(p))`;
 
 /** EC2, RDS and ElastiCache inventory rows as AdvisorResource nodes; resources the graph has but the inventory no longer lists are marked gone. */
+/** A balancer's own facts and what it routes to: the old ROUTES_TO edges go, the current targets come back as edges to the instance (or a ref for a Lambda). */
+const ELB_CYPHER = `
+UNWIND $rows AS row
+MATCH (lb:AdvisorResource {id: row.id})
+SET lb += {dns_name: row.dns_name, scheme: row.scheme, beanstalk_env: row.beanstalk_env, targets: row.targets, healthy: row.healthy, requests_30d: row.requests_30d, gb_30d: row.gb_30d, asgs: row.asgs, ecs_services: row.ecs_services}
+WITH lb, row
+OPTIONAL MATCH (lb)-[old:ROUTES_TO]->() DELETE old
+WITH DISTINCT lb, row
+FOREACH (e IN row.ec2_edges |
+  MERGE (t:AdvisorResource {id: e.target})
+  MERGE (lb)-[r:ROUTES_TO]->(t) SET r += {target_group: e.target_group, port: e.port, health: e.health, updated_at: $now})
+FOREACH (e IN row.ref_edges |
+  MERGE (t:AdvisorResourceRef {id: e.target})
+  MERGE (lb)-[r:ROUTES_TO]->(t) SET r += {target_group: e.target_group, port: e.port, health: e.health, updated_at: $now})`;
+
 export async function mirrorResources(): Promise<{ resources: number }> {
   if (!enabled()) return { resources: 0 };
   await ensureSchema();
   const account = accountId();
   await mirrorAccount(account);
   const roles = roleMap();
+  const elbRows = db.prepare("select * from inventory_elb").all() as any[];
   const rows: ResourceNode[] = [
     ...(db.prepare("select * from inventory_ec2").all() as any[]).map((r) => resourceFromEc2(r, roles)),
     ...(db.prepare("select * from inventory_rds").all() as any[]).map((r) => resourceFromRds(r, roles)),
     ...(db.prepare("select * from inventory_elasticache").all() as any[]).map((r) => resourceFromElasticache(r, roles)),
+    ...elbRows.map((r) => resourceFromElb(r, roles)),
   ];
   const stamp = now();
   for (const batch of chunks(rows)) await write(RESOURCE_CYPHER, { rows: batch, account, now: stamp });
+  for (const batch of chunks(elbRows.map(elbEdges))) await write(ELB_CYPHER, { rows: batch, now: stamp });
   await write("MATCH (r:AdvisorResource {account_id: $account}) WHERE NOT r.id IN $ids AND coalesce(r.gone, false) = false SET r.gone = true, r.updated_at = $now",
     { account, ids: rows.map((r) => r.id), now: stamp });
   return { resources: rows.length };
@@ -816,6 +858,20 @@ export function mirrorKnowledgeInBackground(why: string): void {
   })().finally(() => { knowledgeInFlight = null; });
 }
 export const mirrorResourcesInBackground = () => inBackground("resource mirror", mirrorResources);
+
+/** Usage profiles (src/usage_profile.ts) on the node they describe: the instance's AdvisorResource, or the AdvisorNodePool of an autoscaling group. */
+export async function mirrorUsageProfiles(): Promise<{ profiles: number }> {
+  if (!enabled()) return { profiles: 0 };
+  await ensureSchema();
+  const rows = (db.prepare("select subject, kind, name, computed_at, quiet_hours_week, confidence, suggested_schedule, off_hours_week, est_usd_month, summary, quiet_windows from usage_profiles").all() as any[])
+    .map((r) => ({ id: r.kind === "asg" ? String(r.name) : String(r.subject), kind: r.kind, computed_at: r.computed_at, quiet_hours_week: r.quiet_hours_week, confidence: r.confidence, suggested_schedule: r.suggested_schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, summary: r.summary, quiet_windows: (() => { try { return (JSON.parse(r.quiet_windows) as any[]).map((w) => w.label); } catch { return []; } })() }));
+  const stamp = now();
+  const props = "usage_computed_at: row.computed_at, usage_quiet_hours_week: row.quiet_hours_week, usage_confidence: row.confidence, usage_schedule: row.suggested_schedule, usage_off_hours_week: row.off_hours_week, usage_est_usd_month: row.est_usd_month, usage_summary: row.summary, usage_quiet_windows: row.quiet_windows, updated_at: $now";
+  for (const batch of chunks(rows.filter((r) => r.kind === "ec2"))) await write(`UNWIND $rows AS row MATCH (r:AdvisorResource {id: row.id}) SET r += {${props}}`, { rows: batch, now: stamp });
+  for (const batch of chunks(rows.filter((r) => r.kind === "asg"))) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {name: row.id}) SET p += {${props}}`, { rows: batch, now: stamp });
+  return { profiles: rows.length };
+}
+export const mirrorUsageProfilesInBackground = () => inBackground("usage profile mirror", mirrorUsageProfiles);
 export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackground(`recommendation mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorRecommendations(ids));
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */

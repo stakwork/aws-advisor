@@ -1,6 +1,6 @@
 /**
  * The knowledge graph on top of the mirror (design note, section 1): a general area of system types with list
- * prices, archetypes and operational patterns, and our side as a schematic of systems (pools, clusters, groups,
+ * prices and archetypes (the operational patterns are Concepts, src/concepts.ts), and our side as a schematic of systems (pools, clusters, groups,
  * standalone boxes) linked to their archetype and to the types they run on, with pricing overlays (the Savings
  * Plan, reservations) and traffic on the edges (NAT to the internet, cross-AZ, log shipping). Built from what the
  * advisor already holds; refreshed with every graph sync. The pure grouping is exported for the tests.
@@ -10,14 +10,13 @@ import { S, query } from "./steampipe.js";
 import { HOURS_PER_MONTH } from "./prices.js";
 import { pricebookCatalog, PRICEBOOK_DATE } from "./pricebook.js";
 import { ROLE_OPTIONS } from "./roles.js";
-import { OPERATIONAL_PATTERNS } from "./pools.js";
 import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE, logGroupTags, observedLogShipping } from "./logs.js";
 import { getReconciliation, lastFullMonth } from "./reconcile.js";
 import { accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
 import { AttributionContext, ObservedShipping, attributeLogGroup } from "./log_attribution.js";
 import { LAMBDA_PRICE, lambdaFactsMap, lambdaMonthlyCost } from "./lambda_inventory.js";
 
-export const KN_LABELS = ["KnSystemType", "KnArchetype", "KnPattern", "KnSystem", "KnService", "KnLogGroup", "KnPricingOverlay"] as const;
+export const KN_LABELS = ["KnSystemType", "KnArchetype", "KnSystem", "KnService", "KnLogGroup", "KnPricingOverlay"] as const;
 
 export interface SystemDef { id: string; name: string; kind: "pool" | "instance" | "rds_cluster" | "rds_instance" | "cache_group" | "cache_cluster" | "nat" | "eks_cluster" | "lambda"; parent?: string | null; pool_kind?: string | null; archetype: string; members: string[]; types: { key: string; kind: string; sku: string; region: string; count: number }[]; ebs_gb: number; region: string | null }
 
@@ -97,7 +96,7 @@ const priceFor = (kind: string, sku: string, region: string): number | null => {
   return row?.hourly ?? null;
 };
 
-export interface KnowledgeCounts { system_types: number; archetypes: number; patterns: number; systems: number; log_groups: number; log_groups_attributed: number; log_groups_observed: number; log_groups_jev: number; log_groups_unattributed: number; overlays: number; traffic_edges: number; took_ms: number }
+export interface KnowledgeCounts { system_types: number; archetypes: number; systems: number; log_groups: number; log_groups_attributed: number; log_groups_observed: number; log_groups_jev: number; log_groups_unattributed: number; overlays: number; traffic_edges: number; took_ms: number }
 
 /** Writes the general area and our schematic. Idempotent; a system that disappeared is marked gone. */
 export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
@@ -107,17 +106,15 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   const now = new Date().toISOString();
   for (const l of KN_LABELS) await writeCypher(`CREATE CONSTRAINT ${l.toLowerCase()}_id IF NOT EXISTS FOR (n:${l}) REQUIRE n.id IS UNIQUE`);
 
-  // ---- general area: system types (instance SKUs from the price cache, usage rules from the pricebook), archetypes, patterns
+  // ---- general area: system types (instance SKUs from the price cache, usage rules from the pricebook), archetypes
   const skus = (db.prepare("select kind, sku, region, engine, hourly, fetched_at from prices where hourly is not null").all() as any[]).map((p) => ({
     id: `${p.kind}|${p.sku}|${p.region}`, kind: p.kind, sku: p.sku, region: p.region, engine: p.engine, list_price: p.hourly, price_unit: "USD/hour", unit: "hour", source: "pricing_api", valid_from: String(p.fetched_at).slice(0, 10) }));
   const usage = pricebookCatalog().map((r) => ({ id: `usage|${r.rule}`, kind: "usage", sku: r.rule, region: "us-east-1", engine: null, list_price: r.unit_price, price_unit: `USD/${r.unit}`, unit: r.unit, source: "pricebook", valid_from: PRICEBOOK_DATE, note: r.note ?? null }));
   await writeCypher(`UNWIND $rows AS row MERGE (t:KnSystemType {id: row.id}) SET t += row, t.updated_at = $now`, { rows: [...skus, ...usage], now });
   const archetypes = Object.entries(ROLE_OPTIONS).map(([name, description]) => ({ id: name, name, description }));
   await writeCypher(`UNWIND $rows AS row MERGE (a:KnArchetype {id: row.id}) SET a += row, a.updated_at = $now`, { rows: archetypes, now });
-  // one pattern per "- " bullet; the indented lines that follow a bullet are its continuation
-  const bullets = OPERATIONAL_PATTERNS.split("\n").reduce<string[]>((acc, l) => { if (l.startsWith("- ")) acc.push(l.slice(2).trim()); else if (/^\s+\S/.test(l) && acc.length) acc[acc.length - 1] += " " + l.trim(); return acc; }, []);
-  const patterns = bullets.map((text, i) => ({ id: `pattern:${i + 1}`, text, source: "advisor" }));
-  await writeCypher(`UNWIND $rows AS row MERGE (p:KnPattern {id: row.id}) SET p += row, p.updated_at = $now`, { rows: patterns, now });
+  // the operational patterns used to be KnPattern nodes; they are Concepts now (src/concepts.ts), so any left over go
+  await writeCypher(`MATCH (p:KnPattern) DETACH DELETE p`);
 
   // ---- our side: systems
   const roles = new Map<string, string>((db.prepare("select resource_id, role from resource_roles").all() as any[]).map((r) => [r.resource_id, r.role]));
@@ -252,7 +249,7 @@ FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE
   if (outcomes.length) await writeCypher(`UNWIND $rows AS row MATCH (r:AdvisorRecommendation {id: row.id}) SET r.verdict = row.verdict, r.realised_usd_month = row.realised_usd_month, r.realised_ratio = row.ratio, r.verified_at = row.checked_at`, { rows: outcomes });
 
   const attributed = lg.filter((g) => g.owner).length;
-  return { system_types: skus.length + usage.length, archetypes: archetypes.length, patterns: patterns.length, systems: rows.length, log_groups: lg.length, log_groups_attributed: attributed,
+  return { system_types: skus.length + usage.length, archetypes: archetypes.length, systems: rows.length, log_groups: lg.length, log_groups_attributed: attributed,
     log_groups_observed: lg.filter((g) => g.observed.length).length, log_groups_jev: jevAttributed, log_groups_unattributed: lg.length - attributed, overlays: overlays.length, traffic_edges: traffic, took_ms: Date.now() - t0 };
 }
 

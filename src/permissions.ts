@@ -86,6 +86,8 @@ export const TABLE_ACTIONS: Record<string, string> = {
   aws_ec2_network_load_balancer: "elasticloadbalancing:DescribeLoadBalancers",
   aws_ec2_gateway_load_balancer: "elasticloadbalancing:DescribeLoadBalancers",
   aws_ec2_classic_load_balancer: "elasticloadbalancing:DescribeLoadBalancers",
+  aws_ec2_load_balancer_listener: "elasticloadbalancing:DescribeListeners",
+  aws_ec2_autoscaling_group: "autoscaling:DescribeAutoScalingGroups",
   aws_ebs_volume: "ec2:DescribeVolumes",
   aws_ebs_volume_metric_read_ops_daily: "cloudwatch:GetMetricStatistics",
   aws_ebs_volume_metric_write_ops_daily: "cloudwatch:GetMetricStatistics",
@@ -414,7 +416,8 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
         "cloudfront:List*", "cloudfront:Get*",
         "route53:List*", "route53:Get*",
-        "elasticbeanstalk:DescribeEnvironments",
+        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource",
+        "autoscaling:Describe*",
         "redshift:Describe*",
         "elasticmapreduce:List*", "elasticmapreduce:Describe*",
         "apigateway:GET",
@@ -483,6 +486,8 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   log_retention_tune: { apply: ["logs:PutRetentionPolicy"], revert: ["logs:PutRetentionPolicy"] },
   s3_multipart_abort: { apply: ["s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration"], revert: ["s3:PutLifecycleConfiguration"] },
   lambda_memory: { apply: ["lambda:UpdateFunctionConfiguration"], revert: ["lambda:UpdateFunctionConfiguration"] },
+  beanstalk_scale: { apply: ["elasticbeanstalk:UpdateEnvironment"], revert: ["elasticbeanstalk:UpdateEnvironment"] },
+  usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
 };
 
 export const actuatorPolicy = (): IamPolicy => ({
@@ -518,8 +523,16 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorEfsLifecycle", Effect: "Allow", Action: ["elasticfilesystem:PutLifecycleConfiguration", "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags"], Resource: "*" },
     { Sid: "ActuatorLambdaMemory", Effect: "Allow", Action: ["lambda:UpdateFunctionConfiguration", "lambda:GetFunctionConfiguration", "lambda:ListTags"], Resource: "*" },
     { Sid: "ActuatorAlarmCleanup", Effect: "Allow", Action: ["cloudwatch:DeleteAlarms", "cloudwatch:PutMetricAlarm", "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource"], Resource: "*" },
+    // Beanstalk capacity: only an environment someone tagged advisor:scale can have its MinSize/MaxSize moved. With an operations role on the environment Beanstalk does the CloudFormation and Auto Scaling work under that role; without one the caller needs those rights too (README).
+    { Sid: "ActuatorBeanstalkScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringLike: { "aws:ResourceTag/advisor:scale": "*" } } },
+    // Usage schedules: the one tag the role may write on any instance is advisor:schedule (an approved usage_schedule recommendation); the office-hours action then does the stops and starts.
+    { Sid: "ActuatorUsageScheduleTag", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:schedule"] } } },
+    // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one: UPSERT of A records only.
+    { Sid: "ActuatorDnsReattach", Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: "arn:aws:route53:::hostedzone/*", Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } } },
+    { Sid: "ActuatorDnsReattachRead", Effect: "Allow", Action: ["route53:ListResourceRecordSets", "route53:GetChange", "ec2:DescribeInstances"], Resource: "*" },
+    { Sid: "ActuatorBeanstalkScaleDescribe", Effect: "Allow", Action: ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "autoscaling:DescribeAutoScalingGroups"], Resource: "*" },
     { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances",
-      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration", "elasticbeanstalk:UpdateEnvironment", "ec2:CreateTags", "ec2:DeleteTags"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 

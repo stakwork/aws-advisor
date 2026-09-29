@@ -10,14 +10,17 @@
  * (StopDBCluster / StartDBCluster) are all in scope; the actuator policy allows the calls only on a resource
  * carrying the tag. Nothing is terminated and nothing else is touched.
  *
- * What a stop saves is the instance hours outside the window; what it costs is a public IP that changes on
- * start when the instance has no Elastic IP (the row says so). A stopped RDS instance is started by AWS after
+ * What a stop saves is the instance hours outside the window. A box without an Elastic IP gets a new public
+ * address on start, so the stop row records the A records in the account's zones that name the old address and
+ * the start points them at the new one (`route53:ChangeResourceRecordSets`, UPSERT of A records only) once the
+ * instance reports its address; the row and the read-back say which names were moved. A stopped RDS instance is started by AWS after
  * seven days whatever the schedule says: the next scheduled stop takes it down again, so a weekly schedule holds.
  * A resource the executor stopped that a person then started by hand (Revert on the row, or "wake" in the chat)
  * is left running until the window closes again, so nobody fights the executor for a box they need right now.
  */
 import { DescribeAddressesCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand, StopInstancesCommand, type Instance } from "@aws-sdk/client-ec2";
 import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient, type DescribeDBClustersCommandOutput, type DescribeDBInstancesCommandOutput, StartDBClusterCommand, StartDBInstanceCommand, StopDBClusterCommand, StopDBInstanceCommand, type DBCluster, type DBInstance } from "@aws-sdk/client-rds";
+import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53Client, type Change, type ResourceRecordSet } from "@aws-sdk/client-route-53";
 import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 
@@ -26,6 +29,42 @@ export const SCHEDULE_TAG = "advisor:schedule";
 /** A stop the executor made that a person undid this recently means "I need it now": the pass leaves it until the window closes. */
 export const WOKEN_BY_HAND_HOURS = 12;
 export const HOURS_PER_WEEK = 168;
+/** How long a start waits for the new public address before giving up on the DNS update (the next pass does not retry; the row says so). */
+export const IP_WAIT_MS = 150_000;
+
+/** An A record that names an instance's public address, as stored by the Route 53 inventory. */
+export interface DnsRecord { zone_id: string; name: string; ttl: number | null; values: string[]; routing: Record<string, unknown> | null; old_ip: string }
+const jsonArr = (v: unknown): string[] => { try { const p = typeof v === "string" ? JSON.parse(v) : v; return Array.isArray(p) ? p.map(String) : []; } catch { return []; } };
+const jsonObj = (v: unknown): Record<string, unknown> | null => { try { const p = typeof v === "string" ? JSON.parse(v) : v; return p && typeof p === "object" ? p : null; } catch { return null; } };
+/** The A records (no alias) in the account's zones whose values carry this address. */
+export function recordsNamingIp(ip: string | null | undefined): DnsRecord[] {
+  if (!ip) return [];
+  try {
+    return (db.prepare(`select zone_id, name, ttl, "values", routing from inventory_route53_record where gone = 0 and alias = 0 and type = 'A' and "values" like ?`).all(`%"${ip}"%`) as any[])
+      .map((r) => ({ zone_id: r.zone_id, name: r.name, ttl: r.ttl ?? null, values: jsonArr(r.values), routing: jsonObj(r.routing), old_ip: ip })).filter((r) => r.values.includes(ip));
+  } catch { return []; }
+}
+/** The records to move on a start: what the last stop of this box recorded, else the A records the Route 53 links still tie to it. */
+export function recordsForStart(instanceId: string): DnsRecord[] {
+  const last = db.prepare("select facts_json from actions where kind = ? and resource = ? and json_extract(after_json, '$.state') = 'stopped' and status in ('applied', 'verified', 'reverted') order by id desc limit 1").get(KIND, instanceId) as { facts_json: string } | undefined;
+  try { const recs = last ? JSON.parse(last.facts_json)?.dns_records : null; if (Array.isArray(recs) && recs.length) return recs; } catch { /* fall through */ }
+  try {
+    return (db.prepare(`select r.zone_id, r.name, r.ttl, r."values", r.routing from inventory_route53_link l join inventory_route53_record r on r.id = l.record_id where l.resource_kind = 'ec2' and l.resource_id = ? and l.hop = 1 and r.gone = 0 and r.alias = 0 and r.type = 'A'`).all(instanceId) as any[])
+      .map((r) => { const values = jsonArr(r.values); return { zone_id: r.zone_id, name: r.name, ttl: r.ttl ?? null, values, routing: jsonObj(r.routing), old_ip: values.find((v) => /^\d+\.\d+\.\d+\.\d+$/.test(v)) || "" }; }).filter((r) => r.old_ip);
+  } catch { return []; }
+}
+/** The record set an UPSERT sends: the old address swapped for the new one, the routing kept. Pure. */
+export function upsertChange(r: DnsRecord, newIp: string): Change {
+  const routing = (r.routing || {}) as Record<string, any>;
+  const set: ResourceRecordSet = { Name: r.name, Type: "A", TTL: r.ttl ?? 300, ResourceRecords: [...new Set(r.values.map((v) => (v === r.old_ip ? newIp : v)))].map((Value) => ({ Value })) };
+  if (routing.set_identifier) set.SetIdentifier = String(routing.set_identifier);
+  if (routing.weight != null) set.Weight = Number(routing.weight);
+  if (routing.failover) set.Failover = routing.failover;
+  if (routing.multi_value_answer) set.MultiValueAnswer = true;
+  if (routing.region) set.Region = routing.region;
+  if (routing.geo_location) set.GeoLocation = routing.geo_location;
+  return { Action: "UPSERT", ResourceRecordSet: set };
+}
 
 export interface Schedule { days: Set<number>; start: number; end: number; tz: string; text: string }
 export type ResourceKind = "ec2" | "rds_instance" | "rds_cluster";
@@ -124,14 +163,16 @@ function wokenByHand(resource: string): boolean {
   return r.n > 0;
 }
 
-interface Target { kind: ResourceKind; resource: string; name: string | null; region: string; account_id?: string | null; state: string; tag: string; monthly_usd: number | null; elastic_ip?: boolean; detail: string }
+interface Target { kind: ResourceKind; resource: string; name: string | null; region: string; account_id?: string | null; state: string; tag: string; monthly_usd: number | null; elastic_ip?: boolean; public_ip?: string | null; detail: string }
 
 function propose(t: Target, s: Schedule, d: Decision, notes: string[], log: (l: string) => void): Proposal | null {
   const name = t.name && t.name !== t.resource ? `${t.name} (${t.resource})` : t.resource;
   const skip = (why: string) => { notes.push(`${name}: ${why}`); log(`${name}: ${why}`); return null; };
   if (!d.action) return skip(d.reason);
   if (d.action === "stop" && wokenByHand(t.resource)) return skip(`woken by hand in the last ${WOKEN_BY_HAND_HOURS} h; left until the window closes`);
-  const ipNote = t.kind === "ec2" && d.action === "start" && t.elastic_ip === false ? " No Elastic IP: the public address changes on start." : t.kind === "ec2" && d.action === "stop" && t.elastic_ip === false ? " No Elastic IP: the public address changes when it starts again." : "";
+  const dns = t.kind === "ec2" && t.elastic_ip === false ? (d.action === "stop" ? recordsNamingIp(t.public_ip) : recordsForStart(t.resource)) : [];
+  const names = [...new Set(dns.map((r) => r.name))];
+  const ipNote = t.kind === "ec2" && d.action === "start" && t.elastic_ip === false ? ` No Elastic IP: the public address changes on start${names.length ? `; ${names.join(", ")} will be pointed at the new one` : "; no A record in the account's zones names the old one"}.` : t.kind === "ec2" && d.action === "stop" && t.elastic_ip === false ? ` No Elastic IP: the public address changes when it starts again${names.length ? `; the start re-points ${names.join(", ")}` : ""}.` : "";
   const rdsNote = t.kind !== "ec2" && d.action === "stop" ? " AWS starts a stopped database again after seven days; the next scheduled stop takes it down again." : "";
   const off = offHoursPerWeek(s);
   const est = d.action === "stop" && t.monthly_usd != null ? Math.round(t.monthly_usd * (off / HOURS_PER_WEEK) * 100) / 100 : null;
@@ -143,7 +184,7 @@ function propose(t: Target, s: Schedule, d: Decision, notes: string[], log: (l: 
     title: `${verb} ${name} (${t.detail}): ${d.reason}`,
     reason: `Tagged ${SCHEDULE_TAG}=${s.text}. ${d.reason}; off ${off} of ${HOURS_PER_WEEK} hours a week.${ipNote}${rdsNote}`,
     before: { state: t.state }, after: { state: after },
-    facts: { schedule: s.text, tz: s.tz, target_hour: d.target.toISOString(), kind: t.kind, elastic_ip: t.elastic_ip ?? null, off_hours_per_week: off, monthly_usd: t.monthly_usd },
+    facts: { schedule: s.text, tz: s.tz, target_hour: d.target.toISOString(), kind: t.kind, elastic_ip: t.elastic_ip ?? null, public_ip: t.public_ip ?? null, dns_records: dns.length ? dns : null, off_hours_per_week: off, monthly_usd: t.monthly_usd },
     rollback: `the opposite call (${d.action === "stop" ? "start" : "stop"}); the next pass follows the schedule again`,
     est_usd_month: est,
   };
@@ -195,7 +236,7 @@ export const scheduleHoursAction: ActionModule = {
           const name = row.name || inst.InstanceId!;
           if (tagOf(inst.Tags, "advisor:hands-off") != null) { notes.push(`${name}: tagged advisor:hands-off`); continue; }
           if (row.pool_kind) { notes.push(`${name}: member of a ${row.pool_kind} pool: its controller decides`); continue; }
-          consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, account_id: row.account_id ?? null, state: ec2State(inst), tag: tagOf(inst.Tags, SCHEDULE_TAG)!, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, detail: row.instance_type || inst.InstanceType || "ec2" });
+          consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, account_id: row.account_id ?? null, state: ec2State(inst), tag: tagOf(inst.Tags, SCHEDULE_TAG)!, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, public_ip: inst.PublicIpAddress ?? null, detail: row.instance_type || inst.InstanceType || "ec2" });
         }
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { ec2.destroy(); }
@@ -254,13 +295,66 @@ export const scheduleHoursAction: ActionModule = {
     const kind = String(p.facts.kind) as ResourceKind;
     const state = await currentState(kind, p.resource, p.region, creds);
     if (state == null) return { ok: false, note: "not found on read-back" };
-    if (state === want) return { ok: true, note: `read back: ${state}` };
+    if (state === want) {
+      if (kind === "ec2" && want === "running" && Array.isArray(p.facts.dns_records) && p.facts.dns_records.length) return { ok: true, note: `read back: running; ${await dnsReadBack(p, creds)}` };
+      return { ok: true, note: `read back: ${state}` };
+    }
     if (["stopping", "pending", "starting", "modifying", "configuring-enhanced-monitoring", "backing-up"].includes(state)) return { ok: null, note: `still ${state}` };
     return { ok: false, note: `state reads ${state}` };
   },
 
   async revert(p, creds) { return transition(p, creds, String(p.after.state) === "stopped" ? "start" : "stop"); },
 };
+
+/** Waits for the started instance's public address, then points every recorded A record at it. Never throws: the start already happened, so the outcome is reported on the row. */
+async function reattachDns(p: Proposal, creds: Creds, records: DnsRecord[]): Promise<string> {
+  const ec2 = new EC2Client({ region: p.region, credentials: creds.read });
+  let ip: string | null = null;
+  try {
+    const until = Date.now() + IP_WAIT_MS;
+    while (!ip && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 5000));
+      try { ip = (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [p.resource] }))).Reservations?.[0]?.Instances?.[0]?.PublicIpAddress ?? null; } catch { /* keep waiting */ }
+    }
+  } finally { ec2.destroy(); }
+  const names = [...new Set(records.map((r) => r.name))].join(", ");
+  if (!ip) return `no public address after ${Math.round(IP_WAIT_MS / 1000)} s: ${names} still name ${records[0].old_ip} (update by hand or Revert and start again)`;
+  if (records.every((r) => r.old_ip === ip)) return `public address ${ip} unchanged; ${names} already point at it`;
+  const r53 = new Route53Client({ region: "us-east-1", credentials: creds.act() });
+  const done: string[] = []; const failed: string[] = [];
+  try {
+    const byZone = new Map<string, DnsRecord[]>();
+    for (const r of records) byZone.set(r.zone_id, [...(byZone.get(r.zone_id) || []), r]);
+    for (const [zone, recs] of byZone) {
+      try {
+        await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: zone, ChangeBatch: { Comment: `aws-advisor office hours: ${p.resource} started, ${recs[0].old_ip} → ${ip}`, Changes: recs.map((r) => upsertChange(r, ip!)) } }));
+        done.push(...recs.map((r) => r.name));
+      } catch (e: any) { failed.push(`${recs.map((r) => r.name).join(", ")}: ${String(e?.message || e).slice(0, 120)}`); }
+    }
+  } finally { r53.destroy(); }
+  return `public address ${records[0].old_ip} → ${ip}${done.length ? `; DNS updated: ${[...new Set(done)].join(", ")}` : ""}${failed.length ? `; DNS NOT updated (${failed.join("; ")}): fix the records by hand` : ""}`;
+}
+
+/** Whether the recorded A records now name the instance's public address (read credentials only). */
+async function dnsReadBack(p: Proposal, creds: Creds): Promise<string> {
+  const records = p.facts.dns_records as DnsRecord[];
+  const ec2 = new EC2Client({ region: p.region, credentials: creds.read });
+  let ip: string | null = null;
+  try { ip = (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [p.resource] }))).Reservations?.[0]?.Instances?.[0]?.PublicIpAddress ?? null; } finally { ec2.destroy(); }
+  if (!ip) return "no public address yet; DNS not checked";
+  const r53 = new Route53Client({ region: "us-east-1", credentials: creds.read });
+  const ok: string[] = []; const stale: string[] = [];
+  try {
+    for (const r of records) {
+      try {
+        const sets = (await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: r.zone_id, StartRecordName: r.name, StartRecordType: "A", MaxItems: 5 }))).ResourceRecordSets ?? [];
+        const set = sets.find((s) => s.Name?.replace(/\.$/, "") === r.name.replace(/\.$/, "") && s.Type === "A" && (!r.routing?.set_identifier || s.SetIdentifier === r.routing.set_identifier));
+        (set?.ResourceRecords?.some((v) => v.Value === ip) ? ok : stale).push(r.name);
+      } catch (e: any) { stale.push(`${r.name} (${String(e?.message || e).slice(0, 80)})`); }
+    }
+  } finally { r53.destroy(); }
+  return `${ok.length ? `DNS ${[...new Set(ok)].join(", ")} → ${ip}` : ""}${ok.length && stale.length ? "; " : ""}${stale.length ? `DNS NOT updated: ${[...new Set(stale)].join(", ")} do not name ${ip}` : ""}`;
+}
 
 async function currentState(kind: ResourceKind, id: string, region: string, creds: Creds): Promise<string | null> {
   if (kind === "ec2") {
@@ -283,7 +377,11 @@ async function transition(p: Proposal, creds: Creds, action: "stop" | "start"): 
     try {
       if (action === "stop") { const r = await ec2.send(new StopInstancesCommand({ InstanceIds: [p.resource] })); return `StopInstances: ${r.StoppingInstances?.[0]?.CurrentState?.Name || "stopping"}`; }
       const r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] }));
-      return `StartInstances: ${r.StartingInstances?.[0]?.CurrentState?.Name || "pending"}${p.facts.elastic_ip === false ? " (no Elastic IP: the public address changed)" : ""}`;
+      const line = `StartInstances: ${r.StartingInstances?.[0]?.CurrentState?.Name || "pending"}`;
+      if (p.facts.elastic_ip !== false) return line;
+      const records = Array.isArray(p.facts.dns_records) ? (p.facts.dns_records as DnsRecord[]) : [];
+      if (!records.length) return `${line} (no Elastic IP: the public address changed; no A record named the old one)`;
+      return `${line}; ${await reattachDns(p, creds, records)}`;
     } finally { ec2.destroy(); }
   }
   const rds = new RDSClient({ region: p.region, credentials: creds.act() });

@@ -19,6 +19,7 @@ const concepts = [
   { id: "c-generic-chain", name: "blockchain_node rightsize_instance rule", description: "Never resize chain nodes without the node operator.", scope: "generic" as const },
   { id: "c-internal-web", name: "migrate_to_graviton example-web", description: "Rejected once: example-web runs a vendor binary (i-0abc000000000001) with no ARM build.", scope: "internal" as const },
   { id: "c-internal-other", name: "release_eip 1.2.3.4", description: "Keep this address, it is on a partner allow-list.", scope: "internal" as const },
+  { id: "c-pattern", name: "Pool members are not individual candidates", description: "Pool members are not individual candidates; example-web is a web_or_api box, i-0abc000000000001 too.", scope: "pattern" as const },
 ];
 
 function seed() {
@@ -56,8 +57,9 @@ test("resourceFacts reads the inventory snapshot, the role and the probe's proce
   assert.equal(resourceFacts({ resource: "arn:aws:lambda:us-east-1:1:function:fn", resource_name: null, rule: "graviton_migration" }).kind, "lambda");
 });
 
-test("filterConcepts keeps what names the resource or its role, generic rules by role prefix only", () => {
+test("filterConcepts keeps what names the resource or its role, generic rules by role prefix only, never a pattern", () => {
   const kept = filterConcepts(concepts, { id: "i-0abc000000000001", name: "example-web", role: "web_or_api" });
+  assert.ok(!kept.some((c) => c.scope === "pattern"), "operational patterns belong to the system prompt, not the context pack");
   assert.deepEqual(kept.map((c) => c.id), ["c-generic-web", "c-internal-web"]);
   // an internal concept for another resource never leaks in, a generic rule for another role neither
   assert.deepEqual(filterConcepts(concepts, { id: "eipalloc-1", name: "1.2.3.4", role: null }).map((c) => c.id), ["c-internal-other"]);

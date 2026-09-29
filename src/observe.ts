@@ -8,8 +8,8 @@
 import { config } from "./config.js";
 import { db } from "./db.js";
 import { credentialGate } from "./gate.js";
-import { getPrompt, registerDefaultPrompt } from "./prompts.js";
-import { OPERATIONAL_PATTERNS } from "./pools.js";
+import { registerDefaultPrompt } from "./prompts.js";
+import { systemPromptFor } from "./concepts.js";
 import { latestReview } from "./review.js";
 import { spendSummary } from "./spend.js";
 import { getBaseline } from "./baselines.js";
@@ -59,7 +59,7 @@ aws_cloudtrail_changes (who changed what, the first place to look for the cause 
 aws_recommendation_history (what the team already decided). A spend step that matches a decision the team approved
 is expected, say so. A routine thing is not worth a sentence. If nothing changed, say so in one line and set
 nothing_to_report. Emit the JSON object first, then any commentary.`;
-registerDefaultPrompt("observe", `${OBSERVE_SYSTEM}\n${OPERATIONAL_PATTERNS}`);
+registerDefaultPrompt("observe", OBSERVE_SYSTEM);
 
 const usd = (v: number | null | undefined) => (v == null ? "?" : `${Math.round(v)} USD`);
 
@@ -116,7 +116,7 @@ export async function dispatchObservation(day = new Date().toISOString().slice(0
   const id = Number(db.prepare("insert into observations(day, brief) values (?, ?)").run(day, brief.text).lastInsertRowid);
   const { requestId } = await postAgentRequest({
     prompt: brief.text,
-    systemOverride: getPrompt("observe"),
+    systemOverride: await systemPromptFor("observe"),
     sessionId: `aws-advisor-observe-${day}-${Date.now().toString(36)}`,
     agentName: "aws-observer",
     metadata: { day, observationId: id },
