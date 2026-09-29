@@ -282,3 +282,11 @@ test("use-signal rules: a kind ruled noise for an image stops counting, per imag
   deleteRule(confirmed.id);
   for (const r of listRules()) deleteRule(r.id);
 });
+
+test("probe summary: the probe's own SSM worker and shell tools are never the busiest process", async () => {
+  const { realProcesses, PROBE_MACHINERY } = await import("../ssm.js");
+  const top = [{ command: "ssm-document-wo", cpu: 12 }, { command: "awk", cpu: 3 }, { command: "node", cpu: 2 }, { command: "amazon-ssm-agen", cpu: 1 }];
+  assert.deepEqual(realProcesses(top).map((p) => p.command), ["node"]);
+  assert.equal(realProcesses(undefined).length, 0);
+  assert.ok(PROBE_MACHINERY.test("ssm-document-worker")); assert.ok(!PROBE_MACHINERY.test("postgres")); assert.ok(!PROBE_MACHINERY.test("sshd"));
+});

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api, usd, when } from "../api";
+import { realProcesses, api, usd, when } from "../api";
 import { Badge, Button, DetailCell, Empty, Pager, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
 import { pct } from "../components/incident";
@@ -310,7 +310,7 @@ export default function Recommendations() {
                 <div className="mt-1 space-y-0.5 text-zinc-300">
                   <div>Memory {probe.result.summary.memory_used_pct}% used ({probe.result.summary.memory_used_gb} of {probe.result.summary.memory_total_gb} GB) · load {probe.result.summary.load_1m} on {probe.result.summary.cpus} vCPU</div>
                   {probe.result.data?.disks?.length > 0 && <div>Disks: {probe.result.data.disks.map((d: any) => `${d.mount} ${d.used_pct}%`).join(", ")}</div>}
-                  {probe.result.data?.top_cpu?.length > 0 && <div>Top CPU: {probe.result.data.top_cpu.slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
+                  {realProcesses<any>(probe.result.data?.top_cpu).length > 0 && <div>Top CPU: {realProcesses<any>(probe.result.data.top_cpu).slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
                   {probe.result.data?.top_mem?.length > 0 && <div>Top memory: {probe.result.data.top_mem.slice(0, 3).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ")}</div>}
                 </div>
               )}

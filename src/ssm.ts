@@ -435,6 +435,11 @@ export function useSummary(p: ProbeResult): UseSummary | null {
   };
 }
 
+/** The probe's own machinery, which is always running at the moment the probe looks: the SSM worker that runs the document, its shell and the tools the script pipes through. Never "the busiest process". */
+export const PROBE_MACHINERY = /^(ssm-document-wo\S*|ssm-agent-worke\S*|ssm-session-wor\S*|amazon-ssm-agen\S*|ps|awk|sh|bash|dash|sed|grep|sort|head|tail|tr|cat|docker|ss|who|last|df|free|uptime)$/;
+/** The process list without the probe's own machinery. Pure. */
+export const realProcesses = <T extends { command: string }>(list: T[] | undefined): T[] => (list ?? []).filter((x) => !PROBE_MACHINERY.test(String(x.command).trim()));
+
 export function summarizeProbe(p: ProbeResult): ProbeSummary {
   const gb = (b: number) => Math.round((b / 1024 ** 3) * 10) / 10;
   return {
@@ -444,7 +449,7 @@ export function summarizeProbe(p: ProbeResult): ProbeSummary {
     memory_used_gb: gb(p.memory.used_bytes),
     load_1m: p.load["1m"],
     cpus: p.cpus,
-    top_process: p.top_cpu[0]?.command || p.top_mem[0]?.command || null,
+    top_process: realProcesses(p.top_cpu)[0]?.command || realProcesses(p.top_mem)[0]?.command || null,
     containers_running: p.docker?.available ? p.docker.running : null,
     top_container: p.containers?.length ? [...p.containers].filter((c) => c.state === "running").sort((a, b) => (b.mem_bytes || 0) - (a.mem_bytes || 0))[0]?.name || null : null,
     ...(p.activity ? { last_use_at: useSummary(p)!.last_use_at, last_use_kind: useSummary(p)!.last_use_kind } : {}),

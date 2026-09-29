@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 
 /** GET /api/instances/:id/usage (src/usage_profile.ts): the hours of the week, quiet or busy, and the schedule that fits. */
-type Bucket = { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number };
+type Bucket = { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; busy_cpu?: number; busy_net?: number; busy_requests?: number; busy_probe?: number; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number };
 type Window = { label: string; hours: number; effective_hours: number; confidence: number; probe_coverage: number };
 type Profile = { subject: string; kind: string; computed_at: string; window_days: number; signals: { cloudwatch_hours: number; probes: number; requests: boolean }; hours: Bucket[]; quiet_windows: Window[]; busiest: { label: string; cpu_avg: number; net_mb: number | null }[]; quiet_hours_week: number; confidence: number; suggested_schedule: string | null; off_hours_week: number | null; est_usd_month: number | null; summary: string };
 
@@ -20,6 +20,7 @@ function cellTitle(b: Bucket): string {
   if (b.cpu_avg != null) parts.push(`CPU avg ${b.cpu_avg} %, max ${b.cpu_max ?? "?"} %`);
   if (b.net_mb != null) parts.push(`${b.net_mb} MB/h`);
   if (b.requests != null) parts.push(`${b.requests} requests/h`);
+  if (b.verdict === "busy") parts.push(`busy because of: ${[b.busy_net ? `network (${b.busy_net}×)` : null, b.busy_cpu ? `CPU (${b.busy_cpu}×)` : null, b.busy_requests ? `requests (${b.busy_requests}×)` : null, b.busy_probe ? `probe signals (${b.busy_probe}×)` : null].filter(Boolean).join(", ") || "?"}`);
   if (b.probes) parts.push(`${b.probes} probe${b.probes === 1 ? "" : "s"}: ${[b.ext_conn ? `${b.ext_conn} external conn` : null, b.signals ? `${b.signals}× use signal` : null, b.requests_seen ? `${b.requests_seen}× request` : null, b.logins ? `${b.logins}× login` : null, b.busy_containers ? `${b.busy_containers}× busy container` : null, b.logs ? `${b.logs}× logs` : null].filter(Boolean).join(", ") || "nothing"}`);
   return parts.join("\n");
 }

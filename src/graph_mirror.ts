@@ -813,8 +813,10 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
     WITH r, role, pool, recs, alerts, incidents, controls, actions, apps,
       collect(DISTINCT CASE WHEN g IS NULL THEN null ELSE {name: g.name, how: 'observed', via: sl.via, source: sl.source, observed_at: sl.observed_at, ingest_gb_day: g.ingest_gb_day, ingest_usd_month: g.ingest_usd_month, retention_days: g.retention_days} END) AS observed
     OPTIONAL MATCH (r)-[:MEMBER_OF]->(sys:KnSystem)-[ss:SHIPS_LOGS_TO]->(sg:KnLogGroup)
+    WITH r, role, pool, recs, alerts, incidents, controls, actions, apps, observed,
+      collect(DISTINCT CASE WHEN sg IS NULL THEN null ELSE {name: sg.name, how: ss.attributed_by, via: null, source: sys.name, system: sys.id, observed_at: null, ingest_gb_day: sg.ingest_gb_day, ingest_usd_month: sg.ingest_usd_month, retention_days: sg.retention_days} END) AS system_groups
     RETURN properties(r) AS resource, role.name AS role, pool.name AS pool, recs, alerts, incidents, controls, actions, apps,
-      observed + [x IN collect(DISTINCT CASE WHEN sg IS NULL THEN null ELSE {name: sg.name, how: ss.attributed_by, via: null, source: sys.name, system: sys.id, observed_at: null, ingest_gb_day: sg.ingest_gb_day, ingest_usd_month: sg.ingest_usd_month, retention_days: sg.retention_days} END) WHERE x IS NOT NULL AND NOT x.name IN [o IN observed WHERE o IS NOT NULL | o.name]] AS log_groups`, { id }, { rowCap: 1 });
+      observed + [x IN system_groups WHERE x IS NOT NULL AND NOT x.name IN [o IN observed WHERE o IS NOT NULL | o.name]] AS log_groups`, { id }, { rowCap: 1 });
   const row = r.rows[0];
   if (!row) return null;
   const recs = (row.recs as any[]).filter(Boolean);

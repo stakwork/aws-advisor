@@ -991,7 +991,9 @@ timestamps so nothing from the logs leaves the instance except the last three li
 | host interface counters since boot | `/proc/net/dev`, loopback and docker bridges excluded | the drawer shows the difference from the previous probe ("12 MB in the 58 min since the previous probe"), the roll-up the bytes per day; the raw counter is never shown |
 
 The section takes about three seconds on a box with a handful of containers and never fails the probe: a
-missing tool or file becomes a null. `useSummary` (`src/ssm.ts`) reduces it to one line, **last real use** and
+missing tool or file becomes a null. The probe's own machinery (the `ssm-document-worker` that runs the document, its
+shell and the tools the script pipes through) is always running at the moment the probe looks and is left out of
+"busiest process" and the top-CPU lists (`realProcesses` in `src/ssm.ts`). `useSummary` (`src/ssm.ts`) reduces it to one line, **last real use** and
 what the evidence was (the newest of: a use signal line, a front-door request, a login, an external connection
 at probe time), which the drawer shows first and `summarizeProbe` carries as `last_use_at` for the rules. The
 history keeps it: `instance_activity` (one row per probe, 30 days), the activity columns on `container_samples`
@@ -1304,7 +1306,9 @@ tops out at 0.6, the probes say "not used", and only both together reach 1. A gr
 group is measured as a group, never through a member: its CPU by `AutoScalingGroupName`, and its balancer's
 request count is the use evidence that lifts its confidence (a group with no balancer stays at 0.6). The group
 profile is shown on its balancer's detail in the Load balancers tab. From the busy hours the profile
-derives the smallest `advisor:schedule` value (UTC) that keeps the box up whenever it was ever used, one window a
+says, per busy hour, which signal tripped it (network over 5 MB/h, CPU over 10 %, balancer requests, a probe
+signal), in the summary and in the cell's tooltip, so a box that is "busy" only because something ships 2 GB an hour
+is read for what it is. It derives the smallest `advisor:schedule` value (UTC) that keeps the box up whenever it was ever used, one window a
 day over the days that have any use, a day with none off; a box used around the clock gets none, a box never used
 is a parking case, not a schedule.
 

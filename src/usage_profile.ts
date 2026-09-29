@@ -62,7 +62,7 @@ const DAY_LABEL = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export interface ProbeMark { ext_conn: number; users_now: number; signals_recent: boolean; request_recent: boolean; login_recent: boolean; logs_recent: boolean; container_busy: boolean }
 export interface HourSample { at: number; cpu_avg: number | null; cpu_max: number | null; net_bytes: number | null; requests: number | null; probes: ProbeMark[] }
-export interface HourBucket { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; /** samples with use evidence beyond CloudWatch: a probe, or a balancer request count */ covered: number; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number }
+export interface HourBucket { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; /** samples with use evidence beyond CloudWatch: a probe, or a balancer request count */ covered: number; /** how many busy samples each signal tripped */ busy_cpu: number; busy_net: number; busy_requests: number; busy_probe: number; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number }
 export interface QuietWindow { start: number; end: number; hours: number; effective_start: number; effective_end: number; effective_hours: number; confidence: number; probe_coverage: number; label: string }
 export interface Profile {
   subject: string; kind: "ec2" | "asg"; name: string | null; region: string | null; account_id: string | null; computed_at: string; window_days: number;
@@ -86,15 +86,27 @@ export function sampleQuiet(s: HourSample): boolean {
   return s.probes.every((p) => !p.ext_conn && !p.users_now && !p.signals_recent && !p.request_recent && !p.login_recent && !p.container_busy);
 }
 
+/** Which signals made a sample busy. Pure. */
+export function busyReasons(s: HourSample): { cpu: boolean; net: boolean; requests: boolean; probe: boolean } {
+  return {
+    cpu: s.cpu_max != null && s.cpu_max >= QUIET_CPU_MAX,
+    net: s.net_bytes != null && s.net_bytes >= QUIET_NET_BYTES,
+    requests: s.requests != null && s.requests > 0,
+    probe: s.probes.some((p) => p.ext_conn > 0 || p.users_now > 0 || p.signals_recent || p.request_recent || p.login_recent || p.container_busy),
+  };
+}
+
 /** The 168 buckets from the window's samples. Pure. */
 export function bucketize(samples: HourSample[]): HourBucket[] {
-  const out: HourBucket[] = Array.from({ length: HOURS_PER_WEEK }, (_, i) => ({ day: Math.floor(i / 24), hour: i % 24, seen: 0, quiet: 0, verdict: "unknown", cpu_avg: null, cpu_max: null, net_mb: null, requests: null, probes: 0, covered: 0, ext_conn: 0, signals: 0, requests_seen: 0, logins: 0, logs: 0, busy_containers: 0 }));
+  const out: HourBucket[] = Array.from({ length: HOURS_PER_WEEK }, (_, i) => ({ day: Math.floor(i / 24), hour: i % 24, seen: 0, quiet: 0, verdict: "unknown", cpu_avg: null, cpu_max: null, net_mb: null, requests: null, probes: 0, covered: 0, busy_cpu: 0, busy_net: 0, busy_requests: 0, busy_probe: 0, ext_conn: 0, signals: 0, requests_seen: 0, logins: 0, logs: 0, busy_containers: 0 }));
   const acc = new Map<number, { cpu: number[]; net: number[]; req: number[] }>();
   for (const s of samples) {
     if (s.cpu_max == null) continue; // the box was off that hour, or CloudWatch has nothing: no evidence either way
     const i = ringIndex(s.at); const b = out[i];
     const a = acc.get(i) ?? { cpu: [], net: [], req: [] }; acc.set(i, a);
-    b.seen++; if (sampleQuiet(s)) b.quiet++;
+    b.seen++;
+    if (sampleQuiet(s)) b.quiet++;
+    else { const w = busyReasons(s); if (w.cpu) b.busy_cpu++; if (w.net) b.busy_net++; if (w.requests) b.busy_requests++; if (w.probe) b.busy_probe++; }
     if (s.cpu_avg != null) a.cpu.push(s.cpu_avg);
     if (s.net_bytes != null) a.net.push(s.net_bytes);
     if (s.requests != null) a.req.push(s.requests);
@@ -181,6 +193,12 @@ export function buildProfile(i: BuildInput): Profile {
     parts.push(`quiet ${quietHoursWeek} of ${HOURS_PER_WEEK} hours a week over ${seenWeeks} week${seenWeeks === 1 ? "" : "s"}: ${top}${windows.length > 3 ? ` and ${windows.length - 3} more` : ""}`);
     const cov = Math.round(100 * windows.reduce((s, w) => s + w.probe_coverage * w.hours, 0) / windows.reduce((s, w) => s + w.hours, 0));
     parts.push(i.kind === "asg" ? (i.samples.some((s) => s.requests != null) ? `the balancer's request count covers ${cov} % of the quiet hours` : "no balancer in front of the group: CloudWatch CPU only, so the confidence tops out at 0.6") : probes ? `probes cover ${cov} % of the quiet hours (connections, use signals, logins, container CPU)` : "no probe in the window: CloudWatch only, so the confidence tops out at 0.6");
+  }
+  const why = { cpu: 0, net: 0, requests: 0, probe: 0 }; let busyHours = 0;
+  for (const b of hours) if (b.verdict === "busy") { busyHours++; why.cpu += b.busy_cpu; why.net += b.busy_net; why.requests += b.busy_requests; why.probe += b.busy_probe; }
+  if (busyHours) {
+    const trips = [why.net ? `network over ${Math.round(QUIET_NET_BYTES / 1e6)} MB/h in ${why.net}` : null, why.cpu ? `CPU over ${QUIET_CPU_MAX} % in ${why.cpu}` : null, why.requests ? `balancer requests in ${why.requests}` : null, why.probe ? `a probe signal (connection, use line, login, busy container) in ${why.probe}` : null].filter(Boolean);
+    parts.push(`${busyHours} busy hours of the week; what tripped them, in hour-samples: ${trips.join(", ")}`);
   }
   if (busy.length) parts.push(`busiest ${busy[0].label} (CPU ${busy[0].cpu_avg} %${busy[0].net_mb != null ? `, ${busy[0].net_mb} MB` : ""})`);
   if (sug) parts.push(`schedule that keeps it up whenever it was used: ${sug.text} (off ${off} h/week${est ? `, ≈ ${est} USD/month` : ""})`);

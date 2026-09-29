@@ -35,6 +35,10 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   return res.json() as Promise<T>;
 }
 
+/** The probe's own machinery (the SSM worker that runs the document, its shell and tools) is always running when the probe looks: left out of the top-process lists (mirrors realProcesses in src/ssm.ts). */
+const PROBE_MACHINERY = /^(ssm-document-wo\S*|ssm-agent-worke\S*|ssm-session-wor\S*|amazon-ssm-agen\S*|ps|awk|sh|bash|dash|sed|grep|sort|head|tail|tr|cat|docker|ss|who|last|df|free|uptime)$/;
+export const realProcesses = <T extends { command: string }>(list: T[] | null | undefined): T[] => (list ?? []).filter((x) => !PROBE_MACHINERY.test(String(x.command).trim()));
+
 export function stream(path: string): EventSource {
   const t = token();
   return new EventSource(`/api${path}${t ? `${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(t)}` : ""}`);

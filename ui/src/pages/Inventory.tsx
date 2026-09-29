@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate, Link, useSearchParams } from "react-router-dom";
-import { api, usd, when } from "../api";
+import { api, realProcesses, usd, when } from "../api";
 import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
@@ -907,7 +907,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         <TypicalLine instanceId={d.instance_id} />
         {probe.error && <div className="mt-1 text-xs text-red-300">{probe.error}</div>}
         {latest?.data?.disks?.length > 0 && <div className="mt-1 text-xs text-zinc-400">Disks: {latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).join(", ")}</div>}
-        {latest?.data?.top_cpu?.length > 0 && <div className="text-xs text-zinc-400">Top CPU: {latest.data.top_cpu.slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
+        {realProcesses<any>(latest?.data?.top_cpu).length > 0 && <div className="text-xs text-zinc-400">Top CPU: {realProcesses<any>(latest.data.top_cpu).slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
         {latest?.data?.top_mem?.length > 0 && <div className="text-xs text-zinc-400">Top memory: {latest.data.top_mem.slice(0, 3).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ")}</div>}
         {latest && <AppsBlock instanceId={d.instance_id} probedAt={latest.collected_at} />}
         {latest?.data?.activity && <ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} />}
