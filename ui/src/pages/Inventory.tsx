@@ -509,7 +509,7 @@ export default function Inventory() {
                   const cls = `cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${selectedId === id ? "bg-zinc-900" : ""} ${r.gone ? "text-zinc-500" : ""}`;
                   // The detail expands full width right under the selected row (same pattern as alerts and playbooks).
                   const detailRow = selectedId === id ? (
-                    <tr className="border-t border-zinc-800 bg-zinc-950/40"><td colSpan={COLUMNS[tab]} className="max-w-0 p-3"><DetailCell onClose={() => set({ id: null })} id={id}><div className="lg:columns-2 lg:gap-8">
+                    <tr className="border-t border-zinc-800 bg-zinc-950/40"><td colSpan={COLUMNS[tab]} className="max-w-0 p-3"><DetailCell onClose={() => set({ id: null })} id={id}><div className={tab === "ec2" ? "" : "lg:columns-2 lg:gap-8"}>
                       {!detail ? <div className="text-sm text-zinc-500">{rows ? "Not in the snapshot." : "Loading…"}</div>
                         : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={() => runProbe(detail.instance_id)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
@@ -828,140 +828,190 @@ function GraphLine({ id }: { id: string }) {
   );
 }
 
+/** A compact tile for the glance strip at the top of the EC2 detail. */
+const Glance = ({ label, value, hint, tone }: { label: string; value: ReactNode; hint?: ReactNode; tone?: string }) => (
+  <div className="min-w-[7rem] rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-1.5">
+    <div className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</div>
+    <div className={`text-sm font-medium ${tone || "text-zinc-100"}`}>{value}</div>
+    {hint && <div className="text-[11px] text-zinc-500">{hint}</div>}
+  </div>
+);
+
+type Ec2Tab = "overview" | "usage" | "running" | "links";
+const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["running", "What runs"], ["links", "Links & history"]];
+
+/**
+ * The EC2 detail in four tabs, every fact once: a header with what identifies the box and the two switches, a glance
+ * strip with the numbers people look for first (price, CPU, memory, disk, last real use, quiet hours), then
+ * Overview (identity, network, storage, SSM, role, tags), Usage (the hour-of-week profile, the charts, the probes),
+ * What runs (apps, activity, containers, the process and disk lines) and Links & history (DNS, balancers,
+ * recommendations, findings, the graph, the timeline).
+ */
 function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; error: string }; onProbe: () => void }) {
   const [rules, setRules] = useState<any[]>([]);
+  const [tab, setTab] = useState<Ec2Tab>("overview");
+  const [usage, setUsage] = useState<any>(null);
   const loadRules = () => api("/signal-rules").then((r) => setRules(r.rules)).catch(() => setRules([]));
-  useEffect(() => { loadRules(); }, [d.instance_id]);
+  useEffect(() => { loadRules(); setTab("overview"); setUsage(null); api(`/instances/${encodeURIComponent(d.instance_id)}/usage`).then(setUsage).catch(() => setUsage(null)); }, [d.instance_id]);
   const s = d.snapshot || {};
   const id = s.identity || {}; const net = s.network || {}; const st = s.storage || {}; const ssm = s.ssm; const ut = s.utilisation || {}; const price = s.price;
   const latest = d.probes?.[0];
   const canProbe = d.state === "running" && d.ssm_status === "Online" && (!ssm?.platform_type || ssm.platform_type === "Linux");
+  const diskMax = latest?.data?.disks?.length ? Math.max(...latest.data.disks.map((x: any) => Number(x.used_pct) || 0)) : null;
+  const lastUse = latest?.summary?.last_use_at ?? null;
+  const recs = d.open_recs || 0, findings = d.findings_count ?? 0, domains = d.domains?.length || 0, behind = d.load_balancers?.length || 0;
+  const probeButton = canProbe ? <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={onProbe} disabled={probe.busy}>{probe.busy ? "Probing…" : latest ? "Probe again" : "Probe now"}</Button> : null;
   return (
     <>
-      <h2 className="text-base font-medium text-zinc-100">{d.name || d.instance_id}</h2>
-      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><SsmBadge status={d.ssm_status} platform={d.ssm_platform} />{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.instance_id}</Mono></div>
-      <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
-      <WatchToggle kind="ec2" id={d.instance_id} />
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1">
+        <div>
+          <h2 className="text-base font-medium text-zinc-100">{d.name || d.instance_id}</h2>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><SsmBadge status={d.ssm_status} platform={d.ssm_platform} />{s.pool ? <PoolBadge kind={s.pool.kind} name={s.pool.name} /> : null}{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.instance_id}</Mono><span className="text-zinc-500">{id.instance_type} · {id.region}{id.az ? ` / ${id.az}` : ""}{id.launch_time ? ` · launched ${day(id.launch_time)}` : ""}</span></div>
+          <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}{d.role?.role ? <> · <RoleLine role={d.role} /></> : null}</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2"><WatchToggle kind="ec2" id={d.instance_id} /></div>
+      </div>
       <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} />
 
-      <Group title="Identity">
-        <Dl rows={[
-          ["Type", <>{id.instance_type}{id.cpu_cores ? <span className="text-zinc-500"> · {id.cpu_cores} cores × {id.threads_per_core} threads</span> : null}</>],
-          ["Region / AZ", `${id.region} / ${id.az}`],
-          ["Launched", when(id.launch_time)],
-          ["State since", id.state_transition_time ? `${when(id.state_transition_time)}${id.state_transition_reason ? ` (${id.state_transition_reason})` : ""}` : null],
-          ["Platform", [id.platform_details, id.architecture].filter(Boolean).join(" · ")],
-          ["Lifecycle", id.instance_lifecycle],
-          ["Pool", s.pool ? <><PoolBadge kind={s.pool.kind} /> <span className="font-mono text-xs">{s.pool.name}</span><div className="mt-1 text-xs text-zinc-400">{s.pool.note}</div></> : null],
-          ["AMI", id.image_id && <Mono>{id.image_id}</Mono>],
-          ["Key pair", id.key_name],
-          ["Instance profile", id.iam_instance_profile_arn && <Mono>{id.iam_instance_profile_arn}</Mono>],
-          ["Monitoring", id.monitoring_state],
-          ["EBS optimized", yesNo(id.ebs_optimized)],
-        ]} />
-      </Group>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Glance label="At list" value={price?.monthly != null ? `${usd(price.monthly)} / mo` : "—"} hint={price ? `${usd(price.hourly, 4)} / h · ${price.operating_system}` : `no price for ${d.instance_type}`} />
+        <Glance label="CPU, 30 days" value={ut.cpu_days ? pct(ut.cpu_30d_avg_max) : "—"} hint={ut.cpu_days ? `avg daily peak · ${pct(ut.cpu_30d_avg)} avg · ${ut.cpu_days} d` : "no CloudWatch data"} />
+        <Glance label="Memory" value={latest ? `${latest.summary.memory_used_pct}%` : "—"} hint={latest ? `${latest.summary.memory_used_gb} of ${latest.summary.memory_total_gb} GB · load ${latest.summary.load_1m} / ${latest.summary.cpus} vCPU` : canProbe ? "not probed yet" : "no probe (SSM offline)"} tone={latest && latest.summary.memory_used_pct >= 90 ? "text-red-300" : undefined} />
+        <Glance label="Disk, fullest" value={diskMax != null ? `${Math.round(diskMax)}%` : "—"} hint={latest?.data?.disks?.length ? latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).slice(0, 3).join(" · ") : "from the probe"} tone={diskMax != null ? usedTone(diskMax) : undefined} />
+        <Glance label="Last real use" value={lastUse ? when(lastUse) : latest?.data?.activity ? "none seen" : "—"} hint={latest?.summary?.last_use_kind ? String(latest.summary.last_use_kind).replace(/_/g, " ") : latest ? `probed ${when(latest.collected_at)}` : "needs a probe"} />
+        <Glance label="Quiet hours / week" value={usage ? `${usage.quiet_hours_week} of 168` : "—"} hint={usage ? `confidence ${usage.confidence}${usage.suggested_schedule ? ` · ${usage.suggested_schedule}` : ""}` : "no usage profile yet"} tone={usage && usage.quiet_hours_week >= 100 ? "text-emerald-300" : undefined} />
+        <Glance label="Storage" value={gb(st.ebs_gb)} hint={`${st.volumes?.length || 0} volume${st.volumes?.length === 1 ? "" : "s"}`} />
+      </div>
 
-      <Group title="Network">
-        <Dl rows={[
-          ["Private IP", net.private_ip && <Mono>{net.private_ip}</Mono>],
-          ["Public IP", net.public_ip && <Mono>{net.public_ip}</Mono>],
-          ["Private DNS", net.private_dns && <Mono>{net.private_dns}</Mono>],
-          ["Public DNS", net.public_dns && <Mono>{net.public_dns}</Mono>],
-          ["VPC / subnet", (net.vpc_id || net.subnet_id) && <Mono>{net.vpc_id} / {net.subnet_id}</Mono>],
-          ["Security groups", net.security_groups?.length ? net.security_groups.map((g: any) => `${g.GroupName || ""} (${g.GroupId})`).join(", ") : null],
-        ]} />
-      </Group>
-      <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
-      <Group title="Behind">
-        {d.load_balancers?.length ? <ul className="space-y-0.5 text-sm">{d.load_balancers.map((lb: any, i: number) => <li key={`${lb.arn}-${i}`} className="flex flex-wrap items-center gap-2"><Link className="hover:underline" to={`/inventory?tab=elb&id=${encodeURIComponent(lb.name)}`}>{lb.name}</Link><span className="text-xs uppercase text-zinc-500">{lb.kind === "clb" ? "classic" : lb.kind}</span><span className="text-xs text-zinc-500">{lb.target_group}{lb.port != null ? `:${lb.port}` : ""}</span>{lb.health && <span className={`text-xs ${lb.health === "healthy" ? "text-emerald-300" : lb.health === "unhealthy" ? "text-red-300" : "text-zinc-500"}`}>{lb.health}</span>}</li>)}</ul> : <div className="text-sm text-zinc-500">No load balancer in this account has this instance as a target.</div>}
-      </Group>
+      <div className="mt-3 flex gap-1 border-b border-zinc-800">
+        {EC2_TABS.map(([k, label]) => {
+          const n = k === "links" ? recs + findings + domains + behind : k === "running" ? (latest?.data?.docker?.available ? latest.data.docker.running : 0) : 0;
+          return <button key={k} onClick={() => setTab(k)} className={`-mb-px border-b-2 px-3 py-1 text-sm ${tab === k ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>{label}{n ? <span className="ml-1 text-xs text-zinc-500">{n}</span> : null}</button>;
+        })}
+      </div>
 
-      <Group title={`Storage · ${gb(st.ebs_gb)}`}>
-        <Dl rows={[["Root device", st.root_device_name && `${st.root_device_name} (${st.root_device_type})`]]} />
-        {st.volumes?.length > 0 && (
-          <table className="mt-1 w-full text-xs">
-            <thead><tr className="text-zinc-500"><th className="text-left font-normal">Volume</th><th className="text-left font-normal">Device</th><th className="text-left font-normal">Type</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">Used</th><th className="text-right font-normal">IOPS</th><th className="text-right font-normal">Del. on term.</th></tr></thead>
-            <tbody>{st.volumes.map((v: any) => { const u = d.volume_usage?.[v.volume_id]; return <tr key={v.volume_id} className="border-t border-zinc-800/60"><td className="py-0.5 font-mono"><Link className="hover:underline" to={`/inventory?tab=ebs&id=${v.volume_id}`}>{v.volume_id}</Link></td><td>{v.device}</td><td>{v.type}{v.encrypted ? " 🔒" : ""}</td><td className="text-right">{v.size}</td><td className="text-right"><UsedBar used_pct={u?.used_pct ?? null} used_bytes={u?.used_bytes} total_bytes={u?.total_bytes} usage_at={u?.usage_at} empty="no probe yet" /></td><td className="text-right">{v.iops ?? "—"}</td><td className="text-right">{yesNo(v.delete_on_termination)}</td></tr>; })}</tbody>
-          </table>
-        )}
-      </Group>
-
-      <Group title="Systems Manager">
-        {ssm ? (
-          <Dl rows={[
-            ["Ping status", <Badge>{ssm.ping_status}</Badge>],
-            ["Platform", [ssm.platform_name, ssm.platform_version].filter(Boolean).join(" ") || ssm.platform_type],
-            ["Agent", ssm.agent_version && `${ssm.agent_version}${ssm.agent_latest === false ? " (update available)" : ssm.agent_latest ? " (latest)" : ""}`],
-            ["Last ping", when(ssm.last_ping)],
-            ["IAM role", ssm.iam_role],
-            ["Computer name", ssm.computer_name],
-          ]} />
-        ) : <div className="text-sm text-zinc-400">Not registered with Systems Manager: no SSM agent, no instance profile with the SSM policy, or outside the connection's regions. It cannot be probed or managed through Run Command.</div>}
-      </Group>
-
-      <Group title="Utilisation" action={canProbe ? <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={onProbe} disabled={probe.busy}>{probe.busy ? "Probing…" : latest ? "Probe again" : "Probe"}</Button> : null}>
-        <Dl rows={[
-          ["CPU, 30 days", ut.cpu_days ? `${pct(ut.cpu_30d_avg_max)} avg daily peak · ${pct(ut.cpu_30d_avg)} avg · ${ut.cpu_days} days of data` : "no CloudWatch data"],
-          ["Latest probe", latest ? <>{when(latest.collected_at)}: memory {latest.summary.memory_used_pct}% ({latest.summary.memory_used_gb} of {latest.summary.memory_total_gb} GB) · load {latest.summary.load_1m} on {latest.summary.cpus} vCPU{latest.summary.top_process ? ` · busiest ${latest.summary.top_process}` : ""}</> : canProbe ? "none yet; the probe reads memory, disks, load and top processes over SSM" : null],
-        ]} />
-        <TypicalLine instanceId={d.instance_id} />
-        {probe.error && <div className="mt-1 text-xs text-red-300">{probe.error}</div>}
-        {latest?.data?.disks?.length > 0 && <div className="mt-1 text-xs text-zinc-400">Disks: {latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).join(", ")}</div>}
-        {realProcesses<any>(latest?.data?.top_cpu).length > 0 && <div className="text-xs text-zinc-400">Top CPU: {realProcesses<any>(latest.data.top_cpu).slice(0, 3).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ")}</div>}
-        {latest?.data?.top_mem?.length > 0 && <div className="text-xs text-zinc-400">Top memory: {latest.data.top_mem.slice(0, 3).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ")}</div>}
-        {latest && <AppsBlock instanceId={d.instance_id} probedAt={latest.collected_at} />}
-        {latest?.data?.activity && <ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} />}
-        {latest?.data?.docker?.available && (
-          <div className="mt-1 text-xs text-zinc-400">
-            Docker: {latest.data.docker.running} running of {latest.data.docker.total}
-            {latest.data.containers?.length > 0 && (
-              <ul className="mt-0.5 space-y-0.5">
-                {latest.data.containers.slice(0, 12).map((c: any) => {
-                  const a = latest.data.activity?.containers?.find((x: any) => x.name === c.name);
-                  return (
-                  <li key={c.name} className="flex flex-wrap gap-x-2">
-                    <span className={c.state === "running" ? "text-zinc-200" : "text-zinc-500"}>{c.name}</span>
-                    <span className="text-zinc-500">{c.image}</span>
-                    <span className="text-zinc-500">{c.state}{c.cpu_pct != null ? ` · cpu ${c.cpu_pct}%` : ""}{c.mem_bytes ? ` · ${Math.round(c.mem_bytes / 1048576)} MB${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : ""}</span>
-                    {a && <span className={a.signal_lines > 0 ? "text-emerald-300/80" : "text-zinc-500"} title={a.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : "no log lines in 24 h"}>
-                      {a.log_lines} log lines/24h{a.signal_lines > 0 ? ` · ${a.signal_lines} use signals, last ${when(a.last_signal_at)}` : a.last_log_at ? ` · last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? ` · ${a.errors} errors` : ""}{a.restarts >= 10 ? ` · ${a.restarts} restarts` : ""}
-                    </span>}
-                    {a && <SignalChips image={c.image} act={a} rules={rules} onChange={loadRules} />}
-                  </li>
-                  );
-                })}
-              </ul>
+      {tab === "overview" && (
+        <div className="lg:columns-2 lg:gap-8">
+          <Group title="Identity">
+            <Dl rows={[
+              ["Type", <>{id.instance_type}{id.cpu_cores ? <span className="text-zinc-500"> · {id.cpu_cores} cores × {id.threads_per_core} threads</span> : null}</>],
+              ["State since", id.state_transition_time ? `${when(id.state_transition_time)}${id.state_transition_reason ? ` (${id.state_transition_reason})` : ""}` : null],
+              ["Platform", [id.platform_details, id.architecture].filter(Boolean).join(" · ")],
+              ["Lifecycle", id.instance_lifecycle],
+              ["Pool", s.pool ? <><span className="font-mono text-xs">{s.pool.name}</span><div className="mt-1 text-xs text-zinc-400">{s.pool.note}</div></> : null],
+              ["AMI", id.image_id && <Mono>{id.image_id}</Mono>],
+              ["Key pair", id.key_name],
+              ["Instance profile", id.iam_instance_profile_arn && <Mono>{id.iam_instance_profile_arn}</Mono>],
+              ["Monitoring", id.monitoring_state === "enabled" ? "detailed" : id.monitoring_state],
+              ["EBS optimized", yesNo(id.ebs_optimized)],
+              ["Price fetched", price?.fetched_at ? when(price.fetched_at) : null],
+            ]} />
+          </Group>
+          <Group title="Network">
+            <Dl rows={[
+              ["Private IP", net.private_ip && <Mono>{net.private_ip}{net.private_dns ? <span className="text-zinc-500"> · {net.private_dns}</span> : null}</Mono>],
+              ["Public IP", net.public_ip ? <Mono>{net.public_ip}{net.public_dns ? <span className="text-zinc-500"> · {net.public_dns}</span> : null}</Mono> : <span className="text-zinc-500">none</span>],
+              ["VPC / subnet", (net.vpc_id || net.subnet_id) && <Mono>{net.vpc_id} / {net.subnet_id}</Mono>],
+              ["Security groups", net.security_groups?.length ? net.security_groups.map((g: any) => `${g.GroupName || ""} (${g.GroupId})`).join(", ") : null],
+              ["DNS and balancers", (domains || behind) ? <button className="text-sky-300 hover:underline" onClick={() => setTab("links")}>{[domains ? `${domains} record${domains === 1 ? "" : "s"}` : null, behind ? `behind ${behind} balancer${behind === 1 ? "" : "s"}` : null].filter(Boolean).join(", ")}</button> : "none reach it"],
+            ]} />
+          </Group>
+          <Group title={`Storage · ${gb(st.ebs_gb)}`}>
+            <Dl rows={[["Root device", st.root_device_name && `${st.root_device_name} (${st.root_device_type})`]]} />
+            {st.volumes?.length > 0 && (
+              <table className="mt-1 w-full text-xs">
+                <thead><tr className="text-zinc-500"><th className="text-left font-normal">Volume</th><th className="text-left font-normal">Device</th><th className="text-left font-normal">Type</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">Used</th><th className="text-right font-normal">IOPS</th><th className="text-right font-normal">MiB/s</th></tr></thead>
+                <tbody>{st.volumes.map((v: any) => { const u = d.volume_usage?.[v.volume_id]; return <tr key={v.volume_id} className="border-t border-zinc-800/60"><td className="py-0.5 font-mono"><Link className="hover:underline" to={`/inventory?tab=ebs&id=${v.volume_id}`}>{v.volume_id}</Link></td><td>{v.device}</td><td>{v.type}{v.encrypted ? "" : <span className="ml-1 text-amber-300/80" title="not encrypted">⚠</span>}</td><td className="text-right">{v.size}</td><td className="text-right"><UsedBar used_pct={u?.used_pct ?? null} used_bytes={u?.used_bytes} total_bytes={u?.total_bytes} usage_at={u?.usage_at} empty="no probe usage for this volume" /></td><td className="text-right">{v.iops ?? "—"}</td><td className="text-right">{v.throughput ?? "—"}</td></tr>; })}</tbody>
+              </table>
             )}
-          </div>
-        )}
-        {latest?.data?.docker && !latest.data.docker.available && <div className="mt-1 text-xs text-zinc-600">No Docker daemon on this instance (probe 1.2 reports containers where Docker runs).</div>}
-        <div className="mt-3"><InstanceCharts instanceId={d.instance_id} /></div>
-        <div className="mt-3"><UsageProfile subject={d.instance_id} running={d.state === "running"} /></div>
-        {d.probes?.length > 1 && (
-          <details className="mt-1 text-xs"><summary className="cursor-pointer text-zinc-500">Probe history ({d.probes.length})</summary>
-            <ul className="mt-1 space-y-0.5 text-zinc-400">{d.probes.map((p: any) => <li key={p.id}>{when(p.collected_at)} · memory {p.summary.memory_used_pct}% · load {p.summary.load_1m}{p.summary.top_process ? ` · ${p.summary.top_process}` : ""}</li>)}</ul>
-          </details>
-        )}
-      </Group>
-
-      <Group title="Price">
-        {price?.monthly != null ? <Dl rows={[["On-demand", `${usd(price.monthly, 2)} / month · ${usd(price.hourly, 4)} / hour (${price.operating_system}, list price × 730 h; reservations and Savings Plans not applied)`], ["Price fetched", when(price.fetched_at)]]} />
-          : <div className="text-sm text-zinc-500">No on-demand price found for {d.instance_type} in {d.region}.</div>}
-      </Group>
-
-      <Group title="Role (Jev)">
-        <div className="text-sm"><RoleLine role={d.role} />{d.role?.updated_at && <span className="ml-2 text-xs text-zinc-500">classified {when(d.role.updated_at)}</span>}</div>
-      </Group>
-
-      <Group title="Tags"><Tags tags={s.tags} /></Group>
-
-      <Related id={d.instance_id} recs={d.open_recs} findings={d.findings_count ?? 0} list={d.recommendations} />
-      {d.findings_run_id && d.findings?.length > 0 && (
-        <ul className="mt-1 space-y-0.5 text-sm">{d.findings.map((f: any) => <li key={f.id} className="flex gap-2"><Badge>{f.status}</Badge><span className="min-w-0 truncate" title={f.reason || ""}>{f.control_title || f.control_id}{f.reason ? `: ${f.reason}` : ""}</span></li>)}</ul>
+          </Group>
+          <Group title="Systems Manager">
+            {ssm ? (
+              <Dl rows={[
+                ["Agent", ssm.agent_version && `${ssm.agent_version}${ssm.agent_latest === false ? " (update available)" : ssm.agent_latest ? " (latest)" : ""} · ${[ssm.platform_name, ssm.platform_version].filter(Boolean).join(" ") || ssm.platform_type}`],
+                ["Last ping", when(ssm.last_ping)],
+                ["IAM role", ssm.iam_role],
+                ["Computer name", ssm.computer_name],
+              ]} />
+            ) : <div className="text-sm text-zinc-400">Not registered with Systems Manager: no SSM agent, no instance profile with the SSM policy, or outside the connection's regions. It cannot be probed or managed through Run Command.</div>}
+          </Group>
+          <Group title="Role (Jev)"><div className="text-sm"><RoleLine role={d.role} />{d.role?.updated_at && <span className="ml-2 text-xs text-zinc-500">classified {when(d.role.updated_at)}</span>}</div></Group>
+          <Group title="Tags"><Tags tags={s.tags} /></Group>
+        </div>
       )}
 
-      <GraphLine id={d.instance_id} />
-      <Timeline kind="ec2" id={d.instance_id} />
+      {tab === "usage" && (
+        <div className="grid grid-cols-1 gap-x-8 lg:grid-cols-[7fr_5fr]">
+          <div className="min-w-0">
+            <Group title="When it is used">
+              <UsageProfile subject={d.instance_id} running={d.state === "running"} />
+            </Group>
+          </div>
+          <div className="min-w-0">
+            <Group title="Trends"><TypicalLine instanceId={d.instance_id} /><div className="mt-2"><InstanceCharts instanceId={d.instance_id} /></div></Group>
+            <Group title={`Probes${d.probes?.length ? ` · ${d.probes.length}` : ""}`} action={probeButton}>
+              {probe.error && <div className="mb-1 text-xs text-red-300">{probe.error}</div>}
+              {latest ? <ul className="space-y-0.5 text-xs text-zinc-400">{d.probes.slice(0, 24).map((p: any) => <li key={p.id}>{when(p.collected_at)} · memory {p.summary.memory_used_pct}% · load {p.summary.load_1m}{p.summary.top_process ? ` · busiest ${p.summary.top_process}` : ""}{p.summary.last_use_at ? ` · last use ${when(p.summary.last_use_at)}` : ""}</li>)}</ul>
+                : <div className="text-sm text-zinc-500">{canProbe ? "Not probed yet: Probe now reads memory, load, disks, processes, containers and activity over SSM." : d.state !== "running" ? "Not running: nothing to probe." : "The SSM agent is not online, so the probe cannot run."}</div>}
+            </Group>
+          </div>
+        </div>
+      )}
+
+      {tab === "running" && (
+        <>
+          {!latest && <div className="mt-3 text-sm text-zinc-500">{canProbe ? <>No probe yet. {probeButton}</> : "No probe: what runs here is unknown until the SSM agent is online."}</div>}
+          {latest && <Group title={`Processes · probed ${when(latest.collected_at)}`} action={probeButton}>
+            <Dl rows={[
+              ["Top CPU", realProcesses<any>(latest.data?.top_cpu).length ? realProcesses<any>(latest.data.top_cpu).slice(0, 5).map((p: any) => `${p.command} ${p.cpu_pct}%`).join(", ") : null],
+              ["Top memory", realProcesses<any>(latest.data?.top_mem).length ? realProcesses<any>(latest.data.top_mem).slice(0, 5).map((p: any) => `${p.command} ${Math.round(p.rss_bytes / 1048576)} MB`).join(", ") : null],
+              ["Disks", latest.data?.disks?.length ? latest.data.disks.map((x: any) => `${x.mount} ${x.used_pct}%`).join(", ") : null],
+            ]} />
+            <AppsBlock instanceId={d.instance_id} probedAt={latest.collected_at} />
+          </Group>}
+          {latest?.data?.activity && <Group title="Activity: is anyone using it?"><ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} /></Group>}
+          {latest?.data?.docker?.available && (
+            <Group title={`Containers · ${latest.data.docker.running} running of ${latest.data.docker.total}`}>
+              {latest.data.containers?.length > 0 && (
+                <ul className="space-y-0.5 text-xs text-zinc-400">
+                  {latest.data.containers.slice(0, 12).map((c: any) => {
+                    const a = latest.data.activity?.containers?.find((x: any) => x.name === c.name);
+                    return (
+                    <li key={c.name} className="flex flex-wrap gap-x-2">
+                      <span className={c.state === "running" ? "text-zinc-200" : "text-zinc-500"}>{c.name}</span>
+                      <span className="text-zinc-500">{c.image}</span>
+                      <span className="text-zinc-500">{c.state}{c.cpu_pct != null ? ` · cpu ${c.cpu_pct}%` : ""}{c.mem_bytes ? ` · ${Math.round(c.mem_bytes / 1048576)} MB${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : ""}</span>
+                      {a && <span className={a.signal_lines > 0 ? "text-emerald-300/80" : "text-zinc-500"} title={a.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : "no log lines in 24 h"}>
+                        {a.log_lines} log lines/24h{a.signal_lines > 0 ? ` · ${a.signal_lines} use signals, last ${when(a.last_signal_at)}` : a.last_log_at ? ` · last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? ` · ${a.errors} errors` : ""}{a.restarts >= 10 ? ` · ${a.restarts} restarts` : ""}
+                      </span>}
+                      {a && <SignalChips image={c.image} act={a} rules={rules} onChange={loadRules} />}
+                    </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </Group>
+          )}
+          {latest?.data?.docker && !latest.data.docker.available && <div className="mt-2 text-xs text-zinc-600">No Docker daemon on this instance.</div>}
+        </>
+      )}
+
+      {tab === "links" && (
+        <>
+          <div className="lg:columns-2 lg:gap-8">
+            <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
+            <Group title="Behind">
+              {d.load_balancers?.length ? <ul className="space-y-0.5 text-sm">{d.load_balancers.map((lb: any, i: number) => <li key={`${lb.arn}-${i}`} className="flex flex-wrap items-center gap-2"><Link className="hover:underline" to={`/inventory?tab=elb&id=${encodeURIComponent(lb.name)}`}>{lb.name}</Link><span className="text-xs uppercase text-zinc-500">{lb.kind === "clb" ? "classic" : lb.kind}</span><span className="text-xs text-zinc-500">{lb.target_group}{lb.port != null ? `:${lb.port}` : ""}</span>{lb.health && <span className={`text-xs ${lb.health === "healthy" ? "text-emerald-300" : lb.health === "unhealthy" ? "text-red-300" : "text-zinc-500"}`}>{lb.health}</span>}</li>)}</ul> : <div className="text-sm text-zinc-500">No load balancer in this account has this instance as a target.</div>}
+            </Group>
+            <Related id={d.instance_id} recs={d.open_recs} findings={d.findings_count ?? 0} list={d.recommendations} />
+            {d.findings_run_id && d.findings?.length > 0 && (
+              <ul className="mt-1 space-y-0.5 text-sm">{d.findings.map((f: any) => <li key={f.id} className="flex gap-2"><Badge>{f.status}</Badge><span className="min-w-0 truncate" title={f.reason || ""}>{f.control_title || f.control_id}{f.reason ? `: ${f.reason}` : ""}</span></li>)}</ul>
+            )}
+            <GraphLine id={d.instance_id} />
+          </div>
+          <Timeline kind="ec2" id={d.instance_id} />
+        </>
+      )}
     </>
   );
 }

@@ -54,7 +54,7 @@ test("usage profile: office hours make weekday days busy, nights and weekends qu
   assert.equal(p.off_hours_week, 168 - 5 * 12);
   assert.equal(p.est_usd_month, Math.round(100 * (108 / 168) * 100) / 100);
   assert.match(p.summary, /quiet 118 of 168 hours a week over 4 weeks/);
-  assert.match(p.summary, /50 busy hours of the week; what tripped them, in hour-samples: network over 5 MB\/h in 200, CPU over 10 % in 200, a probe signal .* in 200/);
+  assert.match(p.summary, /50 busy hours of the week; what tripped them, in hour-samples: network over 5 MB\/h in 200, CPU over 10 % in 200, a probe signal in 200 \(external connections 200, use-signal lines 200\)/);
   assert.equal(at(1, 9).busy_net, 4); assert.equal(at(1, 9).busy_cpu, 4); assert.equal(at(1, 9).busy_probe, 4); assert.equal(at(1, 3).busy_net, 0);
   assert.match(p.summary, /schedule that keeps it up whenever it was used: weekdays 07-19 UTC/);
 });

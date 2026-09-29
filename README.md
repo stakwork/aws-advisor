@@ -1203,6 +1203,12 @@ balancers, EBS, S3 and Route 53 have modules of their own, below):
 - **ElastiCache** (`inventory_elasticache`): cluster id, node type, engine and version, node count, status, region,
   created, replication group, list price (node price x nodes), recs and findings counts.
 
+The EC2 detail opens under its row in four tabs, every fact once: a header (name, state, SSM, pool, type, region,
+the watch and auto-park switches), a glance strip (list price, 30-day CPU, memory, fullest disk, last real use,
+quiet hours a week, storage), then **Overview** (identity, network, storage, Systems Manager, role, tags), **Usage**
+(the hour-of-week profile, the trends and charts, the probes), **What runs** (processes, apps, activity, containers)
+and **Links & history** (DNS records, balancers in front, recommendations, findings, the graph, the timeline).
+
 Each row keeps the denormalised columns used for filtering and sorting plus a `snapshot` JSON with everything, and
 `first_seen` / `last_seen`. A resource the refresh no longer sees keeps its `last_seen` and gets `gone = 1`, so
 terminated instances remain visible as history ("include gone" on the page). The refresh runs at the end of every
