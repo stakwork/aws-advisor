@@ -38,7 +38,7 @@ import { config } from "./config.js";
 import { parseSignals } from "./signals.js";
 import { rulesFor } from "./signal_rules.js";
 import { latestProbe } from "./ssm.js";
-import { db } from "./db.js";
+import { db, getJsonSetting, setSetting } from "./db.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
 import { executorCreds, type Creds } from "./executor.js";
@@ -424,6 +424,21 @@ function subjects(creds: Creds, only?: string[]): Subject[] {
   return out;
 }
 
+/** Why a box has no profile: the rule that leaves it out, or what the last pass ran into. */
+export function whyNoProfile(subject: string): string {
+  const row = db.prepare("select instance_id, name, state, pool_kind, pool, region, account_id from inventory_ec2 where instance_id = ?").get(subject) as any;
+  const last = getJsonSetting<{ at: string; subjects: number; profiled: number; errors: string[]; only: string[] | null } | null>("usage_last_pass", null);
+  const lastLine = last ? ` The last pass ran ${last.at.slice(0, 16).replace("T", " ")} UTC over ${last.subjects} subject(s), ${last.profiled} profiled${last.errors.length ? `; errors: ${last.errors.join("; ")}` : ""}.` : " No profile pass has run yet (the daily logs job runs it; Recompute usage on the EC2 tab runs it now).";
+  if (!row) return `${subject} is not in the inventory, so it is not profiled.${lastLine}`;
+  const name = row.name || subject;
+  if (row.state !== "running") return `${name} is ${row.state}: profiles cover running instances (a stopped box has no hours to read). It is profiled again once it runs.${lastLine}`;
+  if (row.pool_kind) return `${name} is a member of ${row.pool ? `the ${row.pool_kind} pool ${row.pool}` : `a ${row.pool_kind} pool`}: its instances come and go, so the group is profiled instead${row.pool_kind === "asg" && row.pool ? ` (subject asg:${row.pool}, shown on its balancer's detail)` : ""}.${lastLine}`;
+  const regionErr = last?.errors.find((e) => row.region && e.startsWith(`${row.region}:`));
+  if (regionErr) return `${name} was in scope but the pass failed for its region: ${regionErr}. Fix that and recompute.`;
+  if (last?.only && !last.only.includes(subject)) return `${name} is in scope; the last pass was for ${last.only.join(", ")} only. Recompute usage on the EC2 tab covers every box.`;
+  return `${name} is in scope but has no profile yet.${lastLine} "Profile now" builds it for this box alone.`;
+}
+
 export interface UsagePassResult { profiled: number; recommendations: number; errors: string[]; took_ms: number }
 
 /** Profiles every subject (or the given ones), stores the profiles and files the schedule recommendations. */
@@ -473,6 +488,7 @@ export async function usageProfilePass(onLog: (s: string) => void = () => {}, op
     } catch (e: any) { const m = String(e?.message || e).slice(0, 200); errors.push(`${region}: ${m}`); onLog(`${region}: ${m}`); }
     finally { cw.destroy(); }
   }
+  setSetting("usage_last_pass", JSON.stringify({ at: new Date().toISOString(), subjects: list.length, profiled, errors, only: opts.only ?? null }));
   let filed = 0;
   if (recs.length) { const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0; filed = upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false }); }
   try { const { mirrorUsageProfilesInBackground } = await import("./graph_mirror.js"); mirrorUsageProfilesInBackground(); } catch { /* graph optional */ }

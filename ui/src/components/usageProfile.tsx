@@ -71,7 +71,7 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
     </div>
   );
   if (p === undefined) return <div>{head}<div className="mt-1 text-xs text-zinc-500">Loading…</div></div>;
-  if (!p) return <div>{head}<div className="mt-1 text-xs text-zinc-500">{err || "No usage profile yet: the daily logs job builds one for every running standalone instance."}</div></div>;
+  if (!p) return <div>{head}<div className="mt-1 text-xs text-zinc-400">{err || "No usage profile yet: the daily logs job builds one for every running standalone instance."}</div></div>;
   return (
     <div>
       {head}

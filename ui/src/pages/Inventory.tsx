@@ -382,12 +382,21 @@ export default function Inventory() {
 
   const [usageBusy, setUsageBusy] = useState(false);
   const [usageMsg, setUsageMsg] = useState("");
+  const [agentBusy, setAgentBusy] = useState(false);
+  const sendToAgent = async () => {
+    setAgentBusy(true); setUsageMsg(""); setErr("");
+    try {
+      const r = await api("/usage/investigate", { method: "POST", body: "{}" });
+      setUsageMsg(`${r.dispatched} box${r.dispatched === 1 ? "" : "es"} sent to the agent of ${r.candidates} unsure${r.skipped?.cooling ? ` (${r.skipped.cooling} looked at within the last week)` : ""}${r.skipped?.pending ? ` (${r.skipped.pending} still running)` : ""}${r.sent?.length ? `: ${r.sent.join(", ")}` : ""}${r.errors?.length ? ` · ${r.errors[0]}` : ""}. Each verdict lands on its box's profile when the run finishes, usually a few minutes.`);
+    } catch (e: any) { setErr(e.message); }
+    finally { setAgentBusy(false); }
+  };
   const recomputeUsage = async () => {
     setUsageBusy(true); setUsageMsg(""); setErr("");
     try {
       const r = await api("/usage/recompute", { method: "POST", body: "{}" });
       const v = r.review?.verdicts || {};
-      setUsageMsg(`${r.profiles.profiled} profiles recomputed, ${r.profiles.recommendations} schedule recommendation(s); Jev reviewed ${r.review.reviewed} (${["confirm", "adjust", "keep_running"].filter((k) => v[k]).map((k) => `${v[k]} ${k.replace("_", " ")}`).join(", ") || "none"})${r.review.errors?.length ? ` · ${r.review.errors[0]}` : ""}${r.profiles.errors?.length ? ` · ${r.profiles.errors[0]}` : ""}`);
+      setUsageMsg(`${r.profiles.profiled} profiles recomputed, ${r.profiles.recommendations} schedule recommendation(s); Jev (typed, not the Claude agent) reviewed ${r.review.reviewed} (${["confirm", "adjust", "keep_running"].filter((k) => v[k]).map((k) => `${v[k]} ${k.replace("_", " ")}`).join(", ") || "none"})${r.review.errors?.length ? ` · ${r.review.errors[0]}` : ""}${r.profiles.errors?.length ? ` · ${r.profiles.errors[0]}` : ""}`);
       if (selectedId) loadDetail();
     } catch (e: any) { setErr(e.message); }
     finally { setUsageBusy(false); }
@@ -424,7 +433,7 @@ export default function Inventory() {
           <h1 className="text-xl font-semibold text-zinc-100">Inventory</h1>
           <div className="text-sm text-zinc-500">{s?.refreshed_at ? <>Snapshot from {when(s.refreshed_at)} · {tab === "route53" ? "DNS links refreshed after every run and by Refresh now (not by the watcher)" : "refreshed after every run and every watcher sample"}</> : "No snapshot yet: start a run, or refresh now."}</div>
         </div>
-        <span className="flex gap-2">{tab === "ec2" && <Button variant="ghost" onClick={recomputeUsage} disabled={usageBusy} title="Recompute every usage profile (28 days of CloudWatch and probes) and ask Jev to decide each window">{usageBusy ? "Profiling and asking Jev…" : "Recompute usage + ask the agent"}</Button>}<Button variant="ghost" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</Button></span>
+        <span className="flex gap-2">{tab === "ec2" && <Button variant="ghost" onClick={recomputeUsage} disabled={usageBusy || agentBusy} title="Recompute every usage profile (28 days of CloudWatch, probes and shipped logs) and have Jev, the typed decision engine, decide each window. No Claude agent run.">{usageBusy ? "Profiling and asking Jev…" : "Recompute usage + ask Jev"}</Button>}{tab === "ec2" && <Button variant="ghost" onClick={sendToAgent} disabled={usageBusy || agentBusy} title="Send every box Jev was not sure about to the Claude agent (one agent run each, under the agent quota and the daily cap). The verdicts land on the profiles as they finish.">{agentBusy ? "Sending to the agent…" : "Send unsure boxes to the agent"}</Button>}<Button variant="ghost" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</Button></span>
       </div>
       {usageMsg && <div className="text-sm text-zinc-400">{usageMsg}</div>}
       {err && <div className="text-sm text-red-300">{err}</div>}

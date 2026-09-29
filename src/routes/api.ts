@@ -26,7 +26,7 @@ import { listLambda } from "../lambda_inventory.js";
 import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { elbsForInstance, listElb } from "../elb_inventory.js";
-import { latestProfile, listProfiles, usageProfilePass } from "../usage_profile.js";
+import { latestProfile, listProfiles, usageProfilePass, whyNoProfile } from "../usage_profile.js";
 import { decidedOffHours, latestReview, scheduleFor, usageReviewPass } from "../usage_review.js";
 import { investigateUsage, latestInvestigation, usageInvestigationPass } from "../usage_agent.js";
 import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent } from "../consent.js";
@@ -408,7 +408,7 @@ api.post("/usage/run", async (_req, res) => {
 });
 api.get("/instances/:id/usage", (req, res) => {
   const p = latestProfile(String(req.params.id)) ?? latestProfile(`asg:${req.params.id}`);
-  p ? res.json({ ...p, review: latestReview(p.subject), investigation: latestInvestigation(p.subject), follows: (() => { const f = scheduleFor(p.subject); return { ...f, off_hours: decidedOffHours(f.schedule) }; })() }) : res.status(404).json({ error: "no usage profile yet: the daily logs job builds one for every running instance; use refresh to build it now" });
+  p ? res.json({ ...p, review: latestReview(p.subject), investigation: latestInvestigation(p.subject), follows: (() => { const f = scheduleFor(p.subject); return { ...f, off_hours: decidedOffHours(f.schedule) }; })() }) : res.status(404).json({ error: whyNoProfile(String(req.params.id)) });
 });
 // The usage review: Jev reads every profile with its context and decides the window (src/usage_review.ts). All boxes, or one; force asks again even when the verdict is fresh.
 api.post("/usage/review", async (req, res) => {

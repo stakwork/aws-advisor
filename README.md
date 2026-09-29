@@ -1379,7 +1379,9 @@ answer below the rubric's bar keeps the box running and says so. The daily pass 
 agent quota; "investigate with the agent" on a profile sends that box now (`POST /api/instances/:id/usage/investigate`,
 `POST /api/usage/investigate` for every unsure box).
 
-On demand: **Recompute usage + ask the agent** on the EC2 tab runs the profiles and the review for every box
+On demand: **Recompute usage + ask Jev** on the EC2 tab runs the profiles and Jev's typed review for every box
+(no Claude agent run), and **Send unsure boxes to the agent** dispatches one Claude agent run per unsure box
+(`POST /api/usage/investigate`); "Recompute usage + ask Jev" runs the profiles and the review for every box
 (`POST /api/usage/recompute`); "ask the agent" on one profile asks for that box (`POST /api/instances/:id/usage/review`);
 `POST /api/usage/review` reviews all without recomputing.
 
