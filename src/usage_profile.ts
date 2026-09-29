@@ -215,12 +215,13 @@ export function buildProfile(i: BuildInput): Profile {
     const cov = Math.round(100 * windows.reduce((s, w) => s + w.probe_coverage * w.hours, 0) / windows.reduce((s, w) => s + w.hours, 0));
     parts.push(i.kind === "asg" ? (i.samples.some((s) => s.requests != null) ? `the balancer's request count covers ${cov} % of the quiet hours` : "no balancer in front of the group: CloudWatch CPU only, so the confidence tops out at 0.6") : (probes || logHours) ? `${[probes ? "probes" : null, logHours ? `the shipped logs (${logHours} h scanned)` : null].filter(Boolean).join(" and ")} cover ${cov} % of the quiet hours (connections, use signals, logins, container CPU${logHours ? ", use-signal lines in CloudWatch Logs" : ""})` : "no probe and no scanned log in the window: CloudWatch only, so the confidence tops out at 0.6");
   }
+  // per signal: in how many of the busy hours of the week it tripped in at least one week (hours, the same unit as the grid)
   const why = { cpu: 0, net: 0, requests: 0, probe: 0, logs: 0 }; const kinds = { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 }; let busyHours = 0;
-  for (const b of hours) if (b.verdict === "busy") { busyHours++; why.cpu += b.busy_cpu; why.net += b.busy_net; why.requests += b.busy_requests; why.probe += b.busy_probe; why.logs += b.busy_logs; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) kinds[k] += b.busy_probe_kinds[k]; }
+  for (const b of hours) if (b.verdict === "busy") { busyHours++; if (b.busy_cpu) why.cpu++; if (b.busy_net) why.net++; if (b.busy_requests) why.requests++; if (b.busy_probe) why.probe++; if (b.busy_logs) why.logs++; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) if (b.busy_probe_kinds[k]) kinds[k]++; }
   if (busyHours) {
     const probeWhy = [kinds.ext_conn ? `external connections ${kinds.ext_conn}` : null, kinds.signals ? `use-signal lines ${kinds.signals}` : null, kinds.requests ? `front-door requests ${kinds.requests}` : null, kinds.logins ? `logins ${kinds.logins}` : null, kinds.users ? `users on the box ${kinds.users}` : null, kinds.containers ? `a container over ${QUIET_CONTAINER_CPU} % CPU ${kinds.containers}` : null].filter(Boolean).join(", ");
     const trips = [why.net ? `network over ${Math.round(QUIET_NET_BYTES / 1e6)} MB/h in ${why.net}` : null, why.cpu ? `CPU over ${QUIET_CPU_MAX} % in ${why.cpu}` : null, why.requests ? `balancer requests in ${why.requests}` : null, why.logs ? `use-signal lines in the shipped logs in ${why.logs}` : null, why.probe ? `a probe signal in ${why.probe} (${probeWhy})` : null].filter(Boolean);
-    parts.push(`${busyHours} busy hours of the week; what tripped them, in hour-samples: ${trips.join(", ")}`);
+    parts.push(`${busyHours} busy hours of the week; what tripped them, in hours: ${trips.join(", ")}`);
   }
   if (busy.length) parts.push(`busiest ${busy[0].label} (CPU ${busy[0].cpu_avg} %${busy[0].net_mb != null ? `, ${busy[0].net_mb} MB` : ""})`);
   if (sug) parts.push(`schedule that keeps it up whenever it was used: ${sug.text} (off ${off} h/week${est ? `, ≈ ${est} USD/month` : ""})`);

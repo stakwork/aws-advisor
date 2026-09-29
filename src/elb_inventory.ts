@@ -25,6 +25,7 @@ db.exec(`create table if not exists inventory_elb (
   first_seen text not null, last_seen text not null, gone integer not null default 0
 )`);
 addColumn("inventory_elb", "account_id", "text");
+addColumn("inventory_elb", "beanstalk_env_id", "text");
 db.exec("create index if not exists inventory_elb_name on inventory_elb(name)");
 
 export type LbKind = "alb" | "nlb" | "gwlb" | "clb";
@@ -171,11 +172,11 @@ export async function refreshElbInventory(onError: (m: string) => void = () => {
   const findingsFor = db.prepare("select count(*) as n from findings where run_id = (select max(run_id) from findings) and (resource = ? or resource = ?)");
   const recsFor = db.prepare("select count(*) as n from recommendations where status = 'open' and (resource = ? or resource = ?)");
   const now = new Date().toISOString().replace("T", " ").slice(0, 19);
-  const up = db.prepare(`insert into inventory_elb(arn, name, kind, scheme, dns_name, state, region, vpc_id, created, azs, security_groups, tags, listeners, target_groups, targets, healthy, unhealthy, requests_30d, gb_30d, flows_30d, metric_days, beanstalk_env, asgs, ecs_services, monthly_usd, open_recs, findings, account_id, first_seen, last_seen, gone)
-    values (@arn, @name, @kind, @scheme, @dns_name, @state, @region, @vpc_id, @created, @azs, @security_groups, @tags, @listeners, @target_groups, @targets, @healthy, @unhealthy, @requests_30d, @gb_30d, @flows_30d, @metric_days, @beanstalk_env, @asgs, @ecs_services, @monthly_usd, @open_recs, @findings, @account_id, @now, @now, 0)
+  const up = db.prepare(`insert into inventory_elb(arn, name, kind, scheme, dns_name, state, region, vpc_id, created, azs, security_groups, tags, listeners, target_groups, targets, healthy, unhealthy, requests_30d, gb_30d, flows_30d, metric_days, beanstalk_env, beanstalk_env_id, asgs, ecs_services, monthly_usd, open_recs, findings, account_id, first_seen, last_seen, gone)
+    values (@arn, @name, @kind, @scheme, @dns_name, @state, @region, @vpc_id, @created, @azs, @security_groups, @tags, @listeners, @target_groups, @targets, @healthy, @unhealthy, @requests_30d, @gb_30d, @flows_30d, @metric_days, @beanstalk_env, @beanstalk_env_id, @asgs, @ecs_services, @monthly_usd, @open_recs, @findings, @account_id, @now, @now, 0)
     on conflict(arn) do update set name = excluded.name, kind = excluded.kind, scheme = excluded.scheme, dns_name = excluded.dns_name, state = excluded.state, region = excluded.region, vpc_id = excluded.vpc_id, created = excluded.created, azs = excluded.azs,
       security_groups = excluded.security_groups, tags = excluded.tags, listeners = excluded.listeners, target_groups = excluded.target_groups, targets = excluded.targets, healthy = excluded.healthy, unhealthy = excluded.unhealthy,
-      requests_30d = excluded.requests_30d, gb_30d = excluded.gb_30d, flows_30d = excluded.flows_30d, metric_days = excluded.metric_days, beanstalk_env = excluded.beanstalk_env, asgs = excluded.asgs, ecs_services = excluded.ecs_services,
+      requests_30d = excluded.requests_30d, gb_30d = excluded.gb_30d, flows_30d = excluded.flows_30d, metric_days = excluded.metric_days, beanstalk_env = excluded.beanstalk_env, beanstalk_env_id = excluded.beanstalk_env_id, asgs = excluded.asgs, ecs_services = excluded.ecs_services,
       monthly_usd = excluded.monthly_usd, open_recs = excluded.open_recs, findings = excluded.findings, account_id = coalesce(excluded.account_id, inventory_elb.account_id), last_seen = excluded.last_seen, gone = 0`);
   let n = 0;
   db.transaction(() => {
@@ -190,7 +191,7 @@ export async function refreshElbInventory(onError: (m: string) => void = () => {
         arn: lb.arn, name: lb.name, kind: lb.kind, scheme: lb.scheme, dns_name: lb.dns_name, state: lb.state, region: lb.region, vpc_id: lb.vpc_id, created: lb.created, azs: lb.azs,
         security_groups: JSON.stringify(lb.security_groups), tags: JSON.stringify(lb.tags), listeners: JSON.stringify(lb.listeners), target_groups: JSON.stringify(lb.target_groups),
         targets: all.length, healthy, unhealthy, requests_30d: m?.requests ?? null, gb_30d: m?.bytes != null ? Math.round((m.bytes / 1e9) * 100) / 100 : null, flows_30d: m?.flows ?? null, metric_days: m?.days ?? 0,
-        beanstalk_env: lb.tags["elasticbeanstalk:environment-name"] || null, asgs: JSON.stringify(asgList), ecs_services: JSON.stringify(ecsList), monthly_usd: elbMonthlyUsd(lb.kind),
+        beanstalk_env: lb.tags["elasticbeanstalk:environment-name"] || null, beanstalk_env_id: lb.tags["elasticbeanstalk:environment-id"] || null, asgs: JSON.stringify(asgList), ecs_services: JSON.stringify(ecsList), monthly_usd: elbMonthlyUsd(lb.kind),
         open_recs: (recsFor.get(lb.arn, lb.name) as any).n, findings: (findingsFor.get(lb.arn, lb.name) as any).n, account_id: lb.account_id, now,
       });
       n++;

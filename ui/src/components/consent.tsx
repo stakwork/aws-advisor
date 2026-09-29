@@ -57,7 +57,8 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number } | null>(null);
   const qs = new URLSearchParams(); if (region) qs.set("region", region); if (accountId) qs.set("account_id", accountId);
-  useEffect(() => { setState(undefined); setMsg(null); api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent?${qs}`).then(setState).catch((e) => { setState(null); setMsg({ text: e.message, err: true }); }); }, [env, region, accountId]);
+  const [readErr, setReadErr] = useState("");
+  useEffect(() => { setState(undefined); setMsg(null); setReadErr(""); api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent?${qs}`).then(setState).catch((e) => { setState(null); setReadErr(e.message); }); }, [env, region, accountId]);
   const flip = (want: boolean) => {
     setBusy(true); setMsg(null);
     api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF", region, account_id: accountId }) })
@@ -68,7 +69,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
     <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-2 text-xs">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-zinc-300">Auto-scale</span>
-        {state === undefined ? <span className="text-zinc-500">reading the environment…</span> : state === null ? <span className="text-zinc-500">environment not readable</span> : (
+        {state === undefined ? <span className="text-zinc-500">reading the environment…</span> : state === null ? <span className="text-amber-300/90">{readErr || "environment not readable"}</span> : (
           <>
             <Switch on={state.on} busy={busy} onChange={flip} label="AdvisorAutoScale: may the executor move this environment's MinSize and MaxSize?" />
             <span className="text-zinc-500">{state.on ? `the capacity action may move the bounds within ${state.band ? `AdvisorScaleBand=${state.band}` : "floor 1 and the current maximum (add AdvisorScaleBand=<floor>-<ceiling> for more room)"}` : state.consent ? `AdvisorAutoScale=${state.consent}: left alone` : "no AdvisorAutoScale tag: left alone"}{state.operations_role ? "" : " · no operations role on the environment (the README says how to attach one; without it the update needs wider rights)"}</span>

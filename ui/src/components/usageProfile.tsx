@@ -6,7 +6,7 @@ type Bucket = { day: number; hour: number; seen: number; quiet: number; verdict:
 type Window = { label: string; hours: number; effective_hours: number; confidence: number; probe_coverage: number };
 type Review = { reviewed_at: string; verdict: "confirm" | "adjust" | "keep_running"; schedule: string | null; off_hours_week: number | null; est_usd_month: number | null; confidence: number; quiet_is_real: number | null; busy_is_machine: number | null; reason: string; options: Record<string, string> };
 type Investigation = { id: number; status: string; result: any; error: string | null; score: number | null; created_at: string; finished_at: string | null; below_bar: string[] | null };
-type Profile = { investigation?: Investigation | null; review?: Review | null; follows?: { schedule: string | null; source: "review" | "profile" | null; note: string } | null; subject: string; kind: string; computed_at: string; window_days: number; signals: { cloudwatch_hours: number; probes: number; requests: boolean; log_hours?: number }; hours: Bucket[]; quiet_windows: Window[]; busiest: { label: string; cpu_avg: number; net_mb: number | null }[]; quiet_hours_week: number; confidence: number; suggested_schedule: string | null; off_hours_week: number | null; est_usd_month: number | null; summary: string };
+type Profile = { investigation?: Investigation | null; review?: Review | null; follows?: { schedule: string | null; source: "review" | "profile" | null; note: string; off_hours?: number[] } | null; subject: string; kind: string; computed_at: string; window_days: number; signals: { cloudwatch_hours: number; probes: number; requests: boolean; log_hours?: number }; hours: Bucket[]; quiet_windows: Window[]; busiest: { label: string; cpu_avg: number; net_mb: number | null }[]; quiet_hours_week: number; confidence: number; suggested_schedule: string | null; off_hours_week: number | null; est_usd_month: number | null; summary: string };
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const KIND_LABEL: Record<string, string> = { ext_conn: "external connections", users: "users on the box", signals: "use-signal lines", requests: "front-door requests", logins: "logins", containers: "busy container" };
@@ -34,13 +34,14 @@ function cellTitle(b: Bucket): string {
 function WhyBusy({ hours }: { hours: Bucket[] }) {
   const busy = hours.filter((b) => b.verdict === "busy");
   if (!busy.length) return null;
-  const sum = (k: keyof Bucket) => busy.reduce((s, b) => s + (Number(b[k]) || 0), 0);
+  // per signal: in how many of the busy hours it tripped in at least one week (the grid's unit; a busy hour can carry several signals)
+  const sum = (k: keyof Bucket) => busy.filter((b) => Number(b[k]) > 0).length;
   const kinds: Record<string, number> = {};
-  for (const b of busy) for (const [k, n] of Object.entries(b.busy_probe_kinds || {})) kinds[k] = (kinds[k] || 0) + n;
-  const chip = (label: string, n: number, always = false) => (!n && !always) ? null : <span key={label} className={`rounded-md border px-2 py-0.5 text-xs ${n ? "border-amber-700/50 bg-amber-950/40 text-amber-200" : "border-zinc-800 bg-zinc-900 text-zinc-500"}`}>{label} · {n}</span>;
+  for (const b of busy) for (const [k, n] of Object.entries(b.busy_probe_kinds || {})) if (n) kinds[k] = (kinds[k] || 0) + 1;
+  const chip = (label: string, n: number, always = false) => (!n && !always) ? null : <span key={label} title={`in ${n} of the ${busy.length} busy hours, ${label} tripped in at least one week`} className={`rounded-md border px-2 py-0.5 text-xs ${n ? "border-amber-700/50 bg-amber-950/40 text-amber-200" : "border-zinc-800 bg-zinc-900 text-zinc-500"}`}>{label} · {n} h</span>;
   return (
     <div className="mt-2 flex flex-wrap gap-1.5">
-      <span className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-200">{busy.length} busy hours a week</span>
+      <span className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-200">{busy.length} busy hours a week, tripped by:</span>
       {chip("network over 5 MB/h", sum("busy_net"), true)}
       {chip("CPU over 10 %", sum("busy_cpu"), true)}
       {chip("balancer requests", sum("busy_requests"))}
@@ -75,7 +76,7 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
     <div>
       {head}
       <ul className="mt-1 space-y-0.5 text-sm text-zinc-300">
-        {p.summary.replace(/ \d+ busy hours of the week; what tripped them[^.]*\.(?= |$)/, "").split(/\. (?=[a-z])/).map((s) => s.replace(/\.$/, "")).filter(Boolean).map((s, i) => <li key={i} className="flex gap-2"><span className="text-zinc-600">·</span><span>{s.charAt(0).toUpperCase() + s.slice(1)}</span></li>)}
+        {p.summary.replace(/ \d+ busy hours of the week; what tripped them[^.]*\.(?= |$)/, "").replace(/ \d+ busy hours of the week; what tripped them, in hours: [^.]*\.(?= |$)/, "").split(/\. (?=[a-z])/).map((s) => s.replace(/\.$/, "")).filter(Boolean).map((s, i) => <li key={i} className="flex gap-2"><span className="text-zinc-600">·</span><span>{s.charAt(0).toUpperCase() + s.slice(1)}</span></li>)}
       </ul>
       <WhyBusy hours={p.hours} />
       {p.kind === "ec2" && (
@@ -116,7 +117,7 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
           {DAYS.map((d, di) => (
             <>
               <div key={`l${d}`} className="pr-1 text-right text-[10px] text-zinc-500">{d}</div>
-              {p.hours.filter((b) => b.day === di).map((b) => <div key={`${di}-${b.hour}`} title={cellTitle(b)} className={`h-3.5 rounded-sm ${cellClass(b)}`} />)}
+              {p.hours.filter((b) => b.day === di).map((b) => { const decided = p.follows?.off_hours?.includes(di * 24 + b.hour); return <div key={`${di}-${b.hour}`} title={`${cellTitle(b)}${decided ? `\n${p.kind === "asg" ? "decided: the group runs at its floor here" : "decided: the box is off here"}` : ""}`} className={`h-3.5 rounded-sm ${cellClass(b)}${decided ? " ring-2 ring-inset ring-sky-300" : ""}`} />; })}
             </>
           ))}
         </div>
@@ -126,6 +127,7 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-500/80" />busy in some week (darker = more CPU)</span>
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-zinc-600/50" />too few weeks</span>
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-zinc-800/60" />not seen (off)</span>
+        {p.follows?.off_hours?.length ? <span><span className="mr-1 inline-block h-2 w-2 rounded-sm ring-2 ring-inset ring-sky-300" />{p.kind === "asg" ? "decided: runs at its floor" : "decided: off"} ({p.follows.off_hours.length} h/week{p.follows.source === "review" ? ", the agent\u2019s decision" : ", the profile\u2019s own window"})</span> : null}
         <span>· {p.signals.cloudwatch_hours} CloudWatch hours{p.kind === "asg" ? " of the group" : ""}, {p.signals.probes} probes{p.signals.requests ? ", balancer requests" : ""}{p.signals.log_hours ? `, ${p.signals.log_hours} h of shipped logs scanned` : ""}{p.kind === "asg" ? " · members come and go; the group is what is measured" : ""}</span>
       </div>
       {p.quiet_windows.length > 0 && <ul className="mt-1 text-xs text-zinc-400">{p.quiet_windows.slice(0, 5).map((w) => <li key={w.label}>{w.label}: {w.effective_hours} h off ({w.hours} h quiet, margins taken) · confidence {w.confidence} · probes in {Math.round(w.probe_coverage * 100)} %</li>)}</ul>}

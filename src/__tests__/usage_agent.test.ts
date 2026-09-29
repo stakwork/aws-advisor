@@ -59,7 +59,7 @@ test("usage agent: the answer is validated, a bad window or a missing one keeps 
 });
 
 import { parseSchedule, wantedState, offHoursPerWeek, describeSchedule, clauseCovers } from "../actions/schedule_hours.js";
-import { windowsFromSchedule } from "../usage_review.js";
+import { decidedOffHours, windowsFromSchedule } from "../usage_review.js";
 
 test("schedules: several running clauses, or several off clauses, never both; off windows say when to be stopped", () => {
   const on = parseSchedule("weekdays 08-20 UTC | sat 10-14 UTC");
@@ -105,5 +105,8 @@ test("usage agent: the agent's windows become an off schedule, uncertain or shor
   const w = windowsFromSchedule(g.schedule);
   assert.equal(w.length, 7); assert.equal(w[0].effective_hours, 7); assert.equal(w[0].confidence, 1);
   const all = windowsFromSchedule("off daily 00-24 UTC"); assert.equal(all[0].label, "all week");
+  assert.deepEqual(decidedOffHours("off weekends 00-24 UTC").length, 48);
+  assert.deepEqual(decidedOffHours("off mon 01-03 UTC"), [25, 26]);
+  assert.deepEqual(decidedOffHours(null), []);
   assert.deepEqual(windowsFromSchedule("weekdays 08-20 Europe/Madrid"), [], "only UTC schedules are read as ring windows");
 });

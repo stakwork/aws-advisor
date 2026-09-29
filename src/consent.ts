@@ -67,13 +67,15 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
     return applyAction(rec.row.id, "manual");
   }
   const region = r.region || creds.region;
-  const eb = new ElasticBeanstalkClient({ region, credentials: creds.forAccount(r.account_id || null).read });
+  const acct = creds.forAccount(r.account_id || null);
+  const envId = (db.prepare("select beanstalk_env_id from inventory_elb where beanstalk_env = ? and gone = 0 and beanstalk_env_id is not null limit 1").get(r.id) as { beanstalk_env_id: string } | undefined)?.beanstalk_env_id ?? null;
+  const eb = new ElasticBeanstalkClient({ region, credentials: acct.read });
   let env; let tags: Record<string, string> = {};
   try {
-    env = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentNames: [r.id], IncludeDeleted: false }))).Environments?.[0];
+    env = await findEnvironment(eb, r.id, { region, account: acct.account_id, envId });
     if (env?.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
   } finally { eb.destroy(); }
-  if (!env?.EnvironmentId || !env.EnvironmentArn) throw new ConsentError(`environment ${r.id} not found in ${region}`, 404);
+  if (!env?.EnvironmentId || !env.EnvironmentArn) throw new ConsentError(`environment ${r.id} has no id or ARN`, 404);
   if (tags["advisor:hands-off"] != null) throw new ConsentError(`${r.id} is tagged advisor:hands-off: remove that first`, 409);
   const before = tags[AUTO_SCALE_TAG] ?? null;
   if (before != null && normaliseConsent(before) === r.value) throw new ConsentError(`${r.id} already carries ${AUTO_SCALE_TAG}=${before}`, 409);
@@ -91,16 +93,33 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
   return applyAction(rec.row.id, "manual");
 }
 
+/**
+ * Finds an environment by id (the balancer's `elasticbeanstalk:environment-id` tag, when the inventory has it), else
+ * by name, else by a case-insensitive scan of the region; a miss names the account, the region and what is there,
+ * so a wrong account or a renamed environment is visible at once.
+ */
+async function findEnvironment(eb: ElasticBeanstalkClient, name: string, where: { region: string; account: string; envId?: string | null }) {
+  if (where.envId) { const byId = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentIds: [where.envId], IncludeDeleted: false }))).Environments?.[0]; if (byId?.EnvironmentId) return byId; }
+  const byName = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentNames: [name], IncludeDeleted: false }))).Environments?.[0];
+  if (byName?.EnvironmentId) return byName;
+  const all = (await eb.send(new DescribeEnvironmentsCommand({ IncludeDeleted: false }))).Environments ?? [];
+  const loose = all.find((e) => e.EnvironmentName?.toLowerCase() === name.toLowerCase() || e.CNAME?.toLowerCase().startsWith(`${name.toLowerCase()}.`));
+  if (loose?.EnvironmentId) return loose;
+  const seen = all.map((e) => e.EnvironmentName).filter(Boolean);
+  throw new ConsentError(`environment ${name}${where.envId ? ` (${where.envId})` : ""} not found in ${where.region} with the credentials of account ${where.account || "(parent)"}: ${seen.length ? `that account and region hold ${seen.length} environment(s): ${seen.slice(0, 8).join(", ")}${seen.length > 8 ? "…" : ""}` : "no environment is visible there at all"}. A balancer in a member account needs that account enabled under Settings › Accounts; a rebuilt environment needs an inventory refresh so the tag is read again.`, 404);
+}
+
 /** What an environment carries right now: the consent, the band and the operations role, for the switch on the page. */
-export async function beanstalkConsent(name: string, region?: string | null, accountId?: string | null): Promise<{ environment_id: string; name: string; consent: string | null; on: boolean; band: string | null; operations_role: string | null; status: string | null }> {
+export async function beanstalkConsent(name: string, region?: string | null, accountId?: string | null): Promise<{ environment_id: string; name: string; consent: string | null; on: boolean; band: string | null; operations_role: string | null; status: string | null; account_id: string; region: string }> {
   const creds = executorCreds();
-  const eb = new ElasticBeanstalkClient({ region: region || creds.region, credentials: creds.forAccount(accountId || null).read });
+  const acct = creds.forAccount(accountId || null);
+  const envId = (db.prepare("select beanstalk_env_id from inventory_elb where beanstalk_env = ? and gone = 0 and beanstalk_env_id is not null limit 1").get(name) as { beanstalk_env_id: string } | undefined)?.beanstalk_env_id ?? null;
+  const eb = new ElasticBeanstalkClient({ region: region || creds.region, credentials: acct.read });
   try {
-    const env = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentNames: [name], IncludeDeleted: false }))).Environments?.[0];
-    if (!env?.EnvironmentId) throw new ConsentError(`environment ${name} not found in ${region || creds.region}`, 404);
+    const env = await findEnvironment(eb, name, { region: region || creds.region, account: acct.account_id, envId });
     const tags: Record<string, string> = {};
     if (env.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
-    return { environment_id: env.EnvironmentId, name: env.EnvironmentName ?? name, consent: tags[AUTO_SCALE_TAG] ?? null, on: isOn(tags[AUTO_SCALE_TAG]), band: tags[SCALE_BAND_TAG] ?? null, operations_role: env.OperationsRole ?? null, status: env.Status ?? null };
+    return { environment_id: env.EnvironmentId!, name: env.EnvironmentName ?? name, consent: tags[AUTO_SCALE_TAG] ?? null, on: isOn(tags[AUTO_SCALE_TAG]), band: tags[SCALE_BAND_TAG] ?? null, operations_role: env.OperationsRole ?? null, status: env.Status ?? null, account_id: acct.account_id, region: region || creds.region };
   } finally { eb.destroy(); }
 }
 

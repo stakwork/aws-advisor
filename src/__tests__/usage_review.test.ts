@@ -44,7 +44,7 @@ test("usage review: the state carries the profile, what tripped the busy hours a
   const p = buildProfile({ subject: "i-r9", kind: "ec2", samples: samples(office) });
   storeProfile(p);
   const s = reviewState(p) as any;
-  assert.equal(s.instance.id, "i-r9"); assert.equal(s.profile.busy_hours_week, 50); assert.equal(s.profile.busy_tripped_by.network_over_5mb_h, 200); assert.ok(s.note.includes("Memory use is not a usage signal"));
+  assert.equal(s.instance.id, "i-r9"); assert.equal(s.profile.busy_hours_week, 50); assert.equal(s.profile.busy_hours_tripped_by.network_over_5mb_h, 50); assert.ok(s.note.includes("Memory use is not a usage signal"));
   assert.equal(latestReview("i-r9"), null);
   // no Jev key in tests: the executor falls back to the profile's own window when it is confident, else waits
   const f = scheduleFor("i-r9");

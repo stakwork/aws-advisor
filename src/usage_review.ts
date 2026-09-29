@@ -83,7 +83,7 @@ export function reviewState(p: Profile): Record<string, unknown> {
   const recs = q(() => db.prepare("select id, rule, status, decided_by, decision_reason, title from recommendations where resource = ? and status in ('approved', 'rejected', 'done') order by id desc limit 6").all(id) as any[], []);
   const busy = p.hours.filter((b) => b.verdict === "busy");
   const kinds = { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 };
-  let net = 0, cpu = 0; for (const b of busy) { net += b.busy_net; cpu += b.busy_cpu; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) kinds[k] += b.busy_probe_kinds?.[k] ?? 0; }
+  let net = 0, cpu = 0; for (const b of busy) { if (b.busy_net) net++; if (b.busy_cpu) cpu++; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) if (b.busy_probe_kinds?.[k]) kinds[k]++; }
   const groupName = p.kind === "asg" ? p.subject.replace(/^asg:/, "") : null;
   const members = groupName ? q(() => db.prepare("select instance_id, instance_type, state, monthly_usd from inventory_ec2 where gone = 0 and snapshot like ?").all(`%"aws:autoscaling:groupName":"${groupName}"%`) as any[], []) : [];
   const balancers = groupName ? q(() => db.prepare("select name, kind, scheme, beanstalk_env, requests_30d, gb_30d, targets, healthy from inventory_elb where gone = 0 and asgs like ?").all(`%"${groupName}"%`) as any[], []) : [];
@@ -98,7 +98,7 @@ export function reviewState(p: Profile): Record<string, unknown> {
     profile: {
       window_days: p.window_days, computed_at: p.computed_at, quiet_hours_week: p.quiet_hours_week, arithmetic_confidence: p.confidence, summary: p.summary,
       quiet_windows: p.quiet_windows.map((w) => ({ window: w.label, hours_off: w.effective_hours, weeks_and_probe_confidence: w.confidence, probe_coverage: w.probe_coverage })),
-      busy_hours_week: busy.length, busy_tripped_by: { network_over_5mb_h: net, cpu_over_10pct_max: cpu, probe: kinds },
+      busy_hours_week: busy.length, busy_hours_tripped_by: { unit: "hours of the week in which the signal tripped in at least one week", network_over_5mb_h: net, cpu_over_10pct_max: cpu, probe: kinds },
       busiest: p.busiest, signals: p.signals, suggested_schedule: p.suggested_schedule,
     },
     latest_activity: act ? { probed_at: act.collected_at, external_connections: act.external_connections, internal_connections: act.internal_connections, ssh_sessions: act.ssh_sessions, users_now: act.users_now,
@@ -239,6 +239,13 @@ export function typicalDay(p: Pick<Profile, "hours">): { hour: number; cpu_avg: 
     out.push({ hour: h, cpu_avg: mean("cpu_avg"), cpu_max: maxs.length ? Math.max(...maxs) : null, requests: mean("requests"), net_mb: mean("net_mb") });
   }
   return out;
+}
+
+/** The ring indexes (0 = Sunday 00:00 UTC) a UTC schedule keeps the resource off, or a group small: what the grid outlines. Pure. */
+export function decidedOffHours(schedule: string | null): number[] {
+  const out: number[] = [];
+  for (const w of windowsFromSchedule(schedule)) for (let k = 0; k < w.effective_hours; k++) out.push((w.effective_start + k) % 168);
+  return out.sort((a, b) => a - b);
 }
 
 export const describeReviewSchedule = (s: string | null) => { if (!s) return null; const p = parseSchedule(s); return "error" in p ? s : describeSchedule(p); };
