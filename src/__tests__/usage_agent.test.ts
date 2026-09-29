@@ -57,3 +57,53 @@ test("usage agent: the answer is validated, a bad window or a missing one keeps 
   assert.equal(parseUsageResult({ verdict: "keep_running", schedule: "weekdays 07-19 UTC", confidence: 0.9, reasoning: "x" }, null)!.schedule, null);
   assert.equal(parseUsageResult("nope", null), null);
 });
+
+import { parseSchedule, wantedState, offHoursPerWeek, describeSchedule, clauseCovers } from "../actions/schedule_hours.js";
+import { windowsFromSchedule } from "../usage_review.js";
+
+test("schedules: several running clauses, or several off clauses, never both; off windows say when to be stopped", () => {
+  const on = parseSchedule("weekdays 08-20 UTC | sat 10-14 UTC");
+  assert.ok(!("error" in on)); if ("error" in on) return;
+  assert.equal(on.clauses.length, 2); assert.equal(on.off, false);
+  assert.equal(wantedState(on, new Date(Date.UTC(2026, 8, 7, 9))), "running"); // Mon 09:00
+  assert.equal(wantedState(on, new Date(Date.UTC(2026, 8, 12, 11))), "running"); // Sat 11:00
+  assert.equal(wantedState(on, new Date(Date.UTC(2026, 8, 12, 15))), "stopped");
+  assert.equal(offHoursPerWeek(on), 168 - 60 - 4);
+  assert.equal(describeSchedule(on), "weekdays 08:00-20:00 UTC | sat 10:00-14:00 UTC");
+  const off = parseSchedule("off daily 01-06 UTC | off weekends 00-24 UTC");
+  assert.ok(!("error" in off)); if ("error" in off) return;
+  assert.equal(off.off, true);
+  assert.equal(wantedState(off, new Date(Date.UTC(2026, 8, 7, 3))), "stopped"); // Mon 03:00
+  assert.equal(wantedState(off, new Date(Date.UTC(2026, 8, 7, 9))), "running");
+  assert.equal(wantedState(off, new Date(Date.UTC(2026, 8, 12, 12))), "stopped"); // Sat noon
+  assert.equal(offHoursPerWeek(off), 5 * 5 + 48);
+  assert.equal(describeSchedule(off), "off daily 01:00-06:00 UTC | off weekends 00:00-24:00 UTC");
+  assert.match((parseSchedule("weekdays 08-20 UTC | off sat 10-14 UTC") as any).error, /not both/);
+  assert.match((parseSchedule("weekdays 08-20 UTC | sat 10-14 Europe/Madrid") as any).error, /same time zone/);
+  // an overnight off clause
+  const night = parseSchedule("off weekdays 22-06 UTC"); if ("error" in night) return;
+  assert.equal(clauseCovers(night.clauses[0], 2, 23), true); assert.equal(clauseCovers(night.clauses[0], 3, 5), true); assert.equal(clauseCovers(night.clauses[0], 6, 5), true, "Saturday small hours belong to Friday night"); assert.equal(clauseCovers(night.clauses[0], 1, 5), false, "Monday small hours belong to Sunday night, not a weekday");
+  // the old single window still parses and reads the same
+  const single = parseSchedule("weekdays 08-20 Europe/Madrid"); if ("error" in single) return;
+  assert.equal(single.clauses.length, 1); assert.equal(offHoursPerWeek(single), 108); assert.equal(describeSchedule(single), "weekdays 08:00-20:00 Europe/Madrid");
+});
+
+test("usage agent: the agent's windows become an off schedule, uncertain or short ones are dropped, and a group's bounds are read", () => {
+  const r = parseUsageResult({ verdict: "adjust", safe_off_windows: [{ days: "weekdays", start: 1, end: 6, certain: true, why: "quiet" }, { days: "weekends", start: 0, end: 24, certain: true, why: "off" }, { days: "daily", start: 13, end: 14, certain: true, why: "lunch" }, { days: "sat", start: 8, end: 20, certain: false, why: "maybe" }], confidence: 0.9, reasoning: "x", evidence: [], busy_hours_explained: [] }, null, { min_off_hours: 4 })!;
+  assert.equal(r.verdict, "adjust"); assert.equal(r.schedule, "off weekdays 01-06 UTC | off weekends 00-24 UTC");
+  assert.equal(r.windows.length, 2); assert.equal(r.dropped_windows.length, 2);
+  assert.match(r.dropped_windows[0], /1 h, under the 4 h/); assert.match(r.dropped_windows[1], /not certain/);
+  // the agent's own minimum: two hours is worth it for this box
+  const short = parseUsageResult({ verdict: "adjust", safe_off_windows: [{ days: "daily", start: 2, end: 4, certain: true, why: "q" }], min_off_hours: 2, confidence: 0.8, reasoning: "boots in a minute", evidence: [], busy_hours_explained: [] }, null, { min_off_hours: 4 })!;
+  assert.equal(short.schedule, "off daily 02-04 UTC"); assert.equal(short.min_off_hours, 2);
+  // nothing certain: kept running
+  const none = parseUsageResult({ verdict: "adjust", safe_off_windows: [{ days: "daily", start: 2, end: 4, certain: false, why: "q" }], confidence: 0.8, reasoning: "x", evidence: [], busy_hours_explained: [] }, null)!;
+  assert.equal(none.verdict, "keep_running"); assert.equal(none.schedule, null); assert.match(none.reasoning, /no certain window/);
+  // a group: downsize windows and fewer machines
+  const g = parseUsageResult({ verdict: "keep_running", downsize_windows: [{ days: "daily", start: 0, end: 7, certain: true, why: "no requests" }], group_min_size: 2, group_max_size: 6, confidence: 0.85, reasoning: "4 machines at 8 % each", evidence: [], busy_hours_explained: [] }, null)!;
+  assert.equal(g.verdict, "adjust", "bounds make it an adjust"); assert.equal(g.schedule, "off daily 00-07 UTC"); assert.equal(g.group_min, 2); assert.equal(g.group_max, 6);
+  const w = windowsFromSchedule(g.schedule);
+  assert.equal(w.length, 7); assert.equal(w[0].effective_hours, 7); assert.equal(w[0].confidence, 1);
+  const all = windowsFromSchedule("off daily 00-24 UTC"); assert.equal(all[0].label, "all week");
+  assert.deepEqual(windowsFromSchedule("weekdays 08-20 Europe/Madrid"), [], "only UTC schedules are read as ring windows");
+});

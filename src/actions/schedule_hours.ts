@@ -67,7 +67,14 @@ export function upsertChange(r: DnsRecord, newIp: string): Change & { ResourceRe
   return { Action: "UPSERT", ResourceRecordSet: set };
 }
 
-export interface Schedule { days: Set<number>; start: number; end: number; tz: string; text: string }
+/** One clause: a day set and an hour window in a time zone; `off` when the clause names hours to be stopped rather than hours to run. */
+export interface Clause { days: Set<number>; start: number; end: number; tz: string; off: boolean; text: string }
+/**
+ * A schedule: one or more clauses joined by " | ", all running windows ("weekdays 08-20 Europe/Madrid | sat 10-14")
+ * or all off windows ("off daily 01-06 UTC | off weekends 00-24 UTC", the form the usage agent answers in). The
+ * first clause's fields are copied to the top level so single-window callers keep working.
+ */
+export interface Schedule extends Clause { clauses: Clause[] }
 export type ResourceKind = "ec2" | "rds_instance" | "rds_cluster";
 
 const DAY_INDEX: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
@@ -75,9 +82,22 @@ const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
 const validTz = (tz: string) => { try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; } };
 
-/** `<days> <HH[:MM]>-<HH[:MM]> [tz]`: days are `daily`, `weekdays`, `weekends`, a range `mon-fri`, or a list `mon,tue,wed`. Pure. */
+/** `[off] <days> <HH[:MM]>-<HH[:MM]> [tz]` clauses joined by " | ": days are `daily`, `weekdays`, `weekends`, a range `mon-fri`, or a list `mon,tue,wed`. Pure. */
 export function parseSchedule(tag: string): Schedule | { error: string } {
-  const text = String(tag ?? "").trim();
+  const whole = String(tag ?? "").trim();
+  const texts = whole.split(/\s*\|\s*/).filter(Boolean);
+  if (!texts.length) return { error: `"${whole}": expected "<days> <HH>-<HH> [time zone]", e.g. "weekdays 08-20 Europe/Madrid"` };
+  const clauses: Clause[] = [];
+  for (const t of texts) { const c = parseClause(t); if ("error" in c) return c; clauses.push(c); }
+  if (clauses.some((c) => c.off) && !clauses.every((c) => c.off)) return { error: `"${whole}": every clause must be a running window, or every clause an "off" window; not both` };
+  if (new Set(clauses.map((c) => c.tz)).size > 1) return { error: `"${whole}": every clause must use the same time zone` };
+  return { ...clauses[0], text: whole, clauses };
+}
+
+function parseClause(tag: string): Clause | { error: string } {
+  let text = String(tag ?? "").trim();
+  const off = /^off\s+/i.test(text);
+  if (off) text = text.replace(/^off\s+/i, "");
   const parts = text.split(/\s+/).filter(Boolean);
   if (parts.length < 2 || parts.length > 3) return { error: `"${text}": expected "<days> <HH>-<HH> [time zone]", e.g. "weekdays 08-20 Europe/Madrid"` };
   const [daysPart, hoursPart, tzPart] = parts;
@@ -101,7 +121,7 @@ export function parseSchedule(tag: string): Schedule | { error: string } {
   if (start > 23 || end > 24 || (start === end)) return { error: `"${hoursPart}": start 00-23, end 01-24, and not the same hour` };
   const tz = tzPart || "UTC";
   if (!validTz(tz)) return { error: `"${tzPart}": not an IANA time zone (e.g. Europe/Madrid, America/New_York)` };
-  return { days, start, end: end === 24 ? 0 : end, tz, text };
+  return { days, start, end: end === 24 ? 0 : end, tz, off, text: `${off ? "off " : ""}${text}` };
 }
 
 /** Weekday (0 = Sunday) and hour of `at` in the schedule's time zone. */
@@ -112,14 +132,22 @@ export function localClock(at: Date, tz: string): { day: number; hour: number } 
   return { day, hour };
 }
 
-/** Whether the schedule wants the resource running at `at`. An overnight window (22-06) belongs to the day it starts on. Pure. */
+/** Whether one clause's window covers the local day and hour. An overnight window (22-06) belongs to the day it starts on. Pure. */
+export function clauseCovers(c: Clause, day: number, hour: number): boolean {
+  const end = c.end === 0 ? 24 : c.end;
+  if (c.start < end) return c.days.has(day) && hour >= c.start && hour < end;
+  // overnight: the evening part belongs to today, the morning part to the day before
+  if (hour >= c.start) return c.days.has(day);
+  if (hour < c.end) return c.days.has((day + 6) % 7);
+  return false;
+}
+
+/** Whether the schedule wants the resource running at `at`: inside any running clause, or outside every off clause. Pure. */
 export function wantedState(s: Schedule, at: Date): "running" | "stopped" {
   const { day, hour } = localClock(at, s.tz);
-  if (s.start < s.end) return s.days.has(day) && hour >= s.start && hour < s.end ? "running" : "stopped";
-  // overnight: the evening part belongs to today, the morning part to the day before
-  if (hour >= s.start) return s.days.has(day) ? "running" : "stopped";
-  if (hour < s.end) return s.days.has((day + 6) % 7) ? "running" : "stopped";
-  return "stopped";
+  const clauses = s.clauses?.length ? s.clauses : [s];
+  const inside = clauses.some((c) => clauseCovers(c, day, hour));
+  return clauses[0].off ? (inside ? "stopped" : "running") : (inside ? "running" : "stopped");
 }
 
 /** The top of the coming hour (a pass at :45 decides for :00). */
@@ -129,17 +157,23 @@ export function nextHour(now: Date): Date {
   return new Date(d.getTime() + 3600000);
 }
 
-/** Hours per week the schedule keeps the resource off: what a stop saves. Pure. */
+/** Hours per week the schedule keeps the resource off: what a stop saves. Counted over the local week, clause by clause. Pure. */
 export function offHoursPerWeek(s: Schedule): number {
-  const span = s.start < s.end ? s.end - s.start : 24 - s.start + s.end;
-  return HOURS_PER_WEEK - s.days.size * span;
+  const clauses = s.clauses?.length ? s.clauses : [s];
+  let inside = 0;
+  for (let day = 0; day < 7; day++) for (let hour = 0; hour < 24; hour++) if (clauses.some((c) => clauseCovers(c, day, hour))) inside++;
+  return clauses[0].off ? inside : HOURS_PER_WEEK - inside;
 }
 
-export const describeSchedule = (s: Schedule) => {
-  const days = s.days.size === 7 ? "daily" : [1, 2, 3, 4, 5].every((d) => s.days.has(d)) && s.days.size === 5 ? "weekdays" : [...s.days].sort().map((d) => DAY_NAMES[d]).join(",");
+const describeClause = (c: Clause) => {
+  const days = c.days.size === 7 ? "daily" : [1, 2, 3, 4, 5].every((d) => c.days.has(d)) && c.days.size === 5 ? "weekdays" : c.days.size === 2 && c.days.has(0) && c.days.has(6) ? "weekends" : [...c.days].sort().map((d) => DAY_NAMES[d]).join(",");
   const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
-  return `${days} ${hh(s.start)}-${hh(s.end === 0 ? 24 : s.end)} ${s.tz}`;
+  return `${c.off ? "off " : ""}${days} ${hh(c.start)}-${hh(c.end === 0 ? 24 : c.end)} ${c.tz}`;
 };
+export const describeSchedule = (s: Schedule) => (s.clauses?.length ? s.clauses : [s]).map(describeClause).join(" | ");
+
+/** A window the agent named ("weekdays", 1, 6) as one off clause of a schedule text. Pure. */
+export const offClauseText = (days: string, start: number, end: number, tz = "UTC") => `off ${days} ${String(start).padStart(2, "0")}-${String(end).padStart(2, "0")} ${tz}`;
 
 export interface Decision { action: "stop" | "start" | null; reason: string; target: Date; wanted: "running" | "stopped" }
 /** The pure decision for the coming hour from the schedule and the state now. */

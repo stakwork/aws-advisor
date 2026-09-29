@@ -1,8 +1,41 @@
 {
   "type": "object",
   "properties": {
-    "verdict": { "type": "string", "enum": ["confirm", "adjust", "keep_running"], "description": "confirm the profile's window, adjust to another window, or keep the box running" },
-    "schedule": { "type": ["string", "null"], "description": "the running window in UTC, '<days> HH-HH UTC' (days: daily, weekdays, weekends, mon-fri, or mon,tue,wed); null for keep_running" },
+    "verdict": { "type": "string", "enum": ["confirm", "adjust", "keep_running"], "description": "confirm when your windows match the profile's suggestion, adjust when you name windows or bounds of your own, keep_running when the box or group must stay as it is" },
+    "safe_off_windows": {
+      "type": "array",
+      "description": "an instance: the hours of the week it is safe to turn it off; only windows with certain=true are used",
+      "items": {
+        "type": "object",
+        "properties": {
+          "days": { "type": "string", "description": "daily, weekdays, weekends, mon-fri, or mon,tue,wed" },
+          "start": { "type": "integer", "description": "UTC hour 0-23 the box may go off" },
+          "end": { "type": "integer", "description": "UTC hour 1-24 it must be back; under start means overnight" },
+          "certain": { "type": "boolean", "description": "true only when you would put your name to nobody using it in those hours, every week" },
+          "why": { "type": "string" }
+        },
+        "required": ["days", "start", "end", "certain", "why"]
+      }
+    },
+    "downsize_windows": {
+      "type": "array",
+      "description": "a group: the hours of the week it is fine to run at its floor; same shape as safe_off_windows",
+      "items": {
+        "type": "object",
+        "properties": {
+          "days": { "type": "string" },
+          "start": { "type": "integer" },
+          "end": { "type": "integer" },
+          "certain": { "type": "boolean" },
+          "why": { "type": "string" }
+        },
+        "required": ["days", "start", "end", "certain", "why"]
+      }
+    },
+    "group_min_size": { "type": ["integer", "null"], "description": "a group: the configured minimum that still does the job in the busy hours (fewer machines when CPU and requests per member allow); null for no change" },
+    "group_max_size": { "type": ["integer", "null"], "description": "a group: the maximum it needs; null for no change" },
+    "min_off_hours": { "type": ["number", "null"], "description": "a better number than the default for the shortest stop worth making on this box, with the reason in reasoning; null to keep the default" },
+    "schedule": { "type": ["string", "null"], "description": "only when you give no windows: a running window in UTC, '<days> HH-HH UTC'; null for keep_running" },
     "confidence": { "type": "number", "description": "0 to 1" },
     "reasoning": { "type": "string", "description": "what was looked at and why it decides the verdict" },
     "evidence": { "type": "array", "items": { "type": "string" }, "description": "each line with numbers and the tool it came from" },
@@ -19,5 +52,5 @@
       }
     }
   },
-  "required": ["verdict", "schedule", "confidence", "reasoning", "evidence", "busy_hours_explained"]
+  "required": ["verdict", "confidence", "reasoning", "evidence", "busy_hours_explained"]
 }

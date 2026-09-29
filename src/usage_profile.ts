@@ -20,8 +20,8 @@
  *
  * An hour of the week is **quiet** when every week we saw it was quiet (at least `MIN_WEEKS` of them), **busy**
  * when any week was, **unknown** otherwise (too few weeks, or the box was off). Quiet hours in a row make a
- * window; a window keeps `MARGIN_HOURS` on each side (people work late, boxes take a minute to come back), so a
- * four-hour run is a two-hour stop. A window's confidence is the weeks behind it and how much of it the probes
+ * window; a window keeps `MARGIN_HOURS` on each side (people work late, boxes take a minute to come back), and a
+ * stop shorter than `USAGE_MIN_OFF_HOURS` (4) once the margins are taken is not worth making, so it is not a window. A window's confidence is the weeks behind it and how much of it the probes
  * covered: CloudWatch alone says "not busy", the probes (or, for a group, its balancer's request count) say "not
  * used", and only both together get close to 1.
  *
@@ -55,6 +55,8 @@ db.exec(`create table if not exists usage_profiles (
 export const WINDOW_DAYS = 28;
 export const MIN_WEEKS = 3;
 export const MIN_WINDOW_HOURS = 4;
+/** The shortest stop worth making, margins taken, when nothing else says (Settings › Auto-actions). */
+export const DEFAULT_MIN_OFF_HOURS = 4;
 export const MARGIN_HOURS = 1;
 /** The hour's maximum CPU (percent) under which CloudWatch calls the hour idle. */
 export const QUIET_CPU_MAX = 10;
@@ -139,7 +141,7 @@ export function bucketize(samples: HourSample[]): HourBucket[] {
 }
 
 /** Runs of quiet hours around the week ring, at least MIN_WINDOW_HOURS long, with the margins taken off. Pure. */
-export function quietWindows(hours: HourBucket[], weeks: number): QuietWindow[] {
+export function quietWindows(hours: HourBucket[], weeks: number, minOffHours = DEFAULT_MIN_OFF_HOURS): QuietWindow[] {
   const n = hours.length; const quiet = hours.map((b) => b.verdict === "quiet");
   if (quiet.every(Boolean)) return [{ start: 0, end: n, hours: n, effective_start: 0, effective_end: n, effective_hours: n, confidence: windowConfidence(hours, 0, n, weeks), probe_coverage: coverage(hours, 0, n), label: "all week" }];
   // start scanning at a non-quiet hour so a run over Sunday midnight is read whole
@@ -150,7 +152,7 @@ export function quietWindows(hours: HourBucket[], weeks: number): QuietWindow[] 
     const idx = (first + i) % n;
     if (!quiet[idx]) { i++; continue; }
     let len = 0; while (len < n && quiet[(idx + len) % n]) len++;
-    if (len >= MIN_WINDOW_HOURS) {
+    if (len >= MIN_WINDOW_HOURS && len - 2 * MARGIN_HOURS >= minOffHours) {
       const es = idx + MARGIN_HOURS, ee = idx + len - MARGIN_HOURS;
       out.push({ start: idx, end: idx + len, hours: len, effective_start: es % n, effective_end: ee % n, effective_hours: ee - es, confidence: windowConfidence(hours, idx, len, weeks), probe_coverage: coverage(hours, idx, len), label: `${ringLabel(es)} → ${ringLabel(ee)}` });
     }
@@ -186,13 +188,13 @@ export function suggestSchedule(hours: HourBucket[]): { text: string; schedule: 
   return "error" in s ? null : { text, schedule: s };
 }
 
-export interface BuildInput { subject: string; kind: "ec2" | "asg"; name?: string | null; region?: string | null; account_id?: string | null; samples: HourSample[]; monthly_usd?: number | null; now?: number }
+export interface BuildInput { subject: string; kind: "ec2" | "asg"; name?: string | null; region?: string | null; account_id?: string | null; samples: HourSample[]; monthly_usd?: number | null; now?: number; /** the shortest stop worth making, margins taken (Settings, or the agent's number for this box) */ min_off_hours?: number }
 
 /** The whole profile from the samples. Pure. */
 export function buildProfile(i: BuildInput): Profile {
   const hours = bucketize(i.samples);
   const weeks = WINDOW_DAYS / 7;
-  const windows = quietWindows(hours, weeks);
+  const windows = quietWindows(hours, weeks, i.min_off_hours ?? DEFAULT_MIN_OFF_HOURS);
   const quietHoursWeek = hours.filter((b) => b.verdict === "quiet").length;
   const busy = hours.filter((b) => b.cpu_avg != null).sort((a, b) => (b.cpu_avg ?? 0) - (a.cpu_avg ?? 0)).slice(0, 3).map((b) => ({ day: b.day, hour: b.hour, cpu_avg: b.cpu_avg ?? 0, net_mb: b.net_mb, label: ringLabel(b.day * 24 + b.hour) }));
   const totalEff = windows.reduce((s, w) => s + w.effective_hours, 0);
@@ -206,7 +208,7 @@ export function buildProfile(i: BuildInput): Profile {
   const seenWeeks = Math.max(0, ...hours.map((b) => b.seen));
   const parts: string[] = [];
   if (!cwHours) parts.push("no CloudWatch hour in the window: nothing to profile");
-  else if (!windows.length) parts.push(`no quiet stretch of ${MIN_WINDOW_HOURS} h in ${seenWeeks} week${seenWeeks === 1 ? "" : "s"}: used or unknown at every hour`);
+  else if (!windows.length) parts.push(`no quiet stretch worth a stop (${(i.min_off_hours ?? DEFAULT_MIN_OFF_HOURS) + 2 * MARGIN_HOURS} h or more) in ${seenWeeks} week${seenWeeks === 1 ? "" : "s"}: used or unknown at every hour`);
   else {
     const top = windows.slice(0, 3).map((w) => `${w.label} (${w.effective_hours} h, confidence ${w.confidence})`).join("; ");
     parts.push(`quiet ${quietHoursWeek} of ${HOURS_PER_WEEK} hours a week over ${seenWeeks} week${seenWeeks === 1 ? "" : "s"}: ${top}${windows.length > 3 ? ` and ${windows.length - 3} more` : ""}`);
@@ -452,7 +454,8 @@ export async function usageProfilePass(onLog: (s: string) => void = () => {}, op
           const m = per.get(at);
           samples.push({ at, cpu_avg: m?.cpu_avg ?? null, cpu_max: m?.cpu_max ?? null, net_bytes: m?.net_in != null || m?.net_out != null ? (m?.net_in ?? 0) + (m?.net_out ?? 0) : null, requests: s.lb_dimension ? (m?.requests ?? 0) : null, probes: marks.get(at) || [], log_signals: logs && at >= logSince ? (logs.get(at) ?? 0) : null });
         }
-        const p = buildProfile({ subject: s.subject, kind: s.kind, name: s.name, region: s.region, account_id: s.account_id, samples, monthly_usd: s.monthly_usd, now: Date.now() });
+        const minOff = (() => { try { const r = db.prepare("select min_off_hours from usage_reviews where subject = ?").get(s.subject) as { min_off_hours: number | null } | undefined; return r?.min_off_hours || config.usageMinOffHours; } catch { return config.usageMinOffHours; } })();
+        const p = buildProfile({ subject: s.subject, kind: s.kind, name: s.name, region: s.region, account_id: s.account_id, samples, monthly_usd: s.monthly_usd, now: Date.now(), min_off_hours: minOff });
         storeProfile(p); profiled++;
         onLog(`${s.name || s.subject}: ${p.summary}`);
         if (s.kind === "ec2" && p.suggested_schedule && p.confidence >= CONFIDENT && (p.off_hours_week ?? 0) >= MIN_OFF_HOURS_WEEK && !tagged.has(s.subject)) {

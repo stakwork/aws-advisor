@@ -46,6 +46,7 @@ import { db, getJsonSetting, setSetting } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { CONFIDENT, latestProfile, ringIndex, type QuietWindow } from "../usage_profile.js";
+import { latestReview, windowsFromSchedule } from "../usage_review.js";
 import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
 
 export const KIND = "beanstalk_scale" as const;
@@ -275,9 +276,45 @@ export const beanstalkScaleAction: ActionModule = {
           const healthOk = !env.HealthStatus || ["Ok", "Info", "Pending", "Unknown"].includes(env.HealthStatus) || env.Health === "Green";
           // the windowed minimum from the group's usage profile, decided for the coming hour
           const profile = latestProfile(`asg:${f.asg}`);
+          const groupReview = latestReview(`asg:${f.asg}`);
           const state = envState(env.EnvironmentId!) ?? { baseline_min: f.cfg.min, last_set: null, since: new Date().toISOString() };
+          // the agent's bounds: fewer machines that still do the job (a new configured minimum), a ceiling it needs; within the tag's band
+          const ceiling = band.ceiling ?? bounds.max;
+          const agentMin = groupReview?.group_min != null && groupReview.group_min >= band.floor && groupReview.group_min <= ceiling ? groupReview.group_min : null;
+          const agentMax = groupReview?.group_max != null && groupReview.group_max >= (agentMin ?? bounds.min) && groupReview.group_max <= ceiling ? groupReview.group_max : null;
+          if (agentMin != null && agentMin !== state.baseline_min && agentMin !== bounds.min) {
+            const price = memberPrice(f.instances);
+            proposals.push({
+              kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
+              dedupe: `${KIND}:${env.EnvironmentId}:agent-min:${agentMin}`,
+              title: `${name}: MinSize ${bounds.min} → ${agentMin} (the agent: ${agentMin < bounds.min ? "fewer machines do the job" : "more machines are needed"})`,
+              reason: `${groupReview!.reason.slice(0, 400)} Tag ${SCALE_TAG}=${band.text}; the agent's minimum becomes the configured minimum the windows return to.${agentMin < bounds.min ? " The group scales in when Beanstalk's scale-in alarm next fires." : ""}`,
+              before: { MinSize: bounds.min, MaxSize: bounds.max }, after: { MinSize: agentMin },
+              facts: { agent_bounds: true, application: env.ApplicationName, asg: f.asg, desired_now: bounds.desired, band: band.text, baseline_min: state.baseline_min, group_min: agentMin, group_max: groupReview!.group_max ?? null, operations_role: env.OperationsRole || null, member_usd_month: price },
+              rollback: `UpdateEnvironment MinSize back to ${bounds.min}`,
+              est_usd_month: agentMin < bounds.min && price ? Math.round((bounds.min - agentMin) * price * 100) / 100 : null,
+            });
+            continue;
+          }
+          if (agentMax != null && agentMax !== bounds.max) {
+            proposals.push({
+              kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
+              dedupe: `${KIND}:${env.EnvironmentId}:agent-max:${agentMax}`,
+              title: `${name}: MaxSize ${bounds.max} → ${agentMax} (the agent's ceiling)`,
+              reason: `${groupReview!.reason.slice(0, 400)} Tag ${SCALE_TAG}=${band.text}.`,
+              before: { MinSize: bounds.min, MaxSize: bounds.max }, after: { MaxSize: agentMax },
+              facts: { agent_bounds: true, application: env.ApplicationName, asg: f.asg, desired_now: bounds.desired, band: band.text, group_min: groupReview!.group_min ?? null, group_max: agentMax, operations_role: env.OperationsRole || null },
+              rollback: `UpdateEnvironment MaxSize back to ${bounds.max}`,
+              est_usd_month: null,
+            });
+            continue;
+          }
+          // the agent's downsize windows, when it decided for this group, win over the profile's own quiet windows
+          const agentWindows = groupReview && groupReview.verdict !== "keep_running" ? windowsFromSchedule(groupReview.schedule) : [];
+          const windows = agentWindows.length ? agentWindows : groupReview?.verdict === "keep_running" ? [] : (profile?.quiet_windows ?? []);
           const nextIdx = ringIndex(hourStart(now) + 3600000);
-          const w = decideWindow({ windows: profile?.quiet_windows ?? [], confidence: profile?.confidence ?? 0, current_min: bounds.min, floor: band.floor, baseline_min: state.baseline_min, last_set: state.last_set, next: nextIdx });
+          const w = decideWindow({ windows, confidence: agentWindows.length ? 1 : profile?.confidence ?? 0, current_min: bounds.min, floor: band.floor, baseline_min: state.baseline_min, last_set: state.last_set, next: nextIdx });
+          if (groupReview?.verdict === "keep_running" && !agentWindows.length) log(`${name}: the agent keeps the group at its configured minimum: ${groupReview.reason.slice(0, 200)}`);
           if (w.baseline_min !== state.baseline_min || !envState(env.EnvironmentId!)) saveEnvState(env.EnvironmentId!, { ...state, baseline_min: w.baseline_min, since: new Date().toISOString() });
           if (w.active && w.wanted != null && w.wanted !== bounds.min) {
             const price = memberPrice(f.instances);
@@ -286,9 +323,9 @@ export const beanstalkScaleAction: ActionModule = {
               kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
               dedupe: `${KIND}:${env.EnvironmentId}:window:${w.wanted}:${new Date(hourStart(now) + 3600000).toISOString().slice(0, 13)}`,
               title: `${name}: MinSize ${bounds.min} → ${w.wanted} (${lowering ? "quiet hours" : "before the working hours"})`,
-              reason: `${w.reason}. Tag ${SCALE_TAG}=${band.text}; the group's usage profile (${profile?.window_days ?? 28} days, confidence ${profile?.confidence ?? "?"}) has ${w.quiet_hours_week} confident quiet hours a week. The environment updates for a minute or two; no instance is replaced${lowering ? ", and the group scales in when Beanstalk's scale-in alarm next fires" : ""}.`,
+              reason: `${w.reason}. Tag ${SCALE_TAG}=${band.text}; ${agentWindows.length ? `the agent decided the downsize windows (${groupReview!.schedule}): ${groupReview!.reason.slice(0, 300)}` : `the group's usage profile (${profile?.window_days ?? 28} days, confidence ${profile?.confidence ?? "?"}) has ${w.quiet_hours_week} confident quiet hours a week`}. The environment updates for a minute or two; no instance is replaced${lowering ? ", and the group scales in when Beanstalk's scale-in alarm next fires" : ""}.`,
               before: { MinSize: bounds.min, MaxSize: bounds.max }, after: { MinSize: w.wanted },
-              facts: { window: true, application: env.ApplicationName, asg: f.asg, desired_now: bounds.desired, band: band.text, baseline_min: w.baseline_min, floor: band.floor, quiet_hours_week: w.quiet_hours_week, profile_confidence: profile?.confidence ?? null, quiet_windows: (profile?.quiet_windows ?? []).map((x) => x.label), operations_role: env.OperationsRole || null, member_usd_month: price },
+              facts: { window: true, application: env.ApplicationName, asg: f.asg, desired_now: bounds.desired, band: band.text, baseline_min: w.baseline_min, floor: band.floor, quiet_hours_week: w.quiet_hours_week, profile_confidence: profile?.confidence ?? null, decided_by: agentWindows.length ? "agent" : "profile", downsize_windows: windows.map((x) => x.label), operations_role: env.OperationsRole || null, member_usd_month: price },
               rollback: `UpdateEnvironment MinSize back to ${bounds.min}`,
               est_usd_month: lowering && price ? Math.round((bounds.min - w.wanted) * price * (w.quiet_hours_week / 168) * 100) / 100 : null,
             });
@@ -331,6 +368,7 @@ export const beanstalkScaleAction: ActionModule = {
       const [option, value] = Object.entries(p.after)[0];
       const r = await eb.send(new UpdateEnvironmentCommand({ EnvironmentId: p.resource, OptionSettings: [{ Namespace: ASG_NAMESPACE, OptionName: option, Value: String(value) }] }));
       if (p.facts.window && option === "MinSize") { const s = envState(p.resource) ?? { baseline_min: Number(p.facts.baseline_min ?? p.before.MinSize), last_set: null, since: new Date().toISOString() }; saveEnvState(p.resource, { ...s, last_set: Number(value) }); }
+      if (p.facts.agent_bounds && option === "MinSize") { const s = envState(p.resource) ?? { baseline_min: Number(value), last_set: null, since: new Date().toISOString() }; saveEnvState(p.resource, { ...s, baseline_min: Number(value), last_set: Number(value), since: new Date().toISOString() }); }
       return `UpdateEnvironment: ${option} ${p.before[option]} → ${value} (environment ${r.Status ?? "Updating"})`;
     } finally { eb.destroy(); }
   },

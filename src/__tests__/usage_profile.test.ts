@@ -86,6 +86,10 @@ test("usage profile: a box used around the clock or never gets no schedule", () 
   const hours = bucketize(samples((d, h) => !(h >= 2 && h < 2 + MIN_WINDOW_HOURS - 1)));
   assert.equal(quietWindows(hours, 4).length, 0);
   assert.equal(suggestSchedule(hours), null, "busy 22 h a day: no schedule");
+  // a five-hour quiet run is a three-hour stop: under the four hours worth making, unless the box's own minimum says two
+  const five = bucketize(samples((d, h) => !(h >= 2 && h < 7)));
+  assert.equal(quietWindows(five, 4).length, 0);
+  assert.equal(quietWindows(five, 4, 2).length, 7); assert.equal(quietWindows(five, 4, 2)[0].effective_hours, 3);
   assert.ok(MARGIN_HOURS >= 1);
 });
 

@@ -18,16 +18,20 @@
  * confirm or adjust, nothing when it is keep_running, the raw profile only when Jev is not configured.
  */
 import { choice, noul } from "@typesafe-ai/sdk";
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { askJev, chunk, jevEnabled } from "./jev.js";
 import { resourceRole } from "./roles.js";
 import { latestProfile, listProfiles, CONFIDENT, MARGIN_HOURS, type Profile } from "./usage_profile.js";
-import { describeSchedule, offHoursPerWeek, parseSchedule, HOURS_PER_WEEK } from "./actions/schedule_hours.js";
+import { clauseCovers, describeSchedule, offHoursPerWeek, parseSchedule, HOURS_PER_WEEK } from "./actions/schedule_hours.js";
+import type { QuietWindow } from "./usage_profile.js";
 
 db.exec(`create table if not exists usage_reviews (
   subject text primary key, reviewed_at text not null, verdict text not null, schedule text, off_hours_week integer, est_usd_month real,
   confidence real not null, quiet_is_real real, busy_is_machine real, reason text not null, options text not null, state text, model text, call_id integer
 )`);
+addColumn("usage_reviews", "group_min", "integer");
+addColumn("usage_reviews", "group_max", "integer");
+addColumn("usage_reviews", "min_off_hours", "real");
 
 export const REVIEW_BATCH_SIZE = 8;
 /** A verdict this old is asked for again by the daily pass; on demand it is always asked. */
@@ -38,6 +42,8 @@ export const MIN_CHOICE_CONFIDENCE = 0.55;
 export interface UsageReview {
   subject: string; reviewed_at: string; verdict: "confirm" | "adjust" | "keep_running"; schedule: string | null; off_hours_week: number | null; est_usd_month: number | null;
   confidence: number; quiet_is_real: number | null; busy_is_machine: number | null; reason: string; options: Record<string, string>; model: string | null; call_id: number | null;
+  /** the agent's bounds for a group: the minimum that still does the job, the maximum it needs (null = no opinion) */ group_min?: number | null; group_max?: number | null;
+  /** the shortest stop worth making for this box, when the agent set one */ min_off_hours?: number | null;
 }
 
 const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -78,9 +84,16 @@ export function reviewState(p: Profile): Record<string, unknown> {
   const busy = p.hours.filter((b) => b.verdict === "busy");
   const kinds = { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 };
   let net = 0, cpu = 0; for (const b of busy) { net += b.busy_net; cpu += b.busy_cpu; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) kinds[k] += b.busy_probe_kinds?.[k] ?? 0; }
+  const groupName = p.kind === "asg" ? p.subject.replace(/^asg:/, "") : null;
+  const members = groupName ? q(() => db.prepare("select instance_id, instance_type, state, monthly_usd from inventory_ec2 where gone = 0 and snapshot like ?").all(`%"aws:autoscaling:groupName":"${groupName}"%`) as any[], []) : [];
+  const balancers = groupName ? q(() => db.prepare("select name, kind, scheme, beanstalk_env, requests_30d, gb_30d, targets, healthy from inventory_elb where gone = 0 and asgs like ?").all(`%"${groupName}"%`) as any[], []) : [];
   return {
+    ...(groupName ? { group: { name: groupName, beanstalk_environment: balancers.find((b) => b.beanstalk_env)?.beanstalk_env ?? null, members_now: members.length, instance_types: [...new Set(members.map((m) => m.instance_type).filter(Boolean))], member_list_usd_month: members.reduce((s, m) => s + (m.monthly_usd || 0), 0) || null,
+      balancers: balancers.map((b) => ({ name: b.name, kind: b.kind, scheme: b.scheme, requests_30d: b.requests_30d, gb_30d: b.gb_30d, targets: b.targets, healthy: b.healthy })),
+      note: "The question for a group is twofold: in which hours may the minimum drop to the floor (downsize windows), and whether the same work could be done by fewer machines all the time (a lower minimum), judging by the group's CPU and requests per member." } } : {}),
     instance: { id, name: inv?.name ?? null, type: inv?.instance_type ?? null, state: inv?.state ?? null, list_usd_month: inv?.monthly_usd ?? null, pool: inv?.pool_kind ?? null, tags,
       role: role ? { role: role.role, confidence: role.role_confidence, protected_prob: role.protected_prob } : null },
+    typical_day_utc: typicalDay(p),
     note: "Memory use is not a usage signal: on a box running containers it is what Docker was given. Use signals already pass the per-image noise rules. External connections include relay peers, health checkers and the swarm checker as well as people.",
     profile: {
       window_days: p.window_days, computed_at: p.computed_at, quiet_hours_week: p.quiet_hours_week, arithmetic_confidence: p.confidence, summary: p.summary,
@@ -133,12 +146,13 @@ export function latestReview(subject: string): UsageReview | null {
   const r = db.prepare("select * from usage_reviews where subject = ?").get(subject) as any;
   if (!r) return null;
   let options = {}; try { options = JSON.parse(r.options || "{}"); } catch { options = {}; }
-  return { subject: r.subject, reviewed_at: r.reviewed_at, verdict: r.verdict, schedule: r.schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, confidence: r.confidence, quiet_is_real: r.quiet_is_real, busy_is_machine: r.busy_is_machine, reason: r.reason, options, model: r.model, call_id: r.call_id };
+  return { subject: r.subject, reviewed_at: r.reviewed_at, verdict: r.verdict, schedule: r.schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, confidence: r.confidence, quiet_is_real: r.quiet_is_real, busy_is_machine: r.busy_is_machine, reason: r.reason, options, model: r.model, call_id: r.call_id, group_min: r.group_min ?? null, group_max: r.group_max ?? null, min_off_hours: r.min_off_hours ?? null };
 }
 
 /** The window the office-hours action follows for a box tagged AdvisorAutoPark=ON: the review's when there is one, else the profile's confident suggestion when Jev is not configured. */
 export function scheduleFor(subject: string): { schedule: string | null; source: "review" | "profile" | null; note: string } {
   const p = latestProfile(subject);
+  if (p?.kind === "asg") { const r = latestReview(subject); return r && r.verdict !== "keep_running" && r.schedule ? { schedule: r.schedule, source: "review", note: `the agent's downsize windows: ${r.reason}` } : { schedule: null, source: r ? "review" : null, note: r ? r.reason : "no agent decision for the group yet" }; }
   if (!p) return { schedule: null, source: null, note: "no usage profile yet (the daily job builds one)" };
   const r = latestReview(subject);
   if (r) {
@@ -186,6 +200,44 @@ export async function usageReviewPass(onLog: (s: string) => void = () => {}, opt
   }
   try { const { mirrorUsageProfilesInBackground } = await import("./graph_mirror.js"); mirrorUsageProfilesInBackground(); } catch { /* graph optional */ }
   out.took_ms = Date.now() - t0;
+  return out;
+}
+
+/**
+ * The hours a schedule keeps the resource off (or a group small), as ring windows the Beanstalk minimum decision
+ * reads like the profile's own quiet windows: UTC schedules only, confidence 1 (the agent said it is safe), no
+ * margin (the agent already chose the edges). Pure.
+ */
+export function windowsFromSchedule(text: string | null): QuietWindow[] {
+  if (!text) return [];
+  const s = parseSchedule(text);
+  if ("error" in s || s.tz !== "UTC") return [];
+  const off: boolean[] = [];
+  for (let day = 0; day < 7; day++) for (let hour = 0; hour < 24; hour++) { const inside = s.clauses.some((c) => clauseCovers(c, day, hour)); off.push(s.clauses[0].off ? inside : !inside); }
+  const n = 168; const out: QuietWindow[] = [];
+  if (off.every(Boolean)) return [{ start: 0, end: n, hours: n, effective_start: 0, effective_end: n, effective_hours: n, confidence: 1, probe_coverage: 1, label: "all week" }];
+  const first = off.findIndex((x) => !x);
+  let i = 0;
+  const label = (k: number) => `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][Math.floor((k % n) / 24)]} ${String(k % 24).padStart(2, "0")}:00`;
+  while (i < n) {
+    const idx = (first + i) % n;
+    if (!off[idx]) { i++; continue; }
+    let len = 0; while (len < n && off[(idx + len) % n]) len++;
+    out.push({ start: idx, end: idx + len, hours: len, effective_start: idx % n, effective_end: (idx + len) % n, effective_hours: len, confidence: 1, probe_coverage: 1, label: `${label(idx)} → ${label(idx + len)}` });
+    i += len;
+  }
+  return out.sort((a, b) => b.effective_hours - a.effective_hours);
+}
+
+/** The typical day of a profile: per UTC hour of day, the mean CPU, maximum CPU, requests and network across the days seen. Pure. */
+export function typicalDay(p: Pick<Profile, "hours">): { hour: number; cpu_avg: number | null; cpu_max: number | null; requests: number | null; net_mb: number | null }[] {
+  const out = [];
+  for (let h = 0; h < 24; h++) {
+    const bs = p.hours.filter((b) => b.hour === h && b.seen > 0);
+    const mean = (k: "cpu_avg" | "requests" | "net_mb") => { const xs = bs.map((b) => b[k]).filter((v): v is number => v != null); return xs.length ? Math.round((xs.reduce((a, v) => a + v, 0) / xs.length) * 10) / 10 : null; };
+    const maxs = bs.map((b) => b.cpu_max).filter((v): v is number => v != null);
+    out.push({ hour: h, cpu_avg: mean("cpu_avg"), cpu_max: maxs.length ? Math.max(...maxs) : null, requests: mean("requests"), net_mb: mean("net_mb") });
+  }
   return out;
 }
 
