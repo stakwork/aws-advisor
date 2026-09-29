@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["confirm", "adjust", "keep_running"], "description": "confirm the profile's window, adjust to another window, or keep the box running" },
+    "schedule": { "type": ["string", "null"], "description": "the running window in UTC, '<days> HH-HH UTC' (days: daily, weekdays, weekends, mon-fri, or mon,tue,wed); null for keep_running" },
+    "confidence": { "type": "number", "description": "0 to 1" },
+    "reasoning": { "type": "string", "description": "what was looked at and why it decides the verdict" },
+    "evidence": { "type": "array", "items": { "type": "string" }, "description": "each line with numbers and the tool it came from" },
+    "busy_hours_explained": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "when": { "type": "string", "description": "the stretch, e.g. 'Mon-Fri 08:00-18:00 UTC' or 'Thu 15:00 in one week'" },
+          "cause": { "type": "string" },
+          "is_people": { "type": "boolean", "description": "true when people or clients caused it, false for machine chatter, jobs, deploys, backups, health checks, peers" }
+        },
+        "required": ["when", "cause", "is_people"]
+      }
+    }
+  },
+  "required": ["verdict", "schedule", "confidence", "reasoning", "evidence", "busy_hours_explained"]
+}

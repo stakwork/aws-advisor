@@ -12,7 +12,11 @@
  *    container above `QUIET_CONTAINER_CPU` % (the probe's use signals already pass the per-image noise rules, so
  *    a heartbeat log does not count as use; whether *any* log line was written is kept as `logs`, informational);
  *  - for an autoscaling group (subject `asg:<name>`): the group's CPU and, when a balancer fronts it, the requests
- *    that hour.
+ *    that hour;
+ *  - the CloudWatch log groups the box ships to (probe 1.6 `log_shipping`): one Logs Insights query per box over
+ *    the last `USAGE_LOG_DAYS` (7) counting the use-signal lines per hour, the same patterns the probe uses on
+ *    container logs, with the kinds ruled noise for the shipping container's image left out. This is log
+ *    evidence for every hour of that week, not only the hours a probe happened to run in.
  *
  * An hour of the week is **quiet** when every week we saw it was quiet (at least `MIN_WEEKS` of them), **busy**
  * when any week was, **unknown** otherwise (too few weeks, or the box was off). Quiet hours in a row make a
@@ -29,6 +33,11 @@
  * start. Nothing here writes to AWS.
  */
 import { CloudWatchClient, GetMetricDataCommand, type MetricDataQuery } from "@aws-sdk/client-cloudwatch";
+import { CloudWatchLogsClient, GetQueryResultsCommand, StartQueryCommand, StopQueryCommand } from "@aws-sdk/client-cloudwatch-logs";
+import { config } from "./config.js";
+import { parseSignals } from "./signals.js";
+import { rulesFor } from "./signal_rules.js";
+import { latestProbe } from "./ssm.js";
 import { db } from "./db.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
@@ -36,6 +45,7 @@ import { executorCreds, type Creds } from "./executor.js";
 import { metricDimension } from "./elb_inventory.js";
 import { HOURS_PER_WEEK, describeSchedule, offHoursPerWeek, parseSchedule, type Schedule } from "./actions/schedule_hours.js";
 
+db.exec(`create table if not exists usage_log_signals (subject text not null, hour integer not null, count integer not null, primary key (subject, hour))`);
 db.exec(`create table if not exists usage_profiles (
   subject text primary key, kind text not null, name text, region text, account_id text, computed_at text not null, window_days integer not null,
   signals text not null, hours text not null, quiet_windows text not null, busiest text not null,
@@ -61,12 +71,12 @@ const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const DAY_LABEL = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export interface ProbeMark { ext_conn: number; users_now: number; signals_recent: boolean; request_recent: boolean; login_recent: boolean; logs_recent: boolean; container_busy: boolean }
-export interface HourSample { at: number; cpu_avg: number | null; cpu_max: number | null; net_bytes: number | null; requests: number | null; probes: ProbeMark[] }
-export interface HourBucket { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; /** samples with use evidence beyond CloudWatch: a probe, or a balancer request count */ covered: number; /** how many busy samples each signal tripped */ busy_cpu: number; busy_net: number; busy_requests: number; busy_probe: number; /** the probe signal by kind: external connections, users on the box, use-signal lines, front-door requests, logins, busy containers */ busy_probe_kinds: { ext_conn: number; users: number; signals: number; requests: number; logins: number; containers: number }; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number }
+export interface HourSample { at: number; cpu_avg: number | null; cpu_max: number | null; net_bytes: number | null; requests: number | null; probes: ProbeMark[]; /** use-signal lines in the box's CloudWatch log groups that hour (Logs Insights); null = no log evidence for the hour */ log_signals?: number | null }
+export interface HourBucket { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; /** samples with use evidence beyond CloudWatch: a probe, or a balancer request count */ covered: number; /** how many busy samples each signal tripped */ busy_cpu: number; busy_net: number; busy_requests: number; busy_probe: number; /** busy samples the shipped logs tripped */ busy_logs: number; /** use-signal lines per hour in the shipped logs, averaged over the hours with log evidence */ log_signals: number | null; /** the probe signal by kind: external connections, users on the box, use-signal lines, front-door requests, logins, busy containers */ busy_probe_kinds: { ext_conn: number; users: number; signals: number; requests: number; logins: number; containers: number }; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number }
 export interface QuietWindow { start: number; end: number; hours: number; effective_start: number; effective_end: number; effective_hours: number; confidence: number; probe_coverage: number; label: string }
 export interface Profile {
   subject: string; kind: "ec2" | "asg"; name: string | null; region: string | null; account_id: string | null; computed_at: string; window_days: number;
-  signals: { cloudwatch_hours: number; probes: number; requests: boolean };
+  signals: { cloudwatch_hours: number; probes: number; requests: boolean; log_hours: number };
   hours: HourBucket[]; quiet_windows: QuietWindow[]; busiest: { day: number; hour: number; cpu_avg: number; net_mb: number | null; label: string }[];
   quiet_hours_week: number; confidence: number; suggested_schedule: string | null; off_hours_week: number | null; est_usd_month: number | null; summary: string;
 }
@@ -83,12 +93,14 @@ export function sampleQuiet(s: HourSample): boolean {
   if (s.cpu_max == null || s.cpu_max >= QUIET_CPU_MAX) return false;
   if (s.net_bytes != null && s.net_bytes >= QUIET_NET_BYTES) return false;
   if (s.requests != null && s.requests > 0) return false;
+  if ((s.log_signals ?? 0) > 0) return false;
   return s.probes.every((p) => !p.ext_conn && !p.users_now && !p.signals_recent && !p.request_recent && !p.login_recent && !p.container_busy);
 }
 
 /** Which signals made a sample busy. Pure. */
-export function busyReasons(s: HourSample): { cpu: boolean; net: boolean; requests: boolean; probe: boolean } {
+export function busyReasons(s: HourSample): { cpu: boolean; net: boolean; requests: boolean; probe: boolean; logs: boolean } {
   return {
+    logs: (s.log_signals ?? 0) > 0,
     cpu: s.cpu_max != null && s.cpu_max >= QUIET_CPU_MAX,
     net: s.net_bytes != null && s.net_bytes >= QUIET_NET_BYTES,
     requests: s.requests != null && s.requests > 0,
@@ -98,16 +110,16 @@ export function busyReasons(s: HourSample): { cpu: boolean; net: boolean; reques
 
 /** The 168 buckets from the window's samples. Pure. */
 export function bucketize(samples: HourSample[]): HourBucket[] {
-  const out: HourBucket[] = Array.from({ length: HOURS_PER_WEEK }, (_, i) => ({ day: Math.floor(i / 24), hour: i % 24, seen: 0, quiet: 0, verdict: "unknown", cpu_avg: null, cpu_max: null, net_mb: null, requests: null, probes: 0, covered: 0, busy_cpu: 0, busy_net: 0, busy_requests: 0, busy_probe: 0, busy_probe_kinds: { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 }, ext_conn: 0, signals: 0, requests_seen: 0, logins: 0, logs: 0, busy_containers: 0 }));
-  const acc = new Map<number, { cpu: number[]; net: number[]; req: number[] }>();
+  const out: HourBucket[] = Array.from({ length: HOURS_PER_WEEK }, (_, i) => ({ day: Math.floor(i / 24), hour: i % 24, seen: 0, quiet: 0, verdict: "unknown", cpu_avg: null, cpu_max: null, net_mb: null, requests: null, probes: 0, covered: 0, busy_cpu: 0, busy_net: 0, busy_requests: 0, busy_probe: 0, busy_logs: 0, log_signals: null, busy_probe_kinds: { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 }, ext_conn: 0, signals: 0, requests_seen: 0, logins: 0, logs: 0, busy_containers: 0 }));
+  const acc = new Map<number, { cpu: number[]; net: number[]; req: number[]; logs: number[] }>();
   for (const s of samples) {
     if (s.cpu_max == null) continue; // the box was off that hour, or CloudWatch has nothing: no evidence either way
     const i = ringIndex(s.at); const b = out[i];
-    const a = acc.get(i) ?? { cpu: [], net: [], req: [] }; acc.set(i, a);
+    const a = acc.get(i) ?? { cpu: [], net: [], req: [], logs: [] }; acc.set(i, a);
     b.seen++;
     if (sampleQuiet(s)) b.quiet++;
     else {
-      const w = busyReasons(s); if (w.cpu) b.busy_cpu++; if (w.net) b.busy_net++; if (w.requests) b.busy_requests++; if (w.probe) b.busy_probe++;
+      const w = busyReasons(s); if (w.cpu) b.busy_cpu++; if (w.net) b.busy_net++; if (w.requests) b.busy_requests++; if (w.probe) b.busy_probe++; if (w.logs) b.busy_logs++;
       const k = b.busy_probe_kinds;
       if (s.probes.some((p) => p.ext_conn > 0)) k.ext_conn++; if (s.probes.some((p) => p.users_now > 0)) k.users++; if (s.probes.some((p) => p.signals_recent)) k.signals++;
       if (s.probes.some((p) => p.request_recent)) k.requests++; if (s.probes.some((p) => p.login_recent)) k.logins++; if (s.probes.some((p) => p.container_busy)) k.containers++;
@@ -115,12 +127,13 @@ export function bucketize(samples: HourSample[]): HourBucket[] {
     if (s.cpu_avg != null) a.cpu.push(s.cpu_avg);
     if (s.net_bytes != null) a.net.push(s.net_bytes);
     if (s.requests != null) a.req.push(s.requests);
+    if (s.log_signals != null) a.logs.push(s.log_signals);
     b.cpu_max = Math.round(Math.max(b.cpu_max ?? 0, s.cpu_max) * 10) / 10;
     b.probes += s.probes.length;
-    if (s.probes.length || s.requests != null) b.covered++;
+    if (s.probes.length || s.requests != null || s.log_signals != null) b.covered++;
     for (const p of s.probes) { b.ext_conn = Math.max(b.ext_conn, p.ext_conn); if (p.signals_recent) b.signals++; if (p.request_recent) b.requests_seen++; if (p.login_recent || p.users_now) b.logins++; if (p.logs_recent) b.logs++; if (p.container_busy) b.busy_containers++; }
   }
-  for (const [i, a] of acc) { const b = out[i]; b.cpu_avg = mean(a.cpu) == null ? null : r1(mean(a.cpu)!); b.net_mb = mean(a.net) == null ? null : Math.round((mean(a.net)! / 1e6) * 10) / 10; b.requests = mean(a.req) == null ? null : Math.round(mean(a.req)!); }
+  for (const [i, a] of acc) { const b = out[i]; b.cpu_avg = mean(a.cpu) == null ? null : r1(mean(a.cpu)!); b.net_mb = mean(a.net) == null ? null : Math.round((mean(a.net)! / 1e6) * 10) / 10; b.requests = mean(a.req) == null ? null : Math.round(mean(a.req)!); b.log_signals = mean(a.logs) == null ? null : Math.round(mean(a.logs)! * 10) / 10; }
   for (const b of out) b.verdict = b.seen < MIN_WEEKS ? "unknown" : b.quiet === b.seen ? "quiet" : "busy";
   return out;
 }
@@ -186,6 +199,7 @@ export function buildProfile(i: BuildInput): Profile {
   const confidence = totalEff ? Math.round((windows.reduce((s, w) => s + w.confidence * w.effective_hours, 0) / totalEff) * 100) / 100 : 0;
   const probes = i.samples.reduce((s, x) => s + x.probes.length, 0);
   const cwHours = i.samples.filter((s) => s.cpu_max != null).length;
+  const logHours = i.samples.filter((s) => s.log_signals != null).length;
   const sug = suggestSchedule(hours);
   const off = sug ? offHoursPerWeek(sug.schedule) : null;
   const est = sug && off != null && i.monthly_usd ? Math.round(i.monthly_usd * (off / HOURS_PER_WEEK) * 100) / 100 : null;
@@ -197,13 +211,13 @@ export function buildProfile(i: BuildInput): Profile {
     const top = windows.slice(0, 3).map((w) => `${w.label} (${w.effective_hours} h, confidence ${w.confidence})`).join("; ");
     parts.push(`quiet ${quietHoursWeek} of ${HOURS_PER_WEEK} hours a week over ${seenWeeks} week${seenWeeks === 1 ? "" : "s"}: ${top}${windows.length > 3 ? ` and ${windows.length - 3} more` : ""}`);
     const cov = Math.round(100 * windows.reduce((s, w) => s + w.probe_coverage * w.hours, 0) / windows.reduce((s, w) => s + w.hours, 0));
-    parts.push(i.kind === "asg" ? (i.samples.some((s) => s.requests != null) ? `the balancer's request count covers ${cov} % of the quiet hours` : "no balancer in front of the group: CloudWatch CPU only, so the confidence tops out at 0.6") : probes ? `probes cover ${cov} % of the quiet hours (connections, use signals, logins, container CPU)` : "no probe in the window: CloudWatch only, so the confidence tops out at 0.6");
+    parts.push(i.kind === "asg" ? (i.samples.some((s) => s.requests != null) ? `the balancer's request count covers ${cov} % of the quiet hours` : "no balancer in front of the group: CloudWatch CPU only, so the confidence tops out at 0.6") : (probes || logHours) ? `${[probes ? "probes" : null, logHours ? `the shipped logs (${logHours} h scanned)` : null].filter(Boolean).join(" and ")} cover ${cov} % of the quiet hours (connections, use signals, logins, container CPU${logHours ? ", use-signal lines in CloudWatch Logs" : ""})` : "no probe and no scanned log in the window: CloudWatch only, so the confidence tops out at 0.6");
   }
-  const why = { cpu: 0, net: 0, requests: 0, probe: 0 }; const kinds = { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 }; let busyHours = 0;
-  for (const b of hours) if (b.verdict === "busy") { busyHours++; why.cpu += b.busy_cpu; why.net += b.busy_net; why.requests += b.busy_requests; why.probe += b.busy_probe; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) kinds[k] += b.busy_probe_kinds[k]; }
+  const why = { cpu: 0, net: 0, requests: 0, probe: 0, logs: 0 }; const kinds = { ext_conn: 0, users: 0, signals: 0, requests: 0, logins: 0, containers: 0 }; let busyHours = 0;
+  for (const b of hours) if (b.verdict === "busy") { busyHours++; why.cpu += b.busy_cpu; why.net += b.busy_net; why.requests += b.busy_requests; why.probe += b.busy_probe; why.logs += b.busy_logs; for (const k of Object.keys(kinds) as (keyof typeof kinds)[]) kinds[k] += b.busy_probe_kinds[k]; }
   if (busyHours) {
     const probeWhy = [kinds.ext_conn ? `external connections ${kinds.ext_conn}` : null, kinds.signals ? `use-signal lines ${kinds.signals}` : null, kinds.requests ? `front-door requests ${kinds.requests}` : null, kinds.logins ? `logins ${kinds.logins}` : null, kinds.users ? `users on the box ${kinds.users}` : null, kinds.containers ? `a container over ${QUIET_CONTAINER_CPU} % CPU ${kinds.containers}` : null].filter(Boolean).join(", ");
-    const trips = [why.net ? `network over ${Math.round(QUIET_NET_BYTES / 1e6)} MB/h in ${why.net}` : null, why.cpu ? `CPU over ${QUIET_CPU_MAX} % in ${why.cpu}` : null, why.requests ? `balancer requests in ${why.requests}` : null, why.probe ? `a probe signal in ${why.probe} (${probeWhy})` : null].filter(Boolean);
+    const trips = [why.net ? `network over ${Math.round(QUIET_NET_BYTES / 1e6)} MB/h in ${why.net}` : null, why.cpu ? `CPU over ${QUIET_CPU_MAX} % in ${why.cpu}` : null, why.requests ? `balancer requests in ${why.requests}` : null, why.logs ? `use-signal lines in the shipped logs in ${why.logs}` : null, why.probe ? `a probe signal in ${why.probe} (${probeWhy})` : null].filter(Boolean);
     parts.push(`${busyHours} busy hours of the week; what tripped them, in hour-samples: ${trips.join(", ")}`);
   }
   if (busy.length) parts.push(`busiest ${busy[0].label} (CPU ${busy[0].cpu_avg} %${busy[0].net_mb != null ? `, ${busy[0].net_mb} MB` : ""})`);
@@ -212,7 +226,7 @@ export function buildProfile(i: BuildInput): Profile {
   else if (cwHours) parts.push("used around the clock, or at unknown hours: no schedule fits");
   return {
     subject: i.subject, kind: i.kind, name: i.name ?? null, region: i.region ?? null, account_id: i.account_id ?? null, computed_at: new Date(i.now ?? Date.now()).toISOString(), window_days: WINDOW_DAYS,
-    signals: { cloudwatch_hours: cwHours, probes, requests: i.samples.some((s) => s.requests != null) },
+    signals: { cloudwatch_hours: cwHours, probes, requests: i.samples.some((s) => s.requests != null), log_hours: logHours },
     hours, quiet_windows: windows, busiest: busy, quiet_hours_week: quietHoursWeek, confidence, suggested_schedule: sug?.text ?? null, off_hours_week: off, est_usd_month: est, summary: parts.join(". ") + ".",
   };
 }
@@ -238,6 +252,104 @@ export function probeMarks(instanceId: string, since: number): Map<number, Probe
 }
 
 interface Subject { subject: string; kind: "ec2" | "asg"; name: string | null; region: string; account_id: string | null; monthly_usd: number | null; dimension: { Name: string; Value: string }; lb_dimension?: string | null }
+
+export const LOG_QUERY_TIMEOUT_MS = 120_000;
+export const LOG_QUERY_CONCURRENCY = 4;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A probe pattern (POSIX ERE for grep -iE) as a Logs Insights regex alternative: the slash escaped, case folded by the query. Pure. */
+export const insightsRegex = (re: string) => re.replace(/\//g, "\\/");
+/** The Logs Insights query counting lines matching any of the patterns per hour. Pure. */
+export const logSignalQuery = (patterns: string[]) => `filter @message like /(?i)(${patterns.map(insightsRegex).join("|")})/ | stats count(*) as n by bin(1h)`;
+
+/**
+ * The log groups a box ships to, grouped by the use-signal kinds that count for them: a group shipped by a
+ * container gets the container image's noise rules applied, so the same kind can count for one group and not
+ * another. Pure given the probe's shipping list and containers.
+ */
+export function logQuerySets(shipping: { group: string; via: string }[], containers: { name: string; image: string }[], kinds: { name: string; regex: string }[]): { groups: string[]; patterns: string[]; kinds: string[] }[] {
+  const imageOf = new Map(containers.map((c) => [c.name, c.image]));
+  const sets = new Map<string, { groups: Set<string>; patterns: string[]; kinds: string[] }>();
+  for (const s of shipping) {
+    if (!s?.group) continue;
+    const container = s.via?.startsWith("docker:") ? s.via.slice(7) : null;
+    const image = container ? imageOf.get(container) : null;
+    const noise = new Set(image ? rulesFor(image).filter((r) => r.verdict === "noise").map((r) => r.kind) : []);
+    const allowed = kinds.filter((k) => !noise.has(k.name));
+    if (!allowed.length) continue;
+    const key = allowed.map((k) => k.name).join(",");
+    const e = sets.get(key) ?? { groups: new Set<string>(), patterns: allowed.map((k) => k.regex), kinds: allowed.map((k) => k.name) }; sets.set(key, e);
+    e.groups.add(s.group);
+  }
+  return [...sets.values()].map((e) => ({ groups: [...e.groups].slice(0, 50), patterns: e.patterns, kinds: e.kinds }));
+}
+
+async function runLogQuery(logs: CloudWatchLogsClient, groups: string[], query: string, since: number, until: number): Promise<Map<number, number> | null> {
+  const r = await logs.send(new StartQueryCommand({ logGroupNames: groups, startTime: Math.floor(since / 1000), endTime: Math.floor(until / 1000), queryString: query, limit: 10000 }));
+  const queryId = r.queryId; if (!queryId) return null;
+  const deadline = Date.now() + LOG_QUERY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await sleep(2000);
+    const g = await logs.send(new GetQueryResultsCommand({ queryId }));
+    if (g.status === "Complete") {
+      const out = new Map<number, number>();
+      for (const row of g.results ?? []) {
+        const f: Record<string, string> = {}; for (const c of row) if (c.field && c.value != null) f[c.field] = c.value;
+        const t = Date.parse(String(f["bin(1h)"] || "").replace(" ", "T") + "Z"); const n = Number(f.n);
+        if (Number.isFinite(t) && Number.isFinite(n)) out.set(hourStart(t), (out.get(hourStart(t)) ?? 0) + n);
+      }
+      return out;
+    }
+    if (g.status && !["Running", "Scheduled"].includes(g.status)) return null;
+  }
+  try { await logs.send(new StopQueryCommand({ queryId })); } catch { /* best effort */ }
+  return null;
+}
+
+/**
+ * The use-signal lines per hour in the log groups each box ships to, over the last `USAGE_LOG_DAYS`, stored in
+ * usage_log_signals. A box with no shipping section, no groups, or a failed query gets no entry (no evidence
+ * either way); a box whose queries ran gets an entry for every hour of the window, zero included.
+ */
+export async function collectLogSignals(creds: Creds, subs: Subject[], since: number, until: number, onLog: (s: string) => void): Promise<Map<string, Map<number, number>>> {
+  const out = new Map<string, Map<number, number>>();
+  const kinds = (() => { try { return parseSignals(config.probeSignals); } catch { return []; } })();
+  if (!kinds.length) return out;
+  const tasks: { s: Subject; set: ReturnType<typeof logQuerySets>[number] }[] = [];
+  for (const s of subs) {
+    if (s.kind !== "ec2") continue;
+    const probe = latestProbe(s.subject);
+    const shipping = Array.isArray(probe?.data?.log_shipping) ? probe!.data.log_shipping : [];
+    if (!shipping.length) continue;
+    for (const set of logQuerySets(shipping, (probe?.data?.containers ?? []).map((c: any) => ({ name: String(c.name), image: String(c.image || "") })), kinds)) tasks.push({ s, set });
+  }
+  const clients = new Map<string, CloudWatchLogsClient>();
+  const clientFor = (s: Subject) => { const k = `${s.account_id || ""}|${s.region}`; let c = clients.get(k); if (!c) { c = new CloudWatchLogsClient({ region: s.region, credentials: creds.forAccount(s.account_id).read }); clients.set(k, c); } return c; };
+  const del = db.prepare("delete from usage_log_signals where subject = ?");
+  const ins = db.prepare("insert into usage_log_signals(subject, hour, count) values (?, ?, ?)");
+  let idx = 0; const failed = new Set<string>();
+  const worker = async () => {
+    while (idx < tasks.length) {
+      const t = tasks[idx++];
+      try {
+        const counts = await runLogQuery(clientFor(t.s), t.set.groups, logSignalQuery(t.set.patterns), since, until);
+        if (!counts) { failed.add(t.s.subject); onLog(`${t.s.name || t.s.subject}: log scan of ${t.set.groups.length} group(s) gave no result`); continue; }
+        const per = out.get(t.s.subject) ?? new Map<number, number>(); out.set(t.s.subject, per);
+        for (const [h, n] of counts) per.set(h, (per.get(h) ?? 0) + n);
+      } catch (e: any) { failed.add(t.s.subject); onLog(`${t.s.name || t.s.subject}: log scan failed: ${String(e?.message || e).slice(0, 160)}`); }
+    }
+  };
+  try { await Promise.all(Array.from({ length: Math.min(LOG_QUERY_CONCURRENCY, tasks.length) }, worker)); }
+  finally { for (const c of clients.values()) c.destroy(); }
+  db.transaction(() => {
+    for (const [subject, per] of out) {
+      if (failed.has(subject)) { out.delete(subject); continue; }
+      del.run(subject);
+      for (let h = hourStart(since); h < until; h += H) ins.run(subject, h, per.get(h) ?? 0);
+    }
+  })();
+  return out;
+}
 
 async function hourlyMetrics(cw: CloudWatchClient, subjects: Subject[], since: number, until: number): Promise<Map<string, Map<number, { cpu_avg?: number; cpu_max?: number; net_in?: number; net_out?: number; requests?: number }>>> {
   const out = new Map<string, Map<number, any>>();
@@ -328,13 +440,17 @@ export async function usageProfilePass(onLog: (s: string) => void = () => {}, op
     const cw = new CloudWatchClient({ region, credentials: creds.forAccount(account || null).read });
     try {
       const metrics = await hourlyMetrics(cw, subs, since, now);
+      const logDays = Math.max(0, Math.min(WINDOW_DAYS, Math.round(config.usageLogDays)));
+      const logSince = now - logDays * 86400000;
+      const logCounts = logDays > 0 ? await collectLogSignals(creds, subs, logSince, now, onLog) : new Map<string, Map<number, number>>();
       for (const s of subs) {
         const per = metrics.get(s.subject) ?? new Map();
         const marks = s.kind === "ec2" ? probeMarks(s.subject, since) : new Map<number, ProbeMark[]>();
+        const logs = logCounts.get(s.subject) ?? null;
         const samples: HourSample[] = [];
         for (let at = since; at < now; at += H) {
           const m = per.get(at);
-          samples.push({ at, cpu_avg: m?.cpu_avg ?? null, cpu_max: m?.cpu_max ?? null, net_bytes: m?.net_in != null || m?.net_out != null ? (m?.net_in ?? 0) + (m?.net_out ?? 0) : null, requests: s.lb_dimension ? (m?.requests ?? 0) : null, probes: marks.get(at) || [] });
+          samples.push({ at, cpu_avg: m?.cpu_avg ?? null, cpu_max: m?.cpu_max ?? null, net_bytes: m?.net_in != null || m?.net_out != null ? (m?.net_in ?? 0) + (m?.net_out ?? 0) : null, requests: s.lb_dimension ? (m?.requests ?? 0) : null, probes: marks.get(at) || [], log_signals: logs && at >= logSince ? (logs.get(at) ?? 0) : null });
         }
         const p = buildProfile({ subject: s.subject, kind: s.kind, name: s.name, region: s.region, account_id: s.account_id, samples, monthly_usd: s.monthly_usd, now: Date.now() });
         storeProfile(p); profiled++;

@@ -6,6 +6,7 @@ import { db } from "./db.js";
 import { RecInput } from "./rules.js";
 import { changeSummaryText } from "./changes.js";
 import { completeObservation } from "./observe.js";
+import { completeUsageInvestigation } from "./usage_agent.js";
 import { checkAgentQuota } from "./quota.js";
 import { taskFor } from "./tasks.js";
 import { critiqueText, gradeByRubric } from "./rubric.js";
@@ -123,7 +124,7 @@ export interface AgentRequest {
   retryOf?: string;
   maxTurns?: number;
   /** Which advisor flow owns the answer; the callback routes on it. */
-  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string } | { kind: "chat"; recommendationId: number | null } | { kind: "pass_report"; reportId: number };
+  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string } | { kind: "usage"; subject: string } | { kind: "chat"; recommendationId: number | null } | { kind: "pass_report"; reportId: number };
 }
 
 export interface AgentAccepted { requestId: string; sessionId: string; eventsToken: string }
@@ -212,7 +213,7 @@ export async function openAgentEvents(requestId: string): Promise<Response> {
   return res;
 }
 
-export interface AgentRunRow { id: number; kind: "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report"; run_id: number | null; alert_id: number | null; recommendation_id?: number | null; request_id: string }
+export interface AgentRunRow { id: number; kind: "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report" | "usage"; run_id: number | null; alert_id: number | null; recommendation_id?: number | null; request_id: string }
 
 /**
  * Handles the terminal webhook from repo2graph (also usable with a polled /progress record). Routes on the
@@ -232,6 +233,7 @@ export async function handleAgentResult(requestId: string, payload: { status: st
     if (run.kind === "observe") completeObservation(run, payload);
     if (run.kind === "chat") completeChat(run, payload);
     if (run.kind === "pass_report") completePassReport(run, payload);
+    if (run.kind === "usage") completeUsageInvestigation(run, payload);
     return { kind: run.kind, imported: 0 };
   }
   db.prepare("update agent_runs set status = 'completed', result = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.result), run.id);
@@ -241,6 +243,7 @@ export async function handleAgentResult(requestId: string, payload: { status: st
   if (run.kind === "observe") { completeObservation(run, payload); return { kind: run.kind, imported: 0 }; }
   if (run.kind === "chat") { completeChat(run, payload); return { kind: run.kind, imported: 0 }; }
   if (run.kind === "pass_report") { completePassReport(run, payload); return { kind: run.kind, imported: 0 }; }
+  if (run.kind === "usage") { completeUsageInvestigation(run, payload); return { kind: run.kind, imported: 0 }; }
   return { kind: run.kind, imported: await importFindingsResult(run, payload.result) };
 }
 

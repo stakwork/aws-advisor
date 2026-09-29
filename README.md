@@ -1302,6 +1302,11 @@ anything happened:
 
 - **CloudWatch**, every hour the instance ran: the hour's maximum CPU under 10 % and the bytes in and out under
   5 MB; for a group, its average CPU and, when an ALB fronts it, the requests that hour.
+- **The shipped logs**: one Logs Insights query per box over the CloudWatch log groups it ships to (probe 1.6
+  `log_shipping`), over the last `USAGE_LOG_DAYS` (7), counting the use-signal lines per hour with the same
+  patterns the probe uses, the kinds ruled noise for the shipping container's image left out. Log evidence for
+  every hour of that week, not only the hours a probe ran in; a use-signal line makes the hour busy. Costs the
+  scan, about 0.005 USD per GB; 0 turns it off.
 - **The probes** that fell in the hour (`instance_activity`, `container_samples`): no established external
   connection, no use-signal line, no front-door request and no login in the last hour, nobody logged in, no
   container above 5 % CPU. The use signals already pass the per-image noise rules, so a heartbeat log is not use;
@@ -1352,6 +1357,19 @@ keep_running.
 window when the verdict is confirm or adjust, leaves the box running on keep_running, waits when there is no
 review yet, and falls back to the profile's own window only when Jev is not configured. Memory is never a usage
 signal anywhere in this chain.
+
+**The agent, for the boxes Jev is not sure about.** When Jev's pick is under 0.75, or its answer on whether the
+quiet windows are real sits between 0.3 and 0.7, the box goes to a real agent run (task `usage`, `tasks/usage/`,
+`src/usage_agent.ts`): the same brief plus the candidate windows and Jev's doubt, and the tools to go and look
+(`instance_apps`, `activity_signals`, `instance_history`, `cloudwatch_metric`, `instance_probe`, `log_groups`,
+`domain_inventory`, `load_balancer_inventory`, `recommendation_history`, `auto_actions`, `graph_query`). It answers
+with a verdict, the window, its confidence, the reasoning, evidence with numbers and, per busy stretch, the cause
+and whether that was people; the answer is graded by the task's rubric, stored in `usage_investigations`, shown on
+the profile, and becomes the box's decision (model `agent:…` in `usage_reviews`) so the executor follows it. An
+answer below the rubric's bar keeps the box running and says so. The daily pass sends at most
+`USAGE_AGENT_MAX_PER_DAY` (5) boxes, the least recently investigated first, none twice within a week, under the
+agent quota; "investigate with the agent" on a profile sends that box now (`POST /api/instances/:id/usage/investigate`,
+`POST /api/usage/investigate` for every unsure box).
 
 On demand: **Recompute usage + ask the agent** on the EC2 tab runs the profiles and the review for every box
 (`POST /api/usage/recompute`); "ask the agent" on one profile asks for that box (`POST /api/instances/:id/usage/review`);
@@ -2433,6 +2451,7 @@ What each one is for (✎ = also editable in Settings):
 | ✎ `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `SPEND_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
 | ✎ `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
 | ✎ `ACT_MODE`, `ACT_ROLE_ARN`, `ACT_CRON`, `ACT_ACU_FLOOR`, `ACT_MAX_PER_PASS`, `ACT_SNAPSHOT_MIN_AGE_DAYS`, `ACT_LOG_RETENTION_DAYS`, `ACT_S3_MIN_GB`, `ACT_EB_LOW_CPU`, `ACT_EB_HIGH_CPU`, `ACT_EB_PRESSURE_HOURS` | the executor: `off` / `dry_run` / `apply`, the actuator role it assumes for changes, its rhythm, the lowest Serverless v2 minimum it may set, the cap per pass, the snapshot age, the retention put on log groups without one, the bucket size from which request metrics are enabled and the lifecycle analysis runs | `dry_run`, unset (dry runs only), hourly at :45, 0.5 ACU, 10, 90 days, 90 days, 20 GB |
+| ✎ `USAGE_LOG_DAYS`, `USAGE_AGENT_MAX_PER_DAY` | how many days of the shipped CloudWatch logs the usage profile scans for use signals (0 = off), and how many unsure boxes a day go to the agent (0 = never) | 7, 5 |
 | ✎ `PROBE_SIGNALS` | other or more use-signal patterns for the probe (`name=regex;;name=regex`) | the nine built-in patterns |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | ✎ `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |

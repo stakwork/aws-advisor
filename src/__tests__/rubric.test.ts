@@ -12,8 +12,14 @@ test("rubric paths fan out over arrays", () => {
 
 test("task files load, register the prompts and carry rubrics the grader understands", () => {
   const tasks = loadTasks();
-  assert.equal(tasks.length, 6);
+  assert.equal(tasks.length, 7);
   assert.ok(taskFor("chat").system.includes("resolution assistant"));
+  const usage = taskFor("usage");
+  assert.ok(usage.system.includes("usage investigator"));
+  assert.equal(usage.schema.required.includes("verdict"), true);
+  const u = gradeByRubric({ verdict: "adjust", schedule: "weekdays 06-20 UTC", confidence: 0.8, reasoning: "people from 7", evidence: ["12 logins on weekdays (aws_activity_signals)", "0 at night (aws_cloudwatch_metric)"], busy_hours_explained: [{ when: "Thu 15:00 once", cause: "deploy", is_people: false }] }, usage.rubric);
+  assert.equal(u.score, 1, JSON.stringify(u.checks.filter((c) => !c.pass)));
+  assert.ok(gradeByRubric({ verdict: "maybe", confidence: 3, evidence: ["looks used"] }, usage.rubric).score < 0.5);
   const observe = taskFor("observe");
   assert.ok(observe.system.includes("observing agent"));
   assert.ok(observe.rubric.length >= 6);

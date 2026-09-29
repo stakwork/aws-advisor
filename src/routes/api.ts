@@ -28,6 +28,7 @@ import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { elbsForInstance, listElb } from "../elb_inventory.js";
 import { latestProfile, listProfiles, usageProfilePass } from "../usage_profile.js";
 import { latestReview, scheduleFor, usageReviewPass } from "../usage_review.js";
+import { investigateUsage, latestInvestigation, usageInvestigationPass } from "../usage_agent.js";
 import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent } from "../consent.js";
 import { dispatchActionNotifications } from "../executor.js";
 import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
@@ -407,7 +408,7 @@ api.post("/usage/run", async (_req, res) => {
 });
 api.get("/instances/:id/usage", (req, res) => {
   const p = latestProfile(String(req.params.id)) ?? latestProfile(`asg:${req.params.id}`);
-  p ? res.json({ ...p, review: p.kind === "ec2" ? latestReview(p.subject) : null, follows: p.kind === "ec2" ? scheduleFor(p.subject) : null }) : res.status(404).json({ error: "no usage profile yet: the daily logs job builds one for every running instance; use refresh to build it now" });
+  p ? res.json({ ...p, review: p.kind === "ec2" ? latestReview(p.subject) : null, investigation: p.kind === "ec2" ? latestInvestigation(p.subject) : null, follows: p.kind === "ec2" ? scheduleFor(p.subject) : null }) : res.status(404).json({ error: "no usage profile yet: the daily logs job builds one for every running instance; use refresh to build it now" });
 });
 // The usage review: Jev reads every profile with its context and decides the window (src/usage_review.ts). All boxes, or one; force asks again even when the verdict is fresh.
 api.post("/usage/review", async (req, res) => {
@@ -417,6 +418,14 @@ api.post("/usage/recompute", async (_req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
   try { const profiles = await usageProfilePass((l) => console.log(`[usage] ${l}`)); const review = await usageReviewPass((l) => console.log(`[usage-review] ${l}`), { force: true }); res.json({ profiles, review }); }
   catch (e: any) { res.status(502).json({ error: describeError(e, "usage profiles (cloudwatch:GetMetricData)") }); }
+});
+// The agent investigation of a box's usage (src/usage_agent.ts): every unsure box, or one on demand.
+api.post("/usage/investigate", async (_req, res) => {
+  try { res.json(await usageInvestigationPass((l) => console.log(`[usage-agent] ${l}`))); } catch (e: any) { res.status(502).json({ error: e?.message || String(e) }); }
+});
+api.post("/instances/:id/usage/investigate", async (req, res) => {
+  try { res.status(202).json(await investigateUsage(String(req.params.id), { force: req.body?.force !== false })); }
+  catch (e: any) { res.status(e?.code === "pending" ? 409 : /not configured|no usage profile/i.test(String(e?.message)) ? 400 : 502).json({ error: e?.message || String(e) }); }
 });
 api.post("/instances/:id/usage/review", async (req, res) => {
   const id = String(req.params.id);
