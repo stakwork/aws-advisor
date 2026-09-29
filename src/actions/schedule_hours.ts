@@ -54,7 +54,7 @@ export function recordsForStart(instanceId: string): DnsRecord[] {
   } catch { return []; }
 }
 /** The record set an UPSERT sends: the old address swapped for the new one, the routing kept. Pure. */
-export function upsertChange(r: DnsRecord, newIp: string): Change {
+export function upsertChange(r: DnsRecord, newIp: string): Change & { ResourceRecordSet: ResourceRecordSet } {
   const routing = (r.routing || {}) as Record<string, any>;
   const set: ResourceRecordSet = { Name: r.name, Type: "A", TTL: r.ttl ?? 300, ResourceRecords: [...new Set(r.values.map((v) => (v === r.old_ip ? newIp : v)))].map((Value) => ({ Value })) };
   if (routing.set_identifier) set.SetIdentifier = String(routing.set_identifier);
