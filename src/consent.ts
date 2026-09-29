@@ -16,6 +16,7 @@
  */
 import { DescribeAddressesCommand, DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand } from "@aws-sdk/client-elastic-beanstalk";
+import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { db } from "./db.js";
 import { config } from "./config.js";
 import { applyAction, executorCreds, recordProposal, type ActionRow, type Proposal } from "./executor.js";
@@ -72,7 +73,7 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
   const eb = new ElasticBeanstalkClient({ region, credentials: acct.read });
   let env; let tags: Record<string, string> = {};
   try {
-    env = await findEnvironment(eb, r.id, { region, account: acct.account_id, envId });
+    env = await findEnvironment(eb, r.id, { region, account: acct.account_id, envId, credentials: acct.read });
     if (env?.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
   } finally { eb.destroy(); }
   if (!env?.EnvironmentId || !env.EnvironmentArn) throw new ConsentError(`environment ${r.id} has no id or ARN`, 404);
@@ -98,7 +99,7 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
  * by name, else by a case-insensitive scan of the region; a miss names the account, the region and what is there,
  * so a wrong account or a renamed environment is visible at once.
  */
-async function findEnvironment(eb: ElasticBeanstalkClient, name: string, where: { region: string; account: string; envId?: string | null }) {
+async function findEnvironment(eb: ElasticBeanstalkClient, name: string, where: { region: string; account: string; envId?: string | null; credentials: any }) {
   if (where.envId) { const byId = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentIds: [where.envId], IncludeDeleted: false }))).Environments?.[0]; if (byId?.EnvironmentId) return byId; }
   const byName = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentNames: [name], IncludeDeleted: false }))).Environments?.[0];
   if (byName?.EnvironmentId) return byName;
@@ -106,7 +107,10 @@ async function findEnvironment(eb: ElasticBeanstalkClient, name: string, where: 
   const loose = all.find((e) => e.EnvironmentName?.toLowerCase() === name.toLowerCase() || e.CNAME?.toLowerCase().startsWith(`${name.toLowerCase()}.`));
   if (loose?.EnvironmentId) return loose;
   const seen = all.map((e) => e.EnvironmentName).filter(Boolean);
-  throw new ConsentError(`environment ${name}${where.envId ? ` (${where.envId})` : ""} not found in ${where.region} with the credentials of account ${where.account || "(parent)"}: ${seen.length ? `that account and region hold ${seen.length} environment(s): ${seen.slice(0, 8).join(", ")}${seen.length > 8 ? "…" : ""}` : "no environment is visible there at all"}. A balancer in a member account needs that account enabled under Settings › Accounts; a rebuilt environment needs an inventory refresh so the tag is read again.`, 404);
+  // who actually made the calls: the account the inventory row names and the identity the SDK holds can differ (Steampipe connection vs advisor credentials)
+  let who = "";
+  try { const sts = new STSClient({ region: where.region, credentials: where.credentials }); try { const id = await sts.send(new GetCallerIdentityCommand({})); who = ` The calls were made as ${id.Arn} (account ${id.Account}).`; } finally { sts.destroy(); } } catch { who = " The identity behind the calls could not be read (sts:GetCallerIdentity)."; }
+  throw new ConsentError(`environment ${name}${where.envId ? ` (${where.envId})` : ""} not found in ${where.region} with the credentials of account ${where.account || "(parent)"}: ${seen.length ? `that account and region hold ${seen.length} environment(s): ${seen.slice(0, 8).join(", ")}${seen.length > 8 ? "…" : ""}` : "no environment is visible there at all"}.${who} If that account is not the balancer's, the advisor's credentials and the Steampipe connection point at different accounts, or the member account needs enabling under Settings › Accounts; a rebuilt environment needs an inventory refresh so the tag is read again.`, 404);
 }
 
 /** What an environment carries right now: the consent, the band and the operations role, for the switch on the page. */
@@ -116,7 +120,7 @@ export async function beanstalkConsent(name: string, region?: string | null, acc
   const envId = (db.prepare("select beanstalk_env_id from inventory_elb where beanstalk_env = ? and gone = 0 and beanstalk_env_id is not null limit 1").get(name) as { beanstalk_env_id: string } | undefined)?.beanstalk_env_id ?? null;
   const eb = new ElasticBeanstalkClient({ region: region || creds.region, credentials: acct.read });
   try {
-    const env = await findEnvironment(eb, name, { region: region || creds.region, account: acct.account_id, envId });
+    const env = await findEnvironment(eb, name, { region: region || creds.region, account: acct.account_id, envId, credentials: acct.read });
     const tags: Record<string, string> = {};
     if (env.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
     return { environment_id: env.EnvironmentId!, name: env.EnvironmentName ?? name, consent: tags[AUTO_SCALE_TAG] ?? null, on: isOn(tags[AUTO_SCALE_TAG]), band: tags[SCALE_BAND_TAG] ?? null, operations_role: env.OperationsRole ?? null, status: env.Status ?? null, account_id: acct.account_id, region: region || creds.region };
