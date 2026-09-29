@@ -488,6 +488,7 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   lambda_memory: { apply: ["lambda:UpdateFunctionConfiguration"], revert: ["lambda:UpdateFunctionConfiguration"] },
   beanstalk_scale: { apply: ["elasticbeanstalk:UpdateEnvironment"], revert: ["elasticbeanstalk:UpdateEnvironment"] },
   usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
+  consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:UpdateTagsForResource"], revert: ["ec2:DeleteTags", "elasticbeanstalk:UpdateTagsForResource"] },
 };
 
 export const actuatorPolicy = (): IamPolicy => ({
@@ -526,13 +527,19 @@ export const actuatorPolicy = (): IamPolicy => ({
     // Beanstalk capacity: only an environment someone tagged advisor:scale can have its MinSize/MaxSize moved. With an operations role on the environment Beanstalk does the CloudFormation and Auto Scaling work under that role; without one the caller needs those rights too (README).
     { Sid: "ActuatorBeanstalkScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringLike: { "aws:ResourceTag/advisor:scale": "*" } } },
     // Usage schedules: the one tag the role may write on any instance is advisor:schedule (an approved usage_schedule recommendation); the office-hours action then does the stops and starts.
-    { Sid: "ActuatorUsageScheduleTag", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:schedule"] } } },
+    { Sid: "ActuatorUsageScheduleTag", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:schedule", "AdvisorAutoPark"] } } },
+    // Consent switches from the page (src/consent.ts): AdvisorAutoPark on instances (above), AdvisorAutoScale and its band on environments.
+    { Sid: "ActuatorBeanstalkConsentTag", Effect: "Allow", Action: ["elasticbeanstalk:UpdateTagsForResource"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["AdvisorAutoScale", "AdvisorScaleBand"] } } },
+    // AdvisorAutoPark=ON is the same consent as advisor:park=auto and advisor:schedule: stop, start and the parked marker on those boxes; AdvisorAutoScale=ON the same as advisor:scale.
+    { Sid: "ActuatorAutoPark", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoPark": "ON" } } },
+    { Sid: "ActuatorAutoParkMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoPark": "ON" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
+    { Sid: "ActuatorAutoScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoScale": "ON" } } },
     // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one: UPSERT of A records only.
     { Sid: "ActuatorDnsReattach", Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: "arn:aws:route53:::hostedzone/*", Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } } },
     { Sid: "ActuatorDnsReattachRead", Effect: "Allow", Action: ["route53:ListResourceRecordSets", "route53:GetChange", "ec2:DescribeInstances"], Resource: "*" },
     { Sid: "ActuatorBeanstalkScaleDescribe", Effect: "Allow", Action: ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "autoscaling:DescribeAutoScalingGroups"], Resource: "*" },
     { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances",
-      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration", "elasticbeanstalk:UpdateEnvironment", "ec2:CreateTags", "ec2:DeleteTags"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration", "elasticbeanstalk:UpdateEnvironment", "ec2:CreateTags", "ec2:DeleteTags", "elasticbeanstalk:UpdateTagsForResource"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 

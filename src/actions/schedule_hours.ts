@@ -23,6 +23,7 @@ import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient, type 
 import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53Client, type Change, type ResourceRecordSet } from "@aws-sdk/client-route-53";
 import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
+import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
 
 export const KIND = "schedule_hours" as const;
 export const SCHEDULE_TAG = "advisor:schedule";
@@ -226,8 +227,9 @@ export const scheduleHoursAction: ActionModule = {
           const r = await ec2.send(new DescribeInstancesCommand({ InstanceIds: list.slice(i, i + 100).map((x) => x.instance_id) }));
           for (const res of r.Reservations ?? []) live.push(...(res.Instances ?? []));
         }
-        const inScope = live.filter((i) => tagOf(i.Tags, SCHEDULE_TAG) != null);
+        const inScope = live.filter((i) => tagOf(i.Tags, SCHEDULE_TAG) != null || isOn(tagOf(i.Tags, AUTO_PARK_TAG)));
         if (!inScope.length) continue;
+        const { latestProfile, CONFIDENT } = await import("../usage_profile.js");
         let eips: Set<string> | null = new Set<string>();
         try { for (const a of (await ec2.send(new DescribeAddressesCommand({ Filters: [{ Name: "instance-id", Values: inScope.map((i) => i.InstanceId!) }] }))).Addresses ?? []) if (a.InstanceId) eips.add(a.InstanceId); }
         catch { eips = null; }
@@ -235,8 +237,18 @@ export const scheduleHoursAction: ActionModule = {
           const row = list.find((x) => x.instance_id === inst.InstanceId)!;
           const name = row.name || inst.InstanceId!;
           if (tagOf(inst.Tags, "advisor:hands-off") != null) { notes.push(`${name}: tagged advisor:hands-off`); continue; }
+          if (isOff(tagOf(inst.Tags, AUTO_PARK_TAG))) { notes.push(`${name}: ${AUTO_PARK_TAG}=${tagOf(inst.Tags, AUTO_PARK_TAG)}: never stopped or started`); continue; }
           if (row.pool_kind) { notes.push(`${name}: member of a ${row.pool_kind} pool: its controller decides`); continue; }
-          consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, account_id: row.account_id ?? null, state: ec2State(inst), tag: tagOf(inst.Tags, SCHEDULE_TAG)!, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, public_ip: inst.PublicIpAddress ?? null, detail: row.instance_type || inst.InstanceType || "ec2" });
+          // the tag's own window first; with AdvisorAutoPark=ON and no window, the usage profile's confident schedule is the window
+          let scheduleText = tagOf(inst.Tags, SCHEDULE_TAG);
+          if (scheduleText == null) {
+            const profile = latestProfile(inst.InstanceId!);
+            if (!profile?.suggested_schedule) { notes.push(`${name}: ${AUTO_PARK_TAG}=ON but no usage schedule yet (${profile ? profile.summary : "no profile: the daily job builds one"})`); continue; }
+            if (profile.confidence < CONFIDENT) { notes.push(`${name}: ${AUTO_PARK_TAG}=ON but the profile's confidence is ${profile.confidence} (needs ${CONFIDENT}); ${profile.suggested_schedule} waits for more weeks or probes`); continue; }
+            scheduleText = profile.suggested_schedule;
+            tagged++;
+          }
+          consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, account_id: row.account_id ?? null, state: ec2State(inst), tag: scheduleText, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, public_ip: inst.PublicIpAddress ?? null, detail: row.instance_type || inst.InstanceType || "ec2" });
         }
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { ec2.destroy(); }
@@ -284,7 +296,7 @@ export const scheduleHoursAction: ActionModule = {
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region} (RDS): ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { rds.destroy(); }
     }
-    if (!tagged) notes.push(`nothing tagged ${SCHEDULE_TAG} (e.g. "weekdays 08-20 Europe/Madrid" on a dev instance or database)`);
+    if (!tagged) notes.push(`nothing tagged ${SCHEDULE_TAG} (e.g. "weekdays 08-20 Europe/Madrid" on a dev instance or database) or ${AUTO_PARK_TAG}=ON with a confident usage profile`);
     return { proposals, notes };
   },
 
@@ -307,7 +319,7 @@ export const scheduleHoursAction: ActionModule = {
 };
 
 /** Waits for the started instance's public address, then points every recorded A record at it. Never throws: the start already happened, so the outcome is reported on the row. */
-async function reattachDns(p: Proposal, creds: Creds, records: DnsRecord[]): Promise<string> {
+export async function reattachDns(p: Proposal, creds: Creds, records: DnsRecord[]): Promise<string> {
   const ec2 = new EC2Client({ region: p.region, credentials: creds.read });
   let ip: string | null = null;
   try {

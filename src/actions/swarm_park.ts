@@ -20,6 +20,8 @@ import { CreateTagsCommand, DeleteTagsCommand, DescribeAddressesCommand, Describ
 import { db } from "../db.js";
 import { config } from "../config.js";
 import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
+import { reattachDns, recordsNamingIp, type DnsRecord } from "./schedule_hours.js";
 
 export const KIND = "swarm_park" as const;
 export const PARK_TAG = "advisor:park";
@@ -96,7 +98,7 @@ export const swarmParkAction: ActionModule = {
           const r = await ec2.send(new DescribeInstancesCommand({ InstanceIds: list.slice(i, i + 100).map((x) => x.instance_id) }));
           for (const res of r.Reservations ?? []) for (const inst of res.Instances ?? []) live.set(inst.InstanceId!, inst);
         }
-        const inScope = list.filter((r) => { const i = live.get(r.instance_id); return i && (tag(i, PARK_TAG) === "auto" || SWARM_NAME.test(r.name || "")); });
+        const inScope = list.filter((r) => { const i = live.get(r.instance_id); return i && (tag(i, PARK_TAG) === "auto" || isOn(tag(i, AUTO_PARK_TAG)) || SWARM_NAME.test(r.name || "")); });
         if (!inScope.length) continue;
         const eips = new Set<string>();
         try { for (const a of (await ec2.send(new DescribeAddressesCommand({ Filters: [{ Name: "instance-id", Values: inScope.map((r) => r.instance_id) }] }))).Addresses ?? []) if (a.InstanceId) eips.add(a.InstanceId); }
@@ -104,7 +106,7 @@ export const swarmParkAction: ActionModule = {
         for (const r of inScope) {
           const inst = live.get(r.instance_id)!;
           const name = r.name || r.instance_id;
-          const optIn = tag(inst, PARK_TAG) === "auto";
+          const optIn = (tag(inst, PARK_TAG) === "auto" || isOn(tag(inst, AUTO_PARK_TAG))) && !isOff(tag(inst, AUTO_PARK_TAG));
           if (optIn) tagged++; else swarmNamed++;
           const skip = (why: string) => { notes.push(`${name}: ${why}`); log(`${name}: ${why}`); };
           const v = idleVerdict(dayUse(r.instance_id, idleDays), { idleDays, minProbes });
@@ -113,11 +115,14 @@ export const swarmParkAction: ActionModule = {
             else for (const why of v.reasons) { const k = why.replace(/ on \d+ day\(s\)$/, "").replace(/^last use .*/, "a use signal in the window").replace(/^probe data for .*/, "probe data missing for some days").replace(/^\d+ probes in the window.*/, "too few probes"); aliveWhy.set(k, (aliveWhy.get(k) ?? 0) + 1); }
             continue;
           }
-          if (!optIn) { skip(`idle for ${idleDays} days${v.last_use_at ? ` (last use ${v.last_use_at.slice(0, 10)})` : ""} but not tagged ${PARK_TAG}=auto: tag it to let the executor park it`); continue; }
+          if (!optIn) { skip(isOff(tag(inst, AUTO_PARK_TAG)) ? `idle for ${idleDays} days but ${AUTO_PARK_TAG}=${tag(inst, AUTO_PARK_TAG)}` : `idle for ${idleDays} days${v.last_use_at ? ` (last use ${v.last_use_at.slice(0, 10)})` : ""} but not tagged ${AUTO_PARK_TAG}=ON (or ${PARK_TAG}=auto): tag it to let the executor park it`); continue; }
           if (tag(inst, PARK_TAG) === "never" || tag(inst, "advisor:hands-off") != null) { skip("tagged to be left alone"); continue; }
           if (inst.State?.Name !== "running") { skip(`state ${inst.State?.Name}`); continue; }
           if (r.pool_kind) { skip(`member of a ${r.pool_kind} pool: its controller decides`); continue; }
-          if (!eips.has(r.instance_id)) { skip("no Elastic IP: a stop and start would change the public address and break what points at it"); continue; }
+          const hasEip = eips.has(r.instance_id);
+          // advisor:park=auto keeps the old rule (an Elastic IP or nothing); AdvisorAutoPark=ON accepts a box without one, since the wake re-points its A records
+          if (!hasEip && !isOn(tag(inst, AUTO_PARK_TAG))) { skip("no Elastic IP: a stop and start would change the public address and break what points at it"); continue; }
+          const dns: DnsRecord[] = hasEip ? [] : recordsNamingIp(inst.PublicIpAddress);
           const openAlert = db.prepare("select kind from alerts where resource = ? and acknowledged = 0 order by id desc limit 1").get(r.instance_id) as { kind: string } | undefined;
           if (openAlert) { skip(`an open ${openAlert.kind} alert on it`); continue; }
           const recent = db.prepare("select status, applied_at, reverted_at from actions where kind = ? and resource = ? and status in ('applied', 'verified', 'reverted') order by id desc limit 1").get(KIND, r.instance_id) as { status: string; applied_at: string | null; reverted_at: string | null } | undefined;
@@ -132,8 +137,8 @@ export const swarmParkAction: ActionModule = {
             title: `stop ${name} (${r.instance_type || inst.InstanceType}): idle ${idleDays} days`,
             reason: `${v.last_use_at ? `last use ${v.last_use_at.slice(0, 16).replace("T", " ")} UTC` : "no use signal recorded"}; over ${v.days_seen} days and ${v.probes} probes: no external connection, no front-door request, no use-signal line in any container log, under ${Math.round(MAX_NET_BYTES_DAY / 1e6)} MB/day out, every container under ${MAX_CONTAINER_CPU_AVG} % CPU. Stop only: volumes, data and the Elastic IP stay; nothing is terminated.${approved ? ` Approved as recommendation #${approved.id}${approved.decided_by ? ` by ${approved.decided_by}` : ""}.` : ""}`,
             before: { state: "running" }, after: { state: "stopped", tag: `${PARKED_TAG}=<time>` },
-            facts: { idle_days: idleDays, window_start: v.window_start, last_use_at: v.last_use_at, probes: v.probes, containers_running_avg: containers, elastic_ip: true, instance_type: r.instance_type || inst.InstanceType, recommendation_id: approved?.id ?? null },
-            rollback: `start it again (Revert on the page, or "wake ${name}" in the chat); the Elastic IP keeps the address, the containers come back with the box`,
+            facts: { idle_days: idleDays, window_start: v.window_start, last_use_at: v.last_use_at, probes: v.probes, containers_running_avg: containers, elastic_ip: hasEip, public_ip: inst.PublicIpAddress ?? null, dns_records: dns.length ? dns : null, consent: isOn(tag(inst, AUTO_PARK_TAG)) ? `${AUTO_PARK_TAG}=ON` : `${PARK_TAG}=auto`, instance_type: r.instance_type || inst.InstanceType, recommendation_id: approved?.id ?? null },
+            rollback: `start it again (Revert on the page, or "wake ${name}" in the chat); ${hasEip ? "the Elastic IP keeps the address" : dns.length ? `the A records ${[...new Set(dns.map((d) => d.name))].join(", ")} are pointed at the new address` : "the public address changes (no A record names the old one)"}, the containers come back with the box`,
             est_usd_month: r.monthly_usd,
           });
         }
@@ -175,7 +180,12 @@ export const swarmParkAction: ActionModule = {
     try {
       const r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] }));
       try { await ec2.send(new DeleteTagsCommand({ Resources: [p.resource], Tags: [{ Key: PARKED_TAG }] })); } catch { /* the marker is informational */ }
-      return `StartInstances: ${r.StartingInstances?.[0]?.CurrentState?.Name || "pending"}; the Elastic IP keeps the address, containers come back with the box (a minute or two)`;
+      const line = `StartInstances: ${r.StartingInstances?.[0]?.CurrentState?.Name || "pending"}`;
+      if (p.facts.elastic_ip === false) {
+        const records = Array.isArray(p.facts.dns_records) ? (p.facts.dns_records as DnsRecord[]) : [];
+        return records.length ? `${line}; ${await reattachDns(p, creds, records)}; containers come back with the box` : `${line}; no Elastic IP: the public address changed (no A record named the old one); containers come back with the box`;
+      }
+      return `${line}; the Elastic IP keeps the address, containers come back with the box (a minute or two)`;
     } finally { ec2.destroy(); }
   },
 };

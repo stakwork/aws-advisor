@@ -46,6 +46,7 @@ import { db, getJsonSetting, setSetting } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { CONFIDENT, latestProfile, ringIndex, type QuietWindow } from "../usage_profile.js";
+import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
 
 export const KIND = "beanstalk_scale" as const;
 export const SCALE_TAG = "advisor:scale";
@@ -249,8 +250,10 @@ export const beanstalkScaleAction: ActionModule = {
           let f: EnvFacts;
           try { f = await environmentFacts(eb, env); } catch (e: any) { skip(`describe failed: ${String(e?.message || e).slice(0, 160)}`); continue; }
           if (f.tags["advisor:hands-off"] != null) { log(`${name}: tagged advisor:hands-off`); continue; }
-          const tag = f.tags[SCALE_TAG];
-          if (tag == null) { log(`${name}: not tagged ${SCALE_TAG}`); continue; }
+          if (isOff(f.tags[AUTO_SCALE_TAG])) { log(`${name}: ${AUTO_SCALE_TAG}=${f.tags[AUTO_SCALE_TAG]}`); continue; }
+          // AdvisorAutoScale=ON is the consent (band from AdvisorScaleBand, else floor 1 and the ceiling where it is); advisor:scale=<band> the older spelling
+          const tag = isOn(f.tags[AUTO_SCALE_TAG]) ? (f.tags[SCALE_BAND_TAG] || "auto") : f.tags[SCALE_TAG];
+          if (tag == null) { log(`${name}: not tagged ${AUTO_SCALE_TAG}=ON (or ${SCALE_TAG})`); continue; }
           tagged++;
           const band = parseBand(tag);
           if ("error" in band) { skip(`tag ${SCALE_TAG} ${band.error}`); continue; }
@@ -317,7 +320,7 @@ export const beanstalkScaleAction: ActionModule = {
       finally { eb.destroy(); as.destroy(); cw.destroy(); }
     }
     if (!seen) notes.push("no Elastic Beanstalk environment in any region the inventory knows");
-    else if (!tagged) notes.push(`${seen} environment(s) seen, none tagged ${SCALE_TAG} (e.g. ${SCALE_TAG}=2-8): nothing is scaled without the tag`);
+    else if (!tagged) notes.push(`${seen} environment(s) seen, none tagged ${AUTO_SCALE_TAG}=ON (or ${SCALE_TAG}=2-8): nothing is scaled without the tag`);
     else if (!proposals.length) notes.push(`${tagged} tagged environment(s) checked: bounds fit the last ${METRIC_DAYS} days`);
     return { proposals, notes };
   },

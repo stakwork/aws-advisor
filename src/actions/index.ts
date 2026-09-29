@@ -26,6 +26,7 @@ import { s3MultipartAbortAction } from "./s3_multipart_abort.js";
 import { lambdaMemoryAction } from "./lambda_memory.js";
 import { beanstalkScaleAction } from "./beanstalk_scale.js";
 import { usageScheduleAction } from "./usage_schedule.js";
+import { consentTagAction } from "./consent_tag.js";
 
 registerAction(acuWindowAction);
 registerAction(snapshotArchiveAction);
@@ -53,3 +54,4 @@ registerAction(s3MultipartAbortAction);
 registerAction(lambdaMemoryAction);
 registerAction(beanstalkScaleAction);
 registerAction(usageScheduleAction);
+registerAction(consentTagAction);

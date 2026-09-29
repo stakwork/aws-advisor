@@ -27,6 +27,8 @@ import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { elbsForInstance, listElb } from "../elb_inventory.js";
 import { latestProfile, listProfiles, usageProfilePass } from "../usage_profile.js";
+import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent } from "../consent.js";
+import { dispatchActionNotifications } from "../executor.js";
 import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
@@ -373,6 +375,27 @@ api.post("/instances/:id/signals/review", async (req, res) => {
     const r = await ask(thread.id, message, by);
     res.status(201).json({ thread_id: thread.id, agent_message_id: r.agent.id });
   } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
+});
+
+// ---- consent switches and manual stop/start (src/consent.ts) -----------------------------------------------------
+const by = (req: any) => (typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
+api.post("/inventory/ec2/:id/consent", async (req, res) => {
+  try { const a = await requestConsent({ kind: "ec2", id: String(req.params.id), value: normaliseConsent(req.body?.value), by: by(req) }); dispatchActionNotifications().catch(() => {}); res.json(a); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
+});
+api.post("/inventory/ec2/:id/power", async (req, res) => {
+  const action = req.body?.action === "stop" ? "stop" : req.body?.action === "start" ? "start" : null;
+  if (!action) return res.status(400).json({ error: "action is stop or start" });
+  try { const a = await manualPower(String(req.params.id), action, by(req)); dispatchActionNotifications().catch(() => {}); res.json(a); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
+});
+api.get("/inventory/beanstalk/:env/consent", async (req, res) => {
+  try { res.json(await beanstalkConsent(String(req.params.env), str(req.query.region), str(req.query.account_id))); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: describeError(e, `beanstalk ${req.params.env} (elasticbeanstalk:DescribeEnvironments, elasticbeanstalk:ListTagsForResource)`) }); }
+});
+api.post("/inventory/beanstalk/:env/consent", async (req, res) => {
+  try { const a = await requestConsent({ kind: "beanstalk", id: String(req.params.env), value: normaliseConsent(req.body?.value), by: by(req), region: str(req.body?.region), account_id: str(req.body?.account_id) }); dispatchActionNotifications().catch(() => {}); res.json(a); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
 });
 
 // ---- usage profiles (src/usage_profile.ts): when a box is used, by hour of the week ----------------------------

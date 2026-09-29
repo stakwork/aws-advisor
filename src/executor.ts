@@ -67,7 +67,7 @@ addColumn("actions", "check_json", "text");
 addColumn("actions", "revived_at", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
-  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule";
+  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule" | "consent_tag";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 

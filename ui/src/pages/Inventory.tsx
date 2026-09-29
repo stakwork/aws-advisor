@@ -7,6 +7,7 @@ import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th 
 import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 import { UsageProfile } from "../components/usageProfile";
+import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
 /** One chip per matched use-signal kind; click marks it noise for this image (or lifts the rule), so the count stops fooling the last-use line. */
@@ -685,7 +686,9 @@ function ElbDetail({ d }: { d: any }) {
       </Group>
       {(d.beanstalk_env || d.asgs?.length || d.ecs_services?.length) ? <Group title="Owned by">
         <Dl rows={[["Elastic Beanstalk", d.beanstalk_env && <span>environment <span className="font-medium">{d.beanstalk_env}</span> (Beanstalk owns this balancer; change it through the environment's configuration)</span>], ["Autoscaling groups", d.asgs?.length ? d.asgs.join(", ") : null], ["ECS services", d.ecs_services?.length ? d.ecs_services.join(", ") : null]]} />
+        {d.beanstalk_env && <AutoScaleSwitch env={d.beanstalk_env} region={d.region} accountId={d.account_id} />}
       </Group> : null}
+      {(d.asgs || []).map((a: string) => <Group key={a} title={`Usage of group ${a}`}><UsageProfile subject={a} running={!d.gone} /></Group>)}
       <Group title="Traffic, last 30 days">
         <Dl rows={[
           ["Requests", d.requests_30d != null ? `${Number(d.requests_30d).toLocaleString(undefined, { maximumFractionDigits: 0 })} over ${d.metric_days} day${d.metric_days === 1 ? "" : "s"} with data` : d.kind === "alb" || d.kind === "clb" ? "no RequestCount datapoint: nothing came through, or the metric is missing" : null],
@@ -839,6 +842,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><SsmBadge status={d.ssm_status} platform={d.ssm_platform} />{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.instance_id}</Mono></div>
       <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
       <WatchToggle kind="ec2" id={d.instance_id} />
+      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} />
 
       <Group title="Identity">
         <Dl rows={[

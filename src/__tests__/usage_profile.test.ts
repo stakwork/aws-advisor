@@ -105,6 +105,13 @@ test("usage profile: probes in the tables become marks on their hour, and the pr
   db.prepare("delete from container_samples where instance_id = 'i-probe'").run();
 });
 
+test("usage profile: a group's balancer requests count as use evidence, so its confidence is not capped at 0.6", () => {
+  const withLb = buildProfile({ subject: "asg:web", kind: "asg", samples: samples((d, h) => office(d, h)).map((x) => ({ ...x, requests: office(new Date(x.at).getUTCDay(), new Date(x.at).getUTCHours()) ? 500 : 0 })) });
+  assert.equal(withLb.confidence, 1); assert.match(withLb.summary, /balancer's request count covers 100 %/);
+  const noLb = buildProfile({ subject: "asg:bare", kind: "asg", samples: samples((d, h) => office(d, h)) });
+  assert.equal(noLb.confidence, 0.6); assert.match(noLb.summary, /no balancer in front of the group/);
+});
+
 test("beanstalk window: the floor before two quiet hours, the baseline back before a working hour, the owner's change becomes the baseline", () => {
   const p = buildProfile({ subject: "asg:web", kind: "asg", samples: samples((d, h) => office(d, h), { probes: () => true }) });
   const base = { windows: p.quiet_windows, confidence: p.confidence, floor: 1, baseline_min: 3, last_set: null as number | null };

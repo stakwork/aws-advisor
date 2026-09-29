@@ -43,7 +43,7 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
     <div>
       {head}
       <div className="mt-1 text-sm text-zinc-300">{p.summary}</div>
-      {p.suggested_schedule && <div className="mt-1 text-xs text-zinc-400">Suggested tag: <span className="font-mono text-zinc-200">advisor:schedule={p.suggested_schedule}</span>{p.off_hours_week != null ? ` · off ${p.off_hours_week} h/week` : ""}{p.est_usd_month ? ` · ≈ ${p.est_usd_month} USD/month` : ""} · confidence {p.confidence}{p.confidence >= 0.85 ? " (a recommendation is filed; approving it puts the tag on)" : " (under 0.85: no recommendation until more weeks or probes back it)"}</div>}
+      {p.suggested_schedule && <div className="mt-1 text-xs text-zinc-400">Suggested tag: <span className="font-mono text-zinc-200">advisor:schedule={p.suggested_schedule}</span>{p.off_hours_week != null ? ` · off ${p.off_hours_week} h/week` : ""}{p.est_usd_month ? ` · ≈ ${p.est_usd_month} USD/month` : ""} · confidence {p.confidence}{p.kind === "asg" ? (p.confidence >= 0.85 ? " (the capacity action drops the minimum to the floor in these windows once the environment is tagged)" : " (under 0.85: no window scheduling until more weeks back it)") : p.confidence >= 0.85 ? " (a recommendation is filed; approving it puts the tag on)" : " (under 0.85: no recommendation until more weeks or probes back it)"}</div>}
       <div className="mt-2 overflow-x-auto">
         <div className="inline-grid gap-px" style={{ gridTemplateColumns: "2.2rem repeat(24, minmax(0.9rem, 1fr))" }}>
           <div />
@@ -61,7 +61,7 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-500/80" />busy in some week (darker = more CPU)</span>
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-zinc-600/50" />too few weeks</span>
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-zinc-800/60" />not seen (off)</span>
-        <span>· {p.signals.cloudwatch_hours} CloudWatch hours, {p.signals.probes} probes{p.signals.requests ? ", balancer requests" : ""}</span>
+        <span>· {p.signals.cloudwatch_hours} CloudWatch hours{p.kind === "asg" ? " of the group" : ""}, {p.signals.probes} probes{p.signals.requests ? ", balancer requests" : ""}{p.kind === "asg" ? " · members come and go; the group is what is measured" : ""}</span>
       </div>
       {p.quiet_windows.length > 0 && <ul className="mt-1 text-xs text-zinc-400">{p.quiet_windows.slice(0, 5).map((w) => <li key={w.label}>{w.label}: {w.effective_hours} h off ({w.hours} h quiet, margins taken) · confidence {w.confidence} · probes in {Math.round(w.probe_coverage * 100)} %</li>)}</ul>}
       {err && <div className="mt-1 text-xs text-red-300">{err}</div>}

@@ -18,7 +18,8 @@
  * when any week was, **unknown** otherwise (too few weeks, or the box was off). Quiet hours in a row make a
  * window; a window keeps `MARGIN_HOURS` on each side (people work late, boxes take a minute to come back), so a
  * four-hour run is a two-hour stop. A window's confidence is the weeks behind it and how much of it the probes
- * covered: CloudWatch alone says "not busy", the probes say "not used", and only both together get close to 1.
+ * covered: CloudWatch alone says "not busy", the probes (or, for a group, its balancer's request count) say "not
+ * used", and only both together get close to 1.
  *
  * From the busy hours the profile derives the smallest `advisor:schedule` value that keeps the box up whenever it
  * was ever used (`suggested_schedule`, UTC, one window a day over the days that have any use; a day with none is
@@ -61,7 +62,7 @@ const DAY_LABEL = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export interface ProbeMark { ext_conn: number; users_now: number; signals_recent: boolean; request_recent: boolean; login_recent: boolean; logs_recent: boolean; container_busy: boolean }
 export interface HourSample { at: number; cpu_avg: number | null; cpu_max: number | null; net_bytes: number | null; requests: number | null; probes: ProbeMark[] }
-export interface HourBucket { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number }
+export interface HourBucket { day: number; hour: number; seen: number; quiet: number; verdict: "quiet" | "busy" | "unknown"; cpu_avg: number | null; cpu_max: number | null; net_mb: number | null; requests: number | null; probes: number; /** samples with use evidence beyond CloudWatch: a probe, or a balancer request count */ covered: number; ext_conn: number; signals: number; requests_seen: number; logins: number; logs: number; busy_containers: number }
 export interface QuietWindow { start: number; end: number; hours: number; effective_start: number; effective_end: number; effective_hours: number; confidence: number; probe_coverage: number; label: string }
 export interface Profile {
   subject: string; kind: "ec2" | "asg"; name: string | null; region: string | null; account_id: string | null; computed_at: string; window_days: number;
@@ -87,7 +88,7 @@ export function sampleQuiet(s: HourSample): boolean {
 
 /** The 168 buckets from the window's samples. Pure. */
 export function bucketize(samples: HourSample[]): HourBucket[] {
-  const out: HourBucket[] = Array.from({ length: HOURS_PER_WEEK }, (_, i) => ({ day: Math.floor(i / 24), hour: i % 24, seen: 0, quiet: 0, verdict: "unknown", cpu_avg: null, cpu_max: null, net_mb: null, requests: null, probes: 0, ext_conn: 0, signals: 0, requests_seen: 0, logins: 0, logs: 0, busy_containers: 0 }));
+  const out: HourBucket[] = Array.from({ length: HOURS_PER_WEEK }, (_, i) => ({ day: Math.floor(i / 24), hour: i % 24, seen: 0, quiet: 0, verdict: "unknown", cpu_avg: null, cpu_max: null, net_mb: null, requests: null, probes: 0, covered: 0, ext_conn: 0, signals: 0, requests_seen: 0, logins: 0, logs: 0, busy_containers: 0 }));
   const acc = new Map<number, { cpu: number[]; net: number[]; req: number[] }>();
   for (const s of samples) {
     if (s.cpu_max == null) continue; // the box was off that hour, or CloudWatch has nothing: no evidence either way
@@ -99,6 +100,7 @@ export function bucketize(samples: HourSample[]): HourBucket[] {
     if (s.requests != null) a.req.push(s.requests);
     b.cpu_max = Math.max(b.cpu_max ?? 0, s.cpu_max);
     b.probes += s.probes.length;
+    if (s.probes.length || s.requests != null) b.covered++;
     for (const p of s.probes) { b.ext_conn = Math.max(b.ext_conn, p.ext_conn); if (p.signals_recent) b.signals++; if (p.request_recent) b.requests_seen++; if (p.login_recent || p.users_now) b.logins++; if (p.logs_recent) b.logs++; if (p.container_busy) b.busy_containers++; }
   }
   for (const [i, a] of acc) { const b = out[i]; b.cpu_avg = mean(a.cpu) == null ? null : r1(mean(a.cpu)!); b.net_mb = mean(a.net) == null ? null : Math.round((mean(a.net)! / 1e6) * 10) / 10; b.requests = mean(a.req) == null ? null : Math.round(mean(a.req)!); }
@@ -126,7 +128,8 @@ export function quietWindows(hours: HourBucket[], weeks: number): QuietWindow[] 
   }
   return out.sort((a, b) => b.effective_hours - a.effective_hours);
 }
-const coverage = (hours: HourBucket[], start: number, len: number) => { let with_ = 0; for (let k = 0; k < len; k++) if (hours[(start + k) % hours.length].probes > 0) with_++; return len ? with_ / len : 0; };
+/** The share of a window's hour-samples that carried use evidence beyond CloudWatch (probes, or the balancer's requests for a group). */
+const coverage = (hours: HourBucket[], start: number, len: number) => { let with_ = 0, seen = 0; for (let k = 0; k < len; k++) { const b = hours[(start + k) % hours.length]; with_ += b.covered; seen += b.seen; } return seen ? with_ / seen : 0; };
 /** Weeks seen (up to the window's weeks) and probe coverage: CloudWatch alone tops out at 0.6, full probe coverage reaches 1. */
 function windowConfidence(hours: HourBucket[], start: number, len: number, weeks: number): number {
   let minSeen = Infinity; for (let k = 0; k < len; k++) minSeen = Math.min(minSeen, hours[(start + k) % hours.length].seen);
@@ -176,7 +179,8 @@ export function buildProfile(i: BuildInput): Profile {
   else {
     const top = windows.slice(0, 3).map((w) => `${w.label} (${w.effective_hours} h, confidence ${w.confidence})`).join("; ");
     parts.push(`quiet ${quietHoursWeek} of ${HOURS_PER_WEEK} hours a week over ${seenWeeks} week${seenWeeks === 1 ? "" : "s"}: ${top}${windows.length > 3 ? ` and ${windows.length - 3} more` : ""}`);
-    parts.push(probes ? `probes cover ${Math.round(100 * windows.reduce((s, w) => s + w.probe_coverage * w.hours, 0) / windows.reduce((s, w) => s + w.hours, 0))} % of the quiet hours (connections, use signals, logins, container CPU)` : "no probe in the window: CloudWatch only, so the confidence tops out at 0.6");
+    const cov = Math.round(100 * windows.reduce((s, w) => s + w.probe_coverage * w.hours, 0) / windows.reduce((s, w) => s + w.hours, 0));
+    parts.push(i.kind === "asg" ? (i.samples.some((s) => s.requests != null) ? `the balancer's request count covers ${cov} % of the quiet hours` : "no balancer in front of the group: CloudWatch CPU only, so the confidence tops out at 0.6") : probes ? `probes cover ${cov} % of the quiet hours (connections, use signals, logins, container CPU)` : "no probe in the window: CloudWatch only, so the confidence tops out at 0.6");
   }
   if (busy.length) parts.push(`busiest ${busy[0].label} (CPU ${busy[0].cpu_avg} %${busy[0].net_mb != null ? `, ${busy[0].net_mb} MB` : ""})`);
   if (sug) parts.push(`schedule that keeps it up whenever it was used: ${sug.text} (off ${off} h/week${est ? `, ≈ ${est} USD/month` : ""})`);
@@ -294,7 +298,7 @@ export async function usageProfilePass(onLog: (s: string) => void = () => {}, op
   const recs: RecInput[] = [];
   const byScope = new Map<string, Subject[]>();
   for (const s of list) { const k = `${s.account_id || ""}|${s.region}`; if (!byScope.has(k)) byScope.set(k, []); byScope.get(k)!.push(s); }
-  const tagged = new Set((db.prepare("select instance_id from inventory_ec2 where gone = 0 and (snapshot like '%\"advisor:schedule\"%' or snapshot like '%\"advisor:hands-off\"%' or snapshot like '%\"advisor:park\"%')").all() as { instance_id: string }[]).map((r) => r.instance_id));
+  const tagged = new Set((db.prepare("select instance_id from inventory_ec2 where gone = 0 and (snapshot like '%\"advisor:schedule\"%' or snapshot like '%\"advisor:hands-off\"%' or snapshot like '%\"advisor:park\"%' or snapshot like '%\"AdvisorAutoPark\"%')").all() as { instance_id: string }[]).map((r) => r.instance_id));
   for (const [scope, subs] of byScope) {
     const [account, region] = scope.split("|");
     const cw = new CloudWatchClient({ region, credentials: creds.forAccount(account || null).read });
