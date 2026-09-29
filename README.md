@@ -35,8 +35,9 @@ through the agent.
    up real prices and read history before answering. It returns schema-shaped recommendations that are imported
    with source `agent`.
 5. **Decide.** In the UI you approve, reject with a reason, snooze, mark pending (in progress) or mark done. Every decision is mirrored into
-   repo2graph's Concept graph (one concept per recommendation under `aws/cost-advisor`) and a rejection is also
-   posted to its learnings store, so the agent consults past decisions natively on the next run.
+   repo2graph's Concept graph (one concept per recommendation under `aws/cost-advisor`, next to the operational
+   patterns the prompts carry) and a rejection is also posted to its learnings store, so the agent consults past
+   decisions natively on the next run.
 6. **Watch.** Every 30 minutes a cheap watcher samples instance states, NAT traffic, Savings Plans and EBS
    totals and raises alerts on sudden change, shown at the top of Overview and on the Alerts page.
 7. **Investigate.** A NAT traffic alert is handed to the agent as an incident: it gets the alert with its
@@ -558,7 +559,8 @@ The complete minimal read-only policy the app needs (the same document is served
         "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
         "cloudfront:List*", "cloudfront:Get*",
         "route53:List*", "route53:Get*",
-        "elasticbeanstalk:DescribeEnvironments",
+        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource",
+        "autoscaling:Describe*",
         "redshift:Describe*",
         "elasticmapreduce:List*", "elasticmapreduce:Describe*",
         "apigateway:GET",
@@ -707,7 +709,8 @@ The advisor never calls an LLM itself; reasoning is delegated to the swarm's rep
 
 ### Approved / rejected decisions as Concepts
 
-Every decision becomes a Concept in repo2graph, in one of two scopes:
+Every decision becomes a Concept in repo2graph, in one of two scopes (a third parent, the operational patterns,
+is described below):
 
 - **internal**: about one specific resource in this account (parent concept "AWS Cost Decisions"), named after the
   action and the resource, e.g. `terminate_stopped_instance example-node-1`.
@@ -719,6 +722,19 @@ When you decide, the detail panel asks whether the decision applies to this reso
 this kind; Jev reads the reason and pre-selects the likely scope with its confidence, and you can override it. The
 agent prompt lists generic rules first, then internal decisions, and the stored scope is kept in the `concepts`
 table (`scope`) and on the recommendation (`decision_scope`).
+
+#### Operational patterns: Concepts only
+
+The rules every agent run is told to respect (pool members are not individual candidates, new instances register
+late with Systems Manager, autoscaling churn is normal, the advisor is the monitor for SSM-managed instances) live
+only in the graph, as children of a third parent, **AWS Operational Patterns**. `OPERATIONAL_PATTERN_SEEDS` in
+`src/concepts.ts` is the seed: at startup and before any dispatch the advisor creates each pattern it finds missing
+from both the graph and its `concepts` table (scope `pattern`, status `seeded`) and never rewrites one. After that
+the graph owns the text: edit a pattern's description in repo2graph and the agents read the new wording at the next
+dispatch; delete it and the rule is retired (the advisor does not recreate a pattern its table already records).
+`systemPromptFor(kind)` appends the block "Operational patterns to respect (facts, not guesses)" with one `[id] rule`
+line per pattern to the editable system prompt of every kind (findings, incident, resolution, observe), so a plan's
+`concepts_used` can cite a pattern by id. The Knowledge page lists them first, with the same click-for-the-record.
 
 #### Mechanics
 
@@ -780,6 +796,7 @@ bearer token (unset = open, like `API_TOKEN`). All tools are read-only:
 | `recommendation_history` | earlier recommendations and decisions for a resource or rule |
 | `findings_for_resource` | findings that mention a resource, and which earlier runs saw it |
 | `instance_inventory` | the EC2 inventory snapshot (name, type, state, SSM status, 30-day CPU, probe memory, EBS GB, list price, open recs, findings), filterable by state / SSM status / search, 200-row cap |
+| `load_balancer_inventory` | the load balancer snapshot: every ALB, NLB, gateway and classic balancer with listeners, target groups and targets resolved to instances or functions with their health, the Beanstalk environment, ASGs and ECS services attached, 30 days of traffic, the fixed list price and the Route 53 records reaching it; `instance_id` = the balancers in front of one instance |
 | `domain_inventory` | the Route 53 snapshot: every record with where it leads in this account (`linked` with the resources reached, `unmatched` for AWS names the account does not have, `external`, `none`), filterable by search, zone, state or type; or one resource's domains by kind and id |
 | `instance_probe` | runs the SSM probe below and returns the parsed JSON |
 | `instance_apps` | what runs on an instance (the apps, the OS set aside, with first/last seen and appear/disappear events, and where its log agents ship), where a program runs across the fleet, or every program running anywhere |
@@ -1089,8 +1106,9 @@ badge on the Inventory page and in the detail's Identity group, and it reaches e
 - the **idle-instance rule** never proposes to stop or right-size a Batch worker, and the **Graviton rule** points at
   the compute environment's instance types and arm64 job images instead of the instance;
 - **Jev** sees the pool in the role state, so a Batch worker is classified as `batch_or_worker` with the reason attached;
-- the **agent prompts** (findings, incident, resolution) carry the same operational patterns: pool members are not
-  individual candidates, new instances register late, autoscaling churn is normal; the `instance_inventory` MCP
+- the **agent prompts** (findings, incident, resolution, observe) carry the same operational patterns, read from
+  the graph at dispatch (Concepts under "AWS Operational Patterns"): pool members are not individual candidates,
+  new instances register late, autoscaling churn is normal; the `instance_inventory` MCP
   tool returns `pool_kind` and `pool`, and incident facts list the pool with its note;
 - the **watcher** already summarises pool churn per day instead of alerting per instance.
 
@@ -1166,7 +1184,8 @@ the chart says so; another change on the same lines moves it too.
 ## Inventory
 
 The Inventory page is meant to replace the console for "what do we run, and which of it can we actually manage".
-`src/inventory.ts` snapshots three kinds of resource with a handful of schema-qualified Steampipe queries:
+`src/inventory.ts` snapshots three kinds of resource with a handful of schema-qualified Steampipe queries (Lambda, load
+balancers, EBS, S3 and Route 53 have modules of their own, below):
 
 - **EC2** (`inventory_ec2`): id, Name tag and all tags, type, state, region and AZ, launch time, private and public IP
   and DNS, platform, architecture, AMI, key pair, instance profile, VPC and subnet, security groups, root device;
@@ -1235,6 +1254,66 @@ part to IA would save. Every hydrated column of `aws_s3_bucket` is a separate S3
 so a denied one (`s3:GetBucketVersioning`, `s3:GetBucketPolicyStatus`, `s3:GetLifecycleConfiguration`) drops
 that column and the refresh continues, reporting the missing action; the affected fields show as unknown rather
 than as zero.
+
+### Load balancers
+
+The Load balancers tab (`src/elb_inventory.ts`, `GET /api/inventory/elb?q&sort&gone&kind&scheme`, refreshed with the
+rest of the inventory, after EC2 so targets resolve against the rows just written) lists every ALB, NLB, gateway and
+classic load balancer with what it fronts and what reaches it:
+
+- **Targets, resolved.** Each target group with its targets: an `instance` target by id, an `ip` target matched to
+  the instance that owns the private address, a `lambda` target by function ARN, each with its health and the
+  reason when unhealthy. A classic balancer's registered instances are shown as one group. The row links every
+  instance, and an instance's own detail lists the balancers in front of it ("Behind", `load_balancers` on
+  `GET /api/inventory/ec2/:id`).
+- **Owners.** The Elastic Beanstalk environment that made the balancer (from its `elasticbeanstalk:environment-name`
+  tag: Beanstalk owns it, change it through the environment), the autoscaling groups attached to its target groups
+  or, for a classic balancer, to its name, and the ECS services that register into it.
+- **Listeners** (port, protocol, certificates, default action), scheme, state, VPC, zones, security groups, tags.
+- **Traffic, 30 days**, from CloudWatch in one `GetMetricData` per region: requests and processed GB for an ALB,
+  peak active flows and GB for an NLB, GB for a gateway balancer, requests for a classic one. A balancer with no
+  datapoint publishes nothing, which is what an unused one looks like.
+- **Price**: the fixed hourly list price × 730 (16.43 USD for an ALB or NLB, 18.25 classic, 9.13 gateway); the
+  LCU-hours (ALB, NLB) or per-GB (classic) part scales with traffic and is left out, and the detail says so.
+- **Domains**: the Route 53 records that lead to the balancer, from the Route 53 links below.
+
+The agent reads the same table through the `load_balancer_inventory` MCP tool (with `instance_id`: the balancers in
+front of one instance), and the graph carries every balancer as an `AdvisorResource {kind: elb}` (id = ARN) with a
+`ROUTES_TO {target_group, port, health}` edge to each instance behind it (a `AdvisorResourceRef` for a Lambda target).
+Rows keep `first_seen` / `last_seen` and `gone` like the other tabs.
+
+### Usage profiles
+
+When is a box used, and when is nobody there? `src/usage_profile.ts` folds the last 28 days into the 168 hours of
+the week for every running standalone instance (pool members belong to their controller) and for every
+autoscaling group behind a load balancer (subject `asg:<name>`), and asks, per hour and per week, whether
+anything happened:
+
+- **CloudWatch**, every hour the instance ran: the hour's maximum CPU under 10 % and the bytes in and out under
+  5 MB; for a group, its average CPU and, when an ALB fronts it, the requests that hour.
+- **The probes** that fell in the hour (`instance_activity`, `container_samples`): no established external
+  connection, no use-signal line, no front-door request and no login in the last hour, nobody logged in, no
+  container above 5 % CPU. The use signals already pass the per-image noise rules, so a heartbeat log is not use;
+  whether *any* log line was written is kept (`logs`) and shown, but does not by itself make an hour busy.
+
+An hour of the week is **quiet** when every week we saw it was quiet (at least three), **busy** when any week
+was, **unknown** otherwise. Quiet hours in a row make a window; a window keeps an hour of margin on each side
+(people work late, boxes take a minute to come back), so a four-hour run is a two-hour stop. A window's
+confidence is the weeks behind it and how much of it the probes covered: CloudWatch alone says "not busy" and
+tops out at 0.6, the probes say "not used", and only both together reach 1. From the busy hours the profile
+derives the smallest `advisor:schedule` value (UTC) that keeps the box up whenever it was ever used, one window a
+day over the days that have any use, a day with none off; a box used around the clock gets none, a box never used
+is a parking case, not a schedule.
+
+The EC2 detail shows the profile as a heat grid (green quiet, amber busy, grey unknown) with the windows, the
+busiest hour and the suggested tag, and a "profile now" button. The daily logs job computes them
+(`GET /api/usage`, `POST /api/usage/run`, `GET /api/instances/:id/usage`, `POST /api/instances/:id/usage/refresh`),
+files a tier-approve `usage_schedule` recommendation when the confidence reaches 0.85 and the schedule leaves the box
+off 20 h a week or more (approving it puts the tag on, see [Auto-actions](#auto-actions-the-executor)), and
+writes the result on the graph: `usage_quiet_hours_week`, `usage_confidence`, `usage_schedule`,
+`usage_off_hours_week`, `usage_est_usd_month`, `usage_quiet_windows` and `usage_summary` on the instance's
+`AdvisorResource` or the group's `AdvisorNodePool`. The Beanstalk capacity action reads the group profiles to
+lower a group's minimum for the quiet hours and raise it back before the busy ones.
 
 ### Route 53: domains linked to resources
 
@@ -1370,7 +1449,8 @@ recommendations, runs, alerts, incidents, controls, playbooks; `Advisor*` labels
 
 - **General area**, true in any account: `KnSystemType` nodes for every instance SKU in the price cache and
   every pricebook rule, with the list price, its unit and source; `KnArchetype` nodes (the workload roles Jev
-  assigns, with their descriptions); `KnPattern` nodes (the operational rules the prompts carry).
+  assigns, with their descriptions). The operational rules the prompts carry are not `Kn*` nodes but Concepts
+  under "AWS Operational Patterns" (see [Operational patterns: Concepts only](#operational-patterns-concepts-only)).
 - **Our side**, a schematic: `KnSystem` nodes, one per autoscaled pool, RDS cluster, ElastiCache replication
   group or NAT gateway, and one per standalone instance, cluster or node (`systemsFromInventory`); each linked
   `IS_A` to its archetype (from Jev's role, or from the pool kind), `RUNS_ON` to the types it uses with the
@@ -1455,10 +1535,12 @@ ever created, changed or deleted), every node carries `account_id` and `updated_
 ```
 (:AdvisorAccount {id})
    ▲ IN_ACCOUNT
-(:AdvisorResource {id, kind: ec2|rds|elasticache, name, type, state, region, role, role_confidence, protected_prob,
+(:AdvisorResource {id, kind: ec2|rds|elasticache|elb, name, type, state, region, role, role_confidence, protected_prob,
                    monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})
    ├─[:HAS_ROLE]──▶ (:AdvisorRole {name})                one node per Jev role name
    ├─[:IN_POOL]───▶ (:AdvisorNodePool {name})            Karpenter pool / EKS node group / ASG (EC2 only)
+   ├─[:ROUTES_TO {target_group, port, health}]─▶ (:AdvisorResource | :AdvisorResourceRef)   a load balancer (kind elb, id = ARN; dns_name, scheme,
+   │                                                          beanstalk_env, targets, healthy, requests_30d, gb_30d, asgs, ecs_services) and the instances or Lambda behind it
    ◀─[:TARGETS]──── (:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule,
    │                  est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})
    │                  ├─[:TARGETS]──────▶ (:AdvisorResourceRef {id})   when the resource is not in the inventory (a VPC, a bucket, a Lambda)
@@ -1578,8 +1660,9 @@ and mount with the free GB in the message. The alert closes by itself (acknowled
 falls five points under its threshold, so a disk hovering at the line does not flap; an escalation replaces the
 warning with an alarm. The latest probe of every running instance is judged again at startup and after every
 probe pass, so a disk that filled while the advisor was down alerts immediately. This is the level today; the
-daily review's `disk_fill` is the trend, days until full at the current rate. The agents are told this (an
-operational pattern in every task's `system.md` and `src/pools.ts`): the advisor is the monitor for SSM-managed
+daily review's `disk_fill` is the trend, days until full at the current rate. The agents are told this (the
+operational pattern "The advisor is the monitor for SSM-managed instances", a Concept appended to every system
+prompt at dispatch): the advisor is the monitor for SSM-managed
 instances, so they must not recommend the CloudWatch agent, CloudWatch alarms or external monitoring for disk,
 memory, load or reboots; a gap in the advisor's coverage goes under `needs_from_human`, not into a recommendation.
 
@@ -1714,8 +1797,9 @@ concept filtering, history, the Jev state and the agent prompt), the gate decisi
 The system prompt for each kind of agent request (findings batch, incident investigation, tailored resolution)
 is editable under Settings > Agent prompts. The code ships a default (`SYSTEM` in `src/agent.ts`,
 `INCIDENT_SYSTEM` in `src/investigate.ts`, `RESOLUTION_SYSTEM` in `src/resolve.ts`); a saved override lives in
-the `settings` table as `prompt:<kind>` and wins until reset. The advisor appends the data after the prompt, so
-what you edit is the persona and the rules. `GET /api/prompts`, `PUT /api/prompts/:kind { text }`,
+the `settings` table as `prompt:<kind>` and wins until reset. At dispatch the advisor appends the operational
+patterns (Concepts under "AWS Operational Patterns", read from the graph) to the prompt and sends the data after
+it, so what you edit is the persona; the operational rules are edited in the graph. `GET /api/prompts`, `PUT /api/prompts/:kind { text }`,
 `DELETE /api/prompts/:kind`.
 
 ## Baselines: what is typical
@@ -1982,10 +2066,36 @@ a `TOUCHED_IN` edge from each row it applied, read back or reverted.
 **The actuator role.** `ACT_ROLE_ARN` is the only identity that ever changes AWS. The executor assumes it from the
 read credentials for the change itself and for nothing else; the read role never gains a write action. The page
 shows the permissions policy to put on it (`actuatorPolicy` in `src/permissions.ts`: `rds:ModifyDBCluster`,
-`ec2:ModifySnapshotTier`, `ec2:RestoreSnapshotTier`, the describes those need, and a **Deny on anything tagged
+`ec2:ModifySnapshotTier`, `ec2:RestoreSnapshotTier`, the describes those need, `ec2:CreateTags`/`DeleteTags` for the
+`advisor:schedule` key alone, `route53:ChangeResourceRecordSets` for UPSERTs of A records alone, and a **Deny on anything tagged
 `advisor:hands-off`**) and the trust policy naming the advisor's read identity. Without a role the executor is
 dry-run only and "acts as" on the page says so. Every plan also skips a hands-off tag itself, and a change
 that failed three times in a day is refused until the next day.
+
+#### Elastic Beanstalk environments
+
+Beanstalk owns the Auto Scaling group behind an environment: its CloudFormation stack tracks MinSize and MaxSize, so
+a size set on the group directly is overwritten by the next configuration change or platform update, and the
+environment's own trigger scales the group back to what its configuration says. The capacity action therefore
+changes the environment's option settings (`aws:autoscaling:asg`) through `UpdateEnvironment`, and the read policy
+carries the describes that need (`DescribeConfigurationSettings`, `DescribeEnvironmentResources`,
+`ListTagsForResource`, `autoscaling:Describe*`).
+
+Who does the CloudFormation and Auto Scaling work depends on the environment. With an **operations role** attached,
+Beanstalk assumes that role for the update and the actuator needs `elasticbeanstalk:UpdateEnvironment` alone, which
+is what `actuatorPolicy` grants (on environments tagged `advisor:scale` only). Without one, Beanstalk uses the
+caller's permissions, and the actuator would need `cloudformation:UpdateStack`, `autoscaling:UpdateAutoScalingGroup`
+and the rest of what the update makes. Attach a role once per environment instead of widening the actuator:
+
+```sh
+aws iam create-role --role-name aws-elasticbeanstalk-operations-role --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"elasticbeanstalk.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name aws-elasticbeanstalk-operations-role --policy-arn arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+aws elasticbeanstalk associate-environment-operations-role --environment-name <env> --operations-role arn:aws:iam::<ACCOUNT_ID>:role/aws-elasticbeanstalk-operations-role
+```
+
+`describe-environments` shows the role as `OperationsRole`; the pass notes name every tagged environment without one.
+The tag is the band the executor may move within: `advisor:scale=2-8` means the floor never goes under 2 and the
+ceiling never over 8, whatever the usage says.
 
 **The catalog today**
 
@@ -2012,9 +2122,11 @@ that failed three times in a day is refused until the next day.
 | Idle load balancers deleted, once approved (`src/actions/idle_load_balancer.ts`) | ALBs, NLBs and gateway load balancers older than 30 days whose CloudWatch metrics (RequestCount and ProcessedBytes; ActiveFlowCount and ProcessedBytes; ProcessedBytes) all summed to zero over 30 days and with no healthy target get a tier-approve `elb_idle` recommendation. Approving it is the decision: `DeleteLoadBalancer`, announced and held `ACT_DELETE_GRACE_HOURS` first, with the listeners, target groups and attributes saved on the row (target groups are not deleted). No automatic revert. Estimate: 0.0225 USD/h (16.43/month) for ALB and NLB, 0.0125 USD/h for GWLB. | classic ELBs (not covered); a missing metric (unknown = traffic); any healthy target or unreadable target health; deletion protection on; `advisor:hands-off`; not idle any more at apply time; no approved recommendation |
 | DynamoDB capacity mode from the 30-day load, once approved (`src/actions/dynamodb_capacity_mode.ts`) | Every table (100 per pass, per region) priced both ways from 30 days of CloudWatch consumed and provisioned units at list (RCU 0.00013 and WCU 0.00065 USD/h; on-demand 0.125 USD per million reads, 0.625 per million writes). Where the other mode is at least 20 % and 5 USD/month cheaper a tier-approve recommendation is filed (rule `dynamodb_capacity_mode`); once approved, `UpdateTable` switches the mode, online. Going to provisioned, table and index units are set to the busiest hour plus 30 %. Estimate: the recommendation's own difference. Revert switches back with the previous units. | fewer than 14 days of metrics (a table's age stands in when it has none); saving under 20 % or 5 USD; table not ACTIVE; a global table; application auto scaling on (or unreadable) when going to on-demand; a switch to on-demand in the last 24 h (AWS allows one per day); `advisor:hands-off` |
 | T-family credit specification from the 30-day credit usage, once approved (`src/actions/cpu_credit_spec.ts`) | Running t2/t3/t3a/t4g instances: from 30 days of CPUSurplusCreditsCharged, CPUCreditBalance and CPUUtilization. Unlimited → standard is recommended where surplus credits cost at least 5 USD and a tenth of the instance's month while the CPU averages under the size's baseline (the bursts are occasional; standard throttles them instead of billing). Standard → unlimited where the credit balance hit zero on three or more days (the instance was throttled; the recommendation carries the cost, no saving claimed). A tier-approve recommendation (rule `cpu_credit_spec`) per instance; once approved, one `ModifyInstanceCreditSpecification`, online, no restart. Estimate: the surplus charge per month (→ standard) or none (→ unlimited). Revert sets it back. | fewer than 14 days of metrics; surplus under the thresholds or CPU above the baseline; balance zero on fewer than 3 days; pool members; `advisor:hands-off` |
-| Office-hours schedules for tagged instances and databases (`src/actions/schedule_hours.ts`) | An EC2 instance, RDS instance or Aurora cluster tagged `advisor:schedule` (e.g. `weekdays 08-20 Europe/Madrid`) runs only in that window: at :45 the pass decides for the top of the coming hour, `StopInstances`/`StopDBInstance`/`StopDBCluster` when it is running outside the window, the matching start when it is stopped inside it. The tag is the consent: no grace, no announcement; the actuator policy allows the calls only on tagged resources. A stopped RDS instance is started by AWS after seven days; the next scheduled stop takes it down again. Revert is the opposite call, and a box a person woke by hand is left running until the window closes. Estimate: the inventory's monthly price × the share of the week outside the window. | no `advisor:schedule` tag; a tag the parser rejects (the note says why); `advisor:hands-off`; EC2 pool members; states other than running/stopped (pending, stopping, modifying wait); RDS read replicas or instances with replicas; Multi-AZ SQL Server; RDS instances inside a cluster (tag the cluster); a cluster whose members are not all available; a resource the executor stopped and someone started by hand in the last 12 h |
+| Office-hours schedules for tagged instances and databases (`src/actions/schedule_hours.ts`) | An EC2 instance, RDS instance or Aurora cluster tagged `advisor:schedule` (e.g. `weekdays 08-20 Europe/Madrid`) runs only in that window: at :45 the pass decides for the top of the coming hour, `StopInstances`/`StopDBInstance`/`StopDBCluster` when it is running outside the window, the matching start when it is stopped inside it. The tag is the consent: no grace, no announcement; the actuator policy allows the calls only on tagged resources. A stopped RDS instance is started by AWS after seven days; the next scheduled stop takes it down again. Revert is the opposite call, and a box a person woke by hand is left running until the window closes. A box without an Elastic IP gets a new public address on start: the stop row records the A records in the account's zones that name the old address (`dns_records`), the start waits up to 150 s for the new address and points them at it (`route53:ChangeResourceRecordSets`, UPSERT of A records only, the routing kept), and the row and its read-back say which names moved or, if the address never came, that DNS was not updated. Estimate: the inventory's monthly price × the share of the week outside the window. | no `advisor:schedule` tag; a tag the parser rejects (the note says why); `advisor:hands-off`; EC2 pool members; states other than running/stopped (pending, stopping, modifying wait); RDS read replicas or instances with replicas; Multi-AZ SQL Server; RDS instances inside a cluster (tag the cluster); a cluster whose members are not all available; a resource the executor stopped and someone started by hand in the last 12 h |
 | Incomplete multipart uploads aborted on every bucket (`src/actions/s3_multipart_abort.ts`) | Every bucket in the inventory (100 largest per pass) without an enabled whole-bucket abort rule: `PutBucketLifecycleConfiguration` adding `aws-advisor-abort-incomplete-multipart` (abort after `ACT_MULTIPART_DAYS`, 7) merged with the existing rules, which are kept as they are. The same rule id the usage analysis proposes, so that part of the lifecycle recommendation becomes moot once this has run. Parts of an abandoned upload bill as Standard and never appear in a listing; completed objects are never touched. No estimate is claimed: the analysis counts the uploads but not their bytes. Revert restores the previous configuration; a bucket that had none keeps the rule Disabled. | a whole-bucket abort rule already enabled (a prefixed or disabled one does not count); `advisor:hands-off`; buckets past the 100-per-pass cap wait |
+| Usage schedules tagged on instances, once approved (`src/actions/usage_schedule.ts`) | An approved `usage_schedule` recommendation (the [usage profile](#usage-profiles) files one for a running standalone instance whose quiet hours are confident, at least 0.85, and add up to 20 h a week or more): one `CreateTags` of `advisor:schedule=<window>` on the instance, e.g. `weekdays 07-19 UTC`, the smallest window that keeps the box up whenever it was ever used plus an hour each side. From then on the office-hours action above stops it outside the window, starts it before the window opens and re-points its DNS records. Revert removes the tag. The actuator policy lets the role write and delete this one tag key on instances and no other. | no approved recommendation; `advisor:hands-off`; pool members; a box not running; a box already tagged `advisor:schedule` by someone (never overwritten; a tag equal to the recommendation marks it done) |
 | Lambda memory right-sized from the REPORT lines, once approved (`src/actions/lambda_memory.ts`) | Functions with `ACT_LAMBDA_MIN_INVOCATIONS` (1,000) or more invocations in 14 days (40 per pass): one Logs Insights query on `/aws/lambda/&lt;name&gt;` over the REPORT lines gives the peak and average memory used, the p95 and average duration and the count. Where the peak stays under half of the configured memory and 100+ reports back it, a tier-approve `lambda_memory` recommendation is filed: target = peak + 50 % headroom rounded up to 64 MB, never under 128, at least one step below the current setting, worth at least 1 USD/month in GB-seconds. Approval-tier because CPU scales with memory, so a lower setting can lengthen the duration. Once approved, `UpdateFunctionConfiguration`, online; Revert puts the old memory back. Estimate: the GB-second difference at the observed average duration and invocation rate. | fewer than 100 REPORT lines; peak over 50 % of configured; already at 128 MB; saving under 1 USD; no log group; function not Active; memory changed since the window; `advisor:hands-off`; no approved recommendation |
+| Elastic Beanstalk capacity bounds from the group's 14-day usage (`src/actions/beanstalk_scale.ts`) | An environment tagged `advisor:scale=<floor>-<ceiling>` (e.g. `2-8`; `auto` = floor 1, the ceiling stays) has its configured `aws:autoscaling:asg` MinSize/MaxSize moved one step at a time, through `UpdateEnvironment` so the change survives deployments (a size set on the group directly is overwritten by the next configuration change, and Beanstalk's own trigger scales the group back). From 14 days of the group's hourly average CPU (`CPUUtilization` by `AutoScalingGroupName`) and its scaling activities, whose causes ("changing the desired capacity from 2 to 3") let the pass replay the desired capacity hour by hour: the floor comes down by one when the group sat at its minimum for 90 % of the window with the p95 hourly CPU under `ACT_EB_LOW_CPU` (30 %), so one instance fewer stays under twice that; the ceiling goes up by one when the group spent `ACT_EB_PRESSURE_HOURS` (3) or more hours pinned at its maximum with the CPU at or above `ACT_EB_HIGH_CPU` (70 %), which adds cost and the row says so. Pressure wins over an idle floor. A third move follows the group's day: when the [usage profile](#usage-profiles) of the group (`asg:<name>`, its CPU and its balancer's requests) has confident quiet windows adding up to 20 h a week or more, the pass before two quiet hours sets MinSize to the tag's floor and the pass before a working hour puts the configured minimum back (the same dance as the Serverless v2 minimum; a minimum the owner changes by hand becomes the new baseline, kept under `act:eb:<environment id>`), and the idle-floor trim is skipped while that schedule is in force. The environment updates for a minute or two, no instance is replaced; the group scales in to a new floor when Beanstalk's scale-in alarm next fires (the row says whether it is in ALARM already). Revert puts the previous bound back. The actuator policy allows `UpdateEnvironment` only on a tagged environment; with an operations role on the environment that is all it needs, without one Beanstalk uses the caller's rights and the pass notes say so (see [Elastic Beanstalk](#elastic-beanstalk-environments)). Estimate: one member's list price for a floor cut. | no `advisor:scale` tag, or one that does not parse; `advisor:hands-off`; a single-instance environment; status other than Ready; fewer than 7 days of metrics; the live group's bounds differ from the configuration (edited directly); health not Ok while a floor cut is due; a step made in the last 24 h; the floor or ceiling of the tag reached |
 
 **The kill switch.** "Pause auto-actions" stops the executor from planning or applying anything until someone
 resumes it: the Pause button on the Auto-actions page (with a reason), `POST /api/actions/pause` `{ reason, until? }`
@@ -2255,7 +2367,7 @@ What each one is for (✎ = also editable in Settings):
 | ✎ `AGENT_API_KEY` | local testing without giving the swarm a key | unset |
 | ✎ `RUN_CRON`, `WATCH_CRON`, `PROBE_CRON`, `SPEND_CRON`, `BASELINE_CRON`, `REVIEW_CRON`, `OBSERVE_CRON`, `LOGS_CRON` | a different rhythm, or `off` | daily 06:00, every 30 min, hourly at :05, daily 06:40, daily 07:00, daily 07:15, daily 06:50 |
 | ✎ `PROBE_MAX`, `PROBE_IDLE_CPU` | a bigger or narrower automatic probe pass | 25 instances, under 20 % CPU |
-| ✎ `ACT_MODE`, `ACT_ROLE_ARN`, `ACT_CRON`, `ACT_ACU_FLOOR`, `ACT_MAX_PER_PASS`, `ACT_SNAPSHOT_MIN_AGE_DAYS`, `ACT_LOG_RETENTION_DAYS`, `ACT_S3_MIN_GB` | the executor: `off` / `dry_run` / `apply`, the actuator role it assumes for changes, its rhythm, the lowest Serverless v2 minimum it may set, the cap per pass, the snapshot age, the retention put on log groups without one, the bucket size from which request metrics are enabled and the lifecycle analysis runs | `dry_run`, unset (dry runs only), hourly at :45, 0.5 ACU, 10, 90 days, 90 days, 20 GB |
+| ✎ `ACT_MODE`, `ACT_ROLE_ARN`, `ACT_CRON`, `ACT_ACU_FLOOR`, `ACT_MAX_PER_PASS`, `ACT_SNAPSHOT_MIN_AGE_DAYS`, `ACT_LOG_RETENTION_DAYS`, `ACT_S3_MIN_GB`, `ACT_EB_LOW_CPU`, `ACT_EB_HIGH_CPU`, `ACT_EB_PRESSURE_HOURS` | the executor: `off` / `dry_run` / `apply`, the actuator role it assumes for changes, its rhythm, the lowest Serverless v2 minimum it may set, the cap per pass, the snapshot age, the retention put on log groups without one, the bucket size from which request metrics are enabled and the lifecycle analysis runs | `dry_run`, unset (dry runs only), hourly at :45, 0.5 ACU, 10, 90 days, 90 days, 20 GB |
 | ✎ `PROBE_SIGNALS` | other or more use-signal patterns for the probe (`name=regex;;name=regex`) | the nine built-in patterns |
 | `PROBE_DOCUMENT` | the probe document has another name (see [The SSM probe document](#the-ssm-probe-document)); `AWS-RunShellScript` is refused outside the test suite | `AwsAdvisorProbe` |
 | ✎ `AGENT_AUTO_DISPATCH` | you want every scheduled run sent (`always`) or none (`never`) | `changes` |

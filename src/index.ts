@@ -19,7 +19,9 @@ import { tags } from "./routes/tags.js";
 import { accounts } from "./routes/accounts.js";
 import { passReports } from "./routes/pass_reports.js";
 import "./actions/index.js";
+import { ensureOperationalPatterns } from "./concepts.js";
 loadTasks();
+void ensureOperationalPatterns(); // the operational-pattern Concepts, seeded once into the graph
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();

@@ -47,19 +47,4 @@ export function batchEnvironmentName(asg: string | undefined): string | null {
 /** Pools whose members appear and disappear with demand: probing or judging one member says nothing. */
 export const isEphemeralPool = (pool: Pool | null | undefined): boolean => pool?.kind === "batch" || pool?.kind === "karpenter";
 
-/** Shared prompt text so every agent call reasons the same way about pools. */
-export const OPERATIONAL_PATTERNS = `Operational patterns to respect (facts, not guesses):
-- Pool members are not individual candidates. Instances with a pool (batch = AWS Batch compute environment, karpenter,
-  eks = managed node group, asg) are launched and terminated by their controller. A Batch worker exists only while a
-  job runs: its appearance, its short life, its idle CPU between jobs and a late SSM registration are all expected.
-  Recommend changes to the compute environment, NodePool, node group, launch template or job definition, never
-  "stop", "right-size" or "migrate" one member.
-- New instances take a few minutes to register with Systems Manager; "not managed" on an instance younger than
-  fifteen minutes is not a finding.
-- Autoscaling churn (nodes appearing and disappearing) is normal; only a change in the pool's size over days is.
-- The advisor is the monitor for SSM-managed instances. It probes memory, disk, load, reboots and containers itself,
-  keeps daily roll-ups, raises disk_high, disk_full and disk_fill (days until full at the current rate), memory and
-  load alerts, and reviews the statistics every day. Never recommend installing the CloudWatch agent, creating
-  CloudWatch alarms or adding external monitoring for these; a monitoring gap (an instance the advisor does not probe,
-  a threshold, a figure it does not compute) goes under needs_from_human or in the rationale, not in a recommendation
-  or a fix.`;
+// The operational patterns the prompts carry live as Concepts (src/concepts.ts OPERATIONAL_PATTERN_SEEDS).

@@ -11,18 +11,3 @@ aws_cloudtrail_changes (who changed what, the first place to look for the cause 
 aws_recommendation_history (what the team already decided). A spend step that matches a decision the team approved
 is expected, say so. A routine thing is not worth a sentence. If nothing changed, say so in one line and set
 nothing_to_report. Emit the JSON object first, then any commentary.
-Operational patterns to respect (facts, not guesses):
-- Pool members are not individual candidates. Instances with a pool (batch = AWS Batch compute environment, karpenter,
-  eks = managed node group, asg) are launched and terminated by their controller. A Batch worker exists only while a
-  job runs: its appearance, its short life, its idle CPU between jobs and a late SSM registration are all expected.
-  Recommend changes to the compute environment, NodePool, node group, launch template or job definition, never
-  "stop", "right-size" or "migrate" one member.
-- New instances take a few minutes to register with Systems Manager; "not managed" on an instance younger than
-  fifteen minutes is not a finding.
-- Autoscaling churn (nodes appearing and disappearing) is normal; only a change in the pool's size over days is.
-- The advisor is the monitor for SSM-managed instances. It probes memory, disk, load, reboots and containers itself,
-  keeps daily roll-ups, raises disk_high, disk_full and disk_fill (days until full at the current rate), memory and
-  load alerts, and reviews the statistics every day. Never recommend installing the CloudWatch agent, creating
-  CloudWatch alarms or adding external monitoring for these; a monitoring gap (an instance the advisor does not probe,
-  a threshold, a figure it does not compute) goes under needs_from_human or in the rationale, not in a recommendation
-  or a fix.

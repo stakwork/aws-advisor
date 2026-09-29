@@ -13,6 +13,7 @@ import { getAction, listActions, pauseActions, pauseState, resumeActions, revert
 import { PriceSpec, fetchPrices } from "./prices.js";
 import { inventoryRefreshedAt, listEc2 } from "./inventory.js";
 import { domainsFor, listRoute53 } from "./route53_inventory.js";
+import { elbsForInstance, listElb } from "./elb_inventory.js";
 import { attributeNatTraffic } from "./watcher.js";
 import { alertContext } from "./investigate.js";
 import { describeError, tablesIn } from "./permissions.js";
@@ -330,6 +331,24 @@ export function createFactServer(): McpServer {
     return text({ count: rows.length, truncated: rows.length >= a.limit, note: "summary is the chain in words; links are the resources reached (hop 1 direct, hop 2 behind a load balancer or distribution); an unmatched record that names an S3 website bucket or an ELB no longer here can be claimed by a stranger and should be deleted", records: rows.map((r) => ({ name: r.name, type: r.type, zone: r.zone_name, ttl: r.ttl, alias: Boolean(r.alias), values: r.values, alias_target: r.alias_target, link_state: r.link_state, target: r.target, summary: r.summary, links: r.links, routing: r.routing })) });
   });
 
+  server.registerTool("load_balancer_inventory", {
+    title: "Load balancers and what they front",
+    description: "The advisor's load balancer snapshot (refreshed with the inventory): every ALB, NLB, gateway and classic load balancer with its scheme, DNS name, listeners, target groups and their targets resolved to instances (by id or private IP) or Lambda functions with each target's health, the Elastic Beanstalk environment that owns it, the autoscaling groups and ECS services attached, 30 days of requests / bytes / flows from CloudWatch, the fixed monthly list price (LCU-hours excluded) and the Route 53 records that lead to it. With instance_id: the balancers in front of that instance. A balancer with no healthy target serves nothing; one whose requests_30d is null publishes no metric (no traffic seen, or the metric is missing).",
+    inputSchema: {
+      q: z.string().max(200).optional().describe("substring of the name, DNS name, ARN, Beanstalk environment, a target group or target, or the VPC id"),
+      kind: z.enum(["alb", "nlb", "gwlb", "clb"]).optional(),
+      scheme: z.enum(["internet-facing", "internal"]).optional(),
+      instance_id: z.string().max(40).optional().describe("the balancers in front of this instance instead of the list"),
+      include_gone: z.boolean().default(false),
+      limit: z.number().int().min(1).max(QUERY_ROW_CAP).default(50),
+    },
+    annotations: ro,
+  }, (a) => {
+    if (a.instance_id) return text({ instance_id: a.instance_id, load_balancers: elbsForInstance(a.instance_id) });
+    const rows = listElb({ q: a.q, kind: a.kind, scheme: a.scheme, gone: a.include_gone }).slice(0, a.limit).map((r) => ({ ...r, domains: domainsFor(r.kind, r.name) }));
+    return text({ count: rows.length, note: "monthly_usd is the fixed hourly price x 730 at list; ALB and NLB add LCU-hours, a classic balancer adds per-GB. target_groups[].targets[].instance_id / name is the inventory instance behind an instance or IP target; lambda names a function target.", load_balancers: rows });
+  });
+
   server.registerTool("open_recommendations", {
     title: "Open recommendations with their full rationale",
     description: "The advisor's open recommendations (rule drafts and earlier agent items) with title, resource, action type, claimed monthly saving, tier, confidence, the full rationale and the evidence the rule attached (prices, metrics, probe, role). Filter by rule (e.g. graviton_migration, idle_instance, review_idle), by resource id or substring, by ids, or by minimum saving; ordered by saving. The findings batch prompt only summarises these: call this for any item you want to judge, rank or merge.",
@@ -627,7 +646,7 @@ export function createFactServer(): McpServer {
 
   server.registerTool("graph_query", {
     title: "Cypher over the advisor's graph mirror",
-    description: `Read-only Cypher against the Neo4j mirror of this advisor's data (a one-way copy of its database; the same facts as the other tools, but walkable). Labels are all prefixed Advisor; every node has account_id and updated_at:\n${SCHEMA_SUMMARY}\nConcept nodes (label Concept, not Advisor) hold the team's decisions and rules: a recommendation with a DECIDED_AS edge was approved, rejected, snoozed or done and the Concept's description and documentation carry the reason; Concepts named "<role> <action> rule" are generic rules that apply to any resource of that kind. Example: MATCH (r:AdvisorResource {id: 'i-0123'})-[e]-(x) RETURN r, e, x. The statement must start with MATCH, OPTIONAL MATCH, WITH or CALL { }, contain no CREATE/MERGE/SET/DELETE/REMOVE/DROP/LOAD and no apoc/dbms procedure; it runs in a read transaction with a ${GRAPH_TIMEOUT_MS / 1000}s timeout and returns at most ${GRAPH_ROW_CAP} rows. When the mirror is not configured the tool says so.`,
+    description: `Read-only Cypher against the Neo4j mirror of this advisor's data (a one-way copy of its database; the same facts as the other tools, but walkable). Labels are all prefixed Advisor; every node has account_id and updated_at:\n${SCHEMA_SUMMARY}\nConcept nodes (label Concept, not Advisor) hold the team's decisions and rules: a recommendation with a DECIDED_AS edge was approved, rejected, snoozed or done and the Concept's description and documentation carry the reason; Concepts named "<role> <action> rule" are generic rules that apply to any resource of that kind; the children of "AWS Operational Patterns" are the operational rules every agent run is told to respect. Example: MATCH (r:AdvisorResource {id: 'i-0123'})-[e]-(x) RETURN r, e, x. The statement must start with MATCH, OPTIONAL MATCH, WITH or CALL { }, contain no CREATE/MERGE/SET/DELETE/REMOVE/DROP/LOAD and no apoc/dbms procedure; it runs in a read transaction with a ${GRAPH_TIMEOUT_MS / 1000}s timeout and returns at most ${GRAPH_ROW_CAP} rows. When the mirror is not configured the tool says so.`,
     inputSchema: { cypher: z.string().min(1).max(10_000).describe("One read-only Cypher statement") },
     annotations: ro,
   }, (a) => graphQuery(a));

@@ -1,6 +1,5 @@
 import { config } from "./config.js";
-import { getPrompt, registerDefaultPrompt } from "./prompts.js";
-import { OPERATIONAL_PATTERNS } from "./pools.js";
+import { registerDefaultPrompt } from "./prompts.js";
 import { canonicalResource } from "./resource_id.js";
 import { credentialGate } from "./gate.js";
 import { db } from "./db.js";
@@ -10,7 +9,7 @@ import { completeObservation } from "./observe.js";
 import { checkAgentQuota } from "./quota.js";
 import { taskFor } from "./tasks.js";
 import { critiqueText, gradeByRubric } from "./rubric.js";
-import { listDecisionConcepts } from "./concepts.js";
+import { listDecisionConcepts, systemPromptFor } from "./concepts.js";
 import { checkTiers } from "./tiercheck.js";
 
 /**
@@ -68,7 +67,7 @@ Do not guess a price or assume a resource is missing without checking.
 Past team decisions are stored as Concepts under the namespace aws/cost-advisor; call learn_concept with a concept id
 from the prompt when you need the full record before proposing something similar.
 Emit the JSON object first, then any commentary.`;
-registerDefaultPrompt("findings", `${SYSTEM}\n${OPERATIONAL_PATTERNS}`);
+registerDefaultPrompt("findings", SYSTEM);
 
 const EXAMPLES_PER_CONTROL = 3, TOP_DRAFTS = 15, TOP_PER_RULE = 3;
 const short = (t: unknown, n: number) => { const x = String(t ?? "").replace(/\s+/g, " ").trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
@@ -173,12 +172,13 @@ export async function dispatchToAgent(runId: number): Promise<{ requestId: strin
   let prompt = buildPrompt(runId);
   // Decisions mirrored into repo2graph's Concept graph; the agent can learn_concept any of them for the full record.
   const concepts = await listDecisionConcepts();
-  if (concepts.length) {
-    prompt += "\n\n## Team decisions on record (Concepts): generic rules first, then internal decisions\n" + concepts.map((c) => `- (${c.scope === "generic" ? "GENERIC rule, applies to any account" : "internal, this resource only"}) [${c.id}] ${c.name}: ${c.description}`).join("\n");
+  const decisions = concepts.filter((c) => c.scope !== "pattern"); // the patterns go in the system prompt
+  if (decisions.length) {
+    prompt += "\n\n## Team decisions on record (Concepts): generic rules first, then internal decisions\n" + decisions.map((c) => `- (${c.scope === "generic" ? "GENERIC rule, applies to any account" : "internal, this resource only"}) [${c.id}] ${c.name}: ${c.description}`).join("\n");
   }
   const { requestId } = await postAgentRequest({
     prompt,
-    systemOverride: getPrompt("findings"),
+    systemOverride: await systemPromptFor("findings", concepts),
     sessionId: `aws-advisor-run-${runId}-${Date.now().toString(36)}`,
     agentName: "aws-cost-advisor",
     metadata: { runId },
@@ -270,7 +270,7 @@ export async function gradeAndMaybeRetry(run: AgentRunRow & { status?: string },
   try {
     const { requestId } = await postAgentRequest({
       prompt: `${original.prompt}\n\n${critiqueText(grade)}`,
-      systemOverride: getPrompt(run.kind),
+      systemOverride: await systemPromptFor(run.kind),
       sessionId: `aws-advisor-${run.kind}-retry-${Date.now().toString(36)}`,
       agentName: `aws-${run.kind}-retry`,
       metadata: { retry_of: run.request_id },

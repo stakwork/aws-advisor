@@ -25,6 +25,8 @@ import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refresh
 import { listLambda } from "../lambda_inventory.js";
 import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
+import { elbsForInstance, listElb } from "../elb_inventory.js";
+import { latestProfile, listProfiles, usageProfilePass } from "../usage_profile.js";
 import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
@@ -373,6 +375,22 @@ api.post("/instances/:id/signals/review", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
+// ---- usage profiles (src/usage_profile.ts): when a box is used, by hour of the week ----------------------------
+api.get("/usage", (req, res) => res.json({ profiles: listProfiles(req.query.kind === "asg" ? "asg" : req.query.kind === "ec2" ? "ec2" : undefined) }));
+api.post("/usage/run", async (_req, res) => {
+  if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  try { res.json(await usageProfilePass((l) => console.log(`[usage] ${l}`))); } catch (e: any) { res.status(502).json({ error: describeError(e, "usage profiles (cloudwatch:GetMetricData)") }); }
+});
+api.get("/instances/:id/usage", (req, res) => {
+  const p = latestProfile(String(req.params.id)) ?? latestProfile(`asg:${req.params.id}`);
+  p ? res.json(p) : res.status(404).json({ error: "no usage profile yet: the daily logs job builds one for every running instance; use refresh to build it now" });
+});
+api.post("/instances/:id/usage/refresh", async (req, res) => {
+  if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  try { const r = await usageProfilePass((l) => console.log(`[usage] ${l}`), { only: [String(req.params.id)] }); const p = latestProfile(String(req.params.id)) ?? latestProfile(`asg:${req.params.id}`); p ? res.json({ ...p, pass: r }) : res.status(404).json({ error: r.errors[0] || "not a running standalone instance or a balanced autoscaling group" }); }
+  catch (e: any) { res.status(502).json({ error: describeError(e, `usage profile ${req.params.id} (cloudwatch:GetMetricData)`) }); }
+});
+
 api.get("/instances/:id/metrics", (req, res) => {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   res.json(instanceMetrics(String(req.params.id), limit).map((p) => ({ ...p, summary: summarizeProbe(p.data) })));
@@ -431,7 +449,7 @@ api.get("/inventory/ec2", (req, res) => {
 api.get("/inventory/ec2/:id", (req, res) => {
   const d = ec2Detail(String(req.params.id));
   if (!d) return res.status(404).json({ error: "not found" });
-  res.json({ ...d, role: resourceRole(String(req.params.id)), domains: domainsFor("ec2", String(req.params.id)) });
+  res.json({ ...d, role: resourceRole(String(req.params.id)), domains: domainsFor("ec2", String(req.params.id)), load_balancers: elbsForInstance(String(req.params.id)) });
 });
 
 // Every list row carries the Route 53 records that lead to it (directly, or through a load balancer or distribution).
@@ -459,6 +477,8 @@ api.post("/inventory/rds/:id/load/refresh", async (req, res) => {
 });
 api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
 api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
+// Load balancers with their targets resolved; the Route 53 records that lead to each (kinds alb/nlb/clb from the resolver, lb when only an interface named it).
+api.get("/inventory/elb", (req, res) => res.json(withDomains(listElb({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), kind: str(req.query.kind), scheme: str(req.query.scheme) }), ["alb", "name"], ["nlb", "name"], ["clb", "name"], ["lb", "name"])));
 api.get("/inventory/ebs", (req, res) => res.json(listEbs({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));
 api.get("/inventory/s3", (req, res) => res.json(withDomains(listS3({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["s3", "name"])));
 api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await refreshS3Inventory()); } catch (e: any) { res.status(500).json({ error: e.message }); } });

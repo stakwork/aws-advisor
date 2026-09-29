@@ -284,6 +284,10 @@ export default function Knowledge() {
       <SystemsCard />
       <LogGroupsCard />
       <BaselinesCard />
+      <Card title={<span>Operational patterns · what every agent run is told ({(d.patterns || []).length})</span>}>
+        <div className="mb-2 text-xs text-zinc-500">Appended to every agent system prompt at dispatch. Edit a rule in repo2graph to change what the agents are told; delete it to retire the rule.</div>
+        <List items={d.patterns || []} empty="No operational patterns in the graph; the advisor seeds them on the next dispatch." />
+      </Card>
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title={<span>Generic rules · apply to any account ({d.generic.length})</span>}>
           <List items={d.generic} empty="No generic rules yet. Reject or approve a recommendation with scope “all resources of this kind” to create one." />

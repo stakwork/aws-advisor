@@ -1,6 +1,7 @@
 import { config } from "./config.js";
-import { getPrompt, registerDefaultPrompt } from "./prompts.js";
-import { OPERATIONAL_PATTERNS, Pool, poolOf } from "./pools.js";
+import { registerDefaultPrompt } from "./prompts.js";
+import { systemPromptFor } from "./concepts.js";
+import { Pool, poolOf } from "./pools.js";
 import { credentialGate } from "./gate.js";
 import { db } from "./db.js";
 import { S, query } from "./steampipe.js";
@@ -82,7 +83,7 @@ interface endpoint replaces NAT processing with cheaper endpoint hours.
 Fix action types: enable_flow_logs, add_vpc_endpoint, add_pull_through_cache, move_workload, reschedule_job,
 rightsize_instance, stop_instance, other. Tier: auto = reversible, approve = needs a human, report = never automate.
 Emit the JSON object first, then any commentary.`;
-registerDefaultPrompt("incident", `${INCIDENT_SYSTEM}\n${OPERATIONAL_PATTERNS}`);
+registerDefaultPrompt("incident", INCIDENT_SYSTEM);
 
 const gb = (b: number) => `${(b / 1e9).toFixed(2)} GB`;
 const safeJson = (s: unknown) => { if (typeof s !== "string") return s ?? null; try { return JSON.parse(s); } catch { return s; } };
@@ -268,7 +269,7 @@ export async function investigateAlert(alertId: number, opts: { force?: boolean 
     const prompt = await buildIncidentPrompt(alert, incidentId);
     const { requestId } = await postAgentRequest({
       prompt,
-      systemOverride: getPrompt("incident"),
+      systemOverride: await systemPromptFor("incident"),
       sessionId: `aws-advisor-incident-${incidentId}-${Date.now().toString(36)}`,
       agentName: "aws-incident-investigator",
       metadata: { alertId, incidentId, kind: alert.kind },
