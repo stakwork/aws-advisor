@@ -5,7 +5,7 @@ import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
-import { ContainersTable, InstanceCharts } from "../components/instanceCharts";
+import { InstanceCharts } from "../components/instanceCharts";
 import { UsageProfile } from "../components/usageProfile";
 import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 
@@ -37,6 +37,50 @@ function SignalChips({ image, act, rules, onChange }: { image: string; act: any;
 }
 
 /** Probe 1.6: what runs on the box (the OS set aside), its appear/disappear events and where its log agents ship. Reloads when a new probe lands. */
+/** One containers table: the latest probe (state, CPU and memory now, logs and use signals) joined by name with 30 days of daily roll-ups (CPU and memory average and maximum). */
+function ContainersPanel({ instanceId, latest, rules, onRules }: { instanceId: string; latest: any; rules: any[]; onRules: () => void }) {
+  const [hist, setHist] = useState<any[] | null>(null);
+  useEffect(() => { setHist(null); api(`/instances/${encodeURIComponent(instanceId)}/history?days=30`).then((h) => setHist(h.containers || [])).catch(() => setHist([])); }, [instanceId, latest?.collected_at]);
+  const byName = new Map<string, any>((hist || []).map((c) => [c.name, c]));
+  const now: any[] = latest.data.containers || [];
+  const seen = new Set(now.map((c) => c.name));
+  const gone = (hist || []).filter((c) => !seen.has(c.name));
+  const mb = (b: number | null | undefined) => (b == null ? "—" : b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`);
+  const p1 = (v: number | null | undefined) => (v == null ? "—" : `${Number(v).toFixed(1)}%`);
+  return (
+    <Group title={`Containers · ${latest.data.docker.running} running of ${latest.data.docker.total}${hist?.length ? ` · ${hist[0]?.days ?? ""} days of roll-ups` : ""}`}>
+      <div className="overflow-x-auto"><table className="w-full border-collapse text-xs">
+        <thead className="text-zinc-500"><tr><th className="py-1 text-left font-normal">Container</th><th className="text-left font-normal">Image</th><th className="text-left font-normal">State</th><th className="text-right font-normal">CPU now</th><th className="text-right font-normal">CPU 30 d avg / max</th><th className="text-right font-normal">Memory now</th><th className="text-right font-normal">Memory 30 d avg / max</th><th className="text-left font-normal">Logs, 24 h</th><th className="text-left font-normal">Use signals</th></tr></thead>
+        <tbody>
+          {now.map((c: any) => {
+            const a = latest.data.activity?.containers?.find((x: any) => x.name === c.name);
+            const h = byName.get(c.name);
+            return (
+              <tr key={c.name} className="border-t border-zinc-800/70 align-top">
+                <td className={`py-1 pr-2 font-mono ${c.state === "running" ? "text-zinc-200" : "text-zinc-500"}`}>{c.name}</td>
+                <td className="max-w-48 truncate pr-2 text-zinc-500" title={c.image}>{c.image}</td>
+                <td className="pr-2 text-zinc-400">{c.state}{h?.running_share != null && h.running_share < 0.99 ? <span className="text-zinc-600"> · up {Math.round(h.running_share * 100)}% of 30 d</span> : null}</td>
+                <td className="pr-2 text-right">{c.cpu_pct != null ? `${c.cpu_pct}%` : "—"}</td>
+                <td className={`pr-2 text-right ${h?.cpu_pct_max >= 50 ? "text-amber-300/80" : "text-zinc-400"}`}>{h ? `${p1(h.cpu_pct_avg)} / ${p1(h.cpu_pct_max)}` : "—"}</td>
+                <td className="pr-2 text-right">{c.mem_bytes ? `${mb(c.mem_bytes)}${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : "—"}</td>
+                <td className="pr-2 text-right text-zinc-400">{h ? `${mb(h.mem_bytes_avg)} / ${mb(h.mem_bytes_max)}` : "—"}</td>
+                <td className="pr-2 text-zinc-400" title={a?.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : undefined}>{a ? <>{a.log_lines} lines{a.last_log_at ? `, last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? <span className="text-amber-300/80"> · {a.errors} errors</span> : null}{a.restarts >= 10 ? <span className="text-red-300"> · {a.restarts} restarts</span> : null}</> : "—"}</td>
+                <td>{a ? <span className="flex flex-wrap items-center gap-1">{a.signal_lines > 0 ? <span className="text-emerald-300/80">{a.signal_lines}, last {when(a.last_signal_at)}</span> : <span className="text-zinc-600">none</span>}<SignalChips image={c.image} act={a} rules={rules} onChange={onRules} /></span> : "—"}</td>
+              </tr>
+            );
+          })}
+          {gone.map((h: any) => (
+            <tr key={`gone-${h.name}`} className="border-t border-zinc-800/70 align-top text-zinc-600">
+              <td className="py-1 pr-2 font-mono line-through">{h.name}</td><td className="max-w-48 truncate pr-2" title={h.image}>{h.image}</td><td className="pr-2">not in the latest probe · last {h.last_day}</td><td className="pr-2 text-right">—</td><td className="pr-2 text-right">{p1(h.cpu_pct_avg)} / {p1(h.cpu_pct_max)}</td><td className="pr-2 text-right">—</td><td className="pr-2 text-right">{mb(h.mem_bytes_avg)} / {mb(h.mem_bytes_max)}</td><td className="pr-2">—</td><td>—</td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div>
+      {hist === null && <div className="mt-1 text-[11px] text-zinc-600">loading the 30-day roll-ups…</div>}
+    </Group>
+  );
+}
+
 /** GET /api/instances/:id/logs: the groups the box ships to (probe 1.6), with what the logs refresh knows about each. */
 function LogsBlock({ instanceId }: { instanceId: string }) {
   const [d, setD] = useState<any>(undefined);
@@ -1023,30 +1067,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
             ]} />
             <AppsBlock instanceId={d.instance_id} probedAt={latest.collected_at} />
           </Group>}
-          {latest?.data?.docker?.available && (
-            <Group title={`Containers · ${latest.data.docker.running} running of ${latest.data.docker.total}`}>
-              {latest.data.containers?.length > 0 && (
-                <div className="overflow-x-auto"><table className="w-full border-collapse text-xs">
-                  <thead className="text-zinc-500"><tr><th className="py-1 text-left font-normal">Container</th><th className="text-left font-normal">Image</th><th className="text-left font-normal">State</th><th className="text-right font-normal">CPU now</th><th className="text-right font-normal">Memory now</th><th className="text-left font-normal">Logs, 24 h</th><th className="text-left font-normal">Use signals</th></tr></thead>
-                  <tbody>{latest.data.containers.slice(0, 20).map((c: any) => {
-                    const a = latest.data.activity?.containers?.find((x: any) => x.name === c.name);
-                    return (
-                      <tr key={c.name} className="border-t border-zinc-800/70 align-top">
-                        <td className={`py-1 pr-2 font-mono ${c.state === "running" ? "text-zinc-200" : "text-zinc-500"}`}>{c.name}</td>
-                        <td className="max-w-56 truncate pr-2 text-zinc-500" title={c.image}>{c.image}</td>
-                        <td className="pr-2 text-zinc-400">{c.state}</td>
-                        <td className="pr-2 text-right">{c.cpu_pct != null ? `${c.cpu_pct}%` : "—"}</td>
-                        <td className="pr-2 text-right">{c.mem_bytes ? `${Math.round(c.mem_bytes / 1048576)} MB${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : "—"}</td>
-                        <td className="pr-2 text-zinc-400" title={a?.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : undefined}>{a ? <>{a.log_lines} lines{a.last_log_at ? `, last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? <span className="text-amber-300/80"> · {a.errors} errors</span> : null}{a.restarts >= 10 ? <span className="text-red-300"> · {a.restarts} restarts</span> : null}</> : "—"}</td>
-                        <td>{a ? <span className="flex flex-wrap items-center gap-1">{a.signal_lines > 0 ? <span className="text-emerald-300/80">{a.signal_lines}, last {when(a.last_signal_at)}</span> : <span className="text-zinc-600">none</span>}<SignalChips image={c.image} act={a} rules={rules} onChange={loadRules} /></span> : "—"}</td>
-                      </tr>
-                    );
-                  })}</tbody>
-                </table></div>
-              )}
-              <div className="mt-3"><ContainersTable instanceId={d.instance_id} days={30} /></div>
-            </Group>
-          )}
+          {latest?.data?.docker?.available && <ContainersPanel instanceId={d.instance_id} latest={latest} rules={rules} onRules={loadRules} />}
           {latest?.data?.docker && !latest.data.docker.available && <div className="mt-2 text-xs text-zinc-600">No Docker daemon on this instance.</div>}
         </>
       )}
@@ -1055,17 +1076,23 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
 
       {tab === "links" && (
         <>
-          <div className="lg:columns-2 lg:gap-8">
+          <div className="grid grid-cols-1 gap-x-8 lg:grid-cols-2">
+            <div className="min-w-0">
             <Domains list={d.domains} empty={d.public_ip || net.public_dns ? "No Route 53 record in this account points at this instance, its Elastic IP or a load balancer in front of it." : "No Route 53 record in this account reaches this instance (no public address; check the load balancers)."} />
             <Group title="Behind">
               {d.load_balancers?.length ? <ul className="space-y-0.5 text-sm">{d.load_balancers.map((lb: any, i: number) => <li key={`${lb.arn}-${i}`} className="flex flex-wrap items-center gap-2"><Link className="hover:underline" to={`/inventory?tab=elb&id=${encodeURIComponent(lb.name)}`}>{lb.name}</Link><span className="text-xs uppercase text-zinc-500">{lb.kind === "clb" ? "classic" : lb.kind}</span><span className="text-xs text-zinc-500">{lb.target_group}{lb.port != null ? `:${lb.port}` : ""}</span>{lb.health && <span className={`text-xs ${lb.health === "healthy" ? "text-emerald-300" : lb.health === "unhealthy" ? "text-red-300" : "text-zinc-500"}`}>{lb.health}</span>}</li>)}</ul> : <div className="text-sm text-zinc-500">No load balancer in this account has this instance as a target.</div>}
             </Group>
+            </div>
+            <div className="min-w-0">
             <Related id={d.instance_id} recs={d.open_recs} findings={d.findings_count ?? 0} list={d.recommendations} />
             {d.findings_run_id && d.findings?.length > 0 && (
-              <ul className="mt-1 space-y-0.5 text-sm">{d.findings.map((f: any) => <li key={f.id} className="flex gap-2"><Badge>{f.status}</Badge><span className="min-w-0 truncate" title={f.reason || ""}>{f.control_title || f.control_id}{f.reason ? `: ${f.reason}` : ""}</span></li>)}</ul>
+              <Group title={`Findings in the last run · ${d.findings.length}`}>
+                <ul className="space-y-0.5 text-sm">{d.findings.map((f: any) => <li key={f.id} className="flex gap-2"><Badge>{f.status}</Badge><span className="min-w-0 truncate" title={f.reason || ""}>{f.control_title || f.control_id}{f.reason ? `: ${f.reason}` : ""}</span></li>)}</ul>
+              </Group>
             )}
-            <GraphLine id={d.instance_id} />
+            </div>
           </div>
+          <GraphLine id={d.instance_id} />
           <Timeline kind="ec2" id={d.instance_id} />
         </>
       )}

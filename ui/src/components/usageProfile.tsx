@@ -67,7 +67,9 @@ export function UsageProfile({ subject, running }: { subject: string; running: b
   return (
     <div>
       {head}
-      <div className="mt-1 text-sm text-zinc-300">{p.summary.replace(/ \d+ busy hours of the week; what tripped them[^.]*\.(?= |$)/, "")}</div>
+      <ul className="mt-1 space-y-0.5 text-sm text-zinc-300">
+        {p.summary.replace(/ \d+ busy hours of the week; what tripped them[^.]*\.(?= |$)/, "").split(/\. (?=[a-z])/).map((s) => s.replace(/\.$/, "")).filter(Boolean).map((s, i) => <li key={i} className="flex gap-2"><span className="text-zinc-600">·</span><span>{s.charAt(0).toUpperCase() + s.slice(1)}</span></li>)}
+      </ul>
       <WhyBusy hours={p.hours} />
       {p.kind === "ec2" && (
         <div className={`mt-2 rounded-md border px-2.5 py-2 text-xs ${p.review ? (p.review.verdict === "keep_running" ? "border-zinc-700 bg-zinc-900/60" : "border-emerald-700/40 bg-emerald-950/30") : "border-zinc-800 bg-zinc-900/40"}`}>
