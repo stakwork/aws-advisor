@@ -5,7 +5,7 @@ import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
 import { RoleLine } from "../components/jev";
-import { InstanceCharts } from "../components/instanceCharts";
+import { ContainersTable, InstanceCharts } from "../components/instanceCharts";
 import { UsageProfile } from "../components/usageProfile";
 import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 
@@ -37,6 +37,45 @@ function SignalChips({ image, act, rules, onChange }: { image: string; act: any;
 }
 
 /** Probe 1.6: what runs on the box (the OS set aside), its appear/disappear events and where its log agents ship. Reloads when a new probe lands. */
+/** GET /api/instances/:id/logs: the groups the box ships to (probe 1.6), with what the logs refresh knows about each. */
+function LogsBlock({ instanceId }: { instanceId: string }) {
+  const [d, setD] = useState<any>(undefined);
+  useEffect(() => { setD(undefined); api(`/instances/${encodeURIComponent(instanceId)}/logs`).then(setD).catch(() => setD(null)); }, [instanceId]);
+  if (d === undefined) return <div className="mt-3 text-sm text-zinc-500">Loading…</div>;
+  if (!d) return <div className="mt-3 text-sm text-zinc-500">Could not read the log shipping for this instance.</div>;
+  const groups: any[] = d.groups || [];
+  const byVia = new Map<string, any[]>(); for (const g of groups) byVia.set(g.via, [...(byVia.get(g.via) || []), g]);
+  const via = (v: string) => v.startsWith("docker:") ? `container ${v.slice(7)}` : v === "cloudwatch-agent" ? "CloudWatch agent" : v;
+  const usd = (n: number | null) => (n == null ? "—" : `$${n.toFixed(2)}`);
+  const totalIngest = groups.reduce((s, g) => s + (g.ingest_usd_month || 0), 0), totalStore = groups.reduce((s, g) => s + (g.storage_usd_month || 0), 0);
+  return (
+    <Group title={`Ships logs to · ${groups.length} group${groups.length === 1 ? "" : "s"}${d.probed_at ? ` · probed ${when(d.probed_at)}` : ""}`}>
+      {!d.probe_has_section ? <div className="text-sm text-zinc-500">No log shipping section on the latest probe: the box has not been probed since probe 1.6, or has never been probed.</div>
+        : !groups.length ? <div className="text-sm text-zinc-500">The probe found no agent or container shipping logs to CloudWatch from this box.</div>
+        : (
+          <>
+            {(totalIngest || totalStore) ? <div className="mb-2 text-xs text-zinc-400">At list: {usd(totalIngest)} / month of ingestion and {usd(totalStore)} / month of storage across the groups the logs refresh knows.</div> : null}
+            <div className="overflow-x-auto"><table className="w-full border-collapse text-xs">
+              <thead className="text-zinc-500"><tr><th className="py-1 text-left font-normal">Log group</th><th className="text-left font-normal">Shipped by</th><th className="text-left font-normal">Source</th><th className="text-right font-normal">Retention</th><th className="text-right font-normal">Stored</th><th className="text-right font-normal">Ingest / day</th><th className="text-right font-normal">$ / month</th></tr></thead>
+              <tbody>{groups.map((g) => (
+                <tr key={`${g.group}|${g.via}`} className="border-t border-zinc-800/70">
+                  <td className="py-1 pr-2 font-mono text-zinc-200">{g.group}</td>
+                  <td className="pr-2 text-zinc-400">{via(g.via)}</td>
+                  <td className="max-w-56 truncate pr-2 text-zinc-500" title={g.source || undefined}>{g.source || "—"}</td>
+                  <td className="pr-2 text-right text-zinc-400">{!g.known ? <span className="text-zinc-600" title="not seen by the daily logs refresh yet, or in another account">unknown</span> : g.retention_days ? `${g.retention_days} d` : <span className="text-amber-300/80">never expires</span>}</td>
+                  <td className="pr-2 text-right">{g.stored_gb != null ? `${g.stored_gb} GB` : "—"}</td>
+                  <td className="pr-2 text-right">{g.ingest_gb_day != null ? `${g.ingest_gb_day} GB` : "—"}</td>
+                  <td className="text-right">{g.ingest_usd_month != null || g.storage_usd_month != null ? usd((g.ingest_usd_month || 0) + (g.storage_usd_month || 0)) : "—"}</td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+            <div className="mt-1 text-[11px] text-zinc-600">{[...byVia.keys()].map(via).join(" · ")}. Retention, size and ingestion come from the daily logs refresh; "unknown" means that refresh has not seen the group.</div>
+          </>
+        )}
+    </Group>
+  );
+}
+
 function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: string }) {
   const [d, setD] = useState<any>(null);
   const [all, setAll] = useState(false);
@@ -73,7 +112,6 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
       {gone.length > 0 && !all && <div className="text-zinc-600">{gone.length} left the box</div>}
       {d.events?.length > 0 && <details className="mt-0.5"><summary className="cursor-pointer text-zinc-500">App events ({d.events.length})</summary>
         <ul className="mt-0.5 space-y-0.5">{d.events.slice(0, 20).map((e: any) => <li key={e.id} className={e.event === "disappeared" ? "text-amber-300/80" : "text-zinc-400"}>{when(e.at)} · {e.event} <span className="font-mono">{e.name}</span>{e.details?.oldest_seconds ? ` (had run ${age(e.details.oldest_seconds)})` : ""}</li>)}</ul></details>}
-      {d.log_shipping?.length > 0 && <div className="mt-0.5">Ships logs to: {d.log_shipping.slice(0, 8).map((s: any) => <span key={`${s.via}|${s.group}`} className="mr-2"><span className="font-mono text-zinc-300">{s.group}</span> <span className="text-zinc-600">({s.via})</span></span>)}{d.log_shipping.length > 8 ? <span className="text-zinc-600">and {d.log_shipping.length - 8} more</span> : null}</div>}
     </div>
   </>);
 }
@@ -298,6 +336,18 @@ export default function Inventory() {
   useEffect(() => { loadRows(); }, [tab, state, ssm, sort, gone, zone, link, params.get("q")]);
   useEffect(() => { loadDetail(); setProbe({ busy: false, error: "" }); }, [tab, selectedId, rows]);
 
+  const [usageBusy, setUsageBusy] = useState(false);
+  const [usageMsg, setUsageMsg] = useState("");
+  const recomputeUsage = async () => {
+    setUsageBusy(true); setUsageMsg(""); setErr("");
+    try {
+      const r = await api("/usage/recompute", { method: "POST", body: "{}" });
+      const v = r.review?.verdicts || {};
+      setUsageMsg(`${r.profiles.profiled} profiles recomputed, ${r.profiles.recommendations} schedule recommendation(s); Jev reviewed ${r.review.reviewed} (${["confirm", "adjust", "keep_running"].filter((k) => v[k]).map((k) => `${v[k]} ${k.replace("_", " ")}`).join(", ") || "none"})${r.review.errors?.length ? ` · ${r.review.errors[0]}` : ""}${r.profiles.errors?.length ? ` · ${r.profiles.errors[0]}` : ""}`);
+      if (selectedId) loadDetail();
+    } catch (e: any) { setErr(e.message); }
+    finally { setUsageBusy(false); }
+  };
   const refresh = async () => {
     setRefreshing(true); setErr("");
     try {
@@ -330,8 +380,9 @@ export default function Inventory() {
           <h1 className="text-xl font-semibold text-zinc-100">Inventory</h1>
           <div className="text-sm text-zinc-500">{s?.refreshed_at ? <>Snapshot from {when(s.refreshed_at)} · {tab === "route53" ? "DNS links refreshed after every run and by Refresh now (not by the watcher)" : "refreshed after every run and every watcher sample"}</> : "No snapshot yet: start a run, or refresh now."}</div>
         </div>
-        <Button variant="ghost" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</Button>
+        <span className="flex gap-2">{tab === "ec2" && <Button variant="ghost" onClick={recomputeUsage} disabled={usageBusy} title="Recompute every usage profile (28 days of CloudWatch and probes) and ask Jev to decide each window">{usageBusy ? "Profiling and asking Jev…" : "Recompute usage + ask the agent"}</Button>}<Button variant="ghost" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh now"}</Button></span>
       </div>
+      {usageMsg && <div className="text-sm text-zinc-400">{usageMsg}</div>}
       {err && <div className="text-sm text-red-300">{err}</div>}
 
       <div className="flex gap-1 border-b border-zinc-800">
@@ -777,9 +828,11 @@ function TypicalLine({ instanceId }: { instanceId: string }) {
   if (!b || !b.length) return null;
   const order = ["cpu_pct", "mem_pct", "disk_pct", "load_per_cpu", "containers"];
   const rows = b.filter((x) => order.includes(x.metric)).sort((x, y) => order.indexOf(x.metric) - order.indexOf(y.metric));
+  const u = (x: any, v: number) => `${Math.round(v)}${x.unit === "%" ? "%" : ""}`;
   return (
-    <div className="mt-1 text-xs text-zinc-400">
-      Typical: {rows.map((x, i) => <span key={x.metric}>{i ? " · " : ""}{metricLabel(x.metric)} <span className="text-zinc-200">{Math.round(x.median)}{x.unit === "%" ? "%" : ""}</span> (p95 {Math.round(x.p95)}{x.unit === "%" ? "%" : ""}, {x.days} d{x.by_hour.some((h: number | null) => h != null) ? ", hourly profile" : ""})</span>)}
+    <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-4 gap-y-0.5 text-xs">
+      <div className="text-zinc-500">Typical</div><div className="text-right text-zinc-500">median</div><div className="text-right text-zinc-500">p95</div><div className="text-right text-zinc-500">days</div>
+      {rows.map((x) => <Fragment key={x.metric}><div className="text-zinc-400">{metricLabel(x.metric)}{x.by_hour.some((h: number | null) => h != null) ? <span className="text-zinc-600"> · hourly profile</span> : null}</div><div className="text-right text-zinc-200">{u(x, x.median)}</div><div className="text-right text-zinc-300">{u(x, x.p95)}</div><div className="text-right text-zinc-500">{x.days}</div></Fragment>)}
     </div>
   );
 }
@@ -837,8 +890,8 @@ const Glance = ({ label, value, hint, tone }: { label: string; value: ReactNode;
   </div>
 );
 
-type Ec2Tab = "overview" | "usage" | "running" | "links";
-const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["running", "What runs"], ["links", "Links & history"]];
+type Ec2Tab = "overview" | "usage" | "running" | "logs" | "links";
+const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["running", "What runs"], ["logs", "Logs"], ["links", "Links & history"]];
 
 /**
  * The EC2 detail in four tabs, every fact once: a header with what identifies the box and the two switches, a glance
@@ -946,6 +999,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
             <Group title="When it is used">
               <UsageProfile subject={d.instance_id} running={d.state === "running"} />
             </Group>
+            {latest?.data?.activity && <Group title="Activity: is anyone using it?"><ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} /></Group>}
           </div>
           <div className="min-w-0">
             <Group title="Trends"><TypicalLine instanceId={d.instance_id} /><div className="mt-2"><InstanceCharts instanceId={d.instance_id} /></div></Group>
@@ -969,32 +1023,35 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
             ]} />
             <AppsBlock instanceId={d.instance_id} probedAt={latest.collected_at} />
           </Group>}
-          {latest?.data?.activity && <Group title="Activity: is anyone using it?"><ActivityBlock activity={latest.data.activity} summary={latest.summary} collectedAt={latest.collected_at} previous={d.probes?.[1] ?? null} instanceId={d.instance_id} rules={rules} onRules={loadRules} /></Group>}
           {latest?.data?.docker?.available && (
             <Group title={`Containers · ${latest.data.docker.running} running of ${latest.data.docker.total}`}>
               {latest.data.containers?.length > 0 && (
-                <ul className="space-y-0.5 text-xs text-zinc-400">
-                  {latest.data.containers.slice(0, 12).map((c: any) => {
+                <div className="overflow-x-auto"><table className="w-full border-collapse text-xs">
+                  <thead className="text-zinc-500"><tr><th className="py-1 text-left font-normal">Container</th><th className="text-left font-normal">Image</th><th className="text-left font-normal">State</th><th className="text-right font-normal">CPU now</th><th className="text-right font-normal">Memory now</th><th className="text-left font-normal">Logs, 24 h</th><th className="text-left font-normal">Use signals</th></tr></thead>
+                  <tbody>{latest.data.containers.slice(0, 20).map((c: any) => {
                     const a = latest.data.activity?.containers?.find((x: any) => x.name === c.name);
                     return (
-                    <li key={c.name} className="flex flex-wrap gap-x-2">
-                      <span className={c.state === "running" ? "text-zinc-200" : "text-zinc-500"}>{c.name}</span>
-                      <span className="text-zinc-500">{c.image}</span>
-                      <span className="text-zinc-500">{c.state}{c.cpu_pct != null ? ` · cpu ${c.cpu_pct}%` : ""}{c.mem_bytes ? ` · ${Math.round(c.mem_bytes / 1048576)} MB${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : ""}</span>
-                      {a && <span className={a.signal_lines > 0 ? "text-emerald-300/80" : "text-zinc-500"} title={a.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : "no log lines in 24 h"}>
-                        {a.log_lines} log lines/24h{a.signal_lines > 0 ? ` · ${a.signal_lines} use signals, last ${when(a.last_signal_at)}` : a.last_log_at ? ` · last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? ` · ${a.errors} errors` : ""}{a.restarts >= 10 ? ` · ${a.restarts} restarts` : ""}
-                      </span>}
-                      {a && <SignalChips image={c.image} act={a} rules={rules} onChange={loadRules} />}
-                    </li>
+                      <tr key={c.name} className="border-t border-zinc-800/70 align-top">
+                        <td className={`py-1 pr-2 font-mono ${c.state === "running" ? "text-zinc-200" : "text-zinc-500"}`}>{c.name}</td>
+                        <td className="max-w-56 truncate pr-2 text-zinc-500" title={c.image}>{c.image}</td>
+                        <td className="pr-2 text-zinc-400">{c.state}</td>
+                        <td className="pr-2 text-right">{c.cpu_pct != null ? `${c.cpu_pct}%` : "—"}</td>
+                        <td className="pr-2 text-right">{c.mem_bytes ? `${Math.round(c.mem_bytes / 1048576)} MB${c.mem_pct != null ? ` (${c.mem_pct}%)` : ""}` : "—"}</td>
+                        <td className="pr-2 text-zinc-400" title={a?.last_lines?.length ? `last lines:\n${a.last_lines.join("\n")}` : undefined}>{a ? <>{a.log_lines} lines{a.last_log_at ? `, last ${when(a.last_log_at)}` : ""}{a.errors > 0 ? <span className="text-amber-300/80"> · {a.errors} errors</span> : null}{a.restarts >= 10 ? <span className="text-red-300"> · {a.restarts} restarts</span> : null}</> : "—"}</td>
+                        <td>{a ? <span className="flex flex-wrap items-center gap-1">{a.signal_lines > 0 ? <span className="text-emerald-300/80">{a.signal_lines}, last {when(a.last_signal_at)}</span> : <span className="text-zinc-600">none</span>}<SignalChips image={c.image} act={a} rules={rules} onChange={loadRules} /></span> : "—"}</td>
+                      </tr>
                     );
-                  })}
-                </ul>
+                  })}</tbody>
+                </table></div>
               )}
+              <div className="mt-3"><ContainersTable instanceId={d.instance_id} days={30} /></div>
             </Group>
           )}
           {latest?.data?.docker && !latest.data.docker.available && <div className="mt-2 text-xs text-zinc-600">No Docker daemon on this instance.</div>}
         </>
       )}
+
+      {tab === "logs" && <LogsBlock instanceId={d.instance_id} />}
 
       {tab === "links" && (
         <>

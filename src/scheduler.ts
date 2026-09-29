@@ -19,6 +19,7 @@ import { refreshCommitments } from "./commitments.js";
 import { refreshS3Inventory } from "./s3_inventory.js";
 import { s3UsagePass } from "./s3_usage.js";
 import { usageProfilePass } from "./usage_profile.js";
+import { usageReviewPass } from "./usage_review.js";
 import { dispatchNotifications } from "./notify.js";
 import { dispatchActionNotifications, runExecutorPass } from "./executor.js";
 import { dispatchPassReports } from "./pass_report.js";
@@ -108,6 +109,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
     try { const r = await s3UsagePass((l) => console.log(`[s3-usage] ${l}`)); out.push(`s3 usage ${r.analysed.length}/${r.candidates}`); } catch (e: any) { console.error(`[s3-usage] failed: ${e?.message || e}`); out.push(`s3 usage failed: ${e?.message || e}`); }
     try { const r = await usageProfilePass((l) => console.log(`[usage] ${l}`)); out.push(`usage profiles ${r.profiled}, ${r.recommendations} schedule recommendation(s)`); } catch (e: any) { console.error(`[usage] failed: ${e?.message || e}`); out.push(`usage failed: ${e?.message || e}`); }
+    try { const r = await usageReviewPass((l) => console.log(`[usage-review] ${l}`)); out.push(`usage review ${r.reviewed} reviewed${r.errors.length ? ` (${r.errors[0]})` : ""}`); } catch (e: any) { console.error(`[usage-review] failed: ${e?.message || e}`); out.push(`usage review failed: ${e?.message || e}`); }
     try { const r = await refreshTagHygiene((l) => console.log(`[tags] ${l}`)); out.push(`tags ${r.missing} missing, ${r.opt_in} opt-in`); } catch (e: any) { console.error(`[tags] failed: ${e?.message || e}`); out.push(`tags failed: ${e?.message || e}`); }
     return out.join(", ");
   } },

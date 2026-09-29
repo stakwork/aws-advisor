@@ -27,6 +27,7 @@ import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { elbsForInstance, listElb } from "../elb_inventory.js";
 import { latestProfile, listProfiles, usageProfilePass } from "../usage_profile.js";
+import { latestReview, scheduleFor, usageReviewPass } from "../usage_review.js";
 import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent } from "../consent.js";
 import { dispatchActionNotifications } from "../executor.js";
 import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
@@ -406,12 +407,43 @@ api.post("/usage/run", async (_req, res) => {
 });
 api.get("/instances/:id/usage", (req, res) => {
   const p = latestProfile(String(req.params.id)) ?? latestProfile(`asg:${req.params.id}`);
-  p ? res.json(p) : res.status(404).json({ error: "no usage profile yet: the daily logs job builds one for every running instance; use refresh to build it now" });
+  p ? res.json({ ...p, review: p.kind === "ec2" ? latestReview(p.subject) : null, follows: p.kind === "ec2" ? scheduleFor(p.subject) : null }) : res.status(404).json({ error: "no usage profile yet: the daily logs job builds one for every running instance; use refresh to build it now" });
+});
+// The usage review: Jev reads every profile with its context and decides the window (src/usage_review.ts). All boxes, or one; force asks again even when the verdict is fresh.
+api.post("/usage/review", async (req, res) => {
+  try { res.json(await usageReviewPass((l) => console.log(`[usage-review] ${l}`), { force: req.body?.force !== false })); } catch (e: any) { res.status(502).json({ error: e?.message || String(e) }); }
+});
+api.post("/usage/recompute", async (_req, res) => {
+  if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  try { const profiles = await usageProfilePass((l) => console.log(`[usage] ${l}`)); const review = await usageReviewPass((l) => console.log(`[usage-review] ${l}`), { force: true }); res.json({ profiles, review }); }
+  catch (e: any) { res.status(502).json({ error: describeError(e, "usage profiles (cloudwatch:GetMetricData)") }); }
+});
+api.post("/instances/:id/usage/review", async (req, res) => {
+  const id = String(req.params.id);
+  try {
+    const r = await usageReviewPass((l) => console.log(`[usage-review] ${l}`), { only: [id], force: true });
+    const review = latestReview(id);
+    review ? res.json({ ...review, follows: scheduleFor(id), pass: r }) : res.status(r.errors.length ? 400 : 502).json({ error: r.errors[0] || (r.skipped ? "no usage profile for this instance yet: profile it first" : "Jev did not answer") });
+  } catch (e: any) { res.status(502).json({ error: e?.message || String(e) }); }
 });
 api.post("/instances/:id/usage/refresh", async (req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
   try { const r = await usageProfilePass((l) => console.log(`[usage] ${l}`), { only: [String(req.params.id)] }); const p = latestProfile(String(req.params.id)) ?? latestProfile(`asg:${req.params.id}`); p ? res.json({ ...p, pass: r }) : res.status(404).json({ error: r.errors[0] || "not a running standalone instance or a balanced autoscaling group" }); }
   catch (e: any) { res.status(502).json({ error: describeError(e, `usage profile ${req.params.id} (cloudwatch:GetMetricData)`) }); }
+});
+
+// The log groups an instance ships to (probe 1.6's log_shipping on the latest probe), joined with what the daily logs refresh knows about each group.
+api.get("/instances/:id/logs", (req, res) => {
+  const id = String(req.params.id);
+  const latest = latestProbe(id);
+  const shipping: { group: string; via: string; source: string | null }[] = Array.isArray(latest?.data?.log_shipping) ? latest!.data.log_shipping.filter((s: any) => s && typeof s.group === "string").map((s: any) => ({ group: String(s.group), via: String(s.via || "unknown"), source: s.source == null ? null : String(s.source) })) : [];
+  const groupRow = db.prepare("select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days, last_seen from log_groups where name = ?");
+  const seen = new Set<string>();
+  const groups = shipping.filter((s) => { const k = `${s.group}|${s.via}`; if (seen.has(k)) return false; seen.add(k); return true; }).map((s) => {
+    const g = groupRow.get(s.group) as any;
+    return { ...s, known: Boolean(g), region: g?.region ?? null, retention_days: g?.retention_days ?? null, stored_gb: g?.stored_bytes != null ? Math.round((g.stored_bytes / 1e9) * 100) / 100 : null, ingest_gb_day: g?.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 1000) / 1000 : null, ingest_usd_month: g?.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30.4 * 0.5 * 100) / 100 : null, storage_usd_month: g?.stored_bytes != null ? Math.round((g.stored_bytes / 1e9) * 0.03 * 100) / 100 : null, last_seen: g?.last_seen ?? null };
+  });
+  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, probe_has_section: Array.isArray(latest?.data?.log_shipping), groups });
 });
 
 api.get("/instances/:id/metrics", (req, res) => {

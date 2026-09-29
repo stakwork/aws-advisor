@@ -1206,8 +1206,11 @@ balancers, EBS, S3 and Route 53 have modules of their own, below):
 The EC2 detail opens under its row in four tabs, every fact once: a header (name, state, SSM, pool, type, region,
 the watch and auto-park switches), a glance strip (list price, 30-day CPU, memory, fullest disk, last real use,
 quiet hours a week, storage), then **Overview** (identity, network, storage, Systems Manager, role, tags), **Usage**
-(the hour-of-week profile, the trends and charts, the probes), **What runs** (processes, apps, activity, containers)
-and **Links & history** (DNS records, balancers in front, recommendations, findings, the graph, the timeline).
+(the hour-of-week profile with the signals that tripped each busy hour, the activity block, the typical values,
+the charts, the probes), **What runs** (processes, apps, one containers table with now and 30 days), **Logs** (the
+groups the box ships to, by agent or container, with retention, size and ingestion from the logs refresh:
+`GET /api/instances/:id/logs`) and **Links & history** (DNS records, balancers in front, recommendations, findings,
+the graph, the timeline).
 
 Each row keeps the denormalised columns used for filtering and sorting plus a `snapshot` JSON with everything, and
 `first_seen` / `last_seen`. A resource the refresh no longer sees keeps its `last_seen` and gets `gone = 1`, so
@@ -1328,6 +1331,31 @@ writes the result on the graph: `usage_quiet_hours_week`, `usage_confidence`, `u
 `usage_off_hours_week`, `usage_est_usd_month`, `usage_quiet_windows` and `usage_summary` on the instance's
 `AdvisorResource` or the group's `AdvisorNodePool`. The Beanstalk capacity action reads the group profiles to
 lower a group's minimum for the quiet hours and raise it back before the busy ones.
+
+#### The usage review: Jev decides the window
+
+The profile is arithmetic and cannot weigh what a person would: that the external connections at every probe
+are relay peers and the swarm checker, that one 39 % hour four weeks ago was a deploy, that 86 % memory on a
+swarm box is Docker holding what it was given, that the role makes the box protected. So once a day, after the
+profiles, `src/usage_review.ts` hands Jev (purpose `usage_review`) every EC2 profile with its context: the quiet
+windows and what tripped the busy hours, the latest activity with the peers behind the connections, the last two
+weeks of daily roll-ups, the containers with their logs and use signals, the role, the tags, the executor rows
+and the team's decisions on the box, plus a set of candidate windows (the profile's own, a wider one with an
+extra hour of margin, a weekdays-only one, and keep running). Jev picks one and answers two typed questions:
+are the quiet windows real non-use rather than a measurement gap, and is what made the busy hours busy machine
+chatter rather than people. The verdict (`confirm`, `adjust` or `keep_running`, with the window, the confidence
+and a reason) is stored in `usage_reviews`, shown on the profile as "Agent's decision", and mirrored to the graph
+(`usage_review_*` on the node). A pick Jev is unsure of, or one whose quiet windows it doubts, becomes
+keep_running.
+
+**The executor follows the review.** For a box tagged `AdvisorAutoPark=ON` the office-hours action takes Jev's
+window when the verdict is confirm or adjust, leaves the box running on keep_running, waits when there is no
+review yet, and falls back to the profile's own window only when Jev is not configured. Memory is never a usage
+signal anywhere in this chain.
+
+On demand: **Recompute usage + ask the agent** on the EC2 tab runs the profiles and the review for every box
+(`POST /api/usage/recompute`); "ask the agent" on one profile asks for that box (`POST /api/instances/:id/usage/review`);
+`POST /api/usage/review` reviews all without recomputing.
 
 ### Route 53: domains linked to resources
 

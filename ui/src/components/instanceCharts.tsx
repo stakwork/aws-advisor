@@ -45,7 +45,7 @@ const gb = (b: number | null | undefined) => (b == null ? "—" : b >= 1e9 ? `${
 const pct = (v: number | null | undefined, d = 0) => (v == null ? "—" : `${Number(v).toFixed(d)}%`);
 
 /** Memory, disk, load and CPU for one instance: hourly from the SSM probes and CloudWatch, or daily roll-ups for 30/90 days. */
-export function InstanceCharts({ instanceId }: { instanceId: string }) {
+export function InstanceCharts({ instanceId, containers = false }: { instanceId: string; containers?: boolean }) {
   const [win, setWin] = useState(1);
   const w = WINDOWS[win];
   return (
@@ -54,7 +54,7 @@ export function InstanceCharts({ instanceId }: { instanceId: string }) {
         {WINDOWS.map((o, i) => <button key={o.label} onClick={() => setWin(i)} className={`rounded border px-1.5 py-0.5 ${i === win ? "border-zinc-400 text-zinc-100" : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}>{o.label}</button>)}
       </div>
       {w.hours ? <HourlyCharts instanceId={instanceId} hours={w.hours} /> : <DailyCharts instanceId={instanceId} days={w.days!} />}
-      <ContainersTable instanceId={instanceId} days={w.days ?? 30} />
+      {containers && <ContainersTable instanceId={instanceId} days={w.days ?? 30} />}
     </div>
   );
 }
@@ -160,7 +160,7 @@ function DailyCharts({ instanceId, days }: { instanceId: string; days: number })
 }
 
 /** Per-container statistics over the window (from container_daily), with the latest probe's containers as a fallback before the first roll-up. */
-function ContainersTable({ instanceId, days }: { instanceId: string; days: number }) {
+export function ContainersTable({ instanceId, days }: { instanceId: string; days: number }) {
   const [d, setD] = useState<{ containers: ContainerStat[]; containers_now: ContainerNow[] } | null>(null);
   useEffect(() => { setD(null); api(`/instances/${instanceId}/history?days=${days}`).then(setD).catch(() => setD({ containers: [], containers_now: [] })); }, [instanceId, days]);
   if (!d) return null;

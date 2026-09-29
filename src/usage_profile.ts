@@ -115,7 +115,7 @@ export function bucketize(samples: HourSample[]): HourBucket[] {
     if (s.cpu_avg != null) a.cpu.push(s.cpu_avg);
     if (s.net_bytes != null) a.net.push(s.net_bytes);
     if (s.requests != null) a.req.push(s.requests);
-    b.cpu_max = Math.max(b.cpu_max ?? 0, s.cpu_max);
+    b.cpu_max = Math.round(Math.max(b.cpu_max ?? 0, s.cpu_max) * 10) / 10;
     b.probes += s.probes.length;
     if (s.probes.length || s.requests != null) b.covered++;
     for (const p of s.probes) { b.ext_conn = Math.max(b.ext_conn, p.ext_conn); if (p.signals_recent) b.signals++; if (p.request_recent) b.requests_seen++; if (p.login_recent || p.users_now) b.logins++; if (p.logs_recent) b.logs++; if (p.container_busy) b.busy_containers++; }

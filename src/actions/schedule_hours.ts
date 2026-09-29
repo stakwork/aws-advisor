@@ -229,7 +229,7 @@ export const scheduleHoursAction: ActionModule = {
         }
         const inScope = live.filter((i) => tagOf(i.Tags, SCHEDULE_TAG) != null || isOn(tagOf(i.Tags, AUTO_PARK_TAG)));
         if (!inScope.length) continue;
-        const { latestProfile, CONFIDENT } = await import("../usage_profile.js");
+        const { scheduleFor } = await import("../usage_review.js");
         let eips: Set<string> | null = new Set<string>();
         try { for (const a of (await ec2.send(new DescribeAddressesCommand({ Filters: [{ Name: "instance-id", Values: inScope.map((i) => i.InstanceId!) }] }))).Addresses ?? []) if (a.InstanceId) eips.add(a.InstanceId); }
         catch { eips = null; }
@@ -242,10 +242,10 @@ export const scheduleHoursAction: ActionModule = {
           // the tag's own window first; with AdvisorAutoPark=ON and no window, the usage profile's confident schedule is the window
           let scheduleText = tagOf(inst.Tags, SCHEDULE_TAG);
           if (scheduleText == null) {
-            const profile = latestProfile(inst.InstanceId!);
-            if (!profile?.suggested_schedule) { notes.push(`${name}: ${AUTO_PARK_TAG}=ON but no usage schedule yet (${profile ? profile.summary : "no profile: the daily job builds one"})`); continue; }
-            if (profile.confidence < CONFIDENT) { notes.push(`${name}: ${AUTO_PARK_TAG}=ON but the profile's confidence is ${profile.confidence} (needs ${CONFIDENT}); ${profile.suggested_schedule} waits for more weeks or probes`); continue; }
-            scheduleText = profile.suggested_schedule;
+            const f = scheduleFor(inst.InstanceId!);
+            if (!f.schedule) { notes.push(`${name}: ${AUTO_PARK_TAG}=ON, no window to follow: ${f.note}`); continue; }
+            scheduleText = f.schedule;
+            log(`${name}: ${AUTO_PARK_TAG}=ON, following ${f.source === "review" ? "Jev's" : "the profile's"} window ${f.schedule}`);
             tagged++;
           }
           consider({ kind: "ec2", resource: inst.InstanceId!, name: row.name, region, account_id: row.account_id ?? null, state: ec2State(inst), tag: scheduleText, monthly_usd: row.monthly_usd, elastic_ip: eips ? eips.has(inst.InstanceId!) : undefined, public_ip: inst.PublicIpAddress ?? null, detail: row.instance_type || inst.InstanceType || "ec2" });
