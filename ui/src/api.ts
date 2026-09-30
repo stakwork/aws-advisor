@@ -47,4 +47,12 @@ export function stream(path: string): EventSource {
 export const usd = (v: number | null | undefined, digits = 0) =>
   v == null ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}`;
 
+/** A ledger trigger for display: "person:<assumed-role arn>" shortens to the session name (the person's login), the full ARN goes in the title. */
+export const triggerLabel = (t: string | null | undefined): { text: string; title?: string } => {
+  const s = String(t ?? "");
+  if (!s.startsWith("person:")) return { text: s };
+  const arn = s.slice("person:".length);
+  const who = arn.includes("/") ? arn.split("/").pop()! : arn.split(":").pop()!;
+  return { text: `person: ${who}`, title: arn };
+};
 export const when = (iso: string | null | undefined) => (iso ? new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z").toLocaleString() : "—");

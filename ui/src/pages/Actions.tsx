@@ -1,6 +1,6 @@
 import React, { Fragment, useEffect, useState } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
-import { api, usd, when } from "../api";
+import { api, triggerLabel, usd, when } from "../api";
 import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../components/ui";
 import { Thread } from "../components/thread";
 import { RunAsMe } from "../components/consent";
@@ -205,7 +205,7 @@ export default function Actions() {
             ) : (
               <div key={`e${it.ev.id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-zinc-800/60 px-2 py-1.5">
                 <span className="whitespace-nowrap text-zinc-400">{when(it.ev.at)}</span>
-                <span className="text-zinc-500">{it.ev.trigger}</span>
+                <span className="break-all text-zinc-500" title={triggerLabel(it.ev.trigger).title}>{triggerLabel(it.ev.trigger).text}</span>
                 <span className="text-zinc-300">{it.ev.event}</span>
                 <span className="cursor-pointer text-sky-300" onClick={() => set("id", String(it.ev.action_id))}>#{it.ev.action_id}</span>
                 <span className="text-zinc-400">{KIND_LABEL[it.ev.kind] || it.ev.kind}</span>
@@ -244,7 +244,7 @@ export default function Actions() {
               {data.actions.map((a) => (
                 <Fragment key={a.id}>
                   <tr className={`cursor-pointer border-t border-zinc-800/60 ${open === a.id ? "bg-zinc-900/60" : "hover:bg-zinc-900/40"}`} onClick={() => toggle(a.id)}>
-                    <Td className="whitespace-nowrap text-xs text-zinc-400"><span title={`proposed ${when(a.created_at)} · last seen by a pass ${when(a.seen_at)}${a.revived_at ? ` · proposed again ${when(a.revived_at)}` : ""}`}>{when(a.applied_at || a.created_at)}</span><div className="text-[11px] text-zinc-600">#{a.id} · {a.trigger}{a.status === "proposed" && a.seen_at !== a.created_at && <span> · seen {when(a.seen_at)}</span>}</div></Td>
+                    <Td className="whitespace-nowrap text-xs text-zinc-400"><span title={`proposed ${when(a.created_at)} · last seen by a pass ${when(a.seen_at)}${a.revived_at ? ` · proposed again ${when(a.revived_at)}` : ""}`}>{when(a.applied_at || a.created_at)}</span><div className="max-w-[16rem] whitespace-normal break-all text-[11px] text-zinc-600">#{a.id} · <span title={triggerLabel(a.trigger).title}>{triggerLabel(a.trigger).text}</span>{a.status === "proposed" && a.seen_at !== a.created_at && <span> · seen {when(a.seen_at)}</span>}</div></Td>
                     <Td className="text-xs text-zinc-300">{KIND_LABEL[a.kind] || a.kind}</Td>
                     <Td>{a.title}<div className="text-xs text-zinc-500">{a.reason}</div></Td>
                     <Td className="text-right text-emerald-300">{a.est_usd_month != null ? usd(a.est_usd_month, 2) : "—"}</Td>
