@@ -22,6 +22,7 @@ import { addColumn, db } from "./db.js";
 import { askJev, chunk, jevEnabled } from "./jev.js";
 import { resourceRole } from "./roles.js";
 import { latestProfile, listProfiles, CONFIDENT, MARGIN_HOURS, type Profile } from "./usage_profile.js";
+import { patternForGroup, pressureEventRows } from "./capacity_pattern.js";
 import { clauseCovers, describeSchedule, offHoursPerWeek, parseSchedule, HOURS_PER_WEEK } from "./actions/schedule_hours.js";
 import type { QuietWindow } from "./usage_profile.js";
 
@@ -90,7 +91,8 @@ export function reviewState(p: Profile): Record<string, unknown> {
   return {
     ...(groupName ? { group: { name: groupName, beanstalk_environment: balancers.find((b) => b.beanstalk_env)?.beanstalk_env ?? null, members_now: members.length, instance_types: [...new Set(members.map((m) => m.instance_type).filter(Boolean))], member_list_usd_month: members.reduce((s, m) => s + (m.monthly_usd || 0), 0) || null,
       balancers: balancers.map((b) => ({ name: b.name, kind: b.kind, scheme: b.scheme, requests_30d: b.requests_30d, gb_30d: b.gb_30d, targets: b.targets, healthy: b.healthy })),
-      note: "The question for a group is twofold: in which hours may the minimum drop to the floor (downsize windows), and whether the same work could be done by fewer machines all the time (a lower minimum), judging by the group's CPU and requests per member." } } : {}),
+      capacity_pattern: (() => { const cp = patternForGroup(groupName); return cp ? { environment: cp.env_name, computed_at: cp.pattern.computed_at, weeks: cp.pattern.weeks, coverage: cp.pattern.coverage, confident: cp.pattern.confident, band: { floor: cp.pattern.floor, ceiling: cp.pattern.ceiling }, learned_week: cp.pattern.summary, pressure_events_28d: pressureEventRows(cp.env_id).slice(0, 10).map((e) => ({ at: e.at, hour: e.label, desired: e.desired, max_size: e.max_size, cpu_avg: e.cpu_avg })) } : null; })(),
+      note: "The question for a group is twofold: in which hours may the minimum drop to the floor (downsize windows), and whether the same work could be done by fewer machines all the time (a lower minimum), judging by the group's CPU and requests per member. When a capacity pattern is present and confident the executor already sets MinSize per hour of the week from it, between the band's floor and ceiling; a group_min you give becomes the configured minimum the pattern is measured against, and a persistent pressure at the ceiling means the band's ceiling is too low." } } : {}),
     instance: { id, name: inv?.name ?? null, type: inv?.instance_type ?? null, state: inv?.state ?? null, list_usd_month: inv?.monthly_usd ?? null, pool: inv?.pool_kind ?? null, tags,
       role: role ? { role: role.role, confidence: role.role_confidence, protected_prob: role.protected_prob } : null },
     typical_day_utc: typicalDay(p),

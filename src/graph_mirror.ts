@@ -35,6 +35,7 @@ export const SCHEMA_SUMMARY = [
   "(:AdvisorResource {kind: elb, type: alb|nlb|gwlb|clb, dns_name, scheme, beanstalk_env, targets, healthy, requests_30d, gb_30d, asgs, ecs_services})-[:ROUTES_TO {target_group, port, health}]->(:AdvisorResource | :AdvisorResourceRef) a load balancer (id = its ARN) and what it fronts: the instances behind its target groups, or a Lambda ref",
   "AdvisorResource (EC2) and AdvisorNodePool (an autoscaling group) carry the usage profile: usage_quiet_hours_week, usage_confidence (0..1), usage_schedule (the advisor:schedule value that keeps it up whenever it was used, UTC), usage_off_hours_week, usage_est_usd_month, usage_quiet_windows (labels), usage_summary, usage_computed_at, and Jev's daily review of it: usage_review_verdict (confirm|adjust|keep_running), usage_review_schedule, usage_review_confidence, usage_review_reason, usage_reviewed_at (src/usage_review.ts; the office-hours action follows the review for a box tagged AdvisorAutoPark=ON) (src/usage_profile.ts: 28 days of CloudWatch and probes folded into the hours of the week; quiet = every week quiet on CPU, network, connections, use signals, logins, container CPU)",
   "(:AdvisorResource)-[:HAS_ROLE]->(:AdvisorRole {name}); (:AdvisorResource)-[:IN_POOL]->(:AdvisorNodePool {name}) for autoscaled EC2 nodes (Karpenter pool, EKS node group, ASG)",
+  "AdvisorNodePool (a Beanstalk group) carries the capacity pattern: capacity_learned_min (168 integers, the MinSize the executor sets per hour of the week, index 0 = Sunday 00:00 UTC), capacity_wanted (what the trigger asked for, p95 across weeks), capacity_floor and capacity_ceiling (the band a person set), capacity_weeks, capacity_coverage, capacity_confident, capacity_summary; (:AdvisorNodePool)-[:PRESSURED_AT]->(:AdvisorPressureEvent {id, at, ring, desired, max_size, cpu_avg, note}) once per hour the group was pinned at its ceiling with high CPU; (:AdvisorAction)-[:ANSWERED]->(:AdvisorPressureEvent) when a ceiling raise answered it",
   "(:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule, est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef {id})",
   "(:AdvisorRecommendation)-[:DECIDED_AS]->(:Concept) when the team's decision was mirrored as a Concept (the Concept holds the decision, its reason and the rule)",
   "(:AdvisorRecommendation)-[:PROPOSED_IN]->(:AdvisorRun {id, started_at, finished_at, status, trigger, findings_count, recommendations_count})",
@@ -875,6 +876,32 @@ export async function mirrorUsageProfiles(): Promise<{ profiles: number }> {
   return { profiles: rows.length };
 }
 export const mirrorUsageProfilesInBackground = () => inBackground("usage profile mirror", mirrorUsageProfiles);
+
+/**
+ * The capacity pattern of every Beanstalk group (src/capacity_pattern.ts) on its AdvisorNodePool node: the learned
+ * minimum per hour of the week, the band, the weeks behind it, and the pressure events of the window as
+ * PRESSURED_AT edges to the action that answered them (when one did).
+ */
+export async function mirrorCapacityPatterns(): Promise<{ patterns: number; events: number }> {
+  if (!enabled()) return { patterns: 0, events: 0 };
+  await ensureSchema();
+  let rows: any[] = [];
+  try { rows = db.prepare("select env_id, env_name, asg, region, account_id, computed_at, json from capacity_patterns").all() as any[]; } catch { return { patterns: 0, events: 0 }; }
+  const stamp = now();
+  const nodes = rows.flatMap((r) => { try { const p = JSON.parse(r.json); return [{ id: String(r.asg), env_id: r.env_id, env_name: r.env_name, region: r.region, computed_at: p.computed_at, days: p.days, weeks: p.weeks, coverage: p.coverage, confident: Boolean(p.confident), floor: p.floor, ceiling: p.ceiling ?? null, learned_min: p.learned, wanted: p.wanted, pressure_events: p.pressure_events, summary: p.summary }]; } catch { return []; } });
+  const props = "capacity_env_id: row.env_id, capacity_env_name: row.env_name, capacity_computed_at: row.computed_at, capacity_days: row.days, capacity_weeks: row.weeks, capacity_coverage: row.coverage, capacity_confident: row.confident, capacity_floor: row.floor, capacity_ceiling: row.ceiling, capacity_learned_min: row.learned_min, capacity_wanted: row.wanted, capacity_pressure_events: row.pressure_events, capacity_summary: row.summary, capacity_updated_at: $now";
+  for (const batch of chunks(nodes)) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {name: row.id}) SET p += {${props}}`, { rows: batch, now: stamp });
+  let events: any[] = [];
+  try { events = db.prepare("select id, env_id, asg, at, ring, desired, max_size, cpu_avg, action_id, note from capacity_pressure_events where datetime(at) > datetime('now', '-28 days')").all() as any[]; } catch { /* table absent */ }
+  for (const batch of chunks(events)) await write(`UNWIND $rows AS row
+    MERGE (p:AdvisorNodePool {name: row.asg})
+    MERGE (e:AdvisorPressureEvent {id: row.id}) SET e += {env_id: row.env_id, at: row.at, ring: row.ring, desired: row.desired, max_size: row.max_size, cpu_avg: row.cpu_avg, note: row.note, updated_at: $now}
+    MERGE (p)-[:PRESSURED_AT]->(e)
+    WITH e, row WHERE row.action_id IS NOT NULL
+    MATCH (a:AdvisorAction {id: row.action_id}) MERGE (a)-[:ANSWERED]->(e)`, { rows: batch, now: stamp });
+  return { patterns: nodes.length, events: events.length };
+}
+export const mirrorCapacityPatternsInBackground = () => inBackground("capacity pattern mirror", mirrorCapacityPatterns);
 export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackground(`recommendation mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorRecommendations(ids));
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */

@@ -67,7 +67,7 @@ addColumn("actions", "check_json", "text");
 addColumn("actions", "revived_at", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
-  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule" | "consent_tag";
+  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule" | "consent_tag" | "beanstalk_pressure";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -145,6 +145,8 @@ export interface ActionModule {
   grace_hours?: () => number;
   /** A fresh proposal is posted to Sphinx when first made (with the grace period), not only once applied. */
   announce?: boolean;
+  /** The change answers something happening now (a group under pressure): the pass applies it in the same breath and Jev's hold is recorded as advice, not waited on. */
+  urgent?: boolean;
 }
 
 export class NoActuator extends Error { constructor(m: string) { super(m); this.name = "NoActuator"; } }
@@ -607,7 +609,7 @@ export interface PassResult { mode: string; proposed: number; fresh: number; app
 let passInFlight: Promise<PassResult> | null = null;
 
 /** One executor pass: every module plans, the ledger is updated, and in apply mode the proposals are applied up to the cap. */
-export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
+export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind[] } = {}): Promise<PassResult> {
   if (passInFlight) return passInFlight;
   passInFlight = (async () => {
     const t0 = Date.now();
@@ -629,6 +631,7 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
     const touched = new Set<number>();
     const caps = mode === "apply" ? (await actuatorCapabilities()).caps : {};
     for (const mod of modules.values()) {
+      if (opts.kinds && !opts.kinds.includes(mod.kind)) continue;
       const blocked = caps[mod.kind]?.apply === false ? caps[mod.kind].missing : null;
       let plan: PlanResult;
       try { plan = await mod.plan(creds, (l) => log(`${mod.kind}: ${l}`)); }
@@ -652,7 +655,10 @@ export function runExecutorPass(trigger = "schedule"): Promise<PassResult> {
         if (fresh && mod.announce) announceProposal(row, mod.grace_hours?.() ?? 0, mode).catch(() => {});
         if (mode !== "apply") continue;
         if (blocked) { if (fresh) out.notes.push(`${mod.kind}: #${row.id} left for a person: the actuator role is not allowed ${blocked.join(", ")}`); continue; }
-        if (row.check?.verdict === "hold" && config.actJevCheck === "hold") { const n = `#${row.id} held by Jev: ${row.check.reason} (Apply on the page proceeds)`; out.notes.push(`${mod.kind}: ${n}`); log(n); out.held++; continue; }
+        if (row.check?.verdict === "hold" && config.actJevCheck === "hold") {
+          if (!mod.urgent) { const n = `#${row.id} held by Jev: ${row.check.reason} (Apply on the page proceeds)`; out.notes.push(`${mod.kind}: ${n}`); log(n); out.held++; continue; }
+          const n = `#${row.id} is urgent: applied over Jev's hold, recorded as advice: ${row.check.reason}`; out.notes.push(`${mod.kind}: ${n}`); log(n);
+        }
         const wait = graceLeftMs(row, mod.grace_hours?.() ?? 0);
         if (wait > 0) { const n = `#${row.id} waits ${Math.ceil(wait / 3600000)} h more (grace period; Apply on the page skips it)`; out.notes.push(`${mod.kind}: ${n}`); log(n); continue; }
         if (budget.left <= 0) { log(`cap of ${config.actMaxPerPass} changes per pass reached; #${row.id} waits`); continue; }

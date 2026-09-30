@@ -34,6 +34,14 @@
  * the new baseline (kept in the settings table under `act:eb:<environment id>`). While a windowed schedule is in
  * force the idle-floor trim is skipped (the window already captures the idle hours); the ceiling raise still runs.
  *
+ * The fourth move is the learned week (src/capacity_pattern.ts). Once the environment carries a band
+ * (`AdvisorScaleBand=<floor>-<ceiling>`, the bare minimum and the ceiling a person set) and the pattern is
+ * confident, the pass sets MinSize for the coming hour to the minimum the group needed at that hour of the
+ * week, clamped to the band, and the windowed schedule and the idle-floor trim step aside: the pattern already
+ * says where the quiet hours are and what the busy ones need. Every pass recomputes the pattern from 28 days of
+ * the group's hours and the pressure events (src/actions/beanstalk_pressure.ts), stores it and mirrors it to
+ * the graph. A MinSize set by hand holds for a day before the pattern resumes.
+ *
  * Which identity does the work: with an operations role on the environment, Beanstalk does the CloudFormation
  * and Auto Scaling calls under that role and the actuator needs `elasticbeanstalk:UpdateEnvironment` only.
  * Without one, Beanstalk uses the caller's permissions, and the actuator would need the CloudFormation and
@@ -48,6 +56,7 @@ import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { CONFIDENT, latestProfile, ringIndex, type QuietWindow } from "../usage_profile.js";
 import { latestReview, windowsFromSchedule } from "../usage_review.js";
 import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
+import { decidePattern, learnPattern, pressureEvents, savePattern, PATTERN_DAYS } from "../capacity_pattern.js";
 
 export const KIND = "beanstalk_scale" as const;
 export const SCALE_TAG = "advisor:scale";
@@ -61,7 +70,7 @@ const MAX_PER_PLAN = 20;
 /** A windowed schedule needs at least this many quiet hours a week before it is worth two updates a day. */
 export const MIN_WINDOW_HOURS_WEEK = 20;
 
-export interface EnvState { baseline_min: number; last_set: number | null; since: string }
+export interface EnvState { baseline_min: number; last_set: number | null; since: string; /** when a MinSize that is not the executor's was first seen (the pattern waits a day) */ hand_set_at?: string | null }
 const stateKey = (envId: string) => `act:eb:${envId}`;
 export const envState = (envId: string) => getJsonSetting<EnvState | null>(stateKey(envId), null);
 export const saveEnvState = (envId: string, s: EnvState) => setSetting(stateKey(envId), JSON.stringify(s));
@@ -98,6 +107,7 @@ export function decideWindow(i: WindowInput): WindowDecision {
 }
 
 export interface Band { floor: number; ceiling: number | null; text: string }
+export type { Bounds as GroupBounds };
 /** `<floor>-<ceiling>` (both whole numbers, floor at least 1, ceiling above the floor) or `auto` (floor 1, the ceiling stays where it is). Pure. */
 export function parseBand(tag: string): Band | { error: string } {
   const text = String(tag ?? "").trim().toLowerCase();
@@ -168,16 +178,16 @@ export function scaleVerdict(i: VerdictInput): Verdict {
   return { move: "floor_down", option: "MinSize", from: b.min, to: b.min - 1, reason: `the group sat at its minimum of ${b.min} for ${Math.round(floorShare * 100)} % of the last ${i.days} days with the hourly average CPU under ${pct(floorP95)} (p95): ${b.min - 1} instance${b.min - 1 === 1 ? "" : "s"} would have run at about ${pct(projected)}. The group scales in to the new floor when Beanstalk's scale-in trigger next fires`, ...facts };
 }
 
-interface EnvFacts { env: EnvironmentDescription; tags: Record<string, string>; asg: string | null; instances: string[]; cfg: { min: number | null; max: number | null } }
+export interface EnvFacts { env: EnvironmentDescription; tags: Record<string, string>; asg: string | null; instances: string[]; cfg: { min: number | null; max: number | null } }
 
 const num = (v: string | undefined) => { const n = Number(v); return v != null && v !== "" && Number.isFinite(n) ? n : null; };
-const hourStart = (t: number) => Math.floor(t / 3600000) * 3600000;
+export const hourStart = (t: number) => Math.floor(t / 3600000) * 3600000;
 
-async function groupCpuByHour(cw: CloudWatchClient, asg: string, now: number): Promise<Map<number, number>> {
+async function groupCpuByHour(cw: CloudWatchClient, asg: string, now: number, days = METRIC_DAYS): Promise<Map<number, number>> {
   const out = new Map<number, number>();
   let NextToken: string | undefined;
   do {
-    const r = await cw.send(new GetMetricDataCommand({ StartTime: new Date(hourStart(now) - METRIC_DAYS * 86400000), EndTime: new Date(hourStart(now)), ScanBy: "TimestampAscending", NextToken, MetricDataQueries: [{ Id: "cpu", MetricStat: { Metric: { Namespace: "AWS/EC2", MetricName: "CPUUtilization", Dimensions: [{ Name: "AutoScalingGroupName", Value: asg }] }, Period: 3600, Stat: "Average" }, ReturnData: true }] }));
+    const r = await cw.send(new GetMetricDataCommand({ StartTime: new Date(hourStart(now) - days * 86400000), EndTime: new Date(hourStart(now)), ScanBy: "TimestampAscending", NextToken, MetricDataQueries: [{ Id: "cpu", MetricStat: { Metric: { Namespace: "AWS/EC2", MetricName: "CPUUtilization", Dimensions: [{ Name: "AutoScalingGroupName", Value: asg }] }, Period: 3600, Stat: "Average" }, ReturnData: true }] }));
     const res = r.MetricDataResults?.[0];
     (res?.Values ?? []).forEach((v, i) => { const t = res?.Timestamps?.[i]; if (t) out.set(hourStart(new Date(t).getTime()), v); });
     NextToken = r.NextToken;
@@ -203,13 +213,13 @@ async function triggerAlarms(cw: CloudWatchClient, envId: string): Promise<{ low
   return { low: find("AlarmLow"), high: find("AlarmHigh") };
 }
 
-function regions(defaultRegion: string): string[] {
+export function regions(defaultRegion: string): string[] {
   const rows = db.prepare("select distinct region from inventory_ec2 where gone = 0 and region is not null").all() as { region: string }[];
   return [...new Set([defaultRegion, ...rows.map((r) => r.region)])];
 }
 
 /** One member's list price, from the inventory (the estimate of a floor cut). */
-function memberPrice(instanceIds: string[]): number | null {
+export function memberPrice(instanceIds: string[]): number | null {
   for (const id of instanceIds) {
     const r = db.prepare("select monthly_usd from inventory_ec2 where instance_id = ?").get(id) as { monthly_usd: number | null } | undefined;
     if (r?.monthly_usd) return r.monthly_usd;
@@ -217,7 +227,7 @@ function memberPrice(instanceIds: string[]): number | null {
   return null;
 }
 
-async function environmentFacts(eb: ElasticBeanstalkClient, env: EnvironmentDescription): Promise<EnvFacts> {
+export async function environmentFacts(eb: ElasticBeanstalkClient, env: EnvironmentDescription): Promise<EnvFacts> {
   const tags: Record<string, string> = {};
   if (env.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
   const res = (await eb.send(new DescribeEnvironmentResourcesCommand({ EnvironmentId: env.EnvironmentId }))).EnvironmentResources;
@@ -236,7 +246,7 @@ export const beanstalkScaleAction: ActionModule = {
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const now = Date.now();
-    let seen = 0, tagged = 0;
+    let seen = 0, tagged = 0, patterns = 0;
     for (const acct of creds.accounts) for (const region of regions(acct.region)) {
       const eb = new ElasticBeanstalkClient({ region, credentials: acct.read });
       const as = new AutoScalingClient({ region, credentials: acct.read });
@@ -267,12 +277,17 @@ export const beanstalkScaleAction: ActionModule = {
           if (!group) { skip(`group ${f.asg} not found`); continue; }
           const bounds: Bounds = { min: group.MinSize ?? f.cfg.min, max: group.MaxSize ?? f.cfg.max, desired: group.DesiredCapacity ?? 0 };
           if (bounds.min !== f.cfg.min || bounds.max !== f.cfg.max) { skip(`the live group is ${bounds.min}-${bounds.max} but the configuration says ${f.cfg.min}-${f.cfg.max} (edited directly?): sort that out first`); continue; }
-          const cpu = await groupCpuByHour(cw, f.asg, now);
-          const hoursList = [...cpu.keys()];
-          const changes = desiredChanges(await scalingActivities(as, f.asg, hourStart(now) - METRIC_DAYS * 86400000));
-          const desired = desiredByHour(hoursList, bounds.desired, changes);
-          const hours: UsageHour[] = hoursList.map((h) => ({ at: h, cpu_avg: cpu.get(h)!, desired: desired.get(h) ?? bounds.desired }));
+          // 28 days of hours feed the learned week; the verdict below reads the last 14 of them
+          const cpu = await groupCpuByHour(cw, f.asg, now, PATTERN_DAYS);
+          const allHours = [...cpu.keys()];
+          const changes = desiredChanges(await scalingActivities(as, f.asg, hourStart(now) - PATTERN_DAYS * 86400000));
+          const desiredAll = desiredByHour(allHours, bounds.desired, changes);
+          const hoursList = allHours.filter((h) => h >= hourStart(now) - METRIC_DAYS * 86400000);
+          const hours: UsageHour[] = hoursList.map((h) => ({ at: h, cpu_avg: cpu.get(h)!, desired: desiredAll.get(h) ?? bounds.desired }));
           const days = new Set(hoursList.map((h) => new Date(h).toISOString().slice(0, 10))).size;
+          const pattern = learnPattern({ hours: allHours.map((h) => ({ at: h, desired: desiredAll.get(h) ?? bounds.desired, cpu_avg: cpu.get(h) ?? null })), pressure: pressureEvents(env.EnvironmentId!), floor: band.floor, ceiling: band.ceiling, now });
+          savePattern({ env_id: env.EnvironmentId!, env_name: env.EnvironmentName ?? null, asg: f.asg, region, account_id: acct.account_id ?? null, pattern });
+          patterns++;
           const healthOk = !env.HealthStatus || ["Ok", "Info", "Pending", "Unknown"].includes(env.HealthStatus) || env.Health === "Green";
           // the windowed minimum from the group's usage profile, decided for the coming hour
           const profile = latestProfile(`asg:${f.asg}`);
@@ -308,6 +323,50 @@ export const beanstalkScaleAction: ActionModule = {
               est_usd_month: null,
             });
             continue;
+          }
+          // the learned week, once a person set the band and the pattern is confident: MinSize for the coming hour
+          if (band.ceiling != null) {
+            const handSet = state.last_set != null && bounds.min !== state.last_set;
+            if (handSet && !state.hand_set_at) { state.hand_set_at = new Date().toISOString(); saveEnvState(env.EnvironmentId!, state); }
+            if (!handSet && state.hand_set_at) { state.hand_set_at = null; saveEnvState(env.EnvironmentId!, state); }
+            const d = decidePattern({ pattern, next: ringIndex(hourStart(now) + 3600000), current_min: bounds.min, last_set: state.last_set, hand_set_at: state.hand_set_at ?? null, now });
+            if (d.active) {
+              log(`${name}: pattern: ${d.reason}`);
+              if (d.wanted != null && d.wanted !== bounds.min) {
+                const price = memberPrice(f.instances);
+                const lowering = d.wanted < bounds.min;
+                const hoursAtOrBelow = pattern.learned.filter((x) => x <= d.wanted!).length;
+                proposals.push({
+                  kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
+                  dedupe: `${KIND}:${env.EnvironmentId}:pattern:${d.wanted}:${new Date(hourStart(now) + 3600000).toISOString().slice(0, 13)}`,
+                  title: `${name}: MinSize ${bounds.min} → ${d.wanted} (the learned week)`,
+                  reason: `${d.reason}. Band ${SCALE_BAND_TAG}=${band.text}: never below ${band.floor}, never above ${band.ceiling}. The environment updates for a minute or two; ${lowering ? "the group scales in when Beanstalk's scale-in alarm next fires" : "the group launches what the new minimum needs before the hour"}.`,
+                  before: { MinSize: bounds.min, MaxSize: bounds.max }, after: { MinSize: d.wanted },
+                  facts: { pattern: true, application: env.ApplicationName, asg: f.asg, desired_now: bounds.desired, band: band.text, floor: band.floor, ceiling: band.ceiling, weeks: pattern.weeks, coverage: pattern.coverage, pressure_events: pattern.pressure_events, learned_week: pattern.summary, hours_at_or_below: hoursAtOrBelow, operations_role: env.OperationsRole || null, member_usd_month: price },
+                  rollback: `UpdateEnvironment MinSize back to ${bounds.min}`,
+                  est_usd_month: lowering && price ? Math.round((bounds.min - d.wanted) * price * (hoursAtOrBelow / 168) * 100) / 100 : null,
+                });
+                if (!env.OperationsRole) notes.push(`${name}: no operations role on the environment, so UpdateEnvironment runs with the actuator's own permissions (see the README)`);
+                continue;
+              }
+              // the pattern owns the minimum: no windowed schedule and no idle-floor trim on top of it; the ceiling raise still runs
+              const v = scaleVerdict({ bounds, band, hours, days, low_cpu: config.actEbLowCpu, high_cpu: config.actEbHighCpu, pressure_hours: config.actEbPressureHours, health_ok: healthOk });
+              if (v.move !== "ceiling_up" || !v.option) { log(`${name}: ${v.move === "floor_down" ? "the learned week owns the minimum; the idle-floor trim is skipped" : v.reason}`); continue; }
+              const opsRole = env.OperationsRole || null;
+              if (!opsRole) notes.push(`${name}: no operations role on the environment, so UpdateEnvironment runs with the actuator's own permissions and needs the CloudFormation and Auto Scaling rights it makes (associate-environment-operations-role fixes that; see the README)`);
+              proposals.push({
+                kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
+                dedupe: `${KIND}:${env.EnvironmentId}:${v.option}:${v.to}`,
+                title: `${name}: ${v.option} ${v.from} → ${v.to} (pinned at the ceiling)`,
+                reason: `${v.reason}. Band ${SCALE_BAND_TAG}=${band.text}. This adds cost rather than saving it: one more instance whenever the trigger asks for it.${opsRole ? "" : " No operations role on the environment: the actuator's own rights do the update."}`,
+                before: { [v.option]: v.from, MinSize: bounds.min, MaxSize: bounds.max }, after: { [v.option]: v.to },
+                facts: { application: env.ApplicationName, asg: f.asg, desired_now: bounds.desired, band: band.text, metric_days: days, pressure_hours: v.pressure_hours, high_cpu: config.actEbHighCpu, operations_role: opsRole, health: env.HealthStatus ?? null, learned_week: pattern.summary },
+                rollback: `UpdateEnvironment ${v.option} back to ${v.from} (the environment updates for a minute or two, no instance is replaced)`,
+                est_usd_month: null,
+              });
+              continue;
+            }
+            log(`${name}: pattern: ${d.reason}`);
           }
           // the agent's downsize windows, when it decided for this group, win over the profile's own quiet windows
           const agentWindows = groupReview && groupReview.verdict !== "keep_running" ? windowsFromSchedule(groupReview.schedule) : [];
@@ -356,6 +415,7 @@ export const beanstalkScaleAction: ActionModule = {
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { eb.destroy(); as.destroy(); cw.destroy(); }
     }
+    if (patterns) import("../graph_mirror.js").then((m) => m.mirrorCapacityPatternsInBackground()).catch(() => { /* graph optional */ });
     if (!seen) notes.push("no Elastic Beanstalk environment in any region the inventory knows");
     else if (!tagged) notes.push(`${seen} environment(s) seen, none tagged ${AUTO_SCALE_TAG}=ON (or ${SCALE_TAG}=2-8): nothing is scaled without the tag`);
     else if (!proposals.length) notes.push(`${tagged} tagged environment(s) checked: bounds fit the last ${METRIC_DAYS} days`);
@@ -368,6 +428,7 @@ export const beanstalkScaleAction: ActionModule = {
       const [option, value] = Object.entries(p.after)[0];
       const r = await eb.send(new UpdateEnvironmentCommand({ EnvironmentId: p.resource, OptionSettings: [{ Namespace: ASG_NAMESPACE, OptionName: option, Value: String(value) }] }));
       if (p.facts.window && option === "MinSize") { const s = envState(p.resource) ?? { baseline_min: Number(p.facts.baseline_min ?? p.before.MinSize), last_set: null, since: new Date().toISOString() }; saveEnvState(p.resource, { ...s, last_set: Number(value) }); }
+      if (p.facts.pattern && option === "MinSize") { const s = envState(p.resource) ?? { baseline_min: Number(p.before.MinSize), last_set: null, since: new Date().toISOString() }; saveEnvState(p.resource, { ...s, last_set: Number(value), hand_set_at: null }); }
       if (p.facts.agent_bounds && option === "MinSize") { const s = envState(p.resource) ?? { baseline_min: Number(value), last_set: null, since: new Date().toISOString() }; saveEnvState(p.resource, { ...s, baseline_min: Number(value), last_set: Number(value), since: new Date().toISOString() }); }
       return `UpdateEnvironment: ${option} ${p.before[option]} → ${value} (environment ${r.Status ?? "Updating"})`;
     } finally { eb.destroy(); }
@@ -397,7 +458,7 @@ export const beanstalkScaleAction: ActionModule = {
       const [option] = Object.entries(p.after)[0];
       const value = p.before[option];
       await eb.send(new UpdateEnvironmentCommand({ EnvironmentId: p.resource, OptionSettings: [{ Namespace: ASG_NAMESPACE, OptionName: option, Value: String(value) }] }));
-      if (p.facts.window && option === "MinSize") { const s = envState(p.resource); if (s) saveEnvState(p.resource, { ...s, last_set: Number(value) }); }
+      if ((p.facts.window || p.facts.pattern) && option === "MinSize") { const s = envState(p.resource); if (s) saveEnvState(p.resource, { ...s, last_set: Number(value), hand_set_at: null }); }
       return `${option} back to ${value}`;
     } finally { eb.destroy(); }
   },

@@ -94,6 +94,58 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
   return applyAction(rec.row.id, "manual");
 }
 
+/** The band as text for the tag, or null to remove it; the numbers are checked the way the capacity action reads them (parseBand). */
+export function bandText(floor: unknown, ceiling: unknown): string | null {
+  if (floor == null && ceiling == null) return null;
+  if (floor == null || ceiling == null) throw new ConsentError("the band needs both a floor and a ceiling (empty both to remove it)", 400);
+  const f = Number(floor), c = Number(ceiling);
+  if (!Number.isInteger(f) || !Number.isInteger(c)) throw new ConsentError("the band is two whole numbers: floor and ceiling", 400);
+  if (f < 1) throw new ConsentError("the floor is at least 1", 400);
+  if (c <= f) throw new ConsentError("the ceiling must be above the floor", 400);
+  if (c > 999) throw new ConsentError("the ceiling is at most 999", 400);
+  return `${f}-${c}`;
+}
+
+export interface BandRequest { id: string; floor: number | null; ceiling: number | null; by?: string; region?: string | null; account_id?: string | null }
+
+/**
+ * Sets the bare minimum and the ceiling of an environment from the page: `AdvisorScaleBand=<floor>-<ceiling>`, one
+ * ledgered consent row applied at once, the same as the switch. Nothing the executor does ever goes below the
+ * floor or above the ceiling; the learned hourly minimum (src/capacity_pattern.ts) lives between them.
+ */
+export async function requestScaleBand(r: BandRequest): Promise<ActionRow> {
+  const creds = executorCreds();
+  const by = r.by || "ui";
+  const value = bandText(r.floor, r.ceiling);
+  const region = r.region || creds.region;
+  const acct = creds.forAccount(r.account_id || null);
+  const envId = (db.prepare("select beanstalk_env_id from inventory_elb where beanstalk_env = ? and gone = 0 and beanstalk_env_id is not null limit 1").get(r.id) as { beanstalk_env_id: string } | undefined)?.beanstalk_env_id ?? null;
+  const eb = new ElasticBeanstalkClient({ region, credentials: acct.read });
+  let env; const tags: Record<string, string> = {};
+  try {
+    env = await findEnvironment(eb, r.id, { region, account: acct.account_id, envId, credentials: acct.read });
+    if (env?.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
+  } finally { eb.destroy(); }
+  if (!env?.EnvironmentId || !env.EnvironmentArn) throw new ConsentError(`environment ${r.id} has no id or ARN`, 404);
+  if (tags["advisor:hands-off"] != null) throw new ConsentError(`${r.id} is tagged advisor:hands-off: remove that first`, 409);
+  const before = tags[SCALE_BAND_TAG] ?? null;
+  if (before === value) throw new ConsentError(value == null ? `${r.id} carries no ${SCALE_BAND_TAG}` : `${r.id} already carries ${SCALE_BAND_TAG}=${before}`, 409);
+  const p: Proposal = {
+    kind: CONSENT_KIND, resource: env.EnvironmentId, resource_name: env.EnvironmentName ?? r.id, region, account_id: r.account_id ?? null,
+    dedupe: `${CONSENT_KIND}:${env.EnvironmentId}:band:${value ?? "none"}`,
+    title: `${env.EnvironmentName}: ${SCALE_BAND_TAG} ${before ?? "(none)"} → ${value ?? "(none)"}`,
+    reason: value == null
+      ? `${by} removed the band from the page: the capacity action is back to floor 1 and the ceiling where it is (${AUTO_SCALE_TAG} unchanged).`
+      : `${by} set the band from the page: MinSize never goes below ${r.floor} (the bare minimum) and MaxSize never above ${r.ceiling}, whatever the usage says. Between them the executor moves the bounds from the group's usage: the learned minimum per hour of the week, a ceiling raise under pressure, the idle floor trim. Beanstalk propagates the tag to the group and the balancer.`,
+    before: { [SCALE_BAND_TAG]: before }, after: { [SCALE_BAND_TAG]: value },
+    facts: { kind: "beanstalk", tag: SCALE_BAND_TAG, by, arn: env.EnvironmentArn, application: env.ApplicationName ?? null, floor: r.floor, ceiling: r.ceiling, consent: tags[AUTO_SCALE_TAG] ?? null },
+    rollback: before == null ? `UpdateTagsForResource: remove ${SCALE_BAND_TAG}` : `UpdateTagsForResource ${SCALE_BAND_TAG}=${before}`,
+    est_usd_month: null,
+  };
+  const rec = recordProposal(p, config.actMode, "manual");
+  return applyAction(rec.row.id, "manual");
+}
+
 /**
  * Finds an environment by id (the balancer's `elasticbeanstalk:environment-id` tag, when the inventory has it), else
  * by name, else by a case-insensitive scan of the region; a miss names the account, the region and what is there,
@@ -114,7 +166,7 @@ async function findEnvironment(eb: ElasticBeanstalkClient, name: string, where: 
 }
 
 /** What an environment carries right now: the consent, the band and the operations role, for the switch on the page. */
-export async function beanstalkConsent(name: string, region?: string | null, accountId?: string | null): Promise<{ environment_id: string; name: string; consent: string | null; on: boolean; band: string | null; operations_role: string | null; status: string | null; account_id: string; region: string }> {
+export async function beanstalkConsent(name: string, region?: string | null, accountId?: string | null): Promise<{ environment_id: string; name: string; consent: string | null; on: boolean; band: string | null; floor: number | null; ceiling: number | null; operations_role: string | null; status: string | null; account_id: string; region: string }> {
   const creds = executorCreds();
   const acct = creds.forAccount(accountId || null);
   const envId = (db.prepare("select beanstalk_env_id from inventory_elb where beanstalk_env = ? and gone = 0 and beanstalk_env_id is not null limit 1").get(name) as { beanstalk_env_id: string } | undefined)?.beanstalk_env_id ?? null;
@@ -123,7 +175,9 @@ export async function beanstalkConsent(name: string, region?: string | null, acc
     const env = await findEnvironment(eb, name, { region: region || creds.region, account: acct.account_id, envId, credentials: acct.read });
     const tags: Record<string, string> = {};
     if (env.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
-    return { environment_id: env.EnvironmentId!, name: env.EnvironmentName ?? name, consent: tags[AUTO_SCALE_TAG] ?? null, on: isOn(tags[AUTO_SCALE_TAG]), band: tags[SCALE_BAND_TAG] ?? null, operations_role: env.OperationsRole ?? null, status: env.Status ?? null, account_id: acct.account_id, region: region || creds.region };
+    const band = tags[SCALE_BAND_TAG] ?? null;
+    const m = band ? /^(\d{1,3})\s*-\s*(\d{1,3})$/.exec(band.trim()) : null;
+    return { environment_id: env.EnvironmentId!, name: env.EnvironmentName ?? name, consent: tags[AUTO_SCALE_TAG] ?? null, on: isOn(tags[AUTO_SCALE_TAG]), band, floor: m ? Number(m[1]) : null, ceiling: m ? Number(m[2]) : null, operations_role: env.OperationsRole ?? null, status: env.Status ?? null, account_id: acct.account_id, region: region || creds.region };
   } finally { eb.destroy(); }
 }
 

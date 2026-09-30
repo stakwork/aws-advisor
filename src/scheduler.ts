@@ -119,10 +119,14 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     const r = await runExecutorPass("schedule");
     return `${r.mode}: ${r.proposed} proposed (${r.fresh} new), ${r.applied} applied, ${r.verified} verified, ${r.failed} failed, ${r.refused} refused, ${r.stale} stale${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
   } },
+  pressureCron: { label: "Pressure check", run: async () => {
+    const r = await runExecutorPass("pressure", { kinds: ["beanstalk_pressure"] });
+    return `${r.mode}: ${r.proposed} proposed, ${r.applied} applied, ${r.failed} failed${r.notes.length ? `; ${r.notes.slice(0, 3).join("; ")}` : ""}${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
+  } },
   verifyCron: { label: "Saving verification", run: async () => { const r: any = await runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }); return typeof r === "object" && r ? JSON.stringify(r).slice(0, 200) : "done"; } },
 };
 
-const tag: Record<string, string> = { swarmCostCron: "swarms", runCron: "scheduler", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor" };
+const tag: Record<string, string> = { swarmCostCron: "swarms", runCron: "scheduler", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor", pressureCron: "pressure" };
 const jobInFlight = new Set<string>();
 
 /** Runs one job now, as the cron would, and reports what it did or why it did nothing. The credential check is the same. */
@@ -146,8 +150,8 @@ export async function runJobNow(key: string, trigger = "manual"): Promise<string
 
 export function startScheduler(): Record<string, string | null> {
   const out: Record<string, string | null> = {};
-  const crons: Record<string, string> = { swarmCostCron: config.reviewCron, runCron: config.runCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron };
-  const names: Record<string, string> = { swarmCostCron: "Cost per swarm (REVIEW_CRON)", runCron: "Scheduler (RUN_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)" };
+  const crons: Record<string, string> = { swarmCostCron: config.reviewCron, runCron: config.runCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron, pressureCron: config.actPressureCron };
+  const names: Record<string, string> = { swarmCostCron: "Cost per swarm (REVIEW_CRON)", runCron: "Scheduler (RUN_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)", pressureCron: "Pressure check (ACT_PRESSURE_CRON)" };
   for (const key of Object.keys(JOBS)) {
     if (key === "observeCron" && !config.repo2graphUrl) { console.log("Observation (OBSERVE_CRON) disabled: no repo2graph URL (Settings > Agent)"); out[key] = null; continue; }
     out[key] = schedule(names[key], crons[key], () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });

@@ -25,6 +25,7 @@ import { logRetentionTuneAction } from "./log_retention_tune.js";
 import { s3MultipartAbortAction } from "./s3_multipart_abort.js";
 import { lambdaMemoryAction } from "./lambda_memory.js";
 import { beanstalkScaleAction } from "./beanstalk_scale.js";
+import { beanstalkPressureAction } from "./beanstalk_pressure.js";
 import { usageScheduleAction } from "./usage_schedule.js";
 import { consentTagAction } from "./consent_tag.js";
 
@@ -53,5 +54,6 @@ registerAction(logRetentionTuneAction);
 registerAction(s3MultipartAbortAction);
 registerAction(lambdaMemoryAction);
 registerAction(beanstalkScaleAction);
+registerAction(beanstalkPressureAction);
 registerAction(usageScheduleAction);
 registerAction(consentTagAction);

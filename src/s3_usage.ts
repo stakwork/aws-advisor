@@ -191,7 +191,7 @@ export function proposeLifecycle(u: S3Usage): LifecycleProposal {
         est_usd_month: Math.round(gb(coldStd) * (PRICE.standard - PRICE.ia) * 100) / 100,
         rule: { ID: "aws-advisor-standard-ia-30", Status: "Enabled", Filter: filter, Transitions: [{ Days: 30, StorageClass: "STANDARD_IA" }] } });
     } else {
-      rules.push({ id: "aws-advisor-intelligent-tiering", why: `${gb(coldStd)} GB of Standard older than 30 days${scope} and no request metrics yet, so how much of it is read is unknown. Intelligent-Tiering moves what is not touched for 30 days to the infrequent tier by itself, no retrieval charge, 0.0025 USD per 1,000 objects a month. Enabling request metrics (the executor does it) would let the next analysis pick a sharper class.${small}`,
+      rules.push({ id: "aws-advisor-intelligent-tiering", why: `${gb(coldStd)} GB of Standard older than 30 days${scope} and no request metrics yet, so how much of it is read is unknown. Intelligent-Tiering moves what is not touched for 30 days to the infrequent tier by itself, no retrieval charge, 0.0025 USD per 1,000 objects a month. Request metrics would let the next analysis pick a sharper class; the executor proposes them when the cold bytes could pay for them.${small}`,
         est_usd_month: Math.round(gb(coldStd) * (PRICE.standard - PRICE.it_infrequent) * 0.5 * 100) / 100,
         rule: { ID: "aws-advisor-intelligent-tiering", Status: "Enabled", Filter: filter, Transitions: [{ Days: 0, StorageClass: "INTELLIGENT_TIERING" }] } });
     }

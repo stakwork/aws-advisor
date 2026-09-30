@@ -29,7 +29,7 @@ import { elbsForInstance, listElb } from "../elb_inventory.js";
 import { latestProfile, listProfiles, usageProfilePass, whyNoProfile } from "../usage_profile.js";
 import { decidedOffHours, latestReview, scheduleFor, usageReviewPass } from "../usage_review.js";
 import { investigateUsage, latestInvestigation, usageInvestigationPass } from "../usage_agent.js";
-import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent } from "../consent.js";
+import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent, requestScaleBand } from "../consent.js";
 import { dispatchActionNotifications } from "../executor.js";
 import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
@@ -394,6 +394,11 @@ api.post("/inventory/ec2/:id/power", async (req, res) => {
 api.get("/inventory/beanstalk/:env/consent", async (req, res) => {
   try { res.json(await beanstalkConsent(String(req.params.env), str(req.query.region), str(req.query.account_id))); }
   catch (e: any) { res.status(consentErrorStatus(e)).json({ error: describeError(e, `beanstalk ${req.params.env} (elasticbeanstalk:DescribeEnvironments, elasticbeanstalk:ListTagsForResource)`) }); }
+});
+api.post("/inventory/beanstalk/:env/band", async (req, res) => {
+  const n = (v: unknown) => (v == null || v === "" ? null : Number(v));
+  try { const a = await requestScaleBand({ id: String(req.params.env), floor: n(req.body?.floor), ceiling: n(req.body?.ceiling), by: by(req), region: str(req.body?.region), account_id: str(req.body?.account_id) }); dispatchActionNotifications().catch(() => {}); res.json(a); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
 });
 api.post("/inventory/beanstalk/:env/consent", async (req, res) => {
   try { const a = await requestConsent({ kind: "beanstalk", id: String(req.params.env), value: normaliseConsent(req.body?.value), by: by(req), region: str(req.body?.region), account_id: str(req.body?.account_id) }); dispatchActionNotifications().catch(() => {}); res.json(a); }

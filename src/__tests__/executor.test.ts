@@ -373,3 +373,113 @@ test("capabilities: every registered kind declares what the role needs, all of i
   assert.deepEqual(learned.log_retention, { apply: false, revert: null, missing: ["logs:PutRetentionPolicy"], source: "learned" });
   assert.deepEqual(learned.ebs_iops_trim, { apply: null, revert: null, missing: [], source: "unknown" });
 });
+
+test("s3 request metrics: proposed only where the cold bytes could pay for them", async () => {
+  const { requestMetricsCase, METRICS_USD_MONTH, METRICS_PAYBACK } = await import("../actions/s3_request_metrics.js");
+  const tally = (cold: number) => ({ "0-30": { objects: 1, bytes: 5e9 }, "30-90": { objects: 1, bytes: cold / 2 }, "90-365": { objects: 0, bytes: 0 }, "365+": { objects: 1, bytes: cold / 2 } });
+  const u = (cold: number, extra: Record<string, unknown> = {}): any => ({ bucket: "b", sample: { objects: 3, bytes: 5e9 + cold, truncated: false, pages: 1 }, standard_by_age: tally(cold), lifecycle: [], inventory: { total_gb: null, standard_gb: null, objects: 3 }, ...extra });
+  const rule = (o: Record<string, unknown>) => ({ id: "r", status: "Enabled", prefix: null, transitions: [], expiration_days: null, noncurrent_expiration_days: null, abort_multipart_days: null, ...o });
+
+  assert.equal(requestMetricsCase(null).worth, false, "no analysis yet: wait for it");
+  assert.match(requestMetricsCase(null).why, /no usage analysis/);
+  // row #101: 23 GB bucket with an expire-after-5-days rule: nothing gets old enough to move, and 5 USD of metrics against under a dollar of storage
+  const youtube = requestMetricsCase(u(18e9, { lifecycle: [rule({ expiration_days: 5 })] }));
+  assert.equal(youtube.worth, false);
+  assert.match(youtube.why, /expires every object after 5 days/);
+  // the same bucket without the rule is still too small to pay for the metrics
+  const small = requestMetricsCase(u(18e9));
+  assert.equal(small.worth, false);
+  assert.match(small.why, /at most 0\.34 USD\/month against 5 USD\/month/);
+  assert.equal(small.cold_gb, 18);
+  // a long expiration does not stop it; a prefix-scoped short one does not either (the rest of the bucket still ages)
+  assert.equal(requestMetricsCase(u(600e9, { lifecycle: [rule({ expiration_days: 365 })] })).worth, true);
+  assert.equal(requestMetricsCase(u(600e9, { lifecycle: [rule({ prefix: "tmp/", expiration_days: 5 })] })).worth, true);
+  // a disabled short expiration is ignored
+  assert.equal(requestMetricsCase(u(600e9, { lifecycle: [rule({ status: "Disabled", expiration_days: 5 })] })).worth, true);
+  // a transition rule already there: the class is decided
+  const tiered = requestMetricsCase(u(600e9, { lifecycle: [rule({ transitions: [{ days: 30, storage_class: "STANDARD_IA" }] })] }));
+  assert.equal(tiered.worth, false);
+  assert.match(tiered.why, /already moves objects to STANDARD_IA/);
+  // under a GB cold: the analysis would not propose a transition at all
+  assert.match(requestMetricsCase(u(0.5e9)).why, /not worth a transition/);
+  // the payback line: ceiling = cold GB × 0.019 must reach METRICS_PAYBACK × METRICS_USD_MONTH
+  const edgeGb = Math.ceil((METRICS_USD_MONTH * METRICS_PAYBACK) / 0.019);
+  assert.equal(requestMetricsCase(u((edgeGb - 20) * 1e9)).worth, false);
+  const ok = requestMetricsCase(u((edgeGb + 20) * 1e9));
+  assert.equal(ok.worth, true);
+  assert.match(ok.why, /fell back to Intelligent-Tiering/);
+  assert.ok(ok.ceiling_usd_month >= METRICS_USD_MONTH * METRICS_PAYBACK);
+  // a truncated sample is scaled to the inventory before the bytes are judged
+  const scaled = requestMetricsCase(u(30e9, { sample: { objects: 3, bytes: 35e9, truncated: true, pages: 10 }, inventory: { total_gb: 1400, standard_gb: 1400, objects: 1e6 } }));
+  assert.equal(scaled.worth, true);
+  assert.equal(scaled.cold_gb, 1200);
+});
+
+test("capacity pattern: the learned week between the band's floor and ceiling, pressure lifts an hour, hand-set minimum holds a day", async () => {
+  const { learnPattern, decidePattern, summarise, HOURS_PER_WEEK, MIN_WEEKS } = await import("../capacity_pattern.js");
+  const { ringIndex } = await import("../usage_profile.js");
+  const now = Date.UTC(2026, 8, 30, 12); // Wednesday
+  const H = 3600000;
+  // four weeks of hours: 3 during weekday working hours (09-17 UTC), 1 otherwise; one odd week wanted 5 on Tuesday 14:00
+  const hours: { at: number; desired: number; cpu_avg: number | null }[] = [];
+  for (let h = 1; h <= 28 * 24; h++) {
+    const at = now - h * H; const d = new Date(at); const wd = d.getUTCDay(), hr = d.getUTCHours();
+    let desired = wd >= 1 && wd <= 5 && hr >= 9 && hr < 17 ? 3 : 1;
+    if (wd === 2 && hr === 14 && h > 7 * 24 && h < 14 * 24) desired = 5;
+    hours.push({ at, desired, cpu_avg: 40 });
+  }
+  const p = learnPattern({ hours, pressure: [], floor: 2, ceiling: 6, now });
+  assert.equal(p.weeks >= 4, true); assert.equal(p.confident, true); assert.equal(p.learned.length, HOURS_PER_WEEK);
+  assert.equal(p.learned[ringIndex(Date.UTC(2026, 8, 27, 3))], 2, "Sunday 03:00: the trigger wanted 1, the floor is 2");
+  assert.equal(p.learned[ringIndex(Date.UTC(2026, 8, 30, 10))], 3, "Wednesday 10:00: 3 every week");
+  assert.equal(p.wanted[ringIndex(Date.UTC(2026, 8, 29, 14))], 3, "Tuesday 14:00: the one week at 5 is above the p95 of four weeks");
+  // pressure on Tuesday 14:00 last week at desired 6 (the ceiling): that hour and the one before learn 7, clamped to the ceiling 6
+  const pressed = learnPattern({ hours, pressure: [{ at: Date.UTC(2026, 8, 22, 14, 20), desired: 6 }], floor: 2, ceiling: 6, now });
+  assert.equal(pressed.pressure_events, 1);
+  assert.equal(pressed.learned[ringIndex(Date.UTC(2026, 8, 29, 14))], 6);
+  assert.equal(pressed.learned[ringIndex(Date.UTC(2026, 8, 29, 13))], 6, "the hour before is warmed too");
+  assert.equal(pressed.learned[ringIndex(Date.UTC(2026, 8, 29, 15))], 3);
+  // one week of data is not confident
+  const thin = learnPattern({ hours: hours.filter((h) => h.at > now - 6 * 86400000), pressure: [], floor: 2, ceiling: 6, now });
+  assert.equal(thin.confident, false); assert.ok(thin.weeks < MIN_WEEKS + 1);
+  assert.match(summarise(p.learned), /^2 for \d+ h.*; 3 for 40 h/);
+  // the decision for the coming hour
+  const next = ringIndex(Date.UTC(2026, 8, 30, 13));
+  assert.equal(decidePattern({ pattern: thin, next, current_min: 2, last_set: null, hand_set_at: null, now }).active, false);
+  const up = decidePattern({ pattern: p, next, current_min: 2, last_set: 2, hand_set_at: null, now });
+  assert.equal(up.wanted, 3); assert.match(up.reason, /Wed 13:00 is 3/);
+  assert.equal(decidePattern({ pattern: p, next, current_min: 3, last_set: 3, hand_set_at: null, now }).wanted, null, "already there");
+  const evening = ringIndex(Date.UTC(2026, 8, 30, 19));
+  assert.equal(decidePattern({ pattern: p, next: evening, current_min: 3, last_set: 3, hand_set_at: null, now }).wanted, 2, "back to the bare minimum for the evening");
+  // someone set MinSize 4 by hand two hours ago: honoured; a day later the pattern resumes
+  const hand = decidePattern({ pattern: p, next, current_min: 4, last_set: 3, hand_set_at: new Date(now - 2 * H).toISOString(), now });
+  assert.equal(hand.wanted, null); assert.equal(hand.hand_set, true); assert.match(hand.reason, /set by hand/);
+  assert.equal(decidePattern({ pattern: p, next, current_min: 4, last_set: 3, hand_set_at: new Date(now - 30 * H).toISOString(), now }).wanted, 3);
+});
+
+test("pressure now: pinned at the ceiling with high CPU raises MaxSize by one within the band", async () => {
+  const { pressureVerdict } = await import("../actions/beanstalk_pressure.js");
+  const base = { min: 2, max: 4, desired: 4, in_service: 4, cpu_avg: 85, high_cpu: 70, ceiling: 6, env_status: "Ready" };
+  const v = pressureVerdict(base);
+  assert.equal(v.pressure, true); assert.equal(v.raise, 5); assert.match(v.reason, /pinned at the maximum of 4/);
+  assert.equal(pressureVerdict({ ...base, desired: 3 }).pressure, false, "the trigger still has room");
+  assert.equal(pressureVerdict({ ...base, in_service: 3 }).pressure, false, "still launching");
+  assert.equal(pressureVerdict({ ...base, cpu_avg: 50 }).pressure, false, "under the line");
+  assert.equal(pressureVerdict({ ...base, cpu_avg: null }).pressure, false, "no metric");
+  const busy = pressureVerdict({ ...base, env_status: "Updating" });
+  assert.equal(busy.pressure, true); assert.equal(busy.raise, null, "pressure is recorded, the raise waits");
+  const noBand = pressureVerdict({ ...base, ceiling: null });
+  assert.equal(noBand.pressure, true); assert.equal(noBand.raise, null); assert.match(noBand.reason, /no band/);
+  const capped = pressureVerdict({ ...base, max: 6 , desired: 6, in_service: 6 });
+  assert.equal(capped.pressure, true); assert.equal(capped.raise, null); assert.match(capped.reason, /band's ceiling/);
+});
+
+test("scale band from the page: two whole numbers, floor at least 1, ceiling above it, or nothing to remove the tag", async () => {
+  const { bandText } = await import("../consent.js");
+  assert.equal(bandText(2, 6), "2-6");
+  assert.equal(bandText(null, null), null);
+  assert.throws(() => bandText(0, 6), /at least 1/);
+  assert.throws(() => bandText(3, 3), /above the floor/);
+  assert.throws(() => bandText(2.5, 6), /whole numbers/);
+  assert.throws(() => bandText(2, null), /both a floor and a ceiling/);
+});

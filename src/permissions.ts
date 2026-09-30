@@ -487,6 +487,7 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   s3_multipart_abort: { apply: ["s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration"], revert: ["s3:PutLifecycleConfiguration"] },
   lambda_memory: { apply: ["lambda:UpdateFunctionConfiguration"], revert: ["lambda:UpdateFunctionConfiguration"] },
   beanstalk_scale: { apply: ["elasticbeanstalk:UpdateEnvironment"], revert: ["elasticbeanstalk:UpdateEnvironment"] },
+  beanstalk_pressure: { apply: ["elasticbeanstalk:UpdateEnvironment"], revert: ["elasticbeanstalk:UpdateEnvironment"] },
   usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
   consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:UpdateTagsForResource"], revert: ["ec2:DeleteTags", "elasticbeanstalk:UpdateTagsForResource"] },
 };

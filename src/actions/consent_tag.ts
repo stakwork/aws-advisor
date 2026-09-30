@@ -1,6 +1,6 @@
 /**
- * The consent switch as an executor action: writes `AdvisorAutoPark` on an instance or `AdvisorAutoScale` on an
- * Elastic Beanstalk environment (src/consent.ts builds the proposal from the page and applies it at once). The
+ * The consent switch as an executor action: writes `AdvisorAutoPark` on an instance, or `AdvisorAutoScale` and the
+ * band `AdvisorScaleBand` on an Elastic Beanstalk environment (src/consent.ts builds the proposal from the page and applies it at once). The
  * pass never plans one of these by itself: a switch is a person's decision. Revert puts the previous value back,
  * or removes the tag when there was none. The actuator policy allows these tag keys and no other.
  */
@@ -45,7 +45,7 @@ async function readTag(p: Proposal, creds: Creds): Promise<string | null | undef
 
 export const consentTagAction: ActionModule = {
   kind: KIND,
-  label: "Consent switches (AdvisorAutoPark, AdvisorAutoScale) flipped from the page",
+  label: "Consent switches (AdvisorAutoPark, AdvisorAutoScale) and the scale band (AdvisorScaleBand) set from the page",
   async plan() { return { proposals: [], notes: ["switches are flipped from the Inventory page, never planned"] }; },
   async apply(p, creds) { return writeTag(p, creds, wanted(p, "after")); },
   async verify(p, creds) {

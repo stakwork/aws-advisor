@@ -53,18 +53,36 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
 }
 
 export function AutoScaleSwitch({ env, region, accountId }: { env: string; region?: string | null; accountId?: string | null }) {
-  const [state, setState] = useState<{ on: boolean; consent: string | null; band: string | null; operations_role: string | null; status: string | null } | null | undefined>(undefined);
+  const [state, setState] = useState<{ on: boolean; consent: string | null; band: string | null; floor: number | null; ceiling: number | null; operations_role: string | null; status: string | null } | null | undefined>(undefined);
+  const [floor, setFloor] = useState(""); const [ceiling, setCeiling] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number } | null>(null);
   const qs = new URLSearchParams(); if (region) qs.set("region", region); if (accountId) qs.set("account_id", accountId);
   const [readErr, setReadErr] = useState("");
-  useEffect(() => { setState(undefined); setMsg(null); setReadErr(""); api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent?${qs}`).then(setState).catch((e) => { setState(null); setReadErr(e.message); }); }, [env, region, accountId]);
+  // What the environment carries is read from AWS, never assumed: after a flip (whether the call succeeded, timed out
+  // on the way back, or was refused because the tag is already there) the switch re-reads it, so the page shows the tag as it is.
+  const read = () => api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent?${qs}`).then((s) => { setState(s); setFloor(s.floor == null ? "" : String(s.floor)); setCeiling(s.ceiling == null ? "" : String(s.ceiling)); setReadErr(""); }).catch((e) => { setState(null); setReadErr(e.message); });
+  useEffect(() => { setState(undefined); setMsg(null); setReadErr(""); read(); }, [env, region, accountId]);
   const flip = (want: boolean) => {
     setBusy(true); setMsg(null);
     api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF", region, account_id: accountId }) })
-      .then((a) => { setState((s) => (s ? { ...s, on: want, consent: want ? "ON" : "OFF" } : s)); setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }); })
-      .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
+      .then((a) => setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }))
+      .catch((e) => setMsg({ text: e.message, err: true }))
+      .finally(() => read().finally(() => setBusy(false)));
   };
+  // The band: the bare minimum and the ceiling, written as AdvisorScaleBand through the same ledgered action; empty both to remove it.
+  const bandDirty = state ? floor !== (state.floor == null ? "" : String(state.floor)) || ceiling !== (state.ceiling == null ? "" : String(state.ceiling)) : false;
+  const saveBand = () => {
+    setBusy(true); setMsg(null);
+    api(`/inventory/beanstalk/${encodeURIComponent(env)}/band`, { method: "POST", body: JSON.stringify({ floor: floor === "" ? null : Number(floor), ceiling: ceiling === "" ? null : Number(ceiling), region, account_id: accountId }) })
+      .then((a) => setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }))
+      .catch((e) => setMsg({ text: e.message, err: true }))
+      .finally(() => read().finally(() => setBusy(false)));
+  };
+  const numInput = (value: string, set: (v: string) => void, label: string) => (
+    <input type="number" min={1} max={999} value={value} disabled={busy} onChange={(e) => set(e.target.value)} placeholder="–" title={label} aria-label={label}
+      className="w-12 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 text-center text-xs text-zinc-200 disabled:opacity-60" />
+  );
   return (
     <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-2 text-xs">
       <div className="flex flex-wrap items-center gap-3">
@@ -72,10 +90,19 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
         {state === undefined ? <span className="text-zinc-500">reading the environment…</span> : state === null ? <span className="text-amber-300/90">{readErr || "environment not readable"}</span> : (
           <>
             <Switch on={state.on} busy={busy} onChange={flip} label="AdvisorAutoScale: may the executor move this environment's MinSize and MaxSize?" />
-            <span className="text-zinc-500">{state.on ? `the capacity action may move the bounds within ${state.band ? `AdvisorScaleBand=${state.band}` : "floor 1 and the current maximum (add AdvisorScaleBand=<floor>-<ceiling> for more room)"}` : state.consent ? `AdvisorAutoScale=${state.consent}: left alone` : "no AdvisorAutoScale tag: left alone"}{state.operations_role ? "" : " · no operations role on the environment (the README says how to attach one; without it the update needs wider rights)"}</span>
+            <span className="text-zinc-500">{state.on ? `the capacity action may move the bounds within ${state.band ? `AdvisorScaleBand=${state.band}` : "floor 1 and the current maximum (set a band below for more room)"}` : state.consent ? `AdvisorAutoScale=${state.consent}: left alone` : "no AdvisorAutoScale tag: left alone"}{state.operations_role ? "" : " · no operations role on the environment (the README says how to attach one; without it the update needs wider rights)"}</span>
           </>
         )}
       </div>
+      {state && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          <span className="text-zinc-300">Band</span>
+          <span className="text-zinc-500">bare minimum</span>{numInput(floor, setFloor, "AdvisorScaleBand floor: MinSize never goes below this")}
+          <span className="text-zinc-500">ceiling</span>{numInput(ceiling, setCeiling, "AdvisorScaleBand ceiling: MaxSize never goes above this")}
+          <button type="button" disabled={busy || !bandDirty} onClick={saveBand} className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" title="write AdvisorScaleBand=<floor>-<ceiling> on the environment (a ledgered row, Revert puts the old value back); empty both fields to remove the band">{busy ? "…" : "Save"}</button>
+          <span className="text-zinc-500">{state.band ? `AdvisorScaleBand=${state.band}: the executor keeps MinSize at or above ${state.floor} and MaxSize at or below ${state.ceiling}; the learned minimum per hour and the pressure raise move between them` : "no band: floor 1, the ceiling never moves and pressure at the ceiling cannot be answered"}</span>
+        </div>
+      )}
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
     </div>
   );
