@@ -25,7 +25,7 @@ import { db } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Proposal } from "../executor.js";
 import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
-import { beanstalkScaleAction, environmentFacts, parseBand, regions, SCALE_TAG } from "./beanstalk_scale.js";
+import { beanstalkScaleAction, environmentFacts, environmentTagGaps, OPS_ROLE_INLINE_POLICY_NOTE, parseBand, regions, SCALE_TAG } from "./beanstalk_scale.js";
 import { recordPressure } from "../capacity_pattern.js";
 
 export const KIND = "beanstalk_pressure" as const;
@@ -95,6 +95,7 @@ export const beanstalkPressureAction: ActionModule = {
           if (f.cfg.max != null && f.cfg.max !== max) { notes.push(`${name}: ${v.reason}, but the live group's maximum (${max}) and the configuration (${f.cfg.max}) disagree: sort that out first`); continue; }
           const opsRole = env.OperationsRole || null;
           if (!opsRole) notes.push(`${name}: no operations role on the environment, so UpdateEnvironment runs with the actuator's own permissions (see the README)`);
+          else { const gaps = await environmentTagGaps(region, acct.read, f.load_balancers); if (gaps?.length) notes.push(`${name}: ${gaps.map((g) => `${g.kind.replace("_", " ")} ${g.id}`).join(" and ")} carry no elasticbeanstalk:* tags: the raise will fail under the operations role's managed policy unless ${OPS_ROLE_INLINE_POLICY_NOTE}`); }
           proposals.push({
             kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
             dedupe: `${KIND}:${env.EnvironmentId}:${v.raise}`,

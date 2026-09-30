@@ -48,6 +48,8 @@
  * Auto Scaling rights the update makes; the pass notes say so per environment (the README shows the command).
  */
 import { AutoScalingClient, DescribeAutoScalingGroupsCommand, DescribeScalingActivitiesCommand, type Activity } from "@aws-sdk/client-auto-scaling";
+import { DescribeLoadBalancersCommand, DescribeTagsCommand, DescribeTargetGroupsCommand, ElasticLoadBalancingV2Client } from "@aws-sdk/client-elastic-load-balancing-v2";
+import { DescribeSecurityGroupsCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { CloudWatchClient, DescribeAlarmsCommand, GetMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { DescribeConfigurationSettingsCommand, DescribeEnvironmentResourcesCommand, DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateEnvironmentCommand, type EnvironmentDescription } from "@aws-sdk/client-elastic-beanstalk";
 import { db, getJsonSetting, setSetting } from "../db.js";
@@ -178,7 +180,7 @@ export function scaleVerdict(i: VerdictInput): Verdict {
   return { move: "floor_down", option: "MinSize", from: b.min, to: b.min - 1, reason: `the group sat at its minimum of ${b.min} for ${Math.round(floorShare * 100)} % of the last ${i.days} days with the hourly average CPU under ${pct(floorP95)} (p95): ${b.min - 1} instance${b.min - 1 === 1 ? "" : "s"} would have run at about ${pct(projected)}. The group scales in to the new floor when Beanstalk's scale-in trigger next fires`, ...facts };
 }
 
-export interface EnvFacts { env: EnvironmentDescription; tags: Record<string, string>; asg: string | null; instances: string[]; cfg: { min: number | null; max: number | null } }
+export interface EnvFacts { env: EnvironmentDescription; tags: Record<string, string>; asg: string | null; instances: string[]; cfg: { min: number | null; max: number | null }; load_balancers: string[] }
 
 const num = (v: string | undefined) => { const n = Number(v); return v != null && v !== "" && Number.isFinite(n) ? n : null; };
 export const hourStart = (t: number) => Math.floor(t / 3600000) * 3600000;
@@ -227,16 +229,49 @@ export function memberPrice(instanceIds: string[]): number | null {
   return null;
 }
 
+/**
+ * Whether the environment's stack resources carry Beanstalk's own tags (`elasticbeanstalk:environment-id` and the
+ * like). AWS's managed policy for an operations role allows the calls a stack update makes (re-tagging the balancer's
+ * security group, modifying the target group) only on resources that carry them; an older environment's resources
+ * do not, so its first update under the operations role fails and leaves the stack in rollback. Pure.
+ */
+export function untaggedResources(resources: { id: string; kind: "security_group" | "target_group"; tag_keys: string[] }[]): { id: string; kind: string }[] {
+  return resources.filter((r) => !r.tag_keys.some((k) => k.startsWith("elasticbeanstalk:"))).map((r) => ({ id: r.id, kind: r.kind }));
+}
+
+/** The remedy the pass notes point at when the resources are untagged: the Beanstalk-scoped admin policy on the operations role (the README says why). */
+export const OPS_ROLE_INLINE_POLICY_NOTE = "attach AdministratorAccess-AWSElasticBeanstalk to the operations role (README, Elastic Beanstalk environments)";
+
+/** Reads the balancer's security groups and target groups of an environment and their tag keys; a missing permission means no verdict (null). */
+export async function environmentTagGaps(region: string, credentials: any, lbArns: string[]): Promise<{ id: string; kind: string }[] | null> {
+  if (!lbArns.length) return [];
+  const elb = new ElasticLoadBalancingV2Client({ region, credentials });
+  const ec2 = new EC2Client({ region, credentials });
+  try {
+    const lbs = (await elb.send(new DescribeLoadBalancersCommand({ LoadBalancerArns: lbArns }))).LoadBalancers ?? [];
+    const sgIds = [...new Set(lbs.flatMap((l) => l.SecurityGroups ?? []))];
+    const tgs = (await Promise.all(lbArns.map((a) => elb.send(new DescribeTargetGroupsCommand({ LoadBalancerArn: a })).then((r) => r.TargetGroups ?? [])))).flat();
+    const tgArns = tgs.map((t) => t.TargetGroupArn!).filter(Boolean);
+    const out: { id: string; kind: "security_group" | "target_group"; tag_keys: string[] }[] = [];
+    if (sgIds.length) for (const g of (await ec2.send(new DescribeSecurityGroupsCommand({ GroupIds: sgIds }))).SecurityGroups ?? []) out.push({ id: g.GroupId!, kind: "security_group", tag_keys: (g.Tags ?? []).map((t) => t.Key!).filter(Boolean) });
+    if (tgArns.length) for (const d of (await elb.send(new DescribeTagsCommand({ ResourceArns: tgArns }))).TagDescriptions ?? []) out.push({ id: d.ResourceArn!.split("/").slice(-2).join("/"), kind: "target_group", tag_keys: (d.Tags ?? []).map((t) => t.Key!).filter(Boolean) });
+    return untaggedResources(out);
+  } catch { return null; }
+  finally { elb.destroy(); ec2.destroy(); }
+}
+
 export async function environmentFacts(eb: ElasticBeanstalkClient, env: EnvironmentDescription): Promise<EnvFacts> {
   const tags: Record<string, string> = {};
   if (env.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
   const res = (await eb.send(new DescribeEnvironmentResourcesCommand({ EnvironmentId: env.EnvironmentId }))).EnvironmentResources;
   const asg = res?.AutoScalingGroups?.[0]?.Name ?? null;
   const instances = (res?.Instances ?? []).map((i) => i.Id!).filter(Boolean);
+  // an application or network balancer is named by its ARN here; a classic one by its name (no target groups: nothing to check)
+  const load_balancers = (res?.LoadBalancers ?? []).map((l) => l.Name!).filter((n) => n && n.startsWith("arn:"));
   const cfg = { min: null as number | null, max: null as number | null };
   const settings = (await eb.send(new DescribeConfigurationSettingsCommand({ ApplicationName: env.ApplicationName, EnvironmentName: env.EnvironmentName }))).ConfigurationSettings?.[0]?.OptionSettings ?? [];
   for (const o of settings) if (o.Namespace === ASG_NAMESPACE) { if (o.OptionName === "MinSize") cfg.min = num(o.Value); if (o.OptionName === "MaxSize") cfg.max = num(o.Value); }
-  return { env, tags, asg, instances, cfg };
+  return { env, tags, asg, instances, cfg, load_balancers };
 }
 
 export const beanstalkScaleAction: ActionModule = {
@@ -269,6 +304,10 @@ export const beanstalkScaleAction: ActionModule = {
           const band = parseBand(tag);
           if ("error" in band) { skip(`tag ${SCALE_TAG} ${band.error}`); continue; }
           if (!f.asg) { skip("single-instance environment (no Auto Scaling group): nothing to scale"); continue; }
+          if (env.OperationsRole) {
+            const gaps = await environmentTagGaps(region, acct.read, f.load_balancers);
+            if (gaps?.length) notes.push(`${name}: ${gaps.map((g) => `${g.kind.replace("_", " ")} ${g.id}`).join(" and ")} carry no elasticbeanstalk:* tags, so the operations role's managed policy will not match them and a stack update fails on the first try (the stack is then left in rollback): ${OPS_ROLE_INLINE_POLICY_NOTE}`);
+          }
           if (env.Status !== "Ready") { skip(`environment is ${env.Status}`); continue; }
           if (f.cfg.min == null || f.cfg.max == null) { skip("MinSize/MaxSize not readable from the configuration"); continue; }
           const recent = db.prepare("select id, status, applied_at from actions where kind = ? and resource = ? and status in ('applied', 'verified') and datetime(applied_at) > datetime('now', ?) order by id desc limit 1").get(KIND, env.EnvironmentId, `-${MIN_HOURS_BETWEEN_CHANGES} hours`) as { id: number; status: string; applied_at: string } | undefined;

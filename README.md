@@ -2174,6 +2174,31 @@ aws elasticbeanstalk associate-environment-operations-role --environment-name <e
 
 `describe-environments` shows the role as `OperationsRole`; the pass notes name every tagged environment without one.
 
+**Older environments.** The managed-updates policy allows what a stack update makes (re-tagging the balancer's
+security group, modifying the target group, even describing the listeners) only on resources that carry Beanstalk's
+own tags (`elasticbeanstalk:environment-id` and the like). Environments created before Beanstalk stamped those, or
+whose resources were rebuilt outside the normal path, do not have them, so the first update under the operations role
+fails on exactly those resources and leaves the CloudFormation stack in `UPDATE_ROLLBACK_FAILED`. The pass checks the
+tags on every tagged environment with an operations role and says so in its notes before proposing anything. The
+remedy is the Beanstalk-scoped admin policy on the operations role: the role is assumed by the Beanstalk service
+alone (its trust policy), never by the advisor, so it carries what a person clicking in the console carried before:
+
+```sh
+aws iam attach-role-policy --role-name aws-elasticbeanstalk-operations-role --policy-arn arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk
+```
+
+A stack already left in rollback is cleared once by a person (the rollback runs with their own rights), after which
+updates go through the operations role again:
+
+```sh
+aws cloudformation continue-update-rollback --stack-name awseb-<env id>-stack
+aws cloudformation wait stack-rollback-complete --stack-name awseb-<env id>-stack
+```
+
+Tag writes are the one thing the operations role does not cover: Beanstalk applies `UpdateTagsForResource` as an
+environment update under the caller's own rights, so the consent tags on an environment are written by a person
+(the **run as me** box on the switch and on the ledger, with temporary credentials used once).
+
 ##### The learned week
 
 With a band on the environment the pass sizes MinSize per hour of the week instead of by hand

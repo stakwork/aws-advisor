@@ -520,3 +520,15 @@ test("deleting ledger rows: only rows that changed nothing go, with their events
   assert.equal((db.prepare("select count(*) as n from executor_events where action_id = ?").get(ids.applied) as any).n, 1, "the applied row's events stay");
   assert.ok(DELETABLE.has("failed") && !DELETABLE.has("applied"));
 });
+
+test("operations role pre-check: stack resources without Beanstalk's tags are named before an update is tried", async () => {
+  const { untaggedResources } = await import("../actions/beanstalk_scale.js");
+  const gaps = untaggedResources([
+    { id: "sg-1", kind: "security_group", tag_keys: ["Name"] },
+    { id: "sg-2", kind: "security_group", tag_keys: ["elasticbeanstalk:environment-id", "Name"] },
+    { id: "awseb-AWSEB-X/1", kind: "target_group", tag_keys: [] },
+    { id: "awseb-AWSEB-Y/2", kind: "target_group", tag_keys: ["elasticbeanstalk:environment-name"] },
+  ]);
+  assert.deepEqual(gaps, [{ id: "sg-1", kind: "security_group" }, { id: "awseb-AWSEB-X/1", kind: "target_group" }]);
+  assert.deepEqual(untaggedResources([]), []);
+});
