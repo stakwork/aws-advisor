@@ -906,6 +906,14 @@ export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackgroun
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */
 export const mirrorActionsInBackground = (ids?: number[]) => inBackground(`action mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorActions(ids));
+
+/** Ledger rows deleted on the page (src/executor.ts deleteActions) leave the graph too: the node and every edge on it. */
+export async function forgetActions(ids: number[]): Promise<{ forgotten: number }> {
+  if (!enabled() || !ids.length) return { forgotten: 0 };
+  await write("UNWIND $ids AS id MATCH (a:AdvisorAction {id: id}) DETACH DELETE a", { ids });
+  return { forgotten: ids.length };
+}
+export const forgetActionsInBackground = (ids: number[]) => inBackground(`action forget (${ids.join(", ")})`, () => forgetActions(ids));
 /** At the end of every executor pass: the pass node and its edges to the rows it touched (src/executor_log.ts). */
 export const mirrorPassInBackground = (passId: number) => inBackground(`pass mirror (${passId})`, () => mirrorPass(passId));
 /** After the watcher read the EC2 status checks (src/status_checks.ts): the statuses on the resources. */

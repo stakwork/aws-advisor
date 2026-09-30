@@ -2127,6 +2127,11 @@ apply shows "by hand: role lacks …" instead of Apply, the pass leaves its rows
 API refuses them; the same for Revert. Where a kind spans resource families (the consent tag on an instance or
 on an environment) each row is judged on its own family's calls.
 
+**Deleting rows.** A row that never changed anything (proposed, failed, refused, stale) can be deleted from its
+expanded detail on the page (`POST /api/actions/delete` with `ids`): its executor events and its chat thread go
+with it, and its node leaves the graph. A row that changed AWS (applied, verified, reverted) is the record of that
+change and cannot be deleted.
+
 **The activity log.** The ledger says what each proposal became; the log says what the actuator did, in order.
 `src/executor_log.ts` records every pass, scheduled or manual, including the ones that did nothing because the
 mode was off or the executor was paused, with its counts, its module notes and every line it printed (what each

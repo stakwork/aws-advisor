@@ -11,6 +11,9 @@ import type { ActionModule, Creds, Proposal } from "../executor.js";
 
 /** Beanstalk applies a tag change as an environment update; the list shows it only once that is through. A read-back younger than this is inconclusive, not a failure. */
 export const BEANSTALK_TAG_SETTLE_MS = 10 * 60_000;
+/** Right after the write, the read-back waits this long for Beanstalk's verdict (its failure event comes within a second or two) before calling it inconclusive. */
+export const BEANSTALK_TAG_WAIT_MS = 12_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const KIND = "consent_tag" as const;
 
@@ -66,10 +69,17 @@ export const consentTagAction: ActionModule = {
       const eb = new ElasticBeanstalkClient({ region: p.region, credentials: creds.read });
       let status: string | undefined; let failed: string | null = null;
       try {
-        status = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentIds: [p.resource], IncludeDeleted: false }))).Environments?.[0]?.Status;
-        // Beanstalk accepts the tag call and applies it as an environment update; when that update fails it says so in the events, not in the call
-        const ev = (await eb.send(new DescribeEventsCommand({ EnvironmentId: p.resource, Severity: "ERROR", StartTime: new Date((appliedAt ?? Date.now()) - 60_000), MaxRecords: 20 }))).Events ?? [];
-        failed = ev.find((e) => /tag update failed/i.test(e.Message || ""))?.Message ?? null;
+        // Beanstalk accepts the tag call and applies it as an environment update; when that update fails it says so in the events, not in the call.
+        // Fresh after the write, poll a few seconds for that verdict (or for the tag to land) so the row does not sit as applied on a failure.
+        const deadline = age < 60_000 ? Date.now() + BEANSTALK_TAG_WAIT_MS : 0;
+        for (;;) {
+          status = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentIds: [p.resource], IncludeDeleted: false }))).Environments?.[0]?.Status;
+          const ev = (await eb.send(new DescribeEventsCommand({ EnvironmentId: p.resource, Severity: "ERROR", StartTime: new Date((appliedAt ?? Date.now()) - 60_000), MaxRecords: 20 }))).Events ?? [];
+          failed = ev.find((e) => /tag update failed/i.test(e.Message || ""))?.Message ?? null;
+          if (failed || Date.now() >= deadline) break;
+          if (status === "Ready") { const again = await readTag(p, creds); if (again === want) return { ok: true, note: `read back: ${tagOf(p)}=${again ?? "(absent)"}` }; }
+          await sleep(3000);
+        }
       } catch { /* the tag read is the verdict then */ } finally { eb.destroy(); }
       if (failed) {
         const tags = [tagOf(p), want == null ? null : `Key=${tagOf(p)},Value=${want}`];

@@ -262,7 +262,7 @@ export async function runAsPerson(id: number, verb: "apply" | "revert", input: u
   const row = getAction(id);
   if (!row) throw new ConsentError(`no action #${id}`, 404);
   if (!PERSON_KINDS.has(row.kind)) throw new ConsentError(`#${id} is a ${row.kind} row: only consent tags are done with a person's credentials`, 400);
-  if (verb === "apply" && !["proposed", "failed"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only a proposed or failed row is applied`, 409);
+  if (verb === "apply" && !["proposed", "failed", "applied"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only a proposed, failed or still-unverified row is applied`, 409);
   if (verb === "revert" && !["applied", "verified"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only an applied or verified row is reverted`, 409);
   const mod = actionModules().find((m) => m.kind === row.kind);
   if (!mod) throw new ConsentError(`no module for ${row.kind}`, 500);

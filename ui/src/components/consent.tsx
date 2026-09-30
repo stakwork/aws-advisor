@@ -5,7 +5,7 @@ import { api } from "../api";
 /** The consent switches (src/consent.ts): AdvisorAutoPark on an instance, AdvisorAutoScale on a Beanstalk environment. Each flip is a ledgered auto-action, applied at once. */
 const isOn = (v: string | null | undefined) => /^(on|true|yes|1)$/i.test(String(v ?? "").trim());
 /** What a ledger row says after a click: its result, or on a failed or refused row the error the actuator hit. */
-const rowMsg = (a: { id: number; status: string; title: string; result?: string | null; error?: string | null }) => ({ text: `${a.status}: ${(a.status === "failed" || a.status === "refused") && a.error ? a.error : a.result || a.title}`, err: a.status === "failed" || a.status === "refused", actionId: a.id });
+const rowMsg = (a: { id: number; status: string; title: string; result?: string | null; error?: string | null }) => ({ text: `${a.status}: ${(a.status === "failed" || a.status === "refused") && a.error ? a.error : a.result || a.title}`, err: a.status === "failed" || a.status === "refused", actionId: a.id, status: a.status });
 
 function Switch({ on, busy, onChange, label }: { on: boolean; busy: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -61,7 +61,7 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
 export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null }) {
   const [value, setValue] = useState<string | null>(tags?.AdvisorAutoPark ?? null);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number } | null>(null);
+  const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
   useEffect(() => { setValue(tags?.AdvisorAutoPark ?? null); setMsg(null); }, [instanceId, tags?.AdvisorAutoPark]);
   const on = isOn(value);
   const flip = (want: boolean) => {
@@ -91,7 +91,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
         )}
       </div>
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
-      {msg?.err && msg.actionId ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id }); setValue(row.after?.AdvisorAutoPark ?? null); } }} /> : null}
+      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setValue(row.after?.AdvisorAutoPark ?? null); } }} /> : null}
     </div>
   );
 }
@@ -100,7 +100,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
   const [state, setState] = useState<{ on: boolean; consent: string | null; band: string | null; floor: number | null; ceiling: number | null; operations_role: string | null; status: string | null } | null | undefined>(undefined);
   const [floor, setFloor] = useState(""); const [ceiling, setCeiling] = useState("");
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number } | null>(null);
+  const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
   const qs = new URLSearchParams(); if (region) qs.set("region", region); if (accountId) qs.set("account_id", accountId);
   const [readErr, setReadErr] = useState("");
   // What the environment carries is read from AWS, never assumed: after a flip (whether the call succeeded, timed out
@@ -148,7 +148,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
         </div>
       )}
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
-      {msg?.err && msg.actionId ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id }); read(); } }} /> : null}
+      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); read(); } }} /> : null}
     </div>
   );
 }

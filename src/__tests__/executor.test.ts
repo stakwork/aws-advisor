@@ -502,3 +502,21 @@ test("a person's one-time credentials: temporary only, with a session token; the
   assert.throws(() => parseOneTimeCredentials(null), /paste an access key/);
   assert.ok(PERSON_KINDS.has("consent_tag")); assert.ok(!PERSON_KINDS.has("beanstalk_scale"));
 });
+
+test("deleting ledger rows: only rows that changed nothing go, with their events; applied and verified rows stay", async () => {
+  const { deleteActions, DELETABLE } = await import("../executor.js");
+  const { db } = await import("../db.js");
+  db.exec("delete from actions; delete from executor_events");
+  const ins = db.prepare("insert into actions(kind, resource, region, dedupe, status, mode, trigger, title, reason) values ('consent_tag', 'e-1', 'us-east-1', ?, ?, 'apply', 'manual', ?, 'because')");
+  const ids: Record<string, number> = {};
+  for (const st of ["failed", "failed", "refused", "stale", "proposed", "applied", "verified", "reverted"]) ids[`${st}${ids[st] != null ? 2 : ""}`] = Number(ins.run(`d-${st}-${Math.random()}`, st, `row ${st}`).lastInsertRowid);
+  const ev = db.prepare("insert into executor_events(action_id, kind, event, trigger, outcome, detail) values (?, 'consent_tag', 'apply', 'manual', 'failed', 'x')");
+  ev.run(ids.failed); ev.run(ids.applied);
+  const r = await deleteActions([ids.failed, ids.failed2, ids.refused, ids.stale, ids.proposed, ids.applied, ids.verified, ids.reverted, 999999]);
+  assert.deepEqual(r.deleted, [ids.failed, ids.failed2, ids.refused, ids.stale, ids.proposed]);
+  assert.deepEqual(r.kept.map((k) => k.status), ["applied", "verified", "reverted"]);
+  assert.equal((db.prepare("select count(*) as n from actions").get() as any).n, 3);
+  assert.equal((db.prepare("select count(*) as n from executor_events where action_id = ?").get(ids.failed) as any).n, 0, "its events went with it");
+  assert.equal((db.prepare("select count(*) as n from executor_events where action_id = ?").get(ids.applied) as any).n, 1, "the applied row's events stay");
+  assert.ok(DELETABLE.has("failed") && !DELETABLE.has("applied"));
+});
