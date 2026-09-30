@@ -9,7 +9,8 @@ containers (the evidence that it is really idle or really busy), aws_baseline fo
 for who touched the resource recently (a plan must not fight an ongoing change), aws_log_groups when the finding is
 about logs, aws_price_lookup for the real on-demand prices of the current and the
 target SKU, aws_instance_probe or aws_instance_inventory for what runs on an instance, aws_resource_cost_history and
-aws_findings_for_resource and aws_recommendation_history for history, learn_concept for the full text of a concept id.
+aws_findings_for_resource and aws_recommendation_history for history, aws_security_findings for what the security
+scan flagged on the resource (a plan must not keep or widen an exposure), learn_concept for the full text of a concept id.
 Write the plan for THIS resource: real ids, names, sizes and regions in every step and command; one verify line per
 step; the rollback where a step is not reversible. Respect the team's decisions: a generic rule for this role applies
 unless the facts say otherwise; a rejection on this resource means say why this time is different or set applies to

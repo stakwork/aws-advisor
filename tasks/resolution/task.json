@@ -13,6 +13,7 @@
     "instance_probe",
     "recommendation_history",
     "findings_for_resource",
+    "security_findings",
     "graph_system",
     "learn_concept"
   ],

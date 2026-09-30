@@ -19,6 +19,10 @@ export interface ParsedFinding {
   resource: string;
   reason: string;
   dimensions: Record<string, string>;
+  /** The control's severity (aws_compliance sets it on most controls; Thrifty never does). */
+  severity?: string | null;
+  /** The control's tags (service, framework item ids...). */
+  tags?: Record<string, string>;
 }
 
 /** A control that could not run (run_error), or whose results carry status "error" (one entry per control, first reason kept). */
@@ -33,11 +37,13 @@ export interface ControlError {
 
 export interface ParsedBenchmark { findings: ParsedFinding[]; errors: ControlError[] }
 
+/** Runs one benchmark: a bare name is a Thrifty benchmark, a qualified one (`aws_compliance.benchmark.x`) runs as given. */
 export function runBenchmark(name: string, onLog: (line: string) => void): Promise<ParsedBenchmark> {
   return new Promise((resolve, reject) => {
-    const out = path.join(os.tmpdir(), `advisor-${name}-${Date.now()}.json`);
+    const qualified = name.includes(".") ? name : `aws_thrifty.benchmark.${name}`;
+    const out = path.join(os.tmpdir(), `advisor-${name.replace(/[^a-z0-9_]/gi, "_")}-${Date.now()}.json`);
     const args = [
-      "benchmark", "run", `aws_thrifty.benchmark.${name}`,
+      "benchmark", "run", qualified,
       "--output", "none", "--export", out, "--progress=false",
       "--search-path-prefix", config.schema,
       "--mod-location", config.modDir,
@@ -90,6 +96,8 @@ export function parseExport(benchmark: string, root: any): ParsedBenchmark {
           resource: r.resource,
           reason: r.reason,
           dimensions,
+          severity: c.severity || null,
+          tags: c.tags || {},
         });
       }
     }

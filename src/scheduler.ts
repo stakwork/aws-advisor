@@ -29,6 +29,7 @@ import { refreshTagHygiene } from "./tag_hygiene.js";
 import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
 import { mirrorKnowledgeInBackground } from "./graph_mirror.js";
 import { refreshStatusChecks } from "./status_checks.js";
+import { complianceBusy, startComplianceScan } from "./compliance.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -70,6 +71,11 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     if (!(await credentialGate("scheduler")).ok) return "skipped: AWS credentials are not working";
     const id = startRun("schedule");
     return `started run #${id}`;
+  } },
+  complianceCron: { label: "Security scan", run: async () => {
+    if (complianceBusy()) return "skipped: a scan is already in progress";
+    if (!(await credentialGate("compliance")).ok) return "skipped: AWS credentials are not working";
+    return `started security scan #${startComplianceScan("schedule")}`;
   } },
   watchCron: { label: "Watcher", run: async () => {
     if (watching) return "skipped: previous sample still collecting";
@@ -126,7 +132,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
   verifyCron: { label: "Saving verification", run: async () => { const r: any = await runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }); return typeof r === "object" && r ? JSON.stringify(r).slice(0, 200) : "done"; } },
 };
 
-const tag: Record<string, string> = { swarmCostCron: "swarms", runCron: "scheduler", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor", pressureCron: "pressure" };
+const tag: Record<string, string> = { swarmCostCron: "swarms", runCron: "scheduler", complianceCron: "compliance", watchCron: "watcher", probeCron: "probe-pass", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor", pressureCron: "pressure" };
 const jobInFlight = new Set<string>();
 
 /** Runs one job now, as the cron would, and reports what it did or why it did nothing. The credential check is the same. */
@@ -150,8 +156,8 @@ export async function runJobNow(key: string, trigger = "manual"): Promise<string
 
 export function startScheduler(): Record<string, string | null> {
   const out: Record<string, string | null> = {};
-  const crons: Record<string, string> = { swarmCostCron: config.reviewCron, runCron: config.runCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron, pressureCron: config.actPressureCron };
-  const names: Record<string, string> = { swarmCostCron: "Cost per swarm (REVIEW_CRON)", runCron: "Scheduler (RUN_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)", pressureCron: "Pressure check (ACT_PRESSURE_CRON)" };
+  const crons: Record<string, string> = { swarmCostCron: config.reviewCron, runCron: config.runCron, complianceCron: config.complianceCron, watchCron: config.watchCron, probeCron: config.probeCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron, pressureCron: config.actPressureCron };
+  const names: Record<string, string> = { swarmCostCron: "Cost per swarm (REVIEW_CRON)", runCron: "Scheduler (RUN_CRON)", complianceCron: "Security scan (COMPLIANCE_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass (PROBE_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)", pressureCron: "Pressure check (ACT_PRESSURE_CRON)" };
   for (const key of Object.keys(JOBS)) {
     if (key === "observeCron" && !config.repo2graphUrl) { console.log("Observation (OBSERVE_CRON) disabled: no repo2graph URL (Settings > Agent)"); out[key] = null; continue; }
     out[key] = schedule(names[key], crons[key], () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });

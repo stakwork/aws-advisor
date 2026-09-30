@@ -356,6 +356,44 @@ for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache"]) add
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");
 
+// Security posture (src/compliance.ts): the aws_compliance scan, apart from the cost runs so its thousand-odd alarms
+// never reach the cost agent's brief or the run diff. A finding keeps the scan it was first seen in across scans.
+db.exec(`create table if not exists compliance_scans (
+  id integer primary key autoincrement,
+  started_at text not null default (datetime('now')),
+  finished_at text,
+  status text not null default 'running',
+  trigger text not null default 'manual',
+  account_id text,
+  benchmarks text,
+  alarms integer not null default 0,
+  new_alarms integer not null default 0,
+  resolved integer not null default 0,
+  errors integer not null default 0,
+  counts text,
+  error text,
+  log text not null default ''
+);
+create table if not exists compliance_findings (
+  id integer primary key autoincrement,
+  scan_id integer not null references compliance_scans(id) on delete cascade,
+  benchmark text not null,
+  control_id text not null,
+  control_title text,
+  severity text,
+  service text,
+  resource text,
+  reason text,
+  account_id text,
+  region text,
+  fingerprint text not null,
+  first_seen_scan integer not null,
+  first_seen_at text not null
+);
+create index if not exists compliance_findings_scan on compliance_findings(scan_id, severity);
+create index if not exists compliance_findings_fp on compliance_findings(fingerprint);
+create index if not exists compliance_findings_resource on compliance_findings(resource);`);
+
 // Member accounts (src/accounts.ts): the inventories and the executor's ledger remember which account a row belongs to.
 for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache", "inventory_ebs", "inventory_s3", "inventory_lambda", "log_groups"]) { try { addColumn(t, "account_id", "text"); } catch { /* table created by a module that has not loaded yet: it adds the column itself */ } }
 

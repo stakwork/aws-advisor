@@ -175,8 +175,99 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
           <span className="text-zinc-500">{state.band ? `AdvisorScaleBand=${state.band}: the executor keeps MinSize at or above ${state.floor} and MaxSize at or below ${state.ceiling}; the learned minimum per hour and the pressure raise move between them` : "no band: floor 1, the ceiling never moves and pressure at the ceiling cannot be answered"}</span>
         </div>
       )}
+      {state && !pending && <ScalingTimeline env={env} region={region} accountId={accountId} state={state} />}
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
       {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); const after = row.after || {}; if ("AdvisorAutoScale" in after) waitFor(`AdvisorAutoScale=${after.AdvisorAutoScale ?? "(removed)"}`, { on: isOn(after.AdvisorAutoScale) }); else if ("AdvisorScaleBand" in after) waitFor(after.AdvisorScaleBand ? `AdvisorScaleBand=${after.AdvisorScaleBand}` : "the band removed", { band: after.AdvisorScaleBand ?? null }); read(); } }} /> : null}
+    </div>
+  );
+}
+
+/** "2026-09-30T14:00:00.000Z" → "14:00"; with the day when it is not today (UTC). */
+const hhmm = (iso: string | null | undefined, withDay = false) => { if (!iso) return "—"; const d = new Date(iso.includes("T") ? iso : `${iso.replace(" ", "T")}Z`); const t = `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`; return withDay ? `${d.toISOString().slice(5, 10)} ${t}` : t; };
+const STATUS_TEXT: Record<string, string> = { driving: "learned week in charge", hand_set: "hand-set, pattern waiting", learning: "still learning", window: "quiet windows in charge", no_band: "no band ceiling", off: "executor off", paused: "paused", no_consent: "not switched on", unknown: "unknown" };
+const KIND_TEXT: Record<string, string> = { beanstalk_scale: "capacity", beanstalk_pressure: "pressure" };
+
+/**
+ * What the capacity action will do to MinSize over the next 24 hours and what it did lately (GET
+ * /actions/beanstalk/:env/timeline, src/capacity_timeline.ts): a bar per hour inside the band, the hours it changes
+ * marked, the hours the one-step-per-24-hours rule or a hand-set minimum holds, the recent ledger rows and pressure events.
+ */
+function ScalingTimeline({ env, region, accountId, state }: { env: string; region?: string | null; accountId?: string | null; state: ScaleState }) {
+  const [t, setT] = useState<any>(undefined);
+  const [err, setErr] = useState("");
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const qs = new URLSearchParams();
+    if (region) qs.set("region", region); if (accountId) qs.set("account_id", accountId);
+    if (state.floor != null) qs.set("floor", String(state.floor)); if (state.ceiling != null) qs.set("ceiling", String(state.ceiling));
+    qs.set("on", state.on ? "1" : "0");
+    setT(undefined); setErr("");
+    api(`/actions/beanstalk/${encodeURIComponent(env)}/timeline?${qs}`).then(setT).catch((e) => { setT(null); setErr(e.message); });
+  }, [env, region, accountId, state.on, state.floor, state.ceiling]);
+  if (t === undefined) return <div className="mt-2 text-zinc-500">Scaling timeline: reading…</div>;
+  if (t === null) return <div className="mt-2 text-zinc-500">Scaling timeline: {err}</div>;
+  const plan = t.plan;
+  const hours: any[] = plan.hours;
+  const top = Math.max(plan.ceiling ?? 0, ...hours.map((h) => h.min ?? 0), ...hours.map((h) => h.learned ?? 0), 1);
+  const changes = hours.filter((h) => h.change || h.held);
+  const dry = plan.mode !== "apply";
+  return (
+    <div className="mt-2 border-t border-zinc-800 pt-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-zinc-300">Scaling timeline</span>
+        <span className={`rounded border px-1.5 py-0 text-[11px] ${plan.status === "driving" || plan.status === "window" ? "border-emerald-500/40 text-emerald-300" : plan.status === "hand_set" || plan.status === "learning" ? "border-amber-500/40 text-amber-300" : "border-zinc-700 text-zinc-400"}`}>{STATUS_TEXT[plan.status] || plan.status}</span>
+        <span className="rounded border border-zinc-700 px-1.5 py-0 text-[11px] text-zinc-400" title="ACT_MODE">{plan.mode === "apply" ? "apply" : plan.mode === "dry_run" ? "dry run: proposes only" : plan.mode}</span>
+        <span className="text-zinc-500">MinSize now {plan.current_min ?? "?"}{t.max_size != null ? `, MaxSize ${t.max_size}` : ""}{t.min_source === "ledger" ? " (from the ledger)" : ""} · next capacity pass {hhmm(t.passes.next_capacity_pass)} UTC ({t.passes.capacity}) · pressure check {t.passes.pressure}</span>
+      </div>
+      <div className="mt-1 text-zinc-400">{plan.headline}</div>
+      <div className="mt-2 flex h-16 items-end gap-px" role="img" aria-label="planned MinSize for each of the next 24 hours">
+        {hours.map((h) => {
+          const v = h.min ?? h.learned ?? 0;
+          return (
+            <div key={h.at} className="relative flex h-full min-w-0 flex-1 flex-col justify-end" title={`${h.label} UTC · MinSize ${h.min ?? "?"}${h.learned != null ? ` · learned ${h.learned}` : ""}${h.change ? ` · ${h.change.applied ? "set" : "proposed"} ${h.change.from} → ${h.change.to} at ${hhmm(h.decided_at)} (${h.change.driver})` : ""}${h.held ? ` · ${h.held}` : ""}`}>
+              {h.learned != null && h.learned !== h.min && <div className="absolute inset-x-0 border-t border-dashed border-zinc-400" style={{ bottom: `${(h.learned / top) * 100}%` }} />}
+              <div className={`rounded-sm ${h.change ? (h.change.applied ? "bg-sky-400" : "bg-sky-400/50") : h.held ? "bg-amber-400/60" : "bg-zinc-600"}`} style={{ height: `${Math.max(4, (v / top) * 100)}%` }} />
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex gap-px text-[10px] text-zinc-600">{hours.map((h, k) => <div key={h.at} className="min-w-0 flex-1 text-center">{k % 3 === 0 ? hhmm(h.at) : ""}</div>)}</div>
+      <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-zinc-500">
+        <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-sky-400" />{dry ? "a proposal row (nothing changes in dry run)" : "MinSize changes here"}</span>
+        <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-400/60" />held (24-hour rule or hand-set)</span>
+        <span><span className="mr-1 inline-block w-3 border-t border-dashed border-zinc-500 align-middle" />learned minimum, when it differs</span>
+        {plan.pattern && <span>pattern: {plan.pattern.weeks} of {plan.pattern.min_weeks} weeks, {Math.round(plan.pattern.coverage * 100)} % of {Math.round(plan.pattern.min_coverage * 100)} % hours, {plan.pattern.pressure_events} pressure event(s), computed {hhmm(plan.pattern.computed_at, true)} UTC</span>}
+      </div>
+      {changes.length > 0 && (
+        <ul className="mt-1 space-y-0.5 text-zinc-400">
+          {changes.slice(0, 8).map((h) => <li key={h.at}><span className="font-mono text-zinc-300">{hhmm(h.decided_at)}</span> for {h.label}: {h.change ? `${h.change.applied ? "MinSize" : "proposes MinSize"} ${h.change.from} → ${h.change.to} (${h.change.driver === "pattern" ? "learned week" : "quiet window"})` : h.held}</li>)}
+          {changes.length > 8 && <li className="text-zinc-500">… {changes.length - 8} more hour(s)</li>}
+        </ul>
+      )}
+      <button type="button" className="mt-1 text-sky-300 hover:underline" onClick={() => setOpen((o) => !o)}>{open ? "hide history" : `history: ${t.changes.length} capacity row(s), ${t.pressure.length} pressure event(s) in 7 days`}</button>
+      {open && (
+        <div className="mt-1 space-y-2">
+          {t.changes.length ? (
+            <ul className="space-y-0.5">
+              {t.changes.slice(0, 15).map((a: any) => (
+                <li key={a.id} className="flex flex-wrap gap-2">
+                  <span className="font-mono text-zinc-500">{hhmm(a.applied_at || a.created_at, true)}</span>
+                  <span className="text-zinc-500">{KIND_TEXT[a.kind] || a.kind}</span>
+                  <span className={a.status === "failed" || a.status === "refused" ? "text-red-300" : a.status === "applied" || a.status === "verified" ? "text-emerald-300" : "text-zinc-400"}>{a.status}</span>
+                  <Link className="text-zinc-300 hover:underline" to={`/actions?id=${a.id}`}>{a.title}</Link>
+                </li>
+              ))}
+            </ul>
+          ) : <div className="text-zinc-500">No capacity rows for this environment yet.</div>}
+          {t.pressure.length > 0 && (
+            <div>
+              <div className="text-zinc-400">Pressure events (pinned at the ceiling with high CPU; each raises its hour and the one before in the learned week)</div>
+              <ul className="space-y-0.5">{t.pressure.map((e: any) => <li key={e.id} className="text-zinc-500"><span className="font-mono">{hhmm(e.at, true)}</span> {e.label} UTC · {e.desired} of max {e.max_size}{e.cpu_avg != null ? ` · CPU ${Math.round(e.cpu_avg)} %` : ""}{e.action_id ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${e.action_id}`}>row #{e.action_id}</Link></> : null}</li>)}</ul>
+            </div>
+          )}
+          <ul className="list-disc space-y-0.5 pl-4 text-zinc-500">{plan.uncertain.map((u: string) => <li key={u}>{u}</li>)}</ul>
+        </div>
+      )}
     </div>
   );
 }

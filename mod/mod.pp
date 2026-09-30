@@ -4,5 +4,8 @@ mod "advisor" {
     mod "github.com/turbot/steampipe-mod-aws-thrifty" {
       version = "*"
     }
+    mod "github.com/turbot/steampipe-mod-aws-compliance" {
+      version = "*"
+    }
   }
 }

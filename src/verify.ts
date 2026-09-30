@@ -57,7 +57,7 @@ export async function runVerifications(opts: { force?: boolean; ids?: number[]; 
   if (!gate.ok) { out.errors.push(gate.error || "credentials not working"); out.took_ms = Date.now() - t0; return out; }
   const today = new Date().toISOString().slice(0, 10);
   const recs = db.prepare(`select r.*, i.instance_type as inv_type, i.region as inv_region from recommendations r left join inventory_ec2 i on i.instance_id = r.resource
-    where r.status in ('approved', 'done') and r.decided_at is not null ${opts.ids?.length ? `and r.id in (${opts.ids.map(() => "?").join(",")})` : ""} order by r.decided_at`).all(...(opts.ids || [])) as any[];
+    where r.status in ('approved', 'done') and r.decided_at is not null and r.action_type <> 'security_fix' ${opts.ids?.length ? `and r.id in (${opts.ids.map(() => "?").join(",")})` : ""} order by r.decided_at`).all(...(opts.ids || [])) as any[];
   const ins = db.prepare(`insert into verifications(recommendation_id, decided_day, days_after, scope_service, scope_usage, scope_note, verdict, before_usd_day, after_usd_day, realised_usd_month, estimate_usd_month, ratio, applied, note, series)
     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const cache = new Map<string, DailyCost[]>();

@@ -5,6 +5,7 @@
   "tools": [
     "open_recommendations",
     "findings_for_resource",
+    "security_findings",
     "recommendation_history",
     "review_findings",
     "steampipe_query",

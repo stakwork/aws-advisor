@@ -32,6 +32,7 @@ import { instanceStatusOf, listInstanceStatus, statusEvents, statusSummary } fro
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 import { registerSwarmTools } from "./mcp_swarms.js";
 import { registerTagTools } from "./mcp_tags.js";
+import { complianceFindings, exposureOfResource, shortControl } from "./compliance.js";
 
 /**
  * MCP fact server, mounted at /mcp (Streamable HTTP, stateless: one server+transport per request).
@@ -194,6 +195,16 @@ function findingsForResource(a: { resource: string; run_id?: number; limit: numb
   return text({ run_id: runId, count: rows.length, findings: rows.map((r) => ({ ...r, dimensions: safeJson(r.dimensions) })), seen_in_earlier_runs: previous });
 }
 
+/** The latest security scan's findings on a resource (or of a severity), worst first, with the reach of the resource when it is a group or an instance. */
+function securityFindings(a: { resource?: string; severity?: string; control?: string; limit: number }) {
+  if (!a.resource && !a.severity && !a.control) return fail("give a resource, a severity or a control");
+  const r = complianceFindings({ resource: a.resource, severity: a.severity, control_id: a.control ? (a.control.includes(".") ? a.control : `aws_compliance.control.${a.control}`) : undefined });
+  if (r.scan_id == null) return text({ scan_id: null, findings: [], note: "no completed security scan yet" });
+  const rows = r.rows.slice(0, Math.min(200, Math.max(1, a.limit)));
+  const exposure = a.resource ? exposureOfResource(rows[0]?.resource ?? a.resource) : null;
+  return text({ scan_id: r.scan_id, count: r.rows.length, findings: rows.map((f) => ({ control: shortControl(f.control_id), title: f.control_title, severity: f.severity, resource: f.resource, reason: f.reason, region: f.region, first_seen_at: f.first_seen_at })), exposure });
+}
+
 const safeJson = (s: string | null) => { if (!s) return null; try { return JSON.parse(s); } catch { return s; } };
 
 async function instanceProbe(a: { instance_id: string }) {
@@ -299,6 +310,13 @@ export function createFactServer(): McpServer {
     inputSchema: { resource: z.string().describe("id, ARN or a substring of it"), run_id: z.number().int().optional(), limit: z.number().int().default(50) },
     annotations: ro,
   }, (a) => findingsForResource(a));
+
+  server.registerTool("security_findings", {
+    title: "Security findings",
+    description: "What the daily security scan (aws_compliance: AWS Foundational Security Best Practices, optionally CIS) flagged, from the latest completed scan: by resource (id, ARN or a substring), by severity (critical, high, medium, low) or by control (e.g. foundational_security_ec2_18). With a resource that is a security group or an instance, also who can reach it: the running instances carrying the group, public address, ports open to the internet with the app listening, domains.",
+    inputSchema: { resource: z.string().optional(), severity: z.enum(["critical", "high", "medium", "low", "unrated"]).optional(), control: z.string().optional(), limit: z.number().int().default(50) },
+    annotations: ro,
+  }, (a) => securityFindings(a));
 
   server.registerTool("instance_inventory", {
     title: "EC2 inventory",

@@ -181,6 +181,31 @@ chat pubkey, the level to send from, the scope and the quiet hours, with a "send
   runs, recommendations and decisions with reasons, tailored resolutions, bill checks, alerts (folded per day)
   and incidents, probes. Each line links to the page that holds the rest.
 
+### Security posture (aws_compliance)
+
+A second, independent scan runs Turbot's [aws_compliance](https://hub.powerpipe.io/mods/turbot/aws_compliance) mod
+through the same Powerpipe and Steampipe connection: AWS Foundational Security Best Practices by default, CIS v3.0.0
+as an option (Security page checkboxes). It runs daily on `COMPLIANCE_CRON` (default `20 6 * * *`, about 30 seconds)
+and keeps its own tables (`compliance_scans`, `compliance_findings`, `src/compliance.ts`), so its thousand-odd alarms
+never reach the cost agent's brief, the cost run's diff or the "material" test. Each finding remembers the scan it was
+first seen in, which is what "new" means on the page and in the chat.
+
+Every alarm is listed on the **Security** page. A few become recommendations (rule `sec_<item>`, action_type
+`security_fix`, no saving, tier approve; the executor never acts on them and the saving verification skips them):
+- every alarm of a critical control, except the known noise (`CRITICAL_NOISE`)
+- a short list of high controls (`CURATED`): account-wide ones always, security groups (ec2_18, ec2_19) and IMDSv1
+  instances (ec2_8) only when the resource is reachable. Reachable comes from what the advisor knows and the scan
+  does not: the running instances carrying the group, their public address, the ports the group opens to 0.0.0.0/0
+  that something listens on (probe 1.8), and the Route 53 records that reach the box.
+
+The recommendations reconcile with each scan (a finding that goes away resolves its open recommendation), are mirrored
+into the graph (`AdvisorSecurityScan`, `SECURITY_FLAGGED` edges kept apart from the cost run's `FLAGGED`) and decided
+like any other. New critical or high findings are posted to the Sphinx chat once per scan. The agent sees them through
+the `security_findings` MCP tool: a cost change must not keep or widen an exposure (a public snapshot is deleted, not
+archived). A control the read role may not evaluate is a control error in the scan log and in Settings › Permissions,
+never a finding: the IAM, GuardDuty, Inspector and account-contact controls need reads the cost policy does not have
+(the merged policy there lists them, or attach the AWS-managed `SecurityAudit` policy to the read role).
+
 ## Local run
 
 Prerequisites: Node 22, the `steampipe` service running with the `aws` plugin installed, `powerpipe` on PATH.

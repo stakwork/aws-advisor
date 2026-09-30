@@ -20,7 +20,9 @@
  * A tag on the environment is the consent and the guard rail: `advisor:scale=<floor>-<ceiling>` (e.g. `2-8`)
  * is the band the executor may move the bounds within; `advisor:scale=auto` means floor 1 and the ceiling
  * where it is (the floor may come down, the ceiling never moves). The actuator policy allows UpdateEnvironment
- * only on an environment carrying the tag. One step per environment per `MIN_HOURS_BETWEEN_CHANGES`, never
+ * only on an environment carrying the tag. One step (the agent's bounds, the idle-floor trim, the ceiling raise) per
+ * environment per `MIN_HOURS_BETWEEN_CHANGES`; the learned week and the quiet windows below move MinSize hour by
+ * hour by design, so they neither wait on that step nor count as one. Never
  * while the environment is not Ready, never a floor cut while its health is Degraded or Severe, never when the
  * live group disagrees with the configuration (someone edited the group directly), never on a single-instance
  * environment, and never on `advisor:hands-off`. Revert puts the previous bounds back.
@@ -310,8 +312,10 @@ export const beanstalkScaleAction: ActionModule = {
           }
           if (env.Status !== "Ready") { skip(`environment is ${env.Status}`); continue; }
           if (f.cfg.min == null || f.cfg.max == null) { skip("MinSize/MaxSize not readable from the configuration"); continue; }
-          const recent = db.prepare("select id, status, applied_at from actions where kind = ? and resource = ? and status in ('applied', 'verified') and datetime(applied_at) > datetime('now', ?) order by id desc limit 1").get(KIND, env.EnvironmentId, `-${MIN_HOURS_BETWEEN_CHANGES} hours`) as { id: number; status: string; applied_at: string } | undefined;
-          if (recent) { skip(`changed by #${recent.id} at ${recent.applied_at} (one step per ${MIN_HOURS_BETWEEN_CHANGES} h)`); continue; }
+          // the last step, not the hourly moves: a pattern or window row neither blocks a step nor is blocked by one
+          const recent = db.prepare(`select id, status, applied_at from actions where kind = ? and resource = ? and status in ('applied', 'verified') and datetime(applied_at) > datetime('now', ?)
+            and coalesce(json_extract(facts_json, '$.pattern'), 0) = 0 and coalesce(json_extract(facts_json, '$.window'), 0) = 0 order by id desc limit 1`).get(KIND, env.EnvironmentId, `-${MIN_HOURS_BETWEEN_CHANGES} hours`) as { id: number; status: string; applied_at: string } | undefined;
+          const stepHeld = recent ? `changed by #${recent.id} at ${recent.applied_at} (one step per ${MIN_HOURS_BETWEEN_CHANGES} h)` : null;
           const group = (await as.send(new DescribeAutoScalingGroupsCommand({ AutoScalingGroupNames: [f.asg] }))).AutoScalingGroups?.[0];
           if (!group) { skip(`group ${f.asg} not found`); continue; }
           const bounds: Bounds = { min: group.MinSize ?? f.cfg.min, max: group.MaxSize ?? f.cfg.max, desired: group.DesiredCapacity ?? 0 };
@@ -337,6 +341,7 @@ export const beanstalkScaleAction: ActionModule = {
           const agentMin = groupReview?.group_min != null && groupReview.group_min >= band.floor && groupReview.group_min <= ceiling ? groupReview.group_min : null;
           const agentMax = groupReview?.group_max != null && groupReview.group_max >= (agentMin ?? bounds.min) && groupReview.group_max <= ceiling ? groupReview.group_max : null;
           if (agentMin != null && agentMin !== state.baseline_min && agentMin !== bounds.min) {
+            if (stepHeld) { skip(`the agent's MinSize ${agentMin} waits: ${stepHeld}`); continue; }
             const price = memberPrice(f.instances);
             proposals.push({
               kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
@@ -351,6 +356,7 @@ export const beanstalkScaleAction: ActionModule = {
             continue;
           }
           if (agentMax != null && agentMax !== bounds.max) {
+            if (stepHeld) { skip(`the agent's MaxSize ${agentMax} waits: ${stepHeld}`); continue; }
             proposals.push({
               kind: KIND, resource: env.EnvironmentId!, resource_name: env.EnvironmentName ?? null, region, account_id: acct.account_id ?? null,
               dedupe: `${KIND}:${env.EnvironmentId}:agent-max:${agentMax}`,
@@ -391,6 +397,7 @@ export const beanstalkScaleAction: ActionModule = {
               // the pattern owns the minimum: no windowed schedule and no idle-floor trim on top of it; the ceiling raise still runs
               const v = scaleVerdict({ bounds, band, hours, days, low_cpu: config.actEbLowCpu, high_cpu: config.actEbHighCpu, pressure_hours: config.actEbPressureHours, health_ok: healthOk });
               if (v.move !== "ceiling_up" || !v.option) { log(`${name}: ${v.move === "floor_down" ? "the learned week owns the minimum; the idle-floor trim is skipped" : v.reason}`); continue; }
+              if (stepHeld) { log(`${name}: the ceiling raise waits: ${stepHeld}`); continue; }
               const opsRole = env.OperationsRole || null;
               if (!opsRole) notes.push(`${name}: no operations role on the environment, so UpdateEnvironment runs with the actuator's own permissions and needs the CloudFormation and Auto Scaling rights it makes (associate-environment-operations-role fixes that; see the README)`);
               proposals.push({
@@ -434,6 +441,7 @@ export const beanstalkScaleAction: ActionModule = {
           const v = scaleVerdict({ bounds: w.active ? { ...bounds, min: Math.max(bounds.min, w.baseline_min) } : bounds, band, hours, days, low_cpu: config.actEbLowCpu, high_cpu: config.actEbHighCpu, pressure_hours: config.actEbPressureHours, health_ok: healthOk });
           if (w.active && v.move === "floor_down") { log(`${name}: a windowed schedule is in force; the idle-floor trim is skipped`); continue; }
           if (!v.move || !v.option) { log(`${name}: ${v.reason}`); continue; }
+          if (stepHeld) { skip(`${v.move === "floor_down" ? "the idle-floor trim" : "the ceiling raise"} waits: ${stepHeld}`); continue; }
           const alarms = await triggerAlarms(cw, env.EnvironmentId!).catch(() => ({ low: null, high: null }));
           const price = v.move === "floor_down" ? memberPrice(f.instances) : null;
           const opsRole = env.OperationsRole || null;

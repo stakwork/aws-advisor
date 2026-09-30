@@ -18,6 +18,7 @@ import { swarms } from "./routes/swarms.js";
 import { tags } from "./routes/tags.js";
 import { accounts } from "./routes/accounts.js";
 import { passReports } from "./routes/pass_reports.js";
+import { security } from "./routes/security.js";
 import "./actions/index.js";
 import { ensureOperationalPatterns } from "./concepts.js";
 loadTasks();
@@ -51,6 +52,7 @@ app.use("/api", swarms);
 app.use("/api", tags);
 app.use("/api", accounts);
 app.use("/api", passReports);
+app.use("/api", security);
 app.use("/api", api);
 mountMcp(app, "/mcp");
 

@@ -22,7 +22,7 @@ export const BATCH = 250;
 export const QUERY_TIMEOUT_MS = 5_000;
 export const QUERY_ROW_CAP = 200;
 
-export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass", "AdvisorApp"] as const;
+export const LABELS = ["AdvisorAccount", "AdvisorResource", "AdvisorResourceRef", "AdvisorRole", "AdvisorNodePool", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorPlaybook", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass", "AdvisorApp", "AdvisorSecurityScan"] as const;
 
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
@@ -42,6 +42,7 @@ export const SCHEMA_SUMMARY = [
   "(:AdvisorRecommendation)-[:PROPOSED_IN]->(:AdvisorRun {id, started_at, finished_at, status, trigger, findings_count, recommendations_count})",
   "(:AdvisorRecommendation)-[:FROM_INCIDENT]->(:AdvisorIncident {id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at})-[:INVESTIGATES]->(:AdvisorAlert {id, kind, level, message, created_at, acknowledged, acknowledged_by})-[:ABOUT]->(:AdvisorResource | :AdvisorResourceRef)",
   "(:AdvisorControl {id, title})-[:FLAGGED {run_id, reason}]->(:AdvisorResource) for the latest completed run's alarm findings; (:AdvisorControl)-[:HAS_PLAYBOOK]->(:AdvisorPlaybook {control_id, title, tier, effort})",
+  "(:AdvisorControl {id, title, severity, benchmark})-[:SECURITY_FLAGGED {scan_id, reason, severity, first_seen_at}]->(:AdvisorResource) for the latest security scan (aws_compliance); (:AdvisorSecurityScan {id, status, alarms, new_alarms, resolved, counts})-[:IN_ACCOUNT]->(:AdvisorAccount); security recommendations are AdvisorRecommendation with action_type security_fix",
   "(:AdvisorAction {id, kind, status: proposed|applied|verified|failed|refused|reverted|stale, mode, trigger, title, reason, rollback, est_usd_month, result, error, created_at, applied_at, verified_at, reverted_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef) the executor's ledger: every change the agent planned, made, read back or undid; (:AdvisorAction)-[:CARRIES_OUT]->(:AdvisorRecommendation) when it executes an approved recommendation",
   "(:AdvisorAction)-[:TOUCHED_IN {event: apply|verify|revert, outcome, at, detail}]->(:AdvisorPass {id, started_at, finished_at, trigger: schedule|manual, mode, proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors}) the executor's activity log: one node per pass (including the ones that did nothing), an edge per apply, read-back or revert made in it",
 ].join("\n");
@@ -732,6 +733,55 @@ export async function mirrorStatusChecks(): Promise<{ instances: number }> {
 
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
+// ---- security scans (src/compliance.ts) ------------------------------------------------------------------------------
+
+const SECURITY_FLAG_CYPHER = `
+UNWIND $rows AS row
+MERGE (c:AdvisorControl {id: row.control_id})
+SET c.title = coalesce(row.control_title, c.title, row.control_id), c.severity = row.severity, c.benchmark = row.benchmark, c.account_id = $account, c.updated_at = $now
+WITH c, row
+MATCH (r:AdvisorResource {id: row.resource_id})
+MERGE (c)-[f:SECURITY_FLAGGED]->(r)
+SET f.scan_id = row.run_id, f.reason = row.reason, f.severity = row.severity, f.first_seen_at = row.first_seen_at`;
+
+/**
+ * One security scan as an AdvisorSecurityScan node, and when it is the latest completed one its alarms on inventory
+ * resources as SECURITY_FLAGGED edges (kept apart from the cost run's FLAGGED, which a cost run replaces wholesale),
+ * then the security recommendations the scan raised or resolved.
+ */
+export async function mirrorComplianceScan(scanId: number): Promise<{ scan: number | null; flagged: number }> {
+  if (!enabled()) return { scan: null, flagged: 0 };
+  await ensureSchema();
+  const row = db.prepare("select id, started_at, finished_at, status, trigger, alarms, new_alarms, resolved, errors, counts from compliance_scans where id = ?").get(scanId) as any;
+  if (!row) return { scan: null, flagged: 0 };
+  const account = accountId();
+  await mirrorAccount(account);
+  await write(`MERGE (s:AdvisorSecurityScan {id: $row.id}) SET s += $row, s.account_id = $account, s.updated_at = $now
+    WITH s MATCH (a:AdvisorAccount {id: $account}) MERGE (s)-[:IN_ACCOUNT]->(a)`, { row: { ...row, counts: row.counts || "{}" }, account, now: now() });
+  let flagged = 0;
+  const latest = (db.prepare("select id from compliance_scans where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  if (row.status === "completed" && latest === scanId) {
+    const findings = db.prepare("select control_id, control_title, severity, benchmark, resource, reason, first_seen_at from compliance_findings where scan_id = ? and resource is not null order by id").all(scanId) as any[];
+    const inv = inventoryIds();
+    const seen = new Set<string>();
+    const edges: (FlagEdge & { severity: string | null; benchmark: string | null; first_seen_at: string | null })[] = [];
+    for (const f of findings) {
+      const rid = inventoryIdOf(f.resource, inv);
+      if (!rid || seen.has(`${f.control_id}|${rid}`)) continue;
+      seen.add(`${f.control_id}|${rid}`);
+      edges.push({ control_id: String(f.control_id), control_title: str(f.control_title), resource_id: rid, run_id: scanId, reason: f.reason ? String(f.reason).slice(0, 500) : null,
+        severity: str(f.severity), benchmark: str(f.benchmark), first_seen_at: str(f.first_seen_at) });
+    }
+    await write("MATCH (:AdvisorControl)-[f:SECURITY_FLAGGED]->(:AdvisorResource {account_id: $account}) WHERE f.scan_id <> $scanId DELETE f", { account, scanId });
+    const stamp = now();
+    for (const batch of chunks(edges)) await write(SECURITY_FLAG_CYPHER, { rows: batch, account, now: stamp });
+    flagged = edges.length;
+  }
+  const recIds = (db.prepare("select id from recommendations where action_type = 'security_fix'").all() as { id: number }[]).map((r) => r.id);
+  if (recIds.length) await mirrorRecommendations(recIds);
+  return { scan: scanId, flagged };
+}
+
 export interface MirrorCounts {
   knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; apps: number; took_ms: number }
 
@@ -753,6 +803,8 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const { passes } = await mirrorPasses();
   const { apps } = await mirrorApps();
   await mirrorStatusChecks();
+  const scan = db.prepare("select id from compliance_scans where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined;
+  if (scan) await mirrorComplianceScan(scan.id);
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
   return { account_id: account, knowledge, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes, apps, took_ms: Date.now() - t0 };
@@ -930,6 +982,7 @@ export async function mirrorCapacityPatterns(): Promise<{ patterns: number; even
   return { patterns: nodes.length, events: events.length };
 }
 export const mirrorCapacityPatternsInBackground = () => inBackground("capacity pattern mirror", mirrorCapacityPatterns);
+export const mirrorComplianceScanInBackground = (scanId: number) => inBackground(`security scan mirror (${scanId})`, () => mirrorComplianceScan(scanId));
 export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackground(`recommendation mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorRecommendations(ids));
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */

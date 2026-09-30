@@ -7,12 +7,26 @@ import { consentErrorStatus, runAsPerson } from "../consent.js";
 import { actuatorCapabilities, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
+import { environmentTimeline } from "../capacity_timeline.js";
 
 export const actions = Router();
 actions.use(authMiddleware);
 
 // The activity log (src/executor_log.ts): the newest passes with their lines and events, and the events made outside a pass. ?limit (default 30, max 200).
 actions.get("/actions/log", (req, res) => { res.json(listExecutorLog({ limit: Number(req.query.limit) || undefined })); });
+
+// The scaling timeline of a Beanstalk environment (src/capacity_timeline.ts): the next 24 hours of MinSize as the hourly
+// pass will set it, the recent capacity and pressure rows, the pressure events. :env is the environment name or id;
+// ?region, ?account_id as the panel has them; ?floor, ?ceiling, ?on the tags the panel just read (else the stored pattern's band).
+actions.get("/actions/beanstalk/:env/timeline", async (req, res) => {
+  const n = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+  const s = (v: unknown) => (typeof v === "string" && v ? v : null);
+  try {
+    const t = await environmentTimeline({ env: String(req.params.env), region: s(req.query.region), account_id: s(req.query.account_id), floor: n(req.query.floor), ceiling: n(req.query.ceiling), consent: req.query.on == null ? null : req.query.on === "1" || req.query.on === "true" });
+    if (!t) return res.status(404).json({ error: "environment not known yet: the capacity pass records it on its next run" });
+    res.json(t);
+  } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
+});
 
 // Re-check what the role may do: drops the denials learned from failed applies (the role was widened) and simulates again.
 actions.post("/actions/capabilities/recheck", async (_req, res) => {

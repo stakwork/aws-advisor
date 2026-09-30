@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { Activity, Bell, Boxes, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2 } from "lucide-react";
+import { Activity, Bell, Boxes, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert } from "lucide-react";
 import { api, signIn, token } from "./api";
 import Overview from "./pages/Overview";
 import Runs from "./pages/Runs";
@@ -16,12 +16,14 @@ import Changes from "./pages/Changes";
 import Chat from "./pages/Chat";
 import Actions from "./pages/Actions";
 import Swarms from "./pages/Swarms";
+import Security from "./pages/Security";
 
 const nav = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
   { to: "/runs", label: "Runs", icon: Activity },
   { to: "/alerts", label: "Alerts", icon: Bell },
   { to: "/findings", label: "Findings", icon: Search },
+  { to: "/security", label: "Security", icon: ShieldAlert },
   { to: "/inventory", label: "Inventory", icon: Server },
   { to: "/swarms", label: "Swarms", icon: Boxes },
   { to: "/recommendations", label: "Recommendations", icon: ListChecks },
@@ -96,6 +98,7 @@ function AppShell() {
           <Route path="/runs/:id" element={<RunDetail />} />
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/findings" element={<Findings />} />
+          <Route path="/security" element={<Security />} />
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/swarms" element={<Swarms />} />
           <Route path="/recommendations" element={<Recommendations />} />

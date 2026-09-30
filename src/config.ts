@@ -33,6 +33,7 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "neo4jPassword", env: "NEO4J_PASSWORD", kind: "secret", def: "", group: "Graph mirror (Neo4j)", label: "Password", help: "" },
   { key: "neo4jDatabase", env: "NEO4J_DATABASE", kind: "string", def: "", group: "Graph mirror (Neo4j)", label: "Database", help: "Empty = the server's default database." },
   { key: "runCron", env: "RUN_CRON", kind: "cron", def: "0 6 * * *", group: "Schedules", label: "Collection run", help: "Powerpipe benchmarks, rules, changes. off = disabled." },
+  { key: "complianceCron", env: "COMPLIANCE_CRON", kind: "cron", def: "20 6 * * *", group: "Schedules", label: "Security scan", help: "aws_compliance benchmarks (FSBP by default, under a minute), security findings and recommendations. off = disabled." },
   { key: "watchCron", env: "WATCH_CRON", kind: "cron", def: "*/30 * * * *", group: "Schedules", label: "Watcher", help: "Instances, NAT traffic, pools, EBS; raises alerts." },
   { key: "probeCron", env: "PROBE_CRON", kind: "cron", def: "30 5 * * *", group: "Schedules", label: "Probe pass", help: "SSM probes and the RDS load profiles; hourly (5 * * * *) fills the utilisation charts." },
   { key: "spendCron", env: "SPEND_CRON", kind: "cron", def: "15 */6 * * *", group: "Schedules", label: "Spend refresh", help: "Cost Explorer, at most every 6 hours." },
@@ -190,6 +191,7 @@ export const config = {
   /** Base for the links in chat messages: the link setting when set, else PUBLIC_URL. */
   get notifyLinkUrl(): string { return (rt("notifyLinkUrl") || this.publicUrl).replace(/\/$/, ""); },
   get runCron(): string { return rt("runCron"); },
+  get complianceCron(): string { return rt("complianceCron"); },
   get watchCron(): string { return rt("watchCron"); },
   get probeCron(): string { return rt("probeCron"); },
   get spendCron(): string { return rt("spendCron"); },
