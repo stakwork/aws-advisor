@@ -2120,8 +2120,12 @@ with what changed, why, the estimate, how to undo and a link to the row.
 checks what the role can actually do per action (`ACTUATOR_NEEDS` in `src/permissions.ts`: the calls apply and
 revert make), through `iam:SimulatePrincipalPolicy` from the read identity when it has that permission (it is in the
 read policy; cached ten minutes) and, whatever the case, from denied applies (a denial is remembered per IAM
-action until the role allows it again). A kind the role cannot apply shows "by hand: role lacks …" instead of
-Apply, the pass leaves its rows for a person with a note, and the API refuses them; the same for Revert.
+action until the role allows it again). The simulation runs against a wildcard resource, so a statement scoped to
+specific ARNs (one environment, one bucket) comes back as an implicit deny: that counts as **unproven**, not as
+missing. Only an explicit Deny or a real AccessDenied learned from an apply blocks a kind. A kind the role cannot
+apply shows "by hand: role lacks …" instead of Apply, the pass leaves its rows for a person with a note, and the
+API refuses them; the same for Revert. Where a kind spans resource families (the consent tag on an instance or
+on an environment) each row is judged on its own family's calls.
 
 **The activity log.** The ledger says what each proposal became; the log says what the actuator did, in order.
 `src/executor_log.ts` records every pass, scheduled or manual, including the ones that did nothing because the

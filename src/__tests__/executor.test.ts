@@ -362,16 +362,24 @@ test("capabilities: every registered kind declares what the role needs, all of i
     assert.ok(n, `${m.kind} has no ACTUATOR_NEEDS entry`);
     for (const a of [...n.apply, ...n.revert]) assert.ok(allowed.has(a), `${m.kind} needs ${a}, which the actuator policy does not allow`);
   }
-  // simulated: a role without ECR write or RDS modify
+  // simulated against a wildcard resource: what is not allowed there is unproven (a policy scoped to ARNs looks like this), never a block by itself
   const sim = new Set([...allowed].filter((a) => !/^ecr:|rds:ModifyDBCluster/.test(a)));
   const caps = computeCapabilities(sim, {});
-  assert.deepEqual(caps.ecr_lifecycle, { apply: false, revert: false, missing: ["ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy"], source: "simulated" });
-  assert.equal(caps.acu_window.apply, false); assert.equal(caps.aurora_storage.apply, false);
-  assert.deepEqual(caps.swarm_park, { apply: true, revert: true, missing: [], source: "simulated" });
+  assert.deepEqual(caps.ecr_lifecycle, { apply: null, revert: null, missing: [], unproven: ["ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy"], source: "simulated" });
+  assert.equal(caps.acu_window.apply, null); assert.equal(caps.aurora_storage.apply, null);
+  assert.deepEqual(caps.swarm_park, { apply: true, revert: true, missing: [], unproven: [], source: "simulated" });
+  // an explicit Deny in the simulation is a block
+  const denied = computeCapabilities({ allowed: sim, explicit: new Set(["ecr:PutLifecyclePolicy"]) }, {});
+  assert.deepEqual(denied.ecr_lifecycle, { apply: false, revert: null, missing: ["ecr:PutLifecyclePolicy"], unproven: ["ecr:DeleteLifecyclePolicy"], source: "simulated" });
   // no simulation: unknown, except what a denied apply taught
   const learned = computeCapabilities(null, { "logs:PutRetentionPolicy": { kind: "log_retention", last_seen: "x", message: "m" } });
-  assert.deepEqual(learned.log_retention, { apply: false, revert: null, missing: ["logs:PutRetentionPolicy"], source: "learned" });
-  assert.deepEqual(learned.ebs_iops_trim, { apply: null, revert: null, missing: [], source: "unknown" });
+  assert.deepEqual(learned.log_retention, { apply: false, revert: null, missing: ["logs:PutRetentionPolicy"], unproven: [], source: "learned" });
+  assert.deepEqual(learned.ebs_iops_trim, { apply: null, revert: null, missing: [], unproven: [], source: "unknown" });
+  // a consent tag row is judged on its own family: a Beanstalk row does not need the EC2 tag calls
+  const { rowNeeds } = await import("../executor.js");
+  assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "beanstalk" } } as any, "apply"), ["elasticbeanstalk:UpdateTagsForResource"]);
+  assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "ec2" } } as any, "apply"), ["ec2:CreateTags"]);
+  assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "ec2" } } as any, "revert"), ["ec2:DeleteTags"]);
 });
 
 test("s3 request metrics: proposed only where the cold bytes could pay for them", async () => {

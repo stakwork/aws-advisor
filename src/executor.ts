@@ -259,7 +259,14 @@ export async function actuatorIdentity(timeoutMs = 15_000): Promise<{ ok: true; 
 
 // ---- what the role may do ---------------------------------------------------------------------------------------------
 
-export interface Capability { apply: boolean | null; revert: boolean | null; missing: string[]; source: "simulated" | "learned" | "unknown"; note?: string }
+/**
+ * What the role may do for one kind. `missing` is what it is known not to have: an explicit Deny in the simulation
+ * or a real AccessDenied learned from an apply. `unproven` is what the simulation could not show for a wildcard
+ * resource: a policy scoped to specific ARNs looks exactly like this, so the pass tries those and lets AWS decide.
+ * `apply`/`revert`: false = something is missing, true = everything allowed, null = unproven or not simulated.
+ */
+export interface Capability { apply: boolean | null; revert: boolean | null; missing: string[]; unproven: string[]; source: "simulated" | "learned" | "unknown"; note?: string }
+export interface Simulation { allowed: Set<string>; explicit: Set<string> }
 type Learned = Record<string, { kind: string; last_seen: string; message: string }>;
 const DENIALS_KEY = "act:denials";
 const CAP_TTL_MS = 10 * 60_000;
@@ -274,17 +281,37 @@ function forgetDenials(actions: string[]): void {
   if (changed) { setSetting(DENIALS_KEY, JSON.stringify(d)); capCache = null; }
 }
 
-/** Per kind, from what the simulation allowed (null when it could not run) and what denied applies taught. Pure. */
-export function computeCapabilities(allowed: Set<string> | null, learned: Learned, needs = ACTUATOR_NEEDS): Record<string, Capability> {
+/** Per kind, from what the simulation allowed and explicitly denied (null when it could not run) and what denied applies taught. Pure. */
+export function computeCapabilities(sim: Simulation | Set<string> | null, learned: Learned, needs = ACTUATOR_NEEDS): Record<string, Capability> {
+  const s: Simulation | null = sim == null ? null : sim instanceof Set ? { allowed: sim, explicit: new Set() } : sim;
   const out: Record<string, Capability> = {};
   for (const [kind, n] of Object.entries(needs)) {
-    const missing = (list: string[]) => list.filter((a) => (allowed ? !allowed.has(a) : false) || Boolean(learned[a]));
-    const ma = missing(n.apply), mr = missing(n.revert);
-    const all = [...new Set([...ma, ...mr])];
-    const source: Capability["source"] = allowed ? "simulated" : all.length ? "learned" : "unknown";
-    out[kind] = { apply: allowed || ma.length ? ma.length === 0 : null, revert: allowed || mr.length ? mr.length === 0 : null, missing: all, source };
+    const missing = (list: string[]) => list.filter((a) => Boolean(learned[a]) || (s ? s.explicit.has(a) : false));
+    const unproven = (list: string[]) => (s ? list.filter((a) => !s.allowed.has(a) && !s.explicit.has(a) && !learned[a]) : []);
+    const ma = missing(n.apply), mr = missing(n.revert), ua = unproven(n.apply), ur = unproven(n.revert);
+    const all = [...new Set([...ma, ...mr])], un = [...new Set([...ua, ...ur])];
+    const source: Capability["source"] = s ? "simulated" : all.length ? "learned" : "unknown";
+    const verdict = (m: string[], u: string[]) => (m.length ? false : s && !u.length ? true : null);
+    out[kind] = { apply: verdict(ma, ua), revert: verdict(mr, ur), missing: all, unproven: un, source };
   }
   return out;
+}
+
+/**
+ * What one row needs, narrower than its kind where the kind spans resource families: a consent tag on an
+ * environment needs the Beanstalk tag call only, on an instance the EC2 tag calls only. Pure.
+ */
+export function rowNeeds(row: Pick<ActionRow, "kind" | "facts">, verb: "apply" | "revert", needs = ACTUATOR_NEEDS): string[] {
+  const all = needs[row.kind]?.[verb] ?? [];
+  if (row.kind === "consent_tag") return all.filter((a) => (row.facts?.kind === "beanstalk" ? a.startsWith("elasticbeanstalk:") : a.startsWith("ec2:")));
+  return all;
+}
+
+/** The actions a row cannot be done with, from the kind's capability and the row's own needs. */
+function rowMissing(row: Pick<ActionRow, "kind" | "facts">, verb: "apply" | "revert", cap: Capability | undefined): string[] {
+  if (!cap) return [];
+  const need = new Set(rowNeeds(row, verb));
+  return cap.missing.filter((a) => need.has(a));
 }
 
 let capCache: { role: string; at: number; caps: Record<string, Capability>; note?: string } | null = null;
@@ -299,16 +326,19 @@ export async function actuatorCapabilities(force = false): Promise<{ caps: Recor
   if (!role) return { caps: computeCapabilities(null, {}), note: "no actuator role configured" };
   if (!force && capCache && capCache.role === role && Date.now() - capCache.at < CAP_TTL_MS) return { caps: capCache.caps, note: capCache.note };
   const actions = [...new Set(Object.values(ACTUATOR_NEEDS).flatMap((n) => [...n.apply, ...n.revert]))];
-  let allowed: Set<string> | null = null; let note: string | undefined;
+  let allowed: Simulation | null = null; let note: string | undefined;
   try {
     const base = sdkCredentials();
     const iam = new IAMClient({ region: base.region, credentials: base.provider });
     try {
       const r = await iam.send(new SimulatePrincipalPolicyCommand({ PolicySourceArn: role, ActionNames: actions, MaxItems: 200,
         ContextEntries: [{ ContextKeyName: "aws:ResourceTag/advisor:park", ContextKeyValues: ["auto"], ContextKeyType: "string" }, { ContextKeyName: "aws:ResourceTag/advisor:schedule", ContextKeyValues: ["weekdays 08-20"], ContextKeyType: "string" }] }));
-      allowed = new Set((r.EvaluationResults ?? []).filter((e) => e.EvalDecision === "allowed").map((e) => String(e.EvalActionName)));
+      const results = r.EvaluationResults ?? [];
+      allowed = { allowed: new Set(results.filter((e) => e.EvalDecision === "allowed").map((e) => String(e.EvalActionName))), explicit: new Set(results.filter((e) => e.EvalDecision === "explicitDeny").map((e) => String(e.EvalActionName))) };
       const learned = learnedDenials();
-      forgetDenials(Object.keys(learned).filter((a) => allowed!.has(a)));
+      forgetDenials(Object.keys(learned).filter((a) => allowed!.allowed.has(a)));
+      const unproven = actions.filter((a) => !allowed!.allowed.has(a) && !allowed!.explicit.has(a));
+      if (unproven.length) note = `${unproven.length} of ${actions.length} action(s) could not be proven for a wildcard resource (a policy scoped to specific ARNs looks like this): ${unproven.slice(0, 6).join(", ")}${unproven.length > 6 ? "…" : ""}. The pass tries those and learns a real denial.`;
     } finally { iam.destroy(); }
   } catch (e: any) {
     const m = String(e?.message || e);
@@ -524,8 +554,8 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
     logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "refused", trigger, detail: why });
     return getAction(id)!;
   }
-  const cap = (await actuatorCapabilities()).caps[row.kind];
-  if (cap?.apply === false) throw new Error(`the actuator role is not allowed ${cap.missing.join(", ")}; #${id} can only be done by a person (or widen the role's policy)`);
+  const missing = rowMissing(row, "apply", (await actuatorCapabilities()).caps[row.kind]);
+  if (missing.length) throw new Error(`the actuator role is not allowed ${missing.join(", ")}; #${id} can only be done by a person (or widen the role's policy)`);
   const p = proposalOf(row);
   let creds: Creds;
   try { creds = credsForAccount(executorCreds(), row.account_id); creds.act(); }
@@ -584,8 +614,8 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
   // Deliberately not checked here: a pause (pauseState) stops planning and applying, never undoing. Revert is the safety valve.
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
-  const cap = (await actuatorCapabilities()).caps[row.kind];
-  if (cap?.revert === false) throw new Error(`the actuator role is not allowed ${cap.missing.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
+  const missingRevert = rowMissing(row, "revert", (await actuatorCapabilities()).caps[row.kind]);
+  if (missingRevert.length) throw new Error(`the actuator role is not allowed ${missingRevert.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
   const creds = credsForAccount(executorCreds(), row.account_id); creds.act();
   console.log(`[executor] reverting #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""} (${by})`);
   try {
