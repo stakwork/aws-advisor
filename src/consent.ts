@@ -19,7 +19,10 @@ import { DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourc
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { db } from "./db.js";
 import { config } from "./config.js";
-import { applyAction, executorCreds, recordProposal, type ActionRow, type Proposal } from "./executor.js";
+import { actionModules, applyAction, executorCreds, getAction, proposalOf, recordProposal, verifyAction, type ActionRow, type Creds, type Proposal } from "./executor.js";
+import { logEvent } from "./executor_log.js";
+import { mirrorActionsInBackground } from "./graph_mirror.js";
+import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { KIND as SCHEDULE_KIND, recordsForStart, recordsNamingIp } from "./actions/schedule_hours.js";
 
 export const AUTO_PARK_TAG = "AdvisorAutoPark";
@@ -222,3 +225,77 @@ export async function manualPower(instanceId: string, action: "stop" | "start", 
 }
 
 export const consentErrorStatus = (e: unknown): number => (e instanceof ConsentError ? e.status : 400);
+
+// ---- a person's one-time credentials ----------------------------------------------------------------------------------
+
+/**
+ * Beanstalk applies a tag change as an environment update under the caller's own rights, operations role or not,
+ * and the actuator is kept too narrow for that. So a consent row on an environment can be done by a person from
+ * the page with temporary credentials of their own: one call, made with those credentials in memory, attributed
+ * to their identity on the ledger, and forgotten the moment it returns. Long-lived keys are refused (a session
+ * token is required; a fifteen-minute session from `aws sts get-session-token` is the token's own lifetime), the
+ * call is the row's and nothing else, and the credentials are never logged or stored.
+ */
+export interface OneTimeCredentials { access_key_id: string; secret_access_key: string; session_token: string }
+
+/** Checks the shape of pasted credentials without using them. Pure. */
+export function parseOneTimeCredentials(input: unknown): OneTimeCredentials {
+  const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const s = (k: string) => (typeof o[k] === "string" ? (o[k] as string).trim() : "");
+  const access_key_id = s("access_key_id"), secret_access_key = s("secret_access_key"), session_token = s("session_token");
+  if (!access_key_id || !secret_access_key) throw new ConsentError("paste an access key id and a secret access key", 400);
+  if (!/^ASIA[A-Z0-9]{16}$/.test(access_key_id)) throw new ConsentError(/^AKIA/.test(access_key_id) ? "that is a long-lived access key (AKIA…): only temporary credentials are accepted (ASIA…, with a session token)" : "the access key id does not look like a temporary one (ASIA…)", 400);
+  if (!session_token || session_token.length < 100) throw new ConsentError("temporary credentials come with a session token; paste it too", 400);
+  return { access_key_id, secret_access_key, session_token };
+}
+
+/** The kinds a person may do with their own credentials from the page: the consent tags. Pure. */
+export const PERSON_KINDS: ReadonlySet<string> = new Set([CONSENT_KIND]);
+
+/**
+ * Applies (or reverts) one consent row with a person's temporary credentials. The row must be one the actuator
+ * could not do (proposed, failed, or applied/verified for a revert). Who did it is read from STS and written on
+ * the row; the credentials live in this call's scope only.
+ */
+export async function runAsPerson(id: number, verb: "apply" | "revert", input: unknown): Promise<ActionRow> {
+  const creds = parseOneTimeCredentials(input);
+  const row = getAction(id);
+  if (!row) throw new ConsentError(`no action #${id}`, 404);
+  if (!PERSON_KINDS.has(row.kind)) throw new ConsentError(`#${id} is a ${row.kind} row: only consent tags are done with a person's credentials`, 400);
+  if (verb === "apply" && !["proposed", "failed"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only a proposed or failed row is applied`, 409);
+  if (verb === "revert" && !["applied", "verified"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only an applied or verified row is reverted`, 409);
+  const mod = actionModules().find((m) => m.kind === row.kind);
+  if (!mod) throw new ConsentError(`no module for ${row.kind}`, 500);
+  const region = row.region || executorCreds().region;
+  const provider: AwsCredentialIdentityProvider = async () => ({ accessKeyId: creds.access_key_id, secretAccessKey: creds.secret_access_key, sessionToken: creds.session_token });
+  // who: the identity behind the credentials, for the ledger
+  let who = "";
+  const sts = new STSClient({ region, credentials: provider });
+  try { const me = await sts.send(new GetCallerIdentityCommand({})); who = me.Arn || me.UserId || "?"; }
+  catch (e: any) { throw new ConsentError(`the credentials did not identify themselves (sts:GetCallerIdentity): ${String(e?.message || e).slice(0, 160)}`, 401); }
+  finally { sts.destroy(); }
+  const personCreds: Creds = { read: provider, act: () => provider, region, accounts: [], forAccount: () => ({ account_id: row.account_id ?? "", name: "person", is_parent: true, read: provider, act: () => provider, region }) };
+  const trigger = `person:${who}`;
+  const p = proposalOf(row);
+  try {
+    if (verb === "apply") {
+      const result = `${await mod.apply(p, personCreds)} (as ${who})`;
+      db.prepare("update actions set status = 'applied', mode = 'apply', trigger = ?, result = ?, error = null, applied_at = datetime('now') where id = ?").run(trigger, result, id);
+      logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "applied", trigger, detail: result });
+    } else {
+      const result = `${await mod.revert(p, personCreds)} (as ${who})`;
+      db.prepare("update actions set status = 'reverted', trigger = ?, result = coalesce(result, '') || ' · ' || ?, reverted_at = datetime('now') where id = ?").run(trigger, result, id);
+      logEvent({ action_id: id, kind: row.kind, event: "revert", outcome: "reverted", trigger, detail: result });
+    }
+  } catch (e: any) {
+    const error = `as ${who}: ${String(e?.message || e).slice(0, 300)}`;
+    if (verb === "apply") db.prepare("update actions set status = 'failed', mode = 'apply', trigger = ?, error = ?, applied_at = datetime('now') where id = ?").run(trigger, error, id);
+    logEvent({ action_id: id, kind: row.kind, event: verb, outcome: "failed", trigger, detail: error });
+    mirrorActionsInBackground([id]);
+    return getAction(id)!;
+  }
+  // the read-back runs under the advisor's own read credentials; Beanstalk's update takes a minute, so it is usually inconclusive here and lands on the next pass
+  if (verb === "apply") { try { await verifyAction(id, undefined, trigger); } catch { /* the next pass reads it back */ } }
+  mirrorActionsInBackground([id]);
+  return getAction(id)!;
+}

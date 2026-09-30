@@ -491,3 +491,14 @@ test("scale band from the page: two whole numbers, floor at least 1, ceiling abo
   assert.throws(() => bandText(2.5, 6), /whole numbers/);
   assert.throws(() => bandText(2, null), /both a floor and a ceiling/);
 });
+
+test("a person's one-time credentials: temporary only, with a session token; the handoff is for consent rows", async () => {
+  const { parseOneTimeCredentials, PERSON_KINDS } = await import("../consent.js");
+  const tok = "x".repeat(200);
+  assert.deepEqual(parseOneTimeCredentials({ access_key_id: " ASIAABCDEFGHIJKLMNOP ", secret_access_key: "s", session_token: tok }), { access_key_id: "ASIAABCDEFGHIJKLMNOP", secret_access_key: "s", session_token: tok });
+  assert.throws(() => parseOneTimeCredentials({ access_key_id: "AKIAABCDEFGHIJKLMNOP", secret_access_key: "s", session_token: tok }), /long-lived/);
+  assert.throws(() => parseOneTimeCredentials({ access_key_id: "ASIAABCDEFGHIJKLMNOP", secret_access_key: "s" }), /session token/);
+  assert.throws(() => parseOneTimeCredentials({ access_key_id: "", secret_access_key: "" }), /paste an access key/);
+  assert.throws(() => parseOneTimeCredentials(null), /paste an access key/);
+  assert.ok(PERSON_KINDS.has("consent_tag")); assert.ok(!PERSON_KINDS.has("beanstalk_scale"));
+});

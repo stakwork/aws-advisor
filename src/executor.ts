@@ -491,7 +491,7 @@ export function listActions(opts: { status?: string; kind?: string; page?: numbe
   return { actions: rows.map(rowOf), total, page, page_size, counts, kinds };
 }
 
-const proposalOf = (r: ActionRow): Proposal => ({ kind: r.kind, resource: r.resource, resource_name: r.resource_name, region: r.region || "us-east-1", account_id: r.account_id ?? null, dedupe: r.dedupe, title: r.title, reason: r.reason, before: r.before || {}, after: r.after || {}, facts: r.facts || {}, rollback: r.rollback || "", est_usd_month: r.est_usd_month });
+export const proposalOf = (r: ActionRow): Proposal => ({ kind: r.kind, resource: r.resource, resource_name: r.resource_name, region: r.region || "us-east-1", account_id: r.account_id ?? null, dedupe: r.dedupe, title: r.title, reason: r.reason, before: r.before || {}, after: r.after || {}, facts: r.facts || {}, rollback: r.rollback || "", est_usd_month: r.est_usd_month });
 
 const FAILURES_BEFORE_REFUSING = 3;
 

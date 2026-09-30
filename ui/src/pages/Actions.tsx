@@ -3,6 +3,7 @@ import { NavLink, useSearchParams } from "react-router-dom";
 import { api, usd, when } from "../api";
 import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../components/ui";
 import { Thread } from "../components/thread";
+import { RunAsMe } from "../components/consent";
 
 const FILTERS = ["proposed", "applied", "verified", "failed", "refused", "reverted", "stale", "all"];
 const PAGE_SIZE = 25;
@@ -273,6 +274,8 @@ export default function Actions() {
                           <div><div className="text-zinc-400">Resource</div><div className="font-mono text-zinc-200">{a.resource}{a.region ? ` · ${a.region}` : ""}</div></div>
                           <div><div className="text-zinc-400">Undo</div><div className="text-zinc-200">{a.rollback}</div></div>
                           {a.result && <div><div className="text-zinc-400">Result</div><div className="text-zinc-200">{a.result}</div></div>}
+                          {a.kind === "consent_tag" && (a.status === "proposed" || a.status === "failed") && <div><div className="text-zinc-400">With your own credentials</div><RunAsMe actionId={a.id} onDone={() => load()} /></div>}
+                          {a.kind === "consent_tag" && (a.status === "applied" || a.status === "verified") && String(a.trigger || "").startsWith("person:") && <div><div className="text-zinc-400">Done by a person; undo the same way</div><RunAsMe actionId={a.id} verb="revert" onDone={() => load()} /></div>}
                           {a.error && <div><div className="text-zinc-400">Error</div><div className="text-red-300">{a.error}</div></div>}
                           <div className="text-zinc-500">proposed {when(a.created_at)}{a.revived_at && ` · went stale, proposed again ${when(a.revived_at)}`} · last seen {when(a.seen_at)}{a.applied_at && ` · applied ${when(a.applied_at)}`}{a.verified_at && ` · verified ${when(a.verified_at)}`}{a.reverted_at && ` · reverted ${when(a.reverted_at)}`} · mode {a.mode}</div>
                         </div>

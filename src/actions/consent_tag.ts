@@ -71,7 +71,11 @@ export const consentTagAction: ActionModule = {
         const ev = (await eb.send(new DescribeEventsCommand({ EnvironmentId: p.resource, Severity: "ERROR", StartTime: new Date((appliedAt ?? Date.now()) - 60_000), MaxRecords: 20 }))).Events ?? [];
         failed = ev.find((e) => /tag update failed/i.test(e.Message || ""))?.Message ?? null;
       } catch { /* the tag read is the verdict then */ } finally { eb.destroy(); }
-      if (failed) return { ok: false, note: `${mismatch}; Beanstalk: "${failed}". The tag is applied as an environment update, which runs under the environment's operations role, or under the caller's own rights without one: attach an operations role to the environment (associate-environment-operations-role, see the README) so the actuator needs the tag call only` };
+      if (failed) {
+        const tags = [tagOf(p), want == null ? null : `Key=${tagOf(p)},Value=${want}`];
+        const cmd = want == null ? `aws elasticbeanstalk update-tags-for-resource --region ${p.region} --resource-arn ${p.facts.arn} --tags-to-remove ${tags[0]}` : `aws elasticbeanstalk update-tags-for-resource --region ${p.region} --resource-arn ${p.facts.arn} --tags-to-add ${tags[1]}`;
+        return { ok: false, note: `${mismatch}; Beanstalk: "${failed}". Beanstalk applies a tag change as an environment update under the caller's own rights (the operations role is not used for it), and the actuator is kept too narrow for that. Write the tag by hand once, the page reads it live: ${cmd}` };
+      }
       if (status && status !== "Ready") return { ok: null, note: `${mismatch}; the environment is ${status} (tags land when the update is through)` };
       if (age < BEANSTALK_TAG_SETTLE_MS) return { ok: null, note: `${mismatch}; written ${Math.round(age / 1000)} s ago, Beanstalk is still propagating it` };
     }

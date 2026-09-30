@@ -17,6 +17,47 @@ function Switch({ on, busy, onChange, label }: { on: boolean; busy: boolean; onC
   );
 }
 
+/**
+ * A consent row done with the person's own temporary credentials (POST /actions/:id/as-person): Beanstalk applies a tag
+ * as an environment update under the caller's rights, which the narrow actuator lacks. The credentials are used for that
+ * one call and forgotten; the ledger records who. Long-lived keys are refused server-side.
+ */
+export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionId: number; verb?: "apply" | "revert"; onDone?: (row: any) => void; compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [key, setKey] = useState(""); const [secret, setSecret] = useState(""); const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; err?: boolean } | null>(null);
+  const submit = () => {
+    setBusy(true); setNote(null);
+    api(`/actions/${actionId}/as-person`, { method: "POST", body: JSON.stringify({ verb, credentials: { access_key_id: key, secret_access_key: secret, session_token: token } }) })
+      .then((row) => { setKey(""); setSecret(""); setToken(""); setNote({ text: `${row.status}: ${(row.status === "failed" && row.error) || row.result || row.title}`, err: row.status === "failed" }); if (row.status !== "failed") setOpen(false); onDone?.(row); })
+      .catch((e) => setNote({ text: e.message, err: true })).finally(() => setBusy(false));
+  };
+  const field = (v: string, set: (x: string) => void, label: string, secretField = false) => (
+    <input type={secretField ? "password" : "text"} value={v} disabled={busy} onChange={(e) => set(e.target.value)} placeholder={label} aria-label={label} autoComplete="off" spellCheck={false}
+      className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-200 disabled:opacity-60" />
+  );
+  return (
+    <div className={compact ? "inline" : "mt-1"}>
+      <button type="button" className="text-sky-300 hover:underline" onClick={() => setOpen((o) => !o)} title="do this one row with temporary credentials of your own (the actuator cannot: Beanstalk applies a tag as an environment update under the caller's rights); used once, never stored">
+        {open ? "cancel" : verb === "revert" ? "undo as me" : "run as me"}
+      </button>
+      {open && (
+        <div className="mt-1 max-w-xl space-y-1 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
+          <div className="text-zinc-400">Temporary credentials of your own, for this one call. From the console's "Command line or programmatic access", from SSO, or <span className="font-mono">aws sts get-session-token --duration-seconds 900</span>. Long-lived keys (AKIA…) are refused. Nothing is stored; the row records who.</div>
+          {field(key, setKey, "AWS_ACCESS_KEY_ID (ASIA…)")}
+          {field(secret, setSecret, "AWS_SECRET_ACCESS_KEY", true)}
+          {field(token, setToken, "AWS_SESSION_TOKEN", true)}
+          <div className="flex items-center gap-2">
+            <button type="button" disabled={busy || !key || !secret || !token} onClick={submit} className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50">{busy ? "…" : verb === "revert" ? "Undo with these" : "Apply with these"}</button>
+            {note && <span className={note.err ? "text-red-300" : "text-zinc-400"}>{note.text}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null }) {
   const [value, setValue] = useState<string | null>(tags?.AdvisorAutoPark ?? null);
   const [busy, setBusy] = useState(false);
@@ -50,6 +91,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
         )}
       </div>
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
+      {msg?.err && msg.actionId ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id }); setValue(row.after?.AdvisorAutoPark ?? null); } }} /> : null}
     </div>
   );
 }
@@ -106,6 +148,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
         </div>
       )}
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
+      {msg?.err && msg.actionId ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id }); read(); } }} /> : null}
     </div>
   );
 }

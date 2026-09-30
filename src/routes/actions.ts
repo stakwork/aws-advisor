@@ -3,6 +3,7 @@ import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
+import { consentErrorStatus, runAsPerson } from "../consent.js";
 import { actuatorCapabilities, applyAction, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
@@ -67,6 +68,12 @@ actions.post("/actions/:id/messages", async (req, res) => {
     const r = await askAboutAction(Number(req.params.id), String(req.body?.message ?? ""), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
     res.status(202).json(r);
   } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
+});
+// A consent row done with a person's own temporary credentials (src/consent.ts runAsPerson): used once, never stored or logged.
+actions.post("/actions/:id/as-person", async (req, res) => {
+  const verb = req.body?.verb === "revert" ? "revert" : "apply";
+  try { const a = await runAsPerson(Number(req.params.id), verb, req.body?.credentials); dispatchActionNotifications().catch(() => {}); res.json(a); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
 });
 actions.post("/actions/:id/apply", async (req, res) => {
   try { const a = await applyAction(Number(req.params.id), "manual"); dispatchActionNotifications().catch(() => {}); res.json(a); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
