@@ -26,7 +26,7 @@ import { db } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Proposal } from "../executor.js";
 import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
-import { beanstalkScaleAction, environmentFacts, environmentTagGaps, OPS_ROLE_INLINE_POLICY_NOTE, parseBand, regions, SCALE_TAG } from "./beanstalk_scale.js";
+import { beanstalkScaleAction, bundleGapNote, bundleReadGap, environmentFacts, environmentTagGaps, OPS_ROLE_INLINE_POLICY_NOTE, parseBand, regions, SCALE_TAG } from "./beanstalk_scale.js";
 import { recordPressure } from "../capacity_pattern.js";
 
 export const KIND = "beanstalk_pressure" as const;
@@ -104,6 +104,8 @@ export const beanstalkPressureAction: ActionModule = {
           if (v.raise == null) { notes.push(`${name}: ${v.reason}`); continue; }
           const recent = db.prepare("select id, applied_at from actions where kind in (?, ?) and resource = ? and status in ('applied', 'verified') and datetime(applied_at) > datetime('now', ?) order by id desc limit 1").get(KIND, beanstalkScaleAction.kind, env.EnvironmentId, `-${COOLDOWN_MINUTES} minutes`) as { id: number; applied_at: string } | undefined;
           if (recent) { log(`${name}: ${v.reason}; #${recent.id} changed the bounds at ${recent.applied_at}, so this waits ${COOLDOWN_MINUTES} minutes`); continue; }
+          const bundle = await bundleReadGap(eb, region, acct.read, env).catch(() => null);
+          if (bundle?.verdict === "denied") { notes.push(bundleGapNote(name, bundle)); continue; }
           if (f.cfg.max != null && f.cfg.max !== max) { notes.push(`${name}: ${v.reason}, but the live group's maximum (${max}) and the configuration (${f.cfg.max}) disagree: sort that out first`); continue; }
           const opsRole = env.OperationsRole || null;
           if (!opsRole) notes.push(`${name}: no operations role on the environment, so UpdateEnvironment runs with the actuator's own permissions (see the README)`);

@@ -584,7 +584,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
         "cloudfront:List*", "cloudfront:Get*",
         "route53:List*", "route53:Get*",
-        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource",
+        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "elasticbeanstalk:DescribeApplicationVersions",
         "autoscaling:Describe*",
         "redshift:Describe*",
         "elasticmapreduce:List*", "elasticmapreduce:Describe*",
@@ -2242,19 +2242,30 @@ aws cloudformation wait stack-rollback-complete --stack-name awseb-<env id>-stac
 
 **The application bundle.** A configuration update (a MinSize change included) re-stages the running application
 version: Beanstalk copies its source bundle into its own bucket (`elasticbeanstalk-<region>-<account>`, under
-`resources/environments/<env id>/_runtime/_versions/`) **under the caller's rights**, operations role or not. Without
-read on the source and write on the destination the update fails with "Failed to deploy configuration … You don't
-have permission to copy an Amazon S3 object" and MinSize stays where it was; the row's read-back fails and the pass
-does not mistake the old minimum for a hand-set. `actuatorPolicy` grants the Beanstalk bucket side
-(`ActuatorBeanstalkStaging`); the source bucket is the one the version was uploaded to, so add it per environment:
+`resources/environments/<env id>/_runtime/_versions/`), and with an operations role attached it does so **as the
+operations role**. The managed policies on that role cover only the `elasticbeanstalk-*` buckets, which is enough
+for versions uploaded through the console or the EB CLI. A version your CI uploaded to its own bucket is not
+covered: the update fails with "Failed to deploy configuration … You don't have permission to copy an Amazon S3
+object", MinSize stays where it was, the row's read-back fails and the pass does not mistake the old minimum for a
+hand-set. Before the operations role, updates ran with the caller's rights, which is why this surfaces the day the
+role is attached. Give the operations role read on the bundle bucket (only Beanstalk can assume it):
 
-```json
-{ "Sid": "ActuatorBeanstalkBundles", "Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetBucketLocation", "s3:ListBucket"],
-  "Resource": ["arn:aws:s3:::<bundle bucket>", "arn:aws:s3:::<bundle bucket>/<application>/*"] }
+```sh
+aws iam put-role-policy --role-name aws-elasticbeanstalk-operations-role --policy-name ReadAppBundles --policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAcl", "s3:GetBucketLocation", "s3:ListBucket"],
+    "Resource": ["arn:aws:s3:::<bundle bucket>", "arn:aws:s3:::<bundle bucket>/*"] }]
+}'
 ```
 
-A bucket encrypted with a customer-managed KMS key also needs `kms:Decrypt` on that key (and `kms:GenerateDataKey`
-for the Beanstalk bucket if it uses one).
+A bundle bucket encrypted with a customer-managed KMS key also needs `kms:Decrypt` on that key for the role, and a
+bucket policy that names its readers must name the role. The actuator itself needs no S3 rights for this.
+The capacity pass and the pressure check check this before proposing: they read where the running version's
+bundle lives (`DescribeApplicationVersions`) and, outside `elasticbeanstalk-*`, ask IAM whether the operations role
+may read it (`iam:SimulatePrincipalPolicy`, cached an hour). A denial holds every MinSize and MaxSize change for the
+environment and the pass notes carry the command above with the bucket filled in; a check that could not run is a
+note only.
 
 Tag writes are the one thing the operations role does not cover: Beanstalk applies `UpdateTagsForResource` as an
 environment update under the caller's own rights, so the consent tags on an environment are written by a person

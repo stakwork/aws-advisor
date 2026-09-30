@@ -417,7 +417,7 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
         "cloudfront:List*", "cloudfront:Get*",
         "route53:List*", "route53:Get*",
-        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource",
+        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "elasticbeanstalk:DescribeApplicationVersions",
         "autoscaling:Describe*",
         "redshift:Describe*",
         "elasticmapreduce:List*", "elasticmapreduce:Describe*",
@@ -536,9 +536,6 @@ export const actuatorPolicy = (): IamPolicy => ({
     // AdvisorAutoPark=ON is the same consent as advisor:park=auto and advisor:schedule: stop, start and the parked marker on those boxes; AdvisorAutoScale=ON the same as advisor:scale.
     { Sid: "ActuatorAutoPark", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoPark": "ON" } } },
     { Sid: "ActuatorAutoParkMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoPark": "ON" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
-    // a configuration update re-stages the running version's bundle into Beanstalk's own bucket under the caller's rights;
-    // the source bucket (where the CI puts the bundles) differs per environment: the README says how to add it
-    { Sid: "ActuatorBeanstalkStaging", Effect: "Allow", Action: ["s3:PutObject", "s3:GetObject", "s3:GetBucketLocation", "s3:ListBucket"], Resource: ["arn:aws:s3:::elasticbeanstalk-*", "arn:aws:s3:::elasticbeanstalk-*/resources/environments/*"] },
     { Sid: "ActuatorAutoScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoScale": "ON" } } },
     // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one: UPSERT of A records only.
     { Sid: "ActuatorDnsReattach", Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: "arn:aws:route53:::hostedzone/*", Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } } },

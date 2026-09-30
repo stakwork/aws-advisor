@@ -53,7 +53,8 @@ import { AutoScalingClient, DescribeAutoScalingGroupsCommand, DescribeScalingAct
 import { DescribeLoadBalancersCommand, DescribeTagsCommand, DescribeTargetGroupsCommand, ElasticLoadBalancingV2Client } from "@aws-sdk/client-elastic-load-balancing-v2";
 import { DescribeInstanceTypesCommand, DescribeSecurityGroupsCommand, EC2Client, type _InstanceType } from "@aws-sdk/client-ec2";
 import { CloudWatchClient, DescribeAlarmsCommand, GetMetricDataCommand } from "@aws-sdk/client-cloudwatch";
-import { DescribeConfigurationSettingsCommand, DescribeEnvironmentResourcesCommand, DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateEnvironmentCommand, type EnvironmentDescription } from "@aws-sdk/client-elastic-beanstalk";
+import { IAMClient, SimulatePrincipalPolicyCommand } from "@aws-sdk/client-iam";
+import { DescribeApplicationVersionsCommand, DescribeConfigurationSettingsCommand, DescribeEnvironmentResourcesCommand, DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateEnvironmentCommand, type EnvironmentDescription } from "@aws-sdk/client-elastic-beanstalk";
 import { db, getJsonSetting, setSetting } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
@@ -282,6 +283,48 @@ export async function environmentTagGaps(region: string, credentials: any, lbArn
   finally { elb.destroy(); ec2.destroy(); }
 }
 
+export interface BundleGap { bucket: string; key: string; role: string; verdict: "denied" | "unproven" }
+
+/** A bundle in a bucket the operations role's managed policies do not cover (they cover elasticbeanstalk-* only). Pure. */
+export const bundleOutsideBeanstalk = (bucket: string | null | undefined) => Boolean(bucket) && !/^elasticbeanstalk-/.test(bucket!);
+
+/** The pass note for a bundle the operations role cannot read (or that could not be proven), with the remedy. Pure. */
+export function bundleGapNote(name: string, g: BundleGap): string {
+  const roleName = g.role.split("/").pop();
+  const cmd = `aws iam put-role-policy --role-name ${roleName} --policy-name ReadAppBundles --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:GetObjectAcl","s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::${g.bucket}","arn:aws:s3:::${g.bucket}/*"]}]}'`;
+  return g.verdict === "denied"
+    ? `${name}: the running version's bundle is in s3://${g.bucket}/${g.key}, which the operations role ${roleName} cannot read; every configuration update (MinSize included) re-stages that bundle as the role and fails with "Failed to deploy configuration". Nothing is proposed until the role can read it: ${cmd}`
+    : `${name}: the running version's bundle is in s3://${g.bucket}/${g.key}, outside the elasticbeanstalk-* buckets the operations role ${roleName} is granted by default; could not check it can read it (iam:SimulatePrincipalPolicy). If updates fail with "Failed to deploy configuration": ${cmd}`;
+}
+
+const bundleCache = new Map<string, { at: number; gap: BundleGap | null }>();
+/**
+ * Can the environment's operations role read the running version's source bundle? Beanstalk copies it as that role
+ * on every configuration update. Null when there is no role, the bundle is in a Beanstalk bucket, or the role may
+ * read it; cached an hour per environment, version and role (a denial is re-checked sooner: ten minutes).
+ */
+export async function bundleReadGap(eb: ElasticBeanstalkClient, region: string, credentials: any, env: EnvironmentDescription): Promise<BundleGap | null> {
+  const role = env.OperationsRole;
+  if (!role || !env.ApplicationName || !env.VersionLabel) return null;
+  const key = `${env.EnvironmentId}|${env.VersionLabel}|${role}`;
+  const hit = bundleCache.get(key);
+  if (hit && Date.now() - hit.at < (hit.gap ? 600000 : 3600000)) return hit.gap;
+  const v = (await eb.send(new DescribeApplicationVersionsCommand({ ApplicationName: env.ApplicationName, VersionLabels: [env.VersionLabel] }))).ApplicationVersions?.[0];
+  const bucket = v?.SourceBundle?.S3Bucket, object = v?.SourceBundle?.S3Key;
+  let gap: BundleGap | null = null;
+  if (bucket && object && bundleOutsideBeanstalk(bucket)) {
+    const iam = new IAMClient({ region, credentials });
+    try {
+      const r = await iam.send(new SimulatePrincipalPolicyCommand({ PolicySourceArn: role, ActionNames: ["s3:GetObject"], ResourceArns: [`arn:aws:s3:::${bucket}/${object}`] }));
+      const d = r.EvaluationResults?.[0]?.EvalDecision;
+      if (d !== "allowed") gap = { bucket, key: object, role, verdict: "denied" };
+    } catch { gap = { bucket, key: object, role, verdict: "unproven" }; }
+    finally { iam.destroy(); }
+  }
+  bundleCache.set(key, { at: Date.now(), gap });
+  return gap;
+}
+
 export async function environmentFacts(eb: ElasticBeanstalkClient, env: EnvironmentDescription): Promise<EnvFacts> {
   const tags: Record<string, string> = {};
   if (env.EnvironmentArn) for (const t of (await eb.send(new ListTagsForResourceCommand({ ResourceArn: env.EnvironmentArn }))).ResourceTags ?? []) if (t.Key) tags[t.Key] = t.Value ?? "";
@@ -331,6 +374,9 @@ export const beanstalkScaleAction: ActionModule = {
             if (gaps?.length) notes.push(`${name}: ${gaps.map((g) => `${g.kind.replace("_", " ")} ${g.id}`).join(" and ")} carry no elasticbeanstalk:* tags, so the operations role's managed policy will not match them and a stack update fails on the first try (the stack is then left in rollback): ${OPS_ROLE_INLINE_POLICY_NOTE}`);
           }
           if (env.Status !== "Ready") { skip(`environment is ${env.Status}`); continue; }
+          const bundle = await bundleReadGap(eb, region, acct.read, env).catch(() => null);
+          if (bundle?.verdict === "denied") { skip(bundleGapNote(name, bundle).replace(`${name}: `, "")); continue; }
+          if (bundle) notes.push(bundleGapNote(name, bundle));
           if (f.cfg.min == null || f.cfg.max == null) { skip("MinSize/MaxSize not readable from the configuration"); continue; }
           // the last step, not the hourly moves: a pattern or window row neither blocks a step nor is blocked by one
           const recent = db.prepare(`select id, status, applied_at from actions where kind = ? and resource = ? and status in ('applied', 'verified') and datetime(applied_at) > datetime('now', ?)

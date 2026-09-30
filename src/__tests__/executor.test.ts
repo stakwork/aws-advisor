@@ -557,6 +557,19 @@ test("a pattern MinSize that did not take is not a hand-set", async () => {
   assert.equal(changeThatDidNotTake(env, 7, 6), null, "7 took, so 6 afterwards is a person's");
 });
 
+test("a bundle outside the Beanstalk buckets needs the operations role's read, and the note says how", async () => {
+  const { bundleOutsideBeanstalk, bundleGapNote } = await import("../actions/beanstalk_scale.js");
+  assert.equal(bundleOutsideBeanstalk("elasticbeanstalk-us-east-1-745666712914"), false);
+  assert.equal(bundleOutsideBeanstalk("stakwork-deployments"), true);
+  assert.equal(bundleOutsideBeanstalk(null), false);
+  const g = { bucket: "stakwork-deployments", key: "StakworkProductionDocker/app-1.zip", role: "arn:aws:iam::745666712914:role/aws-elasticbeanstalk-operations-role", verdict: "denied" as const };
+  const denied = bundleGapNote("prod", g);
+  assert.match(denied, /cannot read/); assert.match(denied, /Nothing is proposed/);
+  assert.match(denied, /--role-name aws-elasticbeanstalk-operations-role --policy-name ReadAppBundles/);
+  assert.match(denied, /arn:aws:s3:::stakwork-deployments\/\*/);
+  assert.match(bundleGapNote("prod", { ...g, verdict: "unproven" }), /could not check/);
+});
+
 test("capacity signals: a full disk, slow answers or 5xx keep the members; memory near its target does not spread; no signal falls back to the trigger", async () => {
   const { needByHour, signalModel } = await import("../capacity_signals.js");
   const t = { cpu: 60, mem: 75, disk: 85 }; const H = 3600000;
