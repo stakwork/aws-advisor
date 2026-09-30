@@ -556,8 +556,9 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   const paused = pauseState();
   if (paused.paused) throw new Error(`auto-actions are paused by ${paused.by}${paused.reason ? ` (${paused.reason})` : ""}; resume from the page or the chat`);
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
-  if (recentFailures(row.dedupe) >= FAILURES_BEFORE_REFUSING) {
-    const why = `failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow`;
+  // The pass stops retrying a change that keeps failing; a person's click is a decision and tries once more (the row says so).
+  if (trigger !== "manual" && recentFailures(row.dedupe) >= FAILURES_BEFORE_REFUSING) {
+    const why = `failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow (Apply on the page tries once more)`;
     db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(why, trigger, id);
     logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "refused", trigger, detail: why });
     return getAction(id)!;
