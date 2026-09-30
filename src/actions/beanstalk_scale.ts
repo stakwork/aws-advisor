@@ -61,6 +61,8 @@ import { CONFIDENT, latestProfile, ringIndex, type QuietWindow } from "../usage_
 import { latestReview, windowsFromSchedule } from "../usage_review.js";
 import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
 import { decidePattern, learnPattern, pressureEvents, savePattern, PATTERN_DAYS } from "../capacity_pattern.js";
+import { describeSignals, groupSignalsByHour, needByHour, signalModel } from "../capacity_signals.js";
+import { metricDimension } from "../elb_inventory.js";
 
 export const KIND = "beanstalk_scale" as const;
 export const SCALE_TAG = "advisor:scale";
@@ -187,18 +189,6 @@ export interface EnvFacts { env: EnvironmentDescription; tags: Record<string, st
 const num = (v: string | undefined) => { const n = Number(v); return v != null && v !== "" && Number.isFinite(n) ? n : null; };
 export const hourStart = (t: number) => Math.floor(t / 3600000) * 3600000;
 
-async function groupCpuByHour(cw: CloudWatchClient, asg: string, now: number, days = METRIC_DAYS): Promise<Map<number, number>> {
-  const out = new Map<number, number>();
-  let NextToken: string | undefined;
-  do {
-    const r = await cw.send(new GetMetricDataCommand({ StartTime: new Date(hourStart(now) - days * 86400000), EndTime: new Date(hourStart(now)), ScanBy: "TimestampAscending", NextToken, MetricDataQueries: [{ Id: "cpu", MetricStat: { Metric: { Namespace: "AWS/EC2", MetricName: "CPUUtilization", Dimensions: [{ Name: "AutoScalingGroupName", Value: asg }] }, Period: 3600, Stat: "Average" }, ReturnData: true }] }));
-    const res = r.MetricDataResults?.[0];
-    (res?.Values ?? []).forEach((v, i) => { const t = res?.Timestamps?.[i]; if (t) out.set(hourStart(new Date(t).getTime()), v); });
-    NextToken = r.NextToken;
-  } while (NextToken);
-  return out;
-}
-
 async function scalingActivities(as: AutoScalingClient, asg: string, since: number): Promise<Activity[]> {
   const out: Activity[] = [];
   let NextToken: string | undefined;
@@ -321,14 +311,25 @@ export const beanstalkScaleAction: ActionModule = {
           const bounds: Bounds = { min: group.MinSize ?? f.cfg.min, max: group.MaxSize ?? f.cfg.max, desired: group.DesiredCapacity ?? 0 };
           if (bounds.min !== f.cfg.min || bounds.max !== f.cfg.max) { skip(`the live group is ${bounds.min}-${bounds.max} but the configuration says ${f.cfg.min}-${f.cfg.max} (edited directly?): sort that out first`); continue; }
           // 28 days of hours feed the learned week; the verdict below reads the last 14 of them
-          const cpu = await groupCpuByHour(cw, f.asg, now, PATTERN_DAYS);
-          const allHours = [...cpu.keys()];
+          // every signal of the group (CPU, memory, disk, requests, network, latency, 5xx) sizes the learned week
+          const sig = await groupSignalsByHour(cw, { asg: f.asg, lb_dimensions: f.load_balancers.map(metricDimension).filter((d) => d.startsWith("app/")), now, days: PATTERN_DAYS });
+          const cpu = new Map([...sig.hours].flatMap(([h, v]) => (v.cpu != null ? [[h, v.cpu] as [number, number]] : [])));
+          const allHours = [...sig.hours.keys()].sort((a, b) => a - b);
           const changes = desiredChanges(await scalingActivities(as, f.asg, hourStart(now) - PATTERN_DAYS * 86400000));
           const desiredAll = desiredByHour(allHours, bounds.desired, changes);
-          const hoursList = allHours.filter((h) => h >= hourStart(now) - METRIC_DAYS * 86400000);
+          const targets = { cpu: config.actEbTargetCpu, mem: config.actEbTargetMem, disk: config.actEbHighDisk };
+          const sigHours = allHours.map((h) => ({ at: h, desired: desiredAll.get(h) ?? bounds.desired, ...sig.hours.get(h) }));
+          const model = signalModel(sigHours, targets);
+          const needs = new Map(needByHour(sigHours, targets, model).map((n) => [n.at, n]));
+          for (const n of sig.notes) log(`${name}: ${n}`);
+          const hoursList = allHours.filter((h) => cpu.has(h) && h >= hourStart(now) - METRIC_DAYS * 86400000);
           const hours: UsageHour[] = hoursList.map((h) => ({ at: h, cpu_avg: cpu.get(h)!, desired: desiredAll.get(h) ?? bounds.desired }));
           const days = new Set(hoursList.map((h) => new Date(h).toISOString().slice(0, 10))).size;
-          const pattern = learnPattern({ hours: allHours.map((h) => ({ at: h, desired: desiredAll.get(h) ?? bounds.desired, cpu_avg: cpu.get(h) ?? null })), pressure: pressureEvents(env.EnvironmentId!), floor: band.floor, ceiling: band.ceiling, now });
+          const pattern = learnPattern({
+            hours: allHours.map((h) => ({ at: h, desired: desiredAll.get(h) ?? bounds.desired, cpu_avg: cpu.get(h) ?? null, need: needs.get(h)?.need, binding: needs.get(h)?.binding })),
+            pressure: pressureEvents(env.EnvironmentId!), floor: band.floor, ceiling: band.ceiling, now,
+            signals: { summary: describeSignals(model, sig.sources), notes: sig.notes, mem_idle: model.mem_idle, requests_per_member: model.requests_per_member, net_in_per_member: model.net_in_per_member, net_out_per_member: model.net_out_per_member, latency_median: model.latency_median, healthy_hours: model.healthy_hours, targets },
+          });
           savePattern({ env_id: env.EnvironmentId!, env_name: env.EnvironmentName ?? null, asg: f.asg, region, account_id: acct.account_id ?? null, pattern });
           patterns++;
           const healthOk = !env.HealthStatus || ["Ok", "Info", "Pending", "Unknown"].includes(env.HealthStatus) || env.Health === "Green";

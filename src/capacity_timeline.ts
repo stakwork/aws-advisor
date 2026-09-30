@@ -27,6 +27,7 @@ export interface PlannedHour {
   /** start of the hour (ISO, UTC) */ at: string; label: string;
   /** when the pass that decides this hour runs (ISO) */ decided_at: string;
   /** the learned minimum for the hour, when there is a pattern */ learned: number | null;
+  /** the signal that set the learned minimum (cpu, memory, requests, …), when the pattern says */ binding: string | null;
   /** MinSize in force during the hour, as the forecast has it */ min: number | null;
   /** the pass changes MinSize for this hour (apply) or proposes to (dry run) */ change: { from: number; to: number; driver: PlanDriver; applied: boolean } | null;
   /** why this hour holds when the pattern or window wanted something else */ held: string | null;
@@ -35,7 +36,7 @@ export type PlanStatus = "driving" | "hand_set" | "learning" | "window" | "no_ba
 export interface TimelinePlan {
   status: PlanStatus; headline: string; mode: string;
   hours: PlannedHour[];
-  pattern: { confident: boolean; weeks: number; coverage: number; min_weeks: number; min_coverage: number; pressure_events: number; summary: string; computed_at: string } | null;
+  pattern: { confident: boolean; weeks: number; coverage: number; min_weeks: number; min_coverage: number; pressure_events: number; summary: string; computed_at: string; signals: string | null; signal_notes: string[]; targets: { cpu: number; mem: number; disk: number } | null } | null;
   current_min: number | null; floor: number | null; ceiling: number | null;
   blocked_until: string | null; hand_set_until: string | null;
   uncertain: string[];
@@ -65,12 +66,12 @@ export function passMinute(cron: string): number | null {
 export function planTimeline(i: PlanInput): TimelinePlan {
   const pm = i.pass_minute ?? 45;
   const p = i.pattern;
-  const patternInfo = p ? { confident: p.confident, weeks: p.weeks, coverage: p.coverage, min_weeks: MIN_WEEKS, min_coverage: MIN_COVERAGE, pressure_events: p.pressure_events, summary: p.summary, computed_at: p.computed_at } : null;
+  const patternInfo = p ? { confident: p.confident, weeks: p.weeks, coverage: p.coverage, min_weeks: MIN_WEEKS, min_coverage: MIN_COVERAGE, pressure_events: p.pressure_events, summary: p.summary, computed_at: p.computed_at, signals: p.signals?.summary ?? null, signal_notes: p.signals?.notes ?? [], targets: p.signals?.targets ?? null } : null;
   const uncertain: string[] = [];
   const base = { mode: i.mode, pattern: patternInfo, current_min: i.current_min, floor: i.band?.floor ?? null, ceiling: i.band?.ceiling ?? null, uncertain };
   const flat = (min: number | null): PlannedHour[] => Array.from({ length: TIMELINE_HOURS }, (_, k) => {
     const at = hourStart(i.now) + (k + 1) * H;
-    return { at: new Date(at).toISOString(), label: ringLabel(ringIndex(at)), decided_at: new Date(at - H + pm * 60000).toISOString(), learned: p ? p.learned[ringIndex(at) % HOURS_PER_WEEK] : null, min, change: null, held: null };
+    return { at: new Date(at).toISOString(), label: ringLabel(ringIndex(at)), decided_at: new Date(at - H + pm * 60000).toISOString(), learned: p ? p.learned[ringIndex(at) % HOURS_PER_WEEK] : null, binding: p?.binding?.[ringIndex(at) % HOURS_PER_WEEK] ?? null, min, change: null, held: null };
   });
   const still = (status: PlanStatus, headline: string): TimelinePlan => ({ ...base, status, headline, hours: flat(i.current_min), blocked_until: null, hand_set_until: null });
   if (i.consent === false) return still("no_consent", "AdvisorAutoScale is not ON: the capacity action leaves this environment alone");
@@ -98,7 +99,7 @@ export function planTimeline(i: PlanInput): TimelinePlan {
     const at = hourStart(i.now) + k * H;
     const decidedAt = at - H + pm * 60000;
     const ring = ringIndex(at);
-    const row: PlannedHour = { at: new Date(at).toISOString(), label: ringLabel(ring), decided_at: new Date(decidedAt).toISOString(), learned: p ? p.learned[ring % HOURS_PER_WEEK] : null, min, change: null, held: null };
+    const row: PlannedHour = { at: new Date(at).toISOString(), label: ringLabel(ring), decided_at: new Date(decidedAt).toISOString(), learned: p ? p.learned[ring % HOURS_PER_WEEK] : null, binding: p?.binding?.[ring % HOURS_PER_WEEK] ?? null, min, change: null, held: null };
     let wanted: number | null = null; let driver: PlanDriver = "none"; let heldWhy: string | null = null;
     if (patternInCharge) {
       const d = decidePattern({ pattern: p!, next: ring, current_min: min, last_set: lastSet, hand_set_at: handSetAt, now: decidedAt });
@@ -122,6 +123,8 @@ export function planTimeline(i: PlanInput): TimelinePlan {
   if (!applies) uncertain.push("dry run: the pass records a proposal for each marked hour and changes nothing unless someone presses Apply on the row");
   uncertain.push("the idle-floor trim and the ceiling raise depend on the next 14 days of CPU and are not forecast; the pressure check (every few minutes) can raise MaxSize at any time");
   uncertain.push("the pattern is recomputed on every pass, and a new pressure event raises that hour and the one before at once");
+  if (p && !p.signals) uncertain.push("this pattern was learned from the trigger's desired capacity only (before the signals): it cannot fall below the MinSize that was in force; the next pass relearns it from CPU, memory, requests, network and disk");
+  for (const n of p?.signals?.notes ?? []) uncertain.push(n);
 
   const windowed = !patternInCharge && i.windows.length > 0 && status0 !== "no_band";
   const status: PlanStatus = handSetUntil && new Date(handSetUntil).getTime() > i.now ? "hand_set" : patternInCharge ? "driving" : windowed ? "window" : status0;

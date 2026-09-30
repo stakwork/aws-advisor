@@ -2,10 +2,12 @@
  * The capacity pattern of an Elastic Beanstalk group: the minimum it needs at each hour of the week, learned.
  *
  * Beanstalk's trigger reacts to load after the fact: a breach, a launch, minutes in which the group runs short.
- * The pattern turns what the trigger asked for into what the group should already have. From the desired
- * capacity replayed hour by hour over the last `PATTERN_DAYS` (28, the group's scaling activities, the way the
- * capacity action reads them), each of the 168 hours of the week gets the p95 of the capacity the trigger wanted
- * at that hour across the weeks seen (the maximum while there are fewer than three weeks). Two corrections sit
+ * The pattern turns what the group needed into what it should already have. Each hour of the last `PATTERN_DAYS`
+ * (28) is sized from its signals (src/capacity_signals.ts: CPU, memory, requests, network in and out, disk,
+ * latency and 5xx, against the targets in Settings), not from the desired capacity the trigger asked for, which
+ * can never fall below the MinSize in force and so would only ever learn the minimum back. Each of the 168 hours
+ * of the week gets the p95 of those needs across the weeks seen (the maximum while there are fewer than three
+ * weeks); an hour with no signal falls back to the capacity the trigger ran. Two corrections sit
  * on top: a **pressure event** (the group pinned at its ceiling with high CPU, src/actions/beanstalk_pressure.ts)
  * raises that hour and the one before it to the capacity that was running plus one, because that hour needed
  * more than it had; and the **band** (`AdvisorScaleBand=<floor>-<ceiling>`, the bare minimum and the ceiling a
@@ -21,6 +23,7 @@
  */
 import { db } from "./db.js";
 import { ringIndex, ringLabel } from "./usage_profile.js";
+import type { SignalName } from "./capacity_signals.js";
 
 db.exec(`create table if not exists capacity_patterns (
   env_id text primary key, env_name text, asg text not null, region text, account_id text,
@@ -42,16 +45,23 @@ export const MIN_COVERAGE = 0.8;
 /** How long a MinSize set by hand is honoured before the pattern resumes. */
 export const HAND_SET_HOURS = 24;
 
-export interface PatternHour { at: number; desired: number; cpu_avg: number | null }
+export interface PatternHour { at: number; desired: number; cpu_avg: number | null; /** members the hour needed (src/capacity_signals.ts); the desired capacity when absent */ need?: number; binding?: SignalName }
+/** What the signals looked like when the pattern was computed: coverage, sources, the learned per-member rates. */
+export interface PatternSignals { summary: string; notes: string[]; mem_idle: number | null; requests_per_member: number | null; net_in_per_member: number | null; net_out_per_member: number | null; latency_median: number | null; healthy_hours: number; targets: { cpu: number; mem: number; disk: number } }
 export interface PressureEvent { at: number; desired: number }
-export interface PatternInput { hours: PatternHour[]; pressure: PressureEvent[]; floor: number; ceiling: number | null; now?: number }
+export interface PatternInput { hours: PatternHour[]; pressure: PressureEvent[]; floor: number; ceiling: number | null; now?: number; signals?: PatternSignals | null }
 export interface CapacityPattern {
   computed_at: string; days: number; weeks: number; coverage: number; confident: boolean;
   floor: number; ceiling: number | null;
   /** The learned minimum per ring hour (0 = Sunday 00:00 UTC), clamped to the band. */
   learned: number[];
-  /** What the trigger wanted per hour before the band and the pressure events: the p95 of the desired capacity across weeks. */
+  /** What the signals needed per hour before the band and the pressure events: the p95 across weeks. */
   wanted: number[];
+  /** What the trigger ran per hour (p95 of the desired capacity), for comparison: it never falls below the MinSize in force. */
+  trigger?: number[];
+  /** The signal that set each hour's need (the one of the hour that decided the p95), "trigger" when none did. */
+  binding?: SignalName[];
+  signals?: PatternSignals | null;
   /** The pressure bump per hour (0 = none): the capacity that ran plus one, from the events of the window. */
   pressure: number[];
   pressure_events: number;
@@ -67,12 +77,15 @@ const weekOf = (at: number) => Math.floor(at / (7 * 86400000));
 export function learnPattern(i: PatternInput): CapacityPattern {
   const now = i.now ?? Date.now();
   const since = now - PATTERN_DAYS * 86400000;
-  const perRing: number[][] = Array.from({ length: HOURS_PER_WEEK }, () => []);
+  const perRing: PatternHour[][] = Array.from({ length: HOURS_PER_WEEK }, () => []);
   const weeks = new Set<number>();
-  for (const h of i.hours) { if (h.at < since || h.at > now) continue; perRing[ringIndex(h.at)].push(h.desired); weeks.add(weekOf(h.at)); }
+  for (const h of i.hours) { if (h.at < since || h.at > now) continue; perRing[ringIndex(h.at)].push(h); weeks.add(weekOf(h.at)); }
   const covered = perRing.filter((xs) => xs.length > 0).length;
   const coverage = Math.round((covered / HOURS_PER_WEEK) * 100) / 100;
-  const wanted = perRing.map((xs) => (xs.length ? (weeks.size < 3 ? Math.max(...xs) : p95(xs)) : i.floor));
+  const pick = (xs: number[]) => (weeks.size < 3 ? Math.max(...xs) : p95(xs));
+  const wanted = perRing.map((xs) => (xs.length ? pick(xs.map((h) => h.need ?? h.desired)) : i.floor));
+  const trigger = perRing.map((xs) => (xs.length ? pick(xs.map((h) => h.desired)) : i.floor));
+  const binding = perRing.map((xs, r): SignalName => { const at = [...xs].reverse().find((h) => (h.need ?? h.desired) === wanted[r]); return at?.binding ?? "trigger"; });
   const pressure = new Array<number>(HOURS_PER_WEEK).fill(0);
   let events = 0;
   for (const e of i.pressure) {
@@ -85,7 +98,7 @@ export function learnPattern(i: PatternInput): CapacityPattern {
   const learned = wanted.map((w, r) => clamp(Math.max(w, pressure[r]), i.floor, i.ceiling));
   const confident = weeks.size >= MIN_WEEKS && coverage >= MIN_COVERAGE;
   const days = Math.min(PATTERN_DAYS, Math.round((now - Math.min(...i.hours.map((h) => h.at), now)) / 86400000));
-  return { computed_at: new Date(now).toISOString(), days, weeks: weeks.size, coverage, confident, floor: i.floor, ceiling: i.ceiling, learned, wanted, pressure, pressure_events: events, summary: summarise(learned) };
+  return { computed_at: new Date(now).toISOString(), days, weeks: weeks.size, coverage, confident, floor: i.floor, ceiling: i.ceiling, learned, wanted, trigger, binding, signals: i.signals ?? null, pressure, pressure_events: events, summary: summarise(learned) };
 }
 
 /** "1 for 120 h (Sat 00:00–Mon 06:00, …), 2 for 40 h, 3 for 8 h (Tue 09:00–17:00)": the levels and where they hold. Pure. */
@@ -122,7 +135,7 @@ export function decidePattern(i: PatternDecisionInput): PatternDecision {
     return { wanted: null, active: true, hand_set: true, reason: `MinSize ${i.current_min} was set by hand at ${i.hand_set_at.slice(0, 16)}Z (the executor last set ${i.last_set}); the pattern resumes ${HAND_SET_HOURS} h later` };
   }
   if (want === i.current_min) return { wanted: null, active: true, hand_set: handSet, reason: `the learned minimum for ${ringLabel(next)} is ${want}, which is what is configured` };
-  return { wanted: want, active: true, hand_set: handSet, reason: `the learned minimum for ${ringLabel(next)} is ${want} (${p.weeks} weeks, ${p.pressure_events} pressure event(s) in ${p.days} days; the week: ${p.summary}): MinSize ${i.current_min} → ${want} before the hour starts` };
+  return { wanted: want, active: true, hand_set: handSet, reason: `the learned minimum for ${ringLabel(next)} is ${want} (${p.binding?.[next] && p.binding[next] !== "trigger" ? `set by ${p.binding[next].replace("_", " ")}; ` : ""}${p.weeks} weeks, ${p.pressure_events} pressure event(s) in ${p.days} days; the week: ${p.summary}): MinSize ${i.current_min} → ${want} before the hour starts` };
 }
 
 // ---- storage -------------------------------------------------------------------------------------------------------

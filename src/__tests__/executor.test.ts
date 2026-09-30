@@ -482,6 +482,65 @@ test("pressure now: pinned at the ceiling with high CPU raises MaxSize by one wi
   assert.equal(capped.pressure, true); assert.equal(capped.raise, null); assert.match(capped.reason, /band's ceiling/);
 });
 
+test("pressure now: memory over its line is pressure too, when the agent reports it", async () => {
+  const { pressureVerdict } = await import("../actions/beanstalk_pressure.js");
+  const base = { min: 2, max: 4, desired: 4, in_service: 4, cpu_avg: 30, high_cpu: 70, ceiling: 6, env_status: "Ready", high_mem: 90 };
+  const v = pressureVerdict({ ...base, mem_avg: 94 });
+  assert.equal(v.pressure, true); assert.equal(v.raise, 5); assert.match(v.reason, /memory over/);
+  assert.equal(pressureVerdict({ ...base, mem_avg: 70 }).pressure, false, "both under their lines");
+  assert.equal(pressureVerdict({ ...base, cpu_avg: null, mem_avg: 95 }).pressure, true, "memory alone is enough");
+  assert.equal(pressureVerdict({ ...base, cpu_avg: null, mem_avg: null }).pressure, false, "no metric at all");
+});
+
+test("capacity signals: a group held at 6 learns what its hours needed, not the minimum back", async () => {
+  const { needByHour, signalModel, describeSignals } = await import("../capacity_signals.js");
+  const { learnPattern } = await import("../capacity_pattern.js");
+  const { ringIndex } = await import("../usage_profile.js");
+  const now = Date.UTC(2026, 8, 30, 12); const H = 3600000;
+  const t = { cpu: 60, mem: 75, disk: 85 };
+  // four weeks at 6 members: weekdays 09-17 UTC CPU 40 %, memory 62 %, 6000 requests; otherwise CPU 8 %, memory 51 %, 600 requests
+  const hours: any[] = [];
+  for (let h = 1; h <= 28 * 24; h++) {
+    const at = now - h * H; const d = new Date(at); const busy = d.getUTCDay() >= 1 && d.getUTCDay() <= 5 && d.getUTCHours() >= 9 && d.getUTCHours() < 17;
+    hours.push({ at, desired: 6, cpu: busy ? 40 : 8, mem: busy ? 62 : 51, requests: busy ? 6000 : 600, net_in: busy ? 6e8 : 6e7, net_out: busy ? 1.2e9 : 1.2e8, latency: 0.1, errors_5xx: 0, disk: 40 });
+  }
+  const m = signalModel(hours, t);
+  assert.equal(m.mem_idle, 51); assert.equal(m.requests_per_member, 1000, "6000 requests on 6 healthy members");
+  assert.match(describeSignals(m, { memory: "CloudWatch agent" }), /memory 100 % \(CloudWatch agent\)/);
+  const needs = needByHour(hours, t, m);
+  const at = (ts: number) => needs.find((n) => n.at === ts)!;
+  const tueNight = at(Date.UTC(2026, 8, 29, 3)), tueNoon = at(Date.UTC(2026, 8, 29, 12));
+  assert.equal(tueNight.by.cpu, 1); assert.equal(tueNight.by.memory, 1); assert.equal(tueNight.by.requests, 1); assert.equal(tueNight.need, 1, "a quiet hour needed one member");
+  assert.equal(tueNoon.by.cpu, 4, "6 × 40 / 60"); assert.equal(tueNoon.by.memory, 3, "6 × (62 − 51) / (75 − 51)"); assert.equal(tueNoon.by.requests, 6, "never more per member than proven");
+  assert.equal(tueNoon.need, 6); assert.equal(tueNoon.binding, "requests");
+  const p = learnPattern({ hours: hours.map((h) => { const n = at(h.at); return { at: h.at, desired: h.desired, cpu_avg: h.cpu, need: n.need, binding: n.binding }; }), pressure: [], floor: 2, ceiling: 8, now });
+  assert.equal(p.learned[ringIndex(Date.UTC(2026, 8, 27, 3))], 2, "Sunday night: needed 1, the band's floor is 2");
+  assert.equal(p.learned[ringIndex(Date.UTC(2026, 8, 29, 12))], 6, "Tuesday noon keeps the proven 6");
+  assert.equal(p.trigger![ringIndex(Date.UTC(2026, 8, 27, 3))], 6, "the trigger alone would have learned 6");
+  assert.equal(p.binding![ringIndex(Date.UTC(2026, 8, 29, 12))], "requests");
+  // the old input shape (no need) still learns the desired capacity
+  assert.equal(learnPattern({ hours: hours.map((h) => ({ at: h.at, desired: 6, cpu_avg: h.cpu })), pressure: [], floor: 2, ceiling: 8, now }).learned[ringIndex(Date.UTC(2026, 8, 27, 3))], 6);
+});
+
+test("capacity signals: a full disk, slow answers or 5xx keep the members; memory near its target does not spread; no signal falls back to the trigger", async () => {
+  const { needByHour, signalModel } = await import("../capacity_signals.js");
+  const t = { cpu: 60, mem: 75, disk: 85 }; const H = 3600000;
+  const base = Array.from({ length: 48 }, (_, k) => ({ at: k * H, desired: 4, cpu: 10, latency: 0.1, requests: 400, errors_5xx: 0 }));
+  const disk = needByHour([...base, { at: 99 * H, desired: 4, cpu: 10, disk: 91 }], t).at(-1)!;
+  assert.equal(disk.need, 4); assert.equal(disk.binding, "disk");
+  const slow = needByHour([...base, { at: 99 * H, desired: 4, cpu: 10, latency: 0.5, requests: 400 }], t).at(-1)!;
+  assert.equal(slow.need, 4); assert.equal(slow.binding, "health");
+  const errors = needByHour([...base, { at: 99 * H, desired: 4, cpu: 10, requests: 400, errors_5xx: 10 }], t).at(-1)!;
+  assert.equal(errors.binding, "health");
+  const heavy = Array.from({ length: 48 }, (_, k) => ({ at: k * H, desired: 4, cpu: 10, mem: 70 }));
+  assert.equal(signalModel(heavy, t).mem_idle, 70);
+  assert.equal(needByHour(heavy, t).at(0)!.by.memory, 4, "an idle footprint of 70 % against a 75 % target leaves nothing to spread");
+  const blind = needByHour([{ at: 0, desired: 5 }], t)[0];
+  assert.equal(blind.need, 5); assert.equal(blind.binding, "trigger");
+  // too few healthy hours: no per-member request rate is trusted
+  assert.equal(signalModel(base.slice(0, 10), t).requests_per_member, null);
+});
+
 test("scale band from the page: two whole numbers, floor at least 1, ceiling above it, or nothing to remove the tag", async () => {
   const { bandText } = await import("../consent.js");
   assert.equal(bandText(2, 6), "2-6");

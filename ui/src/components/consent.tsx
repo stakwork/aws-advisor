@@ -224,7 +224,7 @@ function ScalingTimeline({ env, region, accountId, state }: { env: string; regio
         {hours.map((h) => {
           const v = h.min ?? h.learned ?? 0;
           return (
-            <div key={h.at} className="relative flex h-full min-w-0 flex-1 flex-col justify-end" title={`${h.label} UTC · MinSize ${h.min ?? "?"}${h.learned != null ? ` · learned ${h.learned}` : ""}${h.change ? ` · ${h.change.applied ? "set" : "proposed"} ${h.change.from} → ${h.change.to} at ${hhmm(h.decided_at)} (${h.change.driver})` : ""}${h.held ? ` · ${h.held}` : ""}`}>
+            <div key={h.at} className="relative flex h-full min-w-0 flex-1 flex-col justify-end" title={`${h.label} UTC · MinSize ${h.min ?? "?"}${h.learned != null ? ` · learned ${h.learned}${h.binding ? ` (set by ${h.binding.replace("_", " ")})` : ""}` : ""}${h.change ? ` · ${h.change.applied ? "set" : "proposed"} ${h.change.from} → ${h.change.to} at ${hhmm(h.decided_at)} (${h.change.driver})` : ""}${h.held ? ` · ${h.held}` : ""}`}>
               {h.learned != null && h.learned !== h.min && <div className="absolute inset-x-0 border-t border-dashed border-zinc-400" style={{ bottom: `${(h.learned / top) * 100}%` }} />}
               <div className={`rounded-sm ${h.change ? (h.change.applied ? "bg-sky-400" : "bg-sky-400/50") : h.held ? "bg-amber-400/60" : "bg-zinc-600"}`} style={{ height: `${Math.max(4, (v / top) * 100)}%` }} />
             </div>
@@ -236,11 +236,12 @@ function ScalingTimeline({ env, region, accountId, state }: { env: string; regio
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-sky-400" />{dry ? "a proposal row (nothing changes in dry run)" : "MinSize changes here"}</span>
         <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-400/60" />held (24-hour rule or hand-set)</span>
         <span><span className="mr-1 inline-block w-3 border-t border-dashed border-zinc-500 align-middle" />learned minimum, when it differs</span>
-        {plan.pattern && <span>pattern: {plan.pattern.weeks} of {plan.pattern.min_weeks} weeks, {Math.round(plan.pattern.coverage * 100)} % of {Math.round(plan.pattern.min_coverage * 100)} % hours, {plan.pattern.pressure_events} pressure event(s), computed {hhmm(plan.pattern.computed_at, true)} UTC</span>}
+        {plan.pattern && <span>pattern: {plan.pattern.weeks} weeks (needs {plan.pattern.min_weeks}), {Math.round(plan.pattern.coverage * 100)} % of hours (needs {Math.round(plan.pattern.min_coverage * 100)} %), {plan.pattern.pressure_events} pressure event(s), computed {hhmm(plan.pattern.computed_at, true)} UTC</span>}
+        {plan.pattern && <span className="basis-full">sized by: {plan.pattern.signals ?? "the trigger's desired capacity only (relearned from the signals on the next pass)"}{plan.pattern.targets ? ` · targets CPU ${plan.pattern.targets.cpu} %, memory ${plan.pattern.targets.mem} %, disk hold ${plan.pattern.targets.disk} %` : ""}</span>}
       </div>
       {changes.length > 0 && (
         <ul className="mt-1 space-y-0.5 text-zinc-400">
-          {changes.slice(0, 8).map((h) => <li key={h.at}><span className="font-mono text-zinc-300">{hhmm(h.decided_at)}</span> for {h.label}: {h.change ? `${h.change.applied ? "MinSize" : "proposes MinSize"} ${h.change.from} → ${h.change.to} (${h.change.driver === "pattern" ? "learned week" : "quiet window"})` : h.held}</li>)}
+          {changes.slice(0, 8).map((h) => <li key={h.at}><span className="font-mono text-zinc-300">{hhmm(h.decided_at)}</span> for {h.label}: {h.change ? `${h.change.applied ? "MinSize" : "proposes MinSize"} ${h.change.from} → ${h.change.to} (${h.change.driver === "pattern" ? `learned week${h.binding ? `, set by ${h.binding.replace("_", " ")}` : ""}` : "quiet window"})` : h.held}</li>)}
           {changes.length > 8 && <li className="text-zinc-500">… {changes.length - 8} more hour(s)</li>}
         </ul>
       )}

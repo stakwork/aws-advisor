@@ -8,7 +8,8 @@
  * its own short cadence (Settings › Auto-actions › Pressure check, every ten minutes by default) over the
  * environments tagged `AdvisorAutoScale=ON` with an `AdvisorScaleBand=<floor>-<ceiling>`, reads the group's
  * desired capacity and the last `LOOKBACK_MINUTES` of its average CPU, and when the group is at its maximum, every
- * member in service, and the CPU at or above the pressure threshold (`ACT_EB_HIGH_CPU`), proposes MaxSize + 1 up
+ * member in service, and the CPU at or above the pressure threshold (`ACT_EB_HIGH_CPU`) or the members' memory at or
+ * above `ACT_EB_HIGH_MEM` (CloudWatch agent mem_used_percent by the group, when installed), proposes MaxSize + 1 up
  * to the band's ceiling. It is urgent: the pass applies it in the same breath, Jev's opinion recorded as advice
  * rather than a hold, because the ceiling is the person's number and one step toward it is the smallest change
  * that answers the pressure. One raise per environment per `COOLDOWN_MINUTES`; never while the environment is
@@ -32,17 +33,20 @@ export const KIND = "beanstalk_pressure" as const;
 export const LOOKBACK_MINUTES = 10;
 export const COOLDOWN_MINUTES = 30;
 
-export interface PressureInput { min: number; max: number; desired: number; in_service: number; cpu_avg: number | null; high_cpu: number; ceiling: number | null; env_status: string }
+export interface PressureInput { min: number; max: number; desired: number; in_service: number; cpu_avg: number | null; high_cpu: number; ceiling: number | null; env_status: string; /** members' average memory (CloudWatch agent), when known */ mem_avg?: number | null; high_mem?: number }
 export interface PressureVerdict { pressure: boolean; raise: number | null; reason: string }
 
 /** Whether the group is under pressure now and whether the ceiling can answer it. Pure. */
 export function pressureVerdict(i: PressureInput): PressureVerdict {
-  const cpu = i.cpu_avg == null ? "unknown" : `${i.cpu_avg.toFixed(1)} %`;
+  const cpu = `${i.cpu_avg == null ? "unknown" : `${i.cpu_avg.toFixed(1)} %`}${i.mem_avg != null ? `, memory ${i.mem_avg.toFixed(1)} %` : ""}`;
+  const memHot = i.mem_avg != null && i.high_mem != null && i.mem_avg >= i.high_mem;
+  const cpuHot = i.cpu_avg != null && i.cpu_avg >= i.high_cpu;
   if (i.desired < i.max) return { pressure: false, raise: null, reason: `desired ${i.desired} of a maximum ${i.max}: the trigger still has room (CPU ${cpu})` };
   if (i.in_service < i.max) return { pressure: false, raise: null, reason: `at the maximum of ${i.max} but only ${i.in_service} in service: the group is still launching (CPU ${cpu})` };
-  if (i.cpu_avg == null) return { pressure: false, raise: null, reason: `at the maximum of ${i.max} but no CPU metric for the last ${LOOKBACK_MINUTES} minutes` };
-  if (i.cpu_avg < i.high_cpu) return { pressure: false, raise: null, reason: `at the maximum of ${i.max} with CPU ${cpu}, under the ${i.high_cpu} % pressure line` };
-  const why = `pinned at the maximum of ${i.max}, every member in service, average CPU ${cpu} over the last ${LOOKBACK_MINUTES} minutes (pressure line ${i.high_cpu} %)`;
+  if (i.cpu_avg == null && i.mem_avg == null) return { pressure: false, raise: null, reason: `at the maximum of ${i.max} but no CPU or memory metric for the last ${LOOKBACK_MINUTES} minutes` };
+  const lines = `${i.high_cpu} % CPU${i.high_mem != null ? `, ${i.high_mem} % memory` : ""}`;
+  if (!cpuHot && !memHot) return { pressure: false, raise: null, reason: `at the maximum of ${i.max} with CPU ${cpu}, under the pressure lines (${lines})` };
+  const why = `pinned at the maximum of ${i.max}, every member in service, average CPU ${cpu} over the last ${LOOKBACK_MINUTES} minutes (pressure lines ${lines}; ${cpuHot && memHot ? "CPU and memory" : cpuHot ? "CPU" : "memory"} over)`;
   if (i.env_status !== "Ready") return { pressure: true, raise: null, reason: `${why}, but the environment is ${i.env_status}` };
   if (i.ceiling == null) return { pressure: true, raise: null, reason: `${why}, and no band on the environment: the ceiling cannot move (set ${SCALE_BAND_TAG}=<floor>-<ceiling>)` };
   if (i.max >= i.ceiling) return { pressure: true, raise: null, reason: `${why}, and ${i.max} is the band's ceiling: raise the band, or the group is undersized` };
@@ -51,6 +55,13 @@ export function pressureVerdict(i: PressureInput): PressureVerdict {
 
 async function recentCpu(cw: CloudWatchClient, asg: string, now: number): Promise<number | null> {
   const r = await cw.send(new GetMetricDataCommand({ StartTime: new Date(now - LOOKBACK_MINUTES * 60000), EndTime: new Date(now), MetricDataQueries: [{ Id: "cpu", MetricStat: { Metric: { Namespace: "AWS/EC2", MetricName: "CPUUtilization", Dimensions: [{ Name: "AutoScalingGroupName", Value: asg }] }, Period: 60, Stat: "Average" }, ReturnData: true }] }));
+  const v = r.MetricDataResults?.[0]?.Values ?? [];
+  return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10 : null;
+}
+
+/** The members' average memory over the last minutes, from the CloudWatch agent (by the group); null without the agent. */
+async function recentMem(cw: CloudWatchClient, asg: string, now: number): Promise<number | null> {
+  const r = await cw.send(new GetMetricDataCommand({ StartTime: new Date(now - LOOKBACK_MINUTES * 60000), EndTime: new Date(now), MetricDataQueries: [{ Id: "mem", Expression: `AVG(SEARCH('Namespace="CWAgent" MetricName="mem_used_percent" AutoScalingGroupName="${asg.replace(/["\\]/g, "")}"', 'Average', 60))`, Period: 60 }] }));
   const v = r.MetricDataResults?.[0]?.Values ?? [];
   return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10 : null;
 }
@@ -85,7 +96,8 @@ export const beanstalkPressureAction: ActionModule = {
           const max = group.MaxSize ?? f.cfg.max ?? 0, min = group.MinSize ?? f.cfg.min ?? 0, desired = group.DesiredCapacity ?? 0;
           const inService = (group.Instances ?? []).filter((x) => x.LifecycleState === "InService").length;
           const cpu = desired >= max ? await recentCpu(cw, f.asg, now).catch(() => null) : null;
-          const v = pressureVerdict({ min, max, desired, in_service: inService, cpu_avg: cpu, high_cpu: config.actEbHighCpu, ceiling: band.ceiling, env_status: env.Status ?? "?" });
+          const mem = desired >= max ? await recentMem(cw, f.asg, now).catch(() => null) : null;
+          const v = pressureVerdict({ min, max, desired, in_service: inService, cpu_avg: cpu, high_cpu: config.actEbHighCpu, mem_avg: mem, high_mem: config.actEbHighMem, ceiling: band.ceiling, env_status: env.Status ?? "?" });
           if (!v.pressure) { log(`${name}: ${v.reason}`); continue; }
           const ev = recordPressure({ env_id: env.EnvironmentId!, env_name: env.EnvironmentName ?? null, asg: f.asg, at: now, desired, max_size: max, cpu_avg: cpu, note: v.reason });
           if (ev.fresh) log(`${name}: pressure event #${ev.id} recorded for the learned week`);
@@ -102,7 +114,7 @@ export const beanstalkPressureAction: ActionModule = {
             title: `${name}: MaxSize ${max} → ${v.raise} (pressure now)`,
             reason: `${v.reason}. Band ${SCALE_BAND_TAG}=${band.text}. Applied at once: the trigger launches the extra instance as soon as the environment update is through (a minute or two). This adds cost rather than saving it; the learned week keeps this hour's minimum higher from next week.`,
             before: { MaxSize: max, MinSize: min }, after: { MaxSize: v.raise },
-            facts: { pressure: true, event_id: ev.id, application: env.ApplicationName, asg: f.asg, desired_now: desired, in_service: inService, cpu_avg: cpu, high_cpu: config.actEbHighCpu, band: band.text, ceiling: band.ceiling, operations_role: opsRole, health: env.HealthStatus ?? null },
+            facts: { pressure: true, event_id: ev.id, application: env.ApplicationName, asg: f.asg, desired_now: desired, in_service: inService, cpu_avg: cpu, high_cpu: config.actEbHighCpu, mem_avg: mem, high_mem: config.actEbHighMem, band: band.text, ceiling: band.ceiling, operations_role: opsRole, health: env.HealthStatus ?? null },
             rollback: `UpdateEnvironment MaxSize back to ${max}`,
             est_usd_month: null,
           });
