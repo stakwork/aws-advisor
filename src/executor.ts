@@ -563,7 +563,8 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
     logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "refused", trigger, detail: why });
     return getAction(id)!;
   }
-  const missing = rowMissing(row, "apply", (await actuatorCapabilities()).caps[row.kind]);
+  // The pre-flight keeps the pass from hammering a call the role lacks; a person's click tries the call itself, and AWS is the verdict on the row.
+  const missing = trigger === "manual" ? [] : rowMissing(row, "apply", (await actuatorCapabilities()).caps[row.kind]);
   if (missing.length) throw new Error(`the actuator role is not allowed ${missing.join(", ")}; #${id} can only be done by a person (or widen the role's policy)`);
   const p = proposalOf(row);
   let creds: Creds;
@@ -623,7 +624,7 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
   // Deliberately not checked here: a pause (pauseState) stops planning and applying, never undoing. Revert is the safety valve.
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
-  const missingRevert = rowMissing(row, "revert", (await actuatorCapabilities()).caps[row.kind]);
+  const missingRevert = by === "manual" ? [] : rowMissing(row, "revert", (await actuatorCapabilities()).caps[row.kind]);
   if (missingRevert.length) throw new Error(`the actuator role is not allowed ${missingRevert.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
   const creds = credsForAccount(executorCreds(), row.account_id); creds.act();
   console.log(`[executor] reverting #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""} (${by})`);

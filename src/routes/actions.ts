@@ -3,7 +3,7 @@ import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
-import { applyAction, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
+import { actuatorCapabilities, applyAction, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
 
@@ -13,6 +13,11 @@ actions.use(authMiddleware);
 // The activity log (src/executor_log.ts): the newest passes with their lines and events, and the events made outside a pass. ?limit (default 30, max 200).
 actions.get("/actions/log", (req, res) => { res.json(listExecutorLog({ limit: Number(req.query.limit) || undefined })); });
 
+// Re-check what the role may do: drops the denials learned from failed applies (the role was widened) and simulates again.
+actions.post("/actions/capabilities/recheck", async (_req, res) => {
+  try { const r = await actuatorCapabilities(true); res.json({ capabilities: r.caps, capabilities_note: r.note ?? null }); }
+  catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
+});
 actions.get("/actions/status", async (_req, res) => {
   const status = await executorStatus();
   const read = await sdkIdentity(8000);

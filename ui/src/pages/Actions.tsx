@@ -125,6 +125,15 @@ export default function Actions() {
           );
         })()}
         {status?.capabilities_note && <div className="mt-1 text-xs text-zinc-500">{status.capabilities_note}</div>}
+        {status?.role_arn && (
+          <div className="mt-1 text-xs text-zinc-500">
+            <button className="text-sky-300 hover:underline disabled:opacity-50" disabled={busy === "recheck"} title="drop the denials learned from failed applies (after the role's policy was widened) and simulate the role again"
+              onClick={() => { setBusy("recheck"); setMsg(""); api("/actions/capabilities/recheck", { method: "POST", body: "{}" }).then(() => reloadStatus()).catch((e) => setMsg(e.message)).finally(() => setBusy("")); }}>
+              {busy === "recheck" ? "re-checking the role…" : "re-check the role"}
+            </button>
+            <span className="ml-1">after widening its policy: what it was refused before is forgotten and tried again.</span>
+          </div>
+        )}
         {msg && <div className="mt-2 text-xs text-amber-300">{msg}</div>}
         {lastPass && (
           <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
