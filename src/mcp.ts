@@ -27,7 +27,7 @@ import { poolSummary } from "./inventory.js";
 import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
 import { graphBill, listSystems, logAttributionReport, systemView } from "./graph_knowledge.js";
-import { appEvents, appsOn, appsSummary, fleetApps, whereRuns } from "./instance_apps.js";
+import { appEvents, appsOn, appsSummary, fleetApps, fleetPorts, portsOn, portsSummary, whereListens, whereRuns } from "./instance_apps.js";
 import { instanceStatusOf, listInstanceStatus, statusEvents, statusSummary } from "./status_checks.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 import { registerSwarmTools } from "./mcp_swarms.js";
@@ -500,13 +500,14 @@ export function createFactServer(): McpServer {
 
   server.registerTool("instance_apps", {
     title: "What runs on the instances",
-    description: "The applications running on EC2 instances, from the probe's process list with the operating system's daemons left out (kind app = the workload, kind infra = container runtime and monitoring agents). With instance_id: that box's apps (name, user, process count, CPU, memory, how long the oldest has run, first and last seen), its recent appear/disappear/return events and where its log agents ship. With name: every instance running a program whose name contains it. With neither: every program running anywhere with how many boxes run it. Only instances probed since probe 1.6 have this; older probes report nothing here.",
-    inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]+$/).optional(), name: z.string().max(100).optional(), include_gone: z.boolean().default(false).describe("with instance_id: also the programs that were there and left") },
+    description: "The applications running on EC2 instances, from the probe's process list with the operating system's daemons left out (kind app = the workload, kind infra = container runtime and monitoring agents), and the ports each box answers on (probe 1.8: host sockets and published container ports, matched to the app or container behind them, with exposure from the security group ingress rules: internet, network, group, closed, or local for loopback-only). With port: where that port is open across the fleet. With instance_id: that box's apps (name, user, process count, CPU, memory, how long the oldest has run, first and last seen), its recent appear/disappear/return events and where its log agents ship. With name: every instance running a program whose name contains it. With neither: every program running anywhere with how many boxes run it. Only instances probed since probe 1.6 have this; older probes report nothing here.",
+    inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]+$/).optional(), name: z.string().max(100).optional(), port: z.number().int().min(1).max(65535).optional().describe("where this port is open across the fleet, widest reach first"), include_gone: z.boolean().default(false).describe("with instance_id: also the programs that were there and left") },
     annotations: ro,
   }, (a) => {
-    if (a.instance_id) { const p = latestProbe(a.instance_id); return text({ instance_id: a.instance_id, probed_at: p?.collected_at ?? null, has_process_list: Array.isArray(p?.data.processes), apps: appsOn(a.instance_id, a.include_gone), events: appEvents({ instance_id: a.instance_id, limit: 50 }), log_shipping: p?.data.log_shipping ?? [] }); }
+    if (a.port) return text({ port: a.port, where: whereListens(a.port) });
+    if (a.instance_id) { const p = latestProbe(a.instance_id); return text({ instance_id: a.instance_id, probed_at: p?.collected_at ?? null, has_process_list: Array.isArray(p?.data.processes), apps: appsOn(a.instance_id, a.include_gone), ports: portsOn(a.instance_id, a.include_gone), events: appEvents({ instance_id: a.instance_id, limit: 50 }), log_shipping: p?.data.log_shipping ?? [] }); }
     if (a.name) return text({ name: a.name, where: whereRuns(a.name), events: appEvents({ name: a.name, limit: 50 }) });
-    return text({ summary: appsSummary(), apps: fleetApps(), recent_events: appEvents({ limit: 50 }) });
+    return text({ summary: appsSummary(), apps: fleetApps(), ports: { summary: portsSummary(), open: fleetPorts().slice(0, 100) }, recent_events: appEvents({ limit: 50 }) });
   });
 
   server.registerTool("status_checks", {

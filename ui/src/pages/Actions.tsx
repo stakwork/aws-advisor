@@ -38,6 +38,7 @@ export default function Actions() {
   const [openPass, setOpenPass] = useState<number | null>(null);
   useEffect(() => { if (showLog) api("/actions/log?limit=40").then(setLog).catch((e) => setMsg(e.message)); }, [showLog, lastPass, data]);
   const [open, setOpen] = useState<number | null>(selectedId ? Number(selectedId) : null);
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   // The row whose thread with the agent is open ("why this?"); one at a time, one thread per row on the server.
   const [asking, setAsking] = useState<number | null>(null);
 
@@ -274,16 +275,23 @@ export default function Actions() {
                           <div><div className="text-zinc-400">Resource</div><div className="font-mono text-zinc-200">{a.resource}{a.region ? ` · ${a.region}` : ""}</div></div>
                           <div><div className="text-zinc-400">Undo</div><div className="text-zinc-200">{a.rollback}</div></div>
                           {a.result && <div><div className="text-zinc-400">Result</div><div className="text-zinc-200">{a.result}</div></div>}
-                          {["proposed", "failed", "refused", "stale"].includes(a.status) && (
-                            <div><div className="text-zinc-400">This row changed nothing</div>
-                              <button className="text-red-300 hover:underline" disabled={busy === `delete-${a.id}`} title="delete the row, its events and its thread; the graph node goes too. Rows that changed AWS cannot be deleted."
-                                onClick={() => { setBusy(`delete-${a.id}`); setMsg(""); api("/actions/delete", { method: "POST", body: JSON.stringify({ ids: [a.id] }) }).then(() => { setOpen(null); load(); reloadStatus(); }).catch((e) => setMsg(e.message)).finally(() => setBusy("")); }}>
-                                {busy === `delete-${a.id}` ? "deleting…" : "delete this row"}
-                              </button>
-                            </div>
-                          )}
-                          {a.kind === "consent_tag" && (a.status === "proposed" || a.status === "failed" || a.status === "applied") && <div><div className="text-zinc-400">With your own credentials</div><RunAsMe actionId={a.id} onDone={() => load()} /></div>}
-                          {a.kind === "consent_tag" && (a.status === "applied" || a.status === "verified") && String(a.trigger || "").startsWith("person:") && <div><div className="text-zinc-400">Done by a person; undo the same way</div><RunAsMe actionId={a.id} verb="revert" onDone={() => load()} /></div>}
+                          {(() => {
+                            const changed = ["applied", "verified", "reverted"].includes(a.status);
+                            const arm = confirmDelete === a.id;
+                            const del = () => { setBusy(`delete-${a.id}`); setMsg(""); api("/actions/delete", { method: "POST", body: JSON.stringify({ ids: [a.id], force: changed }) }).then(() => { setOpen(null); setConfirmDelete(null); load(); reloadStatus(); }).catch((e) => setMsg(e.message)).finally(() => setBusy("")); };
+                            return (
+                              <div><div className="text-zinc-400">{changed ? "This row is the record of a change" : "This row changed nothing"}</div>
+                                {changed && !arm
+                                  ? <button className="text-red-300 hover:underline" onClick={() => setConfirmDelete(a.id)} title="the change stays on AWS; only the record, its events, its thread and its graph node go">delete this row…</button>
+                                  : <button className="text-red-300 hover:underline" disabled={busy === `delete-${a.id}`} title="delete the row, its events and its thread; the graph node goes too" onClick={del}>
+                                      {busy === `delete-${a.id}` ? "deleting…" : arm ? "yes, delete the record (the change itself stays on AWS)" : "delete this row"}
+                                    </button>}
+                                {arm && <button className="ml-2 text-zinc-400 hover:underline" onClick={() => setConfirmDelete(null)}>keep it</button>}
+                              </div>
+                            );
+                          })()}
+                          {(a.status === "proposed" || a.status === "failed" || a.status === "applied") && <div><div className="text-zinc-400">With your own credentials{status?.capabilities?.[a.kind]?.apply === false ? " (the actuator role lacks this one)" : ""}</div><RunAsMe actionId={a.id} onDone={() => load()} /></div>}
+                          {(a.status === "applied" || a.status === "verified") && String(a.trigger || "").startsWith("person:") && <div><div className="text-zinc-400">Done by a person; undo the same way</div><RunAsMe actionId={a.id} verb="revert" onDone={() => load()} /></div>}
                           {a.error && <div><div className="text-zinc-400">Error</div><div className="text-red-300">{a.error}</div></div>}
                           <div className="text-zinc-500">proposed {when(a.created_at)}{a.revived_at && ` · went stale, proposed again ${when(a.revived_at)}`} · last seen {when(a.seen_at)}{a.applied_at && ` · applied ${when(a.applied_at)}`}{a.verified_at && ` · verified ${when(a.verified_at)}`}{a.reverted_at && ` · reverted ${when(a.reverted_at)}`} · mode {a.mode}</div>
                         </div>

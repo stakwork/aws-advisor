@@ -82,6 +82,7 @@ export const TABLE_ACTIONS: Record<string, string> = {
   aws_ec2_ami_shared: "ec2:DescribeImages",
   aws_ec2_launch_template_version: "ec2:DescribeLaunchTemplateVersions",
   aws_ec2_target_group: "elasticloadbalancing:DescribeTargetGroups",
+  aws_vpc_security_group_rule: "ec2:DescribeSecurityGroupRules",
   aws_ec2_application_load_balancer: "elasticloadbalancing:DescribeLoadBalancers",
   aws_ec2_network_load_balancer: "elasticloadbalancing:DescribeLoadBalancers",
   aws_ec2_gateway_load_balancer: "elasticloadbalancing:DescribeLoadBalancers",

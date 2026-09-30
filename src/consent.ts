@@ -229,10 +229,10 @@ export const consentErrorStatus = (e: unknown): number => (e instanceof ConsentE
 // ---- a person's one-time credentials ----------------------------------------------------------------------------------
 
 /**
- * Beanstalk applies a tag change as an environment update under the caller's own rights, operations role or not,
- * and the actuator is kept too narrow for that. So a consent row on an environment can be done by a person from
- * the page with temporary credentials of their own: one call, made with those credentials in memory, attributed
- * to their identity on the ledger, and forgotten the moment it returns. Long-lived keys are refused (a session
+ * Any row the actuator cannot or may not do can be done by a person from the page with temporary credentials of
+ * their own (it began with Beanstalk tag writes, which run under the caller's rights whatever the operations role):
+ * one call, made with those credentials in memory, attributed to their identity on the ledger, and forgotten the
+ * moment it returns. The person authorises that one change; the actuator stays as narrow as it is. Long-lived keys are refused (a session
  * token is required; a fifteen-minute session from `aws sts get-session-token` is the token's own lifetime), the
  * call is the row's and nothing else, and the credentials are never logged or stored.
  */
@@ -249,8 +249,12 @@ export function parseOneTimeCredentials(input: unknown): OneTimeCredentials {
   return { access_key_id, secret_access_key, session_token };
 }
 
-/** The kinds a person may do with their own credentials from the page: the consent tags. Pure. */
-export const PERSON_KINDS: ReadonlySet<string> = new Set([CONSENT_KIND]);
+/**
+ * Any ledger row may be done with a person's own credentials from the page: the credentials are the authorization
+ * for that one change, and the row records who gave it. `null` means every kind (kept as a set for the tests and
+ * for narrowing later).
+ */
+export const PERSON_KINDS: ReadonlySet<string> | null = null;
 
 /**
  * Applies (or reverts) one consent row with a person's temporary credentials. The row must be one the actuator
@@ -261,7 +265,7 @@ export async function runAsPerson(id: number, verb: "apply" | "revert", input: u
   const creds = parseOneTimeCredentials(input);
   const row = getAction(id);
   if (!row) throw new ConsentError(`no action #${id}`, 404);
-  if (!PERSON_KINDS.has(row.kind)) throw new ConsentError(`#${id} is a ${row.kind} row: only consent tags are done with a person's credentials`, 400);
+  if (PERSON_KINDS && !PERSON_KINDS.has(row.kind)) throw new ConsentError(`#${id} is a ${row.kind} row: not done with a person's credentials`, 400);
   if (verb === "apply" && !["proposed", "failed", "applied"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only a proposed, failed or still-unverified row is applied`, 409);
   if (verb === "revert" && !["applied", "verified"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only an applied or verified row is reverted`, 409);
   const mod = actionModules().find((m) => m.kind === row.kind);

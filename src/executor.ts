@@ -724,20 +724,20 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
   return passInFlight;
 }
 
-/** Rows that never changed anything may be deleted; an applied, verified or reverted row is the record of a change and stays. */
+/** Rows that never changed anything go on one click; an applied, verified or reverted row is the record of a change and needs `force` (the page asks twice). */
 export const DELETABLE: ReadonlySet<ActionStatus> = new Set<ActionStatus>(["proposed", "failed", "refused", "stale"]);
 
 /**
- * Deletes ledger rows that never changed AWS (a proposal withdrawn, a failed attempt, a refusal, a stale row), with
- * their executor events and their chat thread, and removes their nodes from the graph. Rows of any other status are
- * left and named. A person's decision, from the page; nothing deletes rows on its own.
+ * Deletes ledger rows with their executor events and their chat thread, and removes their nodes from the graph.
+ * Rows that changed AWS (applied, verified, reverted) are kept and named unless `force` is set: they are the record
+ * of a change, so the page asks twice. A person's decision, from the page; nothing deletes rows on its own.
  */
-export async function deleteActions(ids: number[]): Promise<{ deleted: number[]; kept: { id: number; status: string }[] }> {
+export async function deleteActions(ids: number[], opts: { force?: boolean } = {}): Promise<{ deleted: number[]; kept: { id: number; status: string }[] }> {
   const out = { deleted: [] as number[], kept: [] as { id: number; status: string }[] };
   for (const id of [...new Set(ids)]) {
     const row = getAction(id);
     if (!row) continue;
-    if (!DELETABLE.has(row.status)) { out.kept.push({ id, status: row.status }); continue; }
+    if (!DELETABLE.has(row.status) && !opts.force) { out.kept.push({ id, status: row.status }); continue; }
     db.transaction(() => {
       db.prepare("delete from executor_events where action_id = ?").run(id);
       db.prepare("delete from actions where id = ?").run(id); // chat_threads and their messages cascade

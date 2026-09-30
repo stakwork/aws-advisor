@@ -18,7 +18,7 @@ import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN, SIGNALS_MAX_CHARS } fr
  * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
  * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.7";
+export const PROBE_VERSION = "aws-advisor/1.8";
 /** GetCommandInvocation returns at most this many characters of stdout; the agent appends "---Output truncated---" past it. */
 export const SSM_OUTPUT_CAP = 24000;
 /** A probe whose JSON is large prints it gzip-compressed and base64-encoded on one line after this marker (probe 1.7). */
@@ -164,9 +164,16 @@ export const PROBE_SCRIPT = [
   "    nm=(w==\"\"?$7:$7 \" \" w); k=$3 \"\\t\" nm; n[k]++; cpu[k]+=$4; rss[k]+=$5; if($6+0>old[k]) old[k]=$6+0; if(!(k in a)){ a[k]=$8; for(i=9;i<=NF && i<=12;i++) a[k]=a[k] \" \" $i } }",
   "  END { for(k in n){ split(k, p, \"\\t\"); cmd=substr(a[k],1,120); gsub(/[\\\\\"]/,\"\",cmd); c=p[2]; gsub(/[\\\\\"]/,\"\",c); u=p[1]; gsub(/[\\\\\"]/,\"\",u);",
   "    printf \"%012.0f\\t{\\\"name\\\":\\\"%s\\\",\\\"user\\\":\\\"%s\\\",\\\"count\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"oldest_seconds\\\":%d,\\\"command\\\":\\\"%s\\\"}\\n\", rss[k]*1024, c, u, n[k], cpu[k], rss[k]*1024, old[k], cmd } }' | sort -rn | head -n 80 | cut -f2- | paste -sd, -)",
-  "out=$(printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s]}' \\",
+  "# ---- listeners (probe 1.8): every port the box answers on and which program owns it, from the listening sockets (ss) and the ports",
+  "# ---- containers publish (docker ps). scope: all = every interface, loopback = the box only, address = one interface. The advisor matches",
+  "# ---- each port to the app or container behind it and to the security group rules that let traffic in (src/instance_apps.ts).",
+  "lsn=\"\"; dports=\"\"",
+  "if command -v ss >/dev/null 2>&1; then lsn=$(ss -Hlntup 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '{ proto=$1; if(proto!=\"tcp\" && proto!=\"udp\") next; l=$5; p=l; sub(/.*:/,\"\",p); if(p !~ /^[0-9]+$/) next; a=l; sub(/:[0-9]+$/,\"\",a); gsub(/[\\[\\]]/,\"\",a); sub(/%.*/,\"\",a); if(a==\"*\"||a==\"0.0.0.0\"||a==\"::\"||a==\"\") s=\"all\"; else if(a ~ /^127\\./||a==\"::1\") s=\"loopback\"; else s=\"address\"; nm=\"\"; pid=\"\"; if(match($0,/users:\\(\\(\"[^\"]*\",pid=[0-9]+/)){ u=substr($0,RSTART,RLENGTH); nm=u; sub(/^users:\\(\\(\"/,\"\",nm); sub(/\",pid=.*/,\"\",nm); pid=u; sub(/.*pid=/,\"\",pid) } k=proto \":\" p \":\" a; if(k in seen) next; seen[k]=1; n++; if(n>80) exit; gsub(/[\\\\\"]/,\"\",nm); printf \"%s{\\\"proto\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"bind\\\":\\\"%s\\\",\\\"scope\\\":\\\"%s\\\",\\\"process\\\":%s,\\\"pid\\\":%s,\\\"container\\\":null,\\\"container_port\\\":null}\", (n>1?\",\":\"\"), proto, p, a, s, (nm==\"\"?\"null\":\"\\\"\" nm \"\\\"\"), (pid==\"\"?\"null\":pid) }'); fi",
+  "dports=$(docker ps --format '{{.Names}}\\t{{.Ports}}' 2>/dev/null | awk -F'\\t' '{ n=split($2, P, \", \"); for(i=1;i<=n;i++){ if(match(P[i], /:[0-9]+->[0-9]+\\/(tcp|udp)/)){ m=substr(P[i],RSTART+1,RLENGTH-1); hp=m; sub(/->.*/,\"\",hp); cp=m; sub(/.*->/,\"\",cp); pr=cp; sub(/.*\\//,\"\",pr); sub(/\\/.*/,\"\",cp); b=P[i]; sub(/:[0-9]+->.*/,\"\",b); gsub(/[\\[\\]]/,\"\",b); if(b==\"0.0.0.0\"||b==\"::\"||b==\"\") s=\"all\"; else if(b ~ /^127\\./) s=\"loopback\"; else s=\"address\"; nm=$1; gsub(/[\\\\\"]/,\"\",nm); k=pr \":\" hp; if(k in seen) continue; seen[k]=1; c++; if(c>80) exit; printf \"%s{\\\"proto\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"bind\\\":\\\"%s\\\",\\\"scope\\\":\\\"%s\\\",\\\"process\\\":null,\\\"pid\\\":null,\\\"container\\\":\\\"%s\\\",\\\"container_port\\\":%d}\", (c>1?\",\":\"\"), pr, hp, b, s, nm, cp } } }')",
+  "listeners=\"$lsn\"; if [ -n \"$lsn\" ] && [ -n \"$dports\" ]; then listeners=\"$lsn,$dports\"; elif [ -z \"$lsn\" ]; then listeners=\"$dports\"; fi",
+  "out=$(printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s],\"listeners\":[%s]}' \\",
   "  \"$(esc \"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)\")\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${cpus:-0}\" \"${uptime_s:-0}\" \\",
-  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\")",
+  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\" \"$listeners\")",
   "# ---- exactly one JSON object on the last line. GetCommandInvocation returns only the first 24,000 characters of stdout, so a big box (many processes,",
   "# ---- many containers) prints the object gzip-compressed and base64-encoded on one marked line instead (probe 1.7); the advisor decodes it (parseProbeOutput).",
   "if [ ${#out} -gt 16000 ] && command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then printf 'aws-advisor-gz:%s\\n' \"$(printf '%s' \"$out\" | gzip -c -9 | base64 | tr -d '\\n')\"; else printf '%s\\n' \"$out\"; fi"
@@ -242,6 +249,8 @@ export interface ProbeActivity {
 export interface ProbeLogShipping { group: string; via: string; source: string | null }
 /** Probe 1.6: the processes of one program under one user, summed: how many, CPU now, resident memory, the oldest one's age, the program with its first words. */
 export interface ProbeProcessGroup { name: string; user: string; count: number; cpu_pct: number; rss_bytes: number; oldest_seconds: number; command: string }
+/** Probe 1.8: one port the box answers on. `scope` says which interfaces (all, loopback, one address); a host socket names its process and pid, a port a container publishes names the container and the port inside it. */
+export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: string; scope: "all" | "loopback" | "address"; process: string | null; pid: number | null; container: string | null; container_port: number | null }
 
 export interface ProbeResult {
   probe: string;
@@ -262,6 +271,8 @@ export interface ProbeResult {
   /** Present from probe 1.6: where the box's log agents ship to, and what runs on it (kernel threads excluded). */
   log_shipping?: ProbeLogShipping[];
   processes?: ProbeProcessGroup[];
+  /** Present from probe 1.8: the listening ports, host sockets and published container ports alike. */
+  listeners?: ProbeListener[];
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -348,6 +359,10 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     processes: Array.isArray(raw.processes) ? raw.processes.filter((p: any) => p && typeof p.name === "string" && p.name).slice(0, 200).map((p: any): ProbeProcessGroup => ({
       name: String(p.name).slice(0, 64), user: String(p.user ?? "").slice(0, 64), count: Math.max(1, int(p.count)), cpu_pct: Number.isFinite(Number(p.cpu_pct)) ? Number(p.cpu_pct) : 0,
       rss_bytes: Math.max(0, int(p.rss_bytes)), oldest_seconds: Math.max(0, int(p.oldest_seconds)), command: String(p.command ?? p.name).slice(0, 120) })) : undefined,
+    listeners: Array.isArray(raw.listeners) ? raw.listeners.filter((l: any) => l && (l.proto === "tcp" || l.proto === "udp") && Number.isInteger(Number(l.port)) && Number(l.port) > 0 && Number(l.port) < 65536).slice(0, 200).map((l: any): ProbeListener => ({
+      proto: l.proto, port: Number(l.port), bind: String(l.bind ?? "").slice(0, 64), scope: l.scope === "loopback" || l.scope === "address" ? l.scope : "all",
+      process: l.process == null ? null : String(l.process).slice(0, 64), pid: l.pid == null ? null : int(l.pid),
+      container: l.container == null ? null : String(l.container).slice(0, 120), container_port: l.container_port == null ? null : int(l.container_port) })) : undefined,
   };
 }
 
@@ -594,6 +609,9 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
     try {
       const { recordApps } = await import("./instance_apps.js");
       const r = recordApps(instanceId, collectedAt, data, name);
+      const { recordPorts } = await import("./instance_apps.js");
+      const pr = recordPorts(instanceId, collectedAt, data, name);
+      if (pr && (pr.opened.length || pr.closed.length)) console.log(`[probe] ${instanceId} ports: ${pr.ports} listening${pr.opened.length ? `, opened ${pr.opened.join(", ")}` : ""}${pr.closed.length ? `, closed ${pr.closed.join(", ")}` : ""}${pr.alerts ? `, ${pr.alerts} exposed` : ""}`);
       if (r) { if (r.appeared.length || r.disappeared.length || r.returned.length) console.log(`[probe] ${instanceId} apps: ${r.apps} running${r.appeared.length ? `, appeared ${r.appeared.join(", ")}` : ""}${r.disappeared.length ? `, gone ${r.disappeared.join(", ")}` : ""}${r.returned.length ? `, back ${r.returned.join(", ")}` : ""}`); const { mirrorAppsInBackground } = await import("./graph_mirror.js"); mirrorAppsInBackground([instanceId]); }
     } catch (e: any) { console.error(`[probe] apps not recorded for ${instanceId}: ${e?.message || e}`); }
     return { id, instance_id: instanceId, collected_at: collectedAt, data };

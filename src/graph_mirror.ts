@@ -34,6 +34,7 @@ export const SCHEMA_SUMMARY = [
   "(:AdvisorResource {id, kind: ec2|rds|elasticache|elb, name, type, state, region, role, role_confidence, protected_prob, monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})-[:IN_ACCOUNT]->(:AdvisorAccount {id})",
   "(:AdvisorResource {kind: elb, type: alb|nlb|gwlb|clb, dns_name, scheme, beanstalk_env, targets, healthy, requests_30d, gb_30d, asgs, ecs_services})-[:ROUTES_TO {target_group, port, health}]->(:AdvisorResource | :AdvisorResourceRef) a load balancer (id = its ARN) and what it fronts: the instances behind its target groups, or a Lambda ref",
   "AdvisorResource (EC2) and AdvisorNodePool (an autoscaling group) carry the usage profile: usage_quiet_hours_week, usage_confidence (0..1), usage_schedule (the advisor:schedule value that keeps it up whenever it was used, UTC), usage_off_hours_week, usage_est_usd_month, usage_quiet_windows (labels), usage_summary, usage_computed_at, and Jev's daily review of it: usage_review_verdict (confirm|adjust|keep_running), usage_review_schedule, usage_review_confidence, usage_review_reason, usage_reviewed_at (src/usage_review.ts; the office-hours action follows the review for a box tagged AdvisorAutoPark=ON) (src/usage_profile.ts: 28 days of CloudWatch and probes folded into the hours of the week; quiet = every week quiet on CPU, network, connections, use signals, logins, container CPU)",
+  "(:AdvisorResource)-[:LISTENS_ON {gone}]->(:AdvisorPort {id: <instance>:<proto>:<port>, proto: tcp|udp, port, bind, scope: all|loopback|address, exposure: internet|network|group|closed|local, process, container, container_port, first_seen, last_seen, gone}) every port an EC2 box answers on (probe 1.8); (:AdvisorApp)-[:SERVES]->(:AdvisorPort) names the program or container behind it; exposure comes from the security group ingress rules (internet = 0.0.0.0/0 or ::/0 lets it in)",
   "(:AdvisorResource)-[:HAS_ROLE]->(:AdvisorRole {name}); (:AdvisorResource)-[:IN_POOL]->(:AdvisorNodePool {name}) for autoscaled EC2 nodes (Karpenter pool, EKS node group, ASG)",
   "AdvisorNodePool (a Beanstalk group) carries the capacity pattern: capacity_learned_min (168 integers, the MinSize the executor sets per hour of the week, index 0 = Sunday 00:00 UTC), capacity_wanted (what the trigger asked for, p95 across weeks), capacity_floor and capacity_ceiling (the band a person set), capacity_weeks, capacity_coverage, capacity_confident, capacity_summary; (:AdvisorNodePool)-[:PRESSURED_AT]->(:AdvisorPressureEvent {id, at, ring, desired, max_size, cpu_avg, note}) once per hour the group was pinned at its ceiling with high CPU; (:AdvisorAction)-[:ANSWERED]->(:AdvisorPressureEvent) when a ceiling raise answered it",
   "(:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule, est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef {id})",
@@ -665,6 +666,32 @@ MATCH (r:AdvisorResource {id: row.instance_id})
 MERGE (r)-[e:RUNS {user: row.user}]->(app)
 SET e += {count: row.count, cpu_pct: row.cpu_pct, rss_bytes: row.rss_bytes, oldest_seconds: row.oldest_seconds, command: row.command, first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, updated_at: $now}`;
 
+const PORT_CYPHER = `
+UNWIND $rows AS row
+MERGE (p:AdvisorPort {id: row.id})
+SET p += {instance_id: row.instance_id, proto: row.proto, port: row.port, bind: row.bind, scope: row.scope, exposure: row.exposure, process: row.process, container: row.container, container_port: row.container_port,
+  first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, account_id: $account, updated_at: $now}
+WITH p, row
+MATCH (r:AdvisorResource {id: row.instance_id})
+MERGE (r)-[l:LISTENS_ON]->(p) SET l.gone = row.gone, l.updated_at = $now
+WITH p, row WHERE row.app_name IS NOT NULL
+MATCH (a:AdvisorApp {id: row.app_name})
+MERGE (a)-[s:SERVES]->(p) SET s.gone = row.gone, s.updated_at = $now`;
+
+/** The ports of the given instances (or all), as AdvisorPort nodes the box LISTENS_ON and the app SERVES (src/instance_apps.ts, probe 1.8). */
+export async function mirrorPorts(instanceIds?: string[]): Promise<{ ports: number }> {
+  if (!enabled()) return { ports: 0 };
+  if (instanceIds && !instanceIds.length) return { ports: 0 };
+  let raw: any[] = [];
+  try { raw = instanceIds ? db.prepare(`select * from instance_ports where instance_id in (${instanceIds.map(() => "?").join(",")})`).all(...instanceIds) : db.prepare("select * from instance_ports").all(); }
+  catch { return { ports: 0 }; }
+  const rows = raw.map((r) => ({ id: `${r.instance_id}:${r.proto}:${r.port}`, instance_id: String(r.instance_id), proto: String(r.proto), port: num(r.port), bind: str(r.bind), scope: str(r.scope), exposure: str(r.exposure), process: r.process == null ? null : String(r.process), container: r.container == null ? null : String(r.container), container_port: r.container_port == null ? null : num(r.container_port),
+    app_name: r.app_name == null ? null : String(r.app_name), first_seen: str(r.first_seen), last_seen: str(r.last_seen), probes: num(r.probes), gone: Boolean(r.gone) }));
+  const stamp = now();
+  for (const batch of chunks(rows)) await write(PORT_CYPHER, { rows: batch, account: accountId(), now: stamp });
+  return { ports: rows.length };
+}
+
 /** Every instance_apps row (src/instance_apps.ts), or the given instances': the program nodes and the RUNS edges, gone ones included so history stays walkable. */
 export async function mirrorApps(instanceIds?: string[]): Promise<{ apps: number }> {
   if (!enabled()) return { apps: 0 };
@@ -678,6 +705,7 @@ export async function mirrorApps(instanceIds?: string[]): Promise<{ apps: number
     command: str(r.command), first_seen: str(r.first_seen), last_seen: str(r.last_seen), probes: num(r.probes), gone: Boolean(r.gone) }));
   const stamp = now();
   for (const batch of chunks(rows)) await write(APP_CYPHER, { rows: batch, account, now: stamp });
+  await mirrorPorts(instanceIds);
   return { apps: rows.length };
 }
 

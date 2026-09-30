@@ -39,7 +39,7 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
   );
   return (
     <div className={compact ? "inline" : "mt-1"}>
-      <button type="button" className="text-sky-300 hover:underline" onClick={() => setOpen((o) => !o)} title="do this one row with temporary credentials of your own (the actuator cannot: Beanstalk applies a tag as an environment update under the caller's rights); used once, never stored">
+      <button type="button" className="text-sky-300 hover:underline" onClick={() => setOpen((o) => !o)} title="do this one row with temporary credentials of your own: you authorise this change, the row records who; used once, never stored">
         {open ? "cancel" : verb === "revert" ? "undo as me" : "run as me"}
       </button>
       {open && (
@@ -96,30 +96,48 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
   );
 }
 
+type ScaleState = { on: boolean; consent: string | null; band: string | null; floor: number | null; ceiling: number | null; operations_role: string | null; status: string | null };
+/** How long the switch keeps re-reading the environment for a tag it just wrote: Beanstalk lands it as an environment update, a minute or two. */
+const SETTLE_MS = 3 * 60_000;
+const POLL_MS = 5_000;
+
 export function AutoScaleSwitch({ env, region, accountId }: { env: string; region?: string | null; accountId?: string | null }) {
-  const [state, setState] = useState<{ on: boolean; consent: string | null; band: string | null; floor: number | null; ceiling: number | null; operations_role: string | null; status: string | null } | null | undefined>(undefined);
+  const [state, setState] = useState<ScaleState | null | undefined>(undefined);
   const [floor, setFloor] = useState(""); const [ceiling, setCeiling] = useState("");
+  // what was just asked for, until the environment reads it back (or the wait runs out)
+  const [pending, setPending] = useState<{ on?: boolean; band?: string | null; since: number; what: string } | null>(null);
+  const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
   const qs = new URLSearchParams(); if (region) qs.set("region", region); if (accountId) qs.set("account_id", accountId);
   const [readErr, setReadErr] = useState("");
   // What the environment carries is read from AWS, never assumed: after a flip (whether the call succeeded, timed out
   // on the way back, or was refused because the tag is already there) the switch re-reads it, so the page shows the tag as it is.
-  const read = () => api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent?${qs}`).then((s) => { setState(s); setFloor(s.floor == null ? "" : String(s.floor)); setCeiling(s.ceiling == null ? "" : String(s.ceiling)); setReadErr(""); }).catch((e) => { setState(null); setReadErr(e.message); });
-  useEffect(() => { setState(undefined); setMsg(null); setReadErr(""); read(); }, [env, region, accountId]);
+  const read = (): Promise<ScaleState | null> => api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent?${qs}`).then((s: ScaleState) => { setState(s); setFloor(s.floor == null ? "" : String(s.floor)); setCeiling(s.ceiling == null ? "" : String(s.ceiling)); setReadErr(""); return s; }).catch((e) => { setState(null); setReadErr(e.message); return null; });
+  useEffect(() => { setState(undefined); setMsg(null); setReadErr(""); setPending(null); read(); }, [env, region, accountId]);
+  // while a write is landing: re-read every few seconds until the environment shows it, then stop
+  const landed = (s: ScaleState | null, p: NonNullable<typeof pending>) => Boolean(s) && (p.on === undefined || s!.on === p.on) && (p.band === undefined || (s!.band ?? null) === (p.band ?? null));
+  useEffect(() => {
+    if (!pending) return;
+    if (Date.now() - pending.since > SETTLE_MS) { setPending(null); setMsg((m) => ({ ...(m ?? { text: "" }), text: `${m?.text ?? ""} · the environment still does not show it after ${Math.round(SETTLE_MS / 60000)} minutes: check the row and the environment's events` })); return; }
+    const t = setTimeout(() => { read().then((s) => { if (landed(s, pending)) setPending(null); else setTick((n) => n + 1); }); }, POLL_MS);
+    return () => clearTimeout(t);
+  }, [pending, tick]);
+  const waitFor = (what: string, want: { on?: boolean; band?: string | null }) => setPending({ ...want, since: Date.now(), what });
   const flip = (want: boolean) => {
-    setBusy(true); setMsg(null);
+    setBusy(true); setMsg(null); setPending(null);
     api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF", region, account_id: accountId }) })
-      .then((a) => setMsg(rowMsg(a)))
+      .then((a) => { setMsg(rowMsg(a)); if (a.status !== "failed" && a.status !== "refused") waitFor(`AdvisorAutoScale=${want ? "ON" : "OFF"}`, { on: want }); })
       .catch((e) => setMsg({ text: e.message, err: true }))
-      .finally(() => read().finally(() => setBusy(false)));
+      .finally(() => read().then((s) => { if (s && pending && landed(s, pending)) setPending(null); }).finally(() => setBusy(false)));
   };
   // The band: the bare minimum and the ceiling, written as AdvisorScaleBand through the same ledgered action; empty both to remove it.
   const bandDirty = state ? floor !== (state.floor == null ? "" : String(state.floor)) || ceiling !== (state.ceiling == null ? "" : String(state.ceiling)) : false;
   const saveBand = () => {
-    setBusy(true); setMsg(null);
+    setBusy(true); setMsg(null); setPending(null);
+    const want = floor === "" && ceiling === "" ? null : `${floor}-${ceiling}`;
     api(`/inventory/beanstalk/${encodeURIComponent(env)}/band`, { method: "POST", body: JSON.stringify({ floor: floor === "" ? null : Number(floor), ceiling: ceiling === "" ? null : Number(ceiling), region, account_id: accountId }) })
-      .then((a) => setMsg(rowMsg(a)))
+      .then((a) => { setMsg(rowMsg(a)); if (a.status !== "failed" && a.status !== "refused") waitFor(want ? `AdvisorScaleBand=${want}` : "the band removed", { band: want }); })
       .catch((e) => setMsg({ text: e.message, err: true }))
       .finally(() => read().finally(() => setBusy(false)));
   };
@@ -127,8 +145,18 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
     <input type="number" min={1} max={999} value={value} disabled={busy} onChange={(e) => set(e.target.value)} placeholder="–" title={label} aria-label={label}
       className="w-12 rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 text-center text-xs text-zinc-200 disabled:opacity-60" />
   );
+  const progress = busy
+    ? "writing the tag… Beanstalk applies it as an environment update and reads it back, up to fifteen seconds"
+    : pending ? `waiting for the environment to show ${pending.what} (${Math.round((Date.now() - pending.since) / 1000)} s; an environment update takes a minute or two)` : null;
   return (
     <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-2 text-xs">
+      {progress && (
+        <div className="mb-2">
+          <div className="h-1 w-full overflow-hidden rounded bg-zinc-800"><div className="h-full w-1/3 animate-pulse rounded bg-sky-500/70" style={{ animation: "consent-slide 1.4s linear infinite" }} /></div>
+          <div className="mt-1 text-zinc-400">{progress}</div>
+          <style>{`@keyframes consent-slide { from { transform: translateX(-100%) } to { transform: translateX(300%) } }`}</style>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-zinc-300">Auto-scale</span>
         {state === undefined ? <span className="text-zinc-500">reading the environment…</span> : state === null ? <span className="text-amber-300/90">{readErr || "environment not readable"}</span> : (
@@ -148,7 +176,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
         </div>
       )}
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
-      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); read(); } }} /> : null}
+      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); const after = row.after || {}; if ("AdvisorAutoScale" in after) waitFor(`AdvisorAutoScale=${after.AdvisorAutoScale ?? "(removed)"}`, { on: isOn(after.AdvisorAutoScale) }); else if ("AdvisorScaleBand" in after) waitFor(after.AdvisorScaleBand ? `AdvisorScaleBand=${after.AdvisorScaleBand}` : "the band removed", { band: after.AdvisorScaleBand ?? null }); read(); } }} /> : null}
     </div>
   );
 }

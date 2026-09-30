@@ -468,11 +468,11 @@ api.get("/instances/:id/metrics", (req, res) => {
 // ---- what runs on the instances (probe 1.6, src/instance_apps.ts) ------------------------------------------------
 // One instance: its apps (current, and with ?gone=1 the ones that left), its recent appear/disappear events and where its agents ship logs.
 api.get("/instances/:id/apps", async (req, res) => {
-  const { appsOn, appEvents } = await import("../instance_apps.js");
+  const { appsOn, appEvents, portsOn } = await import("../instance_apps.js");
   const { instanceStatusOf, statusEvents } = await import("../status_checks.js");
   const id = String(req.params.id);
   const latest = latestProbe(id);
-  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), apps: appsOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [],
+  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), has_listeners: Array.isArray(latest?.data.listeners), apps: appsOn(id, req.query.gone === "1"), ports: portsOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [],
     status: instanceStatusOf(id), status_events: statusEvents({ instance_id: id, limit: 20 }) });
 });
 
@@ -493,6 +493,13 @@ api.get("/apps", async (req, res) => {
   const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
   const kind = req.query.kind === "app" || req.query.kind === "infra" ? req.query.kind : undefined;
   res.json({ summary: appsSummary(), ...(name ? { where: whereRuns(name) } : { apps: fleetApps(kind) }) });
+});
+// The fleet's open ports (probe 1.8): every port anywhere with how far it can be reached, or where one port is open (?port=443&proto=tcp).
+api.get("/ports", async (req, res) => {
+  const { fleetPorts, whereListens, portsSummary } = await import("../instance_apps.js");
+  const port = Number(req.query.port);
+  const proto = req.query.proto === "tcp" || req.query.proto === "udp" ? req.query.proto : undefined;
+  res.json({ summary: portsSummary(), ...(Number.isInteger(port) && port > 0 ? { port, where: whereListens(port, proto) } : { ports: fleetPorts() }) });
 });
 api.get("/apps/events", async (req, res) => {
   const { appEvents } = await import("../instance_apps.js");

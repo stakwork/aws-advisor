@@ -59,3 +59,57 @@ test("recording apps: first probe is silent, then appear / disappear / return ev
   assert.ok(fleetApps("app").some((f) => f.name === "node server.js" && f.instance_ids.includes(id)));
   db.prepare("delete from instance_apps where instance_id = ?").run(id); db.prepare("delete from instance_app_events where instance_id = ?").run(id); db.prepare("delete from alerts where resource = ?").run(id);
 });
+
+test("probe 1.8 ports: listeners parse, a host socket and its published container port merge, owners match the apps, exposure follows the security group rules", async () => {
+  const out = parseProbeOutput(JSON.stringify({ probe: "aws-advisor/1", hostname: "h", collected_at: "2026-09-30T10:00:00Z", cpus: 2, uptime_seconds: 100, memory: { total_bytes: 1, used_bytes: 1, available_bytes: 0 }, load: { "1m": 0, "5m": 0, "15m": 0 }, disks: [], top_cpu: [], top_mem: [],
+    listeners: [{ proto: "tcp", port: "443", bind: "0.0.0.0", scope: "all", process: "docker-proxy", pid: "77" }, { proto: "tcp", port: 443, bind: "0.0.0.0", scope: "all", container: "web", container_port: 8443 },
+      { proto: "tcp", port: 22, bind: "0.0.0.0", scope: "all", process: "sshd", pid: 12 }, { proto: "tcp", port: 5432, bind: "127.0.0.1", scope: "loopback", process: "postgres", pid: 30 }, { proto: "udp", port: 68, bind: "0.0.0.0", scope: "all", process: "dhclient" },
+      { proto: "sctp", port: 1 }, { proto: "tcp", port: 70000 }, { port: 80 }] }));
+  assert.equal(out.listeners!.length, 5, "bad protocols, bad ports and missing fields are dropped");
+  const { listenersFromProbe, ownerOf, exposureOf, portsFromProbe } = await import("../instance_apps.js");
+  const merged = listenersFromProbe(out);
+  assert.deepEqual(merged.map((l) => `${l.port}/${l.proto}`), ["22/tcp", "68/udp", "443/tcp", "5432/tcp"]);
+  const https = merged.find((l) => l.port === 443)!;
+  assert.equal(https.container, "web"); assert.equal(https.container_port, 8443); assert.equal(https.pid, 77); assert.equal(https.process, null, "docker-proxy is not the owner");
+  const apps = [{ name: "postgres" }, { name: "node server.js" }, { name: "nginx" }];
+  assert.equal(ownerOf({ process: "node", container: null }, apps), "node server.js", "the program name matches the app by its first word");
+  assert.equal(ownerOf({ process: "postgres", container: null }, apps), "postgres");
+  assert.equal(ownerOf({ process: null, container: "web" }, apps), "web");
+  assert.equal(ownerOf({ process: "sshd", container: null }, apps), "sshd", "an OS daemon keeps its own name");
+  const rules = [
+    { group_id: "sg-1", ip_protocol: "tcp", from_port: 443, to_port: 443, cidr_ipv4: "0.0.0.0/0", cidr_ipv6: null, referenced_group_id: null, prefix_list_id: null },
+    { group_id: "sg-1", ip_protocol: "tcp", from_port: 22, to_port: 22, cidr_ipv4: "10.0.0.0/8", cidr_ipv6: null, referenced_group_id: null, prefix_list_id: null },
+    { group_id: "sg-1", ip_protocol: "tcp", from_port: 5432, to_port: 5432, cidr_ipv4: null, cidr_ipv6: null, referenced_group_id: "sg-2", prefix_list_id: null },
+    { group_id: "sg-1", ip_protocol: "-1", from_port: null, to_port: null, cidr_ipv4: null, cidr_ipv6: null, referenced_group_id: "sg-1", prefix_list_id: null },
+  ];
+  assert.equal(exposureOf({ proto: "tcp", port: 443, scope: "all" }, rules), "internet");
+  assert.equal(exposureOf({ proto: "tcp", port: 22, scope: "all" }, rules), "network");
+  assert.equal(exposureOf({ proto: "tcp", port: 5432, scope: "all" }, rules), "group");
+  assert.equal(exposureOf({ proto: "tcp", port: 5432, scope: "loopback" }, rules), "local", "loopback wins whatever the rules say");
+  assert.equal(exposureOf({ proto: "udp", port: 68, scope: "all" }, rules), "group", "the all-traffic rule from the group itself");
+  assert.equal(exposureOf({ proto: "tcp", port: 9999, scope: "all" }, [rules[0]]), "closed");
+  const ports = portsFromProbe({ listeners: out.listeners, processes: [{ name: "postgres", user: "postgres", count: 1, cpu_pct: 0, rss_bytes: 1, oldest_seconds: 1, command: "postgres" }] }, rules);
+  assert.deepEqual(ports.map((p) => [p.port, p.app_name, p.exposure]), [[22, "sshd", "network"], [68, "dhclient", "group"], [443, "web", "internet"], [5432, "postgres", "local"]]);
+});
+
+test("recording ports: first probe is silent, an opened internet-facing port raises port_exposed once, a closed port is an event", async () => {
+  const { recordPorts, portsOn, replaceIngressRules, whereListens, fleetPorts } = await import("../instance_apps.js");
+  const id = "i-ports000000001";
+  db.prepare("delete from instance_ports where instance_id = ?").run(id); db.prepare("delete from instance_app_events where instance_id = ?").run(id); db.prepare("delete from alerts where resource = ?").run(id);
+  db.prepare("insert or replace into inventory_ec2(instance_id, name, state, region, snapshot, gone) values (?, 'web-1', 'running', 'us-east-1', ?, 0)").run(id, JSON.stringify({ network: { security_groups: [{ GroupId: "sg-ports1", GroupName: "web" }] } }));
+  replaceIngressRules([{ group_id: "sg-ports1", ip_protocol: "tcp", from_port: 80, to_port: 443, cidr_ipv4: "0.0.0.0/0", cidr_ipv6: null, referenced_group_id: null, prefix_list_id: null }]);
+  const l = (port: number, extra: Partial<import("../ssm.js").ProbeListener> = {}): import("../ssm.js").ProbeListener => ({ proto: "tcp", port, bind: "0.0.0.0", scope: "all", process: "nginx", pid: 1, container: null, container_port: null, ...extra });
+  assert.equal(recordPorts(id, "2026-09-30T10:00:00Z", { listeners: undefined, processes: [] }), null, "a probe without listeners records nothing");
+  const r1 = recordPorts(id, "2026-09-30T10:00:00Z", { listeners: [l(22, { process: "sshd" }), l(443)], processes: [] }, "web-1")!;
+  assert.equal(r1.ports, 2); assert.deepEqual(r1.opened, []); assert.equal(r1.alerts, 1, "443 is open to the internet: alerted even on the first inventory");
+  assert.equal(portsOn(id)[0].exposure, "internet"); assert.equal(portsOn(id)[0].port, 443);
+  const r2 = recordPorts(id, "2026-09-30T11:00:00Z", { listeners: [l(22, { process: "sshd" }), l(443), l(8080, { process: "node" })], processes: [] }, "web-1")!;
+  assert.deepEqual(r2.opened, ["8080/tcp (node)"]); assert.equal(r2.alerts, 0, "8080 is not let in by the rules");
+  const r3 = recordPorts(id, "2026-09-30T12:00:00Z", { listeners: [l(22, { process: "sshd" }), l(443)], processes: [] }, "web-1")!;
+  assert.deepEqual(r3.closed, ["8080/tcp (node)"]);
+  assert.deepEqual(db.prepare("select event, name from instance_app_events where instance_id = ? order by id").all(id), [{ event: "port_opened", name: "node" }, { event: "port_closed", name: "node" }]);
+  assert.equal((db.prepare("select count(*) as n from alerts where resource = ? and kind = 'port_exposed'").get(id) as { n: number }).n, 1);
+  assert.ok(whereListens(443).some((w) => w.instance_id === id && w.instance_name === "web-1"));
+  assert.ok(fleetPorts().some((f) => f.port === 443 && f.instance_ids.includes(id) && f.exposures.internet === 1));
+  db.prepare("delete from instance_ports where instance_id = ?").run(id); db.prepare("delete from instance_app_events where instance_id = ?").run(id); db.prepare("delete from alerts where resource = ?").run(id); db.prepare("delete from inventory_ec2 where instance_id = ?").run(id);
+});

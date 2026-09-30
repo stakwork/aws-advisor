@@ -7,7 +7,7 @@
  * the same as (:AdvisorResource)-[:RUNS]->(:AdvisorApp) (src/graph_mirror.ts).
  */
 import { db } from "./db.js";
-import type { ProbeProcessGroup, ProbeResult } from "./ssm.js";
+import type { ProbeListener, ProbeProcessGroup, ProbeResult } from "./ssm.js";
 
 db.exec(`
 create table if not exists instance_apps (
@@ -21,7 +21,17 @@ create table if not exists instance_app_events (
   event text not null, at text not null, details text
 );
 create index if not exists instance_app_events_instance on instance_app_events(instance_id, at);
-create index if not exists instance_app_events_at on instance_app_events(at);`);
+create index if not exists instance_app_events_at on instance_app_events(at);
+create table if not exists instance_ports (
+  instance_id text not null, proto text not null, port integer not null, bind text, scope text not null,
+  process text, pid integer, container text, container_port integer, app_name text, exposure text not null,
+  first_seen text not null, last_seen text not null, probes integer not null default 1, gone integer not null default 0,
+  primary key (instance_id, proto, port)
+);
+create table if not exists sg_ingress (
+  group_id text not null, region text, ip_protocol text, from_port integer, to_port integer, cidr_ipv4 text, cidr_ipv6 text, referenced_group_id text, prefix_list_id text, refreshed_at text not null
+);
+create index if not exists sg_ingress_group on sg_ingress(group_id);`);
 
 export type AppKind = "app" | "infra";
 export interface AppRow { name: string; user: string; kind: AppKind; command: string; count: number; cpu_pct: number; rss_bytes: number; oldest_seconds: number }
@@ -156,4 +166,182 @@ export function appsSummary(): { instances: number; apps: number; infra: number;
   const a = db.prepare("select count(distinct instance_id) as instances, count(distinct case when kind = 'app' then name end) as apps, count(distinct case when kind = 'infra' then name end) as infra, max(last_seen) as last_seen from instance_apps where gone = 0").get() as any;
   const e = db.prepare("select count(*) as n from instance_app_events where at >= datetime('now', '-1 day')").get() as { n: number };
   return { instances: Number(a?.instances ?? 0), apps: Number(a?.apps ?? 0), infra: Number(a?.infra ?? 0), events_24h: Number(e?.n ?? 0), last_seen: a?.last_seen ?? null };
+}
+
+
+// ---- ports (probe 1.8): what the box answers on, who owns it, and who can reach it ----------------------------------------------
+
+export type PortScope = "all" | "loopback" | "address";
+/** internet = a rule lets 0.0.0.0/0 or ::/0 in; network = other addresses or a prefix list; group = other security groups only; closed = no rule lets it in; local = the socket listens on loopback only. */
+export type PortExposure = "internet" | "network" | "group" | "closed" | "local";
+export interface PortRow { proto: "tcp" | "udp"; port: number; bind: string; scope: PortScope; process: string | null; pid: number | null; container: string | null; container_port: number | null; app_name: string | null; exposure: PortExposure }
+export interface StoredPort extends PortRow { instance_id: string; first_seen: string; last_seen: string; probes: number; gone: boolean }
+export interface IngressRule { group_id: string; ip_protocol: string | null; from_port: number | null; to_port: number | null; cidr_ipv4: string | null; cidr_ipv6: string | null; referenced_group_id: string | null; prefix_list_id: string | null }
+
+/**
+ * The listeners of one probe, one per protocol and port: a host socket and the container publishing the same port
+ * (docker-proxy on the host, the container behind it) merge into one row that names both. Pure.
+ */
+export function listenersFromProbe(p: Pick<ProbeResult, "listeners">): ProbeListener[] {
+  const out = new Map<string, ProbeListener>();
+  for (const l of p.listeners ?? []) {
+    const key = `${l.proto}:${l.port}`;
+    const have = out.get(key);
+    if (!have) { out.set(key, { ...l }); continue; }
+    // the container entry carries the owner; the socket entry the pid and the bind address
+    const container = have.container ?? l.container, container_port = have.container_port ?? l.container_port;
+    const process = have.container || l.container ? (have.process && have.process !== "docker-proxy" ? have.process : l.process && l.process !== "docker-proxy" ? l.process : null) : have.process ?? l.process;
+    const scope: PortScope = have.scope === "all" || l.scope === "all" ? "all" : have.scope === "address" || l.scope === "address" ? "address" : "loopback";
+    out.set(key, { proto: l.proto, port: l.port, bind: have.bind || l.bind, scope, process, pid: have.pid ?? l.pid, container, container_port });
+  }
+  return [...out.values()].sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto));
+}
+
+/** The app row a listener belongs to: the container's name when it publishes the port, else the process by its program name (the first word of an app's name). Pure. */
+export function ownerOf(l: Pick<ProbeListener, "process" | "container">, apps: Pick<AppRow, "name">[]): string | null {
+  if (l.container) return l.container;
+  if (!l.process) return null;
+  const exact = apps.find((a) => a.name === l.process) ?? apps.find((a) => a.name.split(" ")[0] === l.process);
+  return exact?.name ?? l.process;
+}
+
+const protoMatches = (rule: string | null, proto: string) => rule == null || rule === "-1" || rule.toLowerCase() === proto || (rule === "6" && proto === "tcp") || (rule === "17" && proto === "udp");
+const portMatches = (r: IngressRule, port: number) => (r.from_port == null && r.to_port == null) || (r.from_port === -1) || ((r.from_port ?? 0) <= port && port <= (r.to_port ?? 65535));
+
+/** How far a listening port can be reached, from the ingress rules of the box's security groups. Pure. */
+export function exposureOf(l: Pick<ProbeListener, "proto" | "port" | "scope">, rules: IngressRule[]): PortExposure {
+  if (l.scope === "loopback") return "local";
+  let best: PortExposure = "closed";
+  const rank: Record<PortExposure, number> = { local: 0, closed: 0, group: 1, network: 2, internet: 3 };
+  for (const r of rules) {
+    if (!protoMatches(r.ip_protocol, l.proto) || !portMatches(r, l.port)) continue;
+    const e: PortExposure = r.cidr_ipv4 === "0.0.0.0/0" || r.cidr_ipv6 === "::/0" ? "internet" : r.cidr_ipv4 || r.cidr_ipv6 || r.prefix_list_id ? "network" : r.referenced_group_id ? "group" : "closed";
+    if (rank[e] > rank[best]) best = e;
+  }
+  return best;
+}
+
+/** The security group ids of an instance, from its inventory snapshot. */
+export function securityGroupsOf(instanceId: string): string[] {
+  try {
+    const r = db.prepare("select snapshot from inventory_ec2 where instance_id = ?").get(instanceId) as { snapshot: string | null } | undefined;
+    const snap = r?.snapshot ? JSON.parse(r.snapshot) : null;
+    const sgs = snap?.network?.security_groups ?? [];
+    return (Array.isArray(sgs) ? sgs : []).map((g: any) => String(g?.GroupId ?? g?.group_id ?? g ?? "")).filter((g: string) => /^sg-/.test(g));
+  } catch { return []; }
+}
+
+export function ingressRulesFor(groupIds: string[]): IngressRule[] {
+  if (!groupIds.length) return [];
+  return db.prepare(`select group_id, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id from sg_ingress where group_id in (${groupIds.map(() => "?").join(",")})`).all(...groupIds) as IngressRule[];
+}
+
+/** Replaces the ingress rules the inventory read from Steampipe (src/inventory.ts, every refresh). */
+export function replaceIngressRules(rows: (IngressRule & { region?: string | null })[]): number {
+  const at = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare("delete from sg_ingress").run();
+    const ins = db.prepare("insert into sg_ingress(group_id, region, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, refreshed_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    for (const r of rows) ins.run(r.group_id, r.region ?? null, r.ip_protocol ?? null, r.from_port ?? null, r.to_port ?? null, r.cidr_ipv4 ?? null, r.cidr_ipv6 ?? null, r.referenced_group_id ?? null, r.prefix_list_id ?? null, at);
+  })();
+  return rows.length;
+}
+
+/** The port rows for one probe, owners matched to the app rows and exposure read from the given rules. Pure. */
+export function portsFromProbe(p: Pick<ProbeResult, "listeners" | "processes">, rules: IngressRule[]): PortRow[] {
+  const apps = appsFromProbe(p);
+  return listenersFromProbe(p).map((l) => ({ ...l, app_name: ownerOf(l, apps), exposure: exposureOf(l, rules) }));
+}
+
+const upsertPort = db.prepare(`insert into instance_ports(instance_id, proto, port, bind, scope, process, pid, container, container_port, app_name, exposure, first_seen, last_seen, probes, gone)
+  values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+  on conflict(instance_id, proto, port) do update set bind = excluded.bind, scope = excluded.scope, process = excluded.process, pid = excluded.pid, container = excluded.container, container_port = excluded.container_port,
+    app_name = excluded.app_name, exposure = excluded.exposure, last_seen = excluded.last_seen, probes = probes + 1, gone = 0`);
+const markPortGone = db.prepare("update instance_ports set gone = 1 where instance_id = ? and proto = ? and port = ?");
+const openPortExposed = db.prepare("select 1 from alerts where kind = 'port_exposed' and resource = ? and acknowledged = 0 and json_extract(details, '$.port') = ? and json_extract(details, '$.proto') = ? limit 1");
+
+export interface RecordPortsResult { ports: number; opened: string[]; closed: string[]; alerts: number }
+const portLabel = (r: Pick<PortRow, "proto" | "port" | "app_name">) => `${r.port}/${r.proto}${r.app_name ? ` (${r.app_name})` : ""}`;
+
+/**
+ * Called for every stored probe that carries listeners. The first probe of a box records its ports without events;
+ * from the second on, a port not seen before is `port_opened`, one gone is `port_closed` (both in the app events, under
+ * the owner's name). A port open to the internet raises a `port_exposed` alert when first seen (first inventory included:
+ * that is a finding whenever it is found), once while it stays open.
+ */
+export function recordPorts(instanceId: string, collectedAt: string, data: Pick<ProbeResult, "listeners" | "processes">, instanceName: string | null = null): RecordPortsResult | null {
+  if (!Array.isArray(data.listeners)) return null;
+  const rules = ingressRulesFor(securityGroupsOf(instanceId));
+  const ports = portsFromProbe(data, rules);
+  const res: RecordPortsResult = { ports: ports.length, opened: [], closed: [], alerts: 0 };
+  const label = instanceName ? `${instanceName} (${instanceId})` : instanceId;
+  db.transaction(() => {
+    const prev = db.prepare("select proto, port, app_name, exposure, gone, probes, last_seen from instance_ports where instance_id = ?").all(instanceId) as { proto: string; port: number; app_name: string | null; exposure: string; gone: number; probes: number; last_seen: string }[];
+    const known = new Map(prev.map((r) => [`${r.proto}:${r.port}`, r]));
+    const first = prev.length === 0;
+    const now = new Set<string>();
+    for (const r of ports) {
+      const key = `${r.proto}:${r.port}`;
+      now.add(key);
+      const was = known.get(key);
+      upsertPort.run(instanceId, r.proto, r.port, r.bind, r.scope, r.process, r.pid, r.container, r.container_port, r.app_name, r.exposure, collectedAt, collectedAt);
+      const fresh = (!was || was.gone) && !first;
+      if (fresh) { res.opened.push(portLabel(r)); insertEvent.run(instanceId, r.app_name ?? `:${r.port}`, r.container ? "container" : r.process ?? "", "port_opened", collectedAt, JSON.stringify({ proto: r.proto, port: r.port, scope: r.scope, exposure: r.exposure, container: r.container, process: r.process })); }
+      // an internet-facing port is news the first time it is seen, first inventory or not, and again if it closes and reopens or its rules widen
+      if (r.exposure === "internet" && (!was || was.gone || was.exposure !== "internet") && !openPortExposed.get(instanceId, r.port, r.proto)) {
+        const msg = `${label}: ${r.port}/${r.proto} is open to the internet${r.app_name ? `, served by ${r.app_name}` : ""} (listening on ${r.scope === "all" ? "every interface" : r.bind}, and a security group rule lets 0.0.0.0/0 in)`;
+        insertAlert.run("port_exposed", instanceId, msg, JSON.stringify({ summary: msg, instance_id: instanceId, name: instanceName, port: r.port, proto: r.proto, app: r.app_name, container: r.container, process: r.process, scope: r.scope, probed_at: collectedAt }));
+        res.alerts++;
+      }
+    }
+    for (const r of prev) {
+      const key = `${r.proto}:${r.port}`;
+      if (r.gone || now.has(key)) continue;
+      markPortGone.run(instanceId, r.proto, r.port);
+      res.closed.push(portLabel({ proto: r.proto as "tcp" | "udp", port: r.port, app_name: r.app_name }));
+      insertEvent.run(instanceId, r.app_name ?? `:${r.port}`, "", "port_closed", collectedAt, JSON.stringify({ proto: r.proto, port: r.port, exposure: r.exposure, last_seen: r.last_seen, probes: r.probes }));
+    }
+  })();
+  return res;
+}
+
+const rowToPort = (r: any): StoredPort => ({ instance_id: r.instance_id, proto: r.proto, port: Number(r.port), bind: r.bind ?? "", scope: r.scope, process: r.process ?? null, pid: r.pid == null ? null : Number(r.pid), container: r.container ?? null, container_port: r.container_port == null ? null : Number(r.container_port), app_name: r.app_name ?? null, exposure: r.exposure, first_seen: r.first_seen, last_seen: r.last_seen, probes: Number(r.probes ?? 1), gone: Boolean(r.gone) });
+
+/** The ports one instance answers on now (and, with `includeGone`, what it used to), exposure re-read from the current rules; widest reach first. */
+export function portsOn(instanceId: string, includeGone = false): StoredPort[] {
+  const rules = ingressRulesFor(securityGroupsOf(instanceId));
+  const rank: Record<string, number> = { internet: 0, network: 1, group: 2, closed: 3, local: 4 };
+  return (db.prepare(`select * from instance_ports where instance_id = ? ${includeGone ? "" : "and gone = 0"}`).all(instanceId) as any[])
+    .map((r) => { const p = rowToPort(r); return { ...p, exposure: rules.length || p.exposure === "local" ? exposureOf(p, rules) : p.exposure }; })
+    .sort((a, b) => Number(a.gone) - Number(b.gone) || rank[a.exposure] - rank[b.exposure] || a.port - b.port);
+}
+
+/** Where a port is open across the fleet, widest reach first. */
+export function whereListens(port: number, proto?: "tcp" | "udp"): (StoredPort & { instance_name: string | null; instance_state: string | null })[] {
+  const rank: Record<string, number> = { internet: 0, network: 1, group: 2, closed: 3, local: 4 };
+  return (db.prepare(`select p.*, i.name as instance_name, i.state as instance_state from instance_ports p left join inventory_ec2 i on i.instance_id = p.instance_id where p.gone = 0 and p.port = ? ${proto ? "and p.proto = ?" : ""}`).all(...(proto ? [port, proto] : [port])) as any[])
+    .map((r) => ({ ...rowToPort(r), instance_name: r.instance_name ?? null, instance_state: r.instance_state ?? null }))
+    .sort((a, b) => rank[a.exposure] - rank[b.exposure]);
+}
+
+export interface FleetPort { proto: string; port: number; instances: number; instance_ids: string[]; apps: string[]; exposures: Record<string, number> }
+
+/** Every open port anywhere, with how many boxes answer on it and how far each can be reached; the internet-facing ones first. */
+export function fleetPorts(): FleetPort[] {
+  const rows = db.prepare("select proto, port, instance_id, app_name, exposure from instance_ports where gone = 0").all() as { proto: string; port: number; instance_id: string; app_name: string | null; exposure: string }[];
+  const out = new Map<string, FleetPort>();
+  for (const r of rows) {
+    const k = `${r.proto}:${r.port}`;
+    const f = out.get(k) ?? { proto: r.proto, port: r.port, instances: 0, instance_ids: [], apps: [], exposures: {} };
+    f.instances++; f.instance_ids.push(r.instance_id); if (r.app_name && !f.apps.includes(r.app_name)) f.apps.push(r.app_name); f.exposures[r.exposure] = (f.exposures[r.exposure] ?? 0) + 1;
+    out.set(k, f);
+  }
+  return [...out.values()].sort((a, b) => (b.exposures.internet ?? 0) - (a.exposures.internet ?? 0) || b.instances - a.instances || a.port - b.port);
+}
+
+/** Counts for the UI and the tools. */
+export function portsSummary(): { instances: number; ports: number; internet: number; rules: number } {
+  const a = db.prepare("select count(distinct instance_id) as instances, count(*) as ports, sum(case when exposure = 'internet' then 1 else 0 end) as internet from instance_ports where gone = 0").get() as any;
+  const r = db.prepare("select count(*) as n from sg_ingress").get() as { n: number };
+  return { instances: Number(a?.instances ?? 0), ports: Number(a?.ports ?? 0), internet: Number(a?.internet ?? 0), rules: Number(r?.n ?? 0) };
 }

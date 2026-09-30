@@ -79,7 +79,7 @@ actions.post("/actions/:id/as-person", async (req, res) => {
 actions.post("/actions/delete", async (req, res) => {
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [req.body?.id]).map(Number).filter((n: number) => Number.isInteger(n) && n > 0);
   if (!ids.length) return res.status(400).json({ error: "ids: the rows to delete" });
-  try { res.json(await deleteActions(ids)); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
+  try { res.json(await deleteActions(ids, { force: req.body?.force === true })); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
 });
 actions.post("/actions/:id/apply", async (req, res) => {
   try { const a = await applyAction(Number(req.params.id), "manual"); dispatchActionNotifications().catch(() => {}); res.json(a); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }

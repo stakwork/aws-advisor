@@ -500,7 +500,7 @@ test("a person's one-time credentials: temporary only, with a session token; the
   assert.throws(() => parseOneTimeCredentials({ access_key_id: "ASIAABCDEFGHIJKLMNOP", secret_access_key: "s" }), /session token/);
   assert.throws(() => parseOneTimeCredentials({ access_key_id: "", secret_access_key: "" }), /paste an access key/);
   assert.throws(() => parseOneTimeCredentials(null), /paste an access key/);
-  assert.ok(PERSON_KINDS.has("consent_tag")); assert.ok(!PERSON_KINDS.has("beanstalk_scale"));
+  assert.equal(PERSON_KINDS, null, "every kind: the person's credentials are the authorisation for that one row");
 });
 
 test("deleting ledger rows: only rows that changed nothing go, with their events; applied and verified rows stay", async () => {
@@ -519,6 +519,10 @@ test("deleting ledger rows: only rows that changed nothing go, with their events
   assert.equal((db.prepare("select count(*) as n from executor_events where action_id = ?").get(ids.failed) as any).n, 0, "its events went with it");
   assert.equal((db.prepare("select count(*) as n from executor_events where action_id = ?").get(ids.applied) as any).n, 1, "the applied row's events stay");
   assert.ok(DELETABLE.has("failed") && !DELETABLE.has("applied"));
+  // with force (the page asked twice) the record of a change goes too
+  const forced = await deleteActions([ids.applied, ids.verified], { force: true });
+  assert.deepEqual(forced.deleted, [ids.applied, ids.verified]); assert.deepEqual(forced.kept, []);
+  assert.equal((db.prepare("select count(*) as n from actions").get() as any).n, 1);
 });
 
 test("operations role pre-check: stack resources without Beanstalk's tags are named before an update is tried", async () => {
