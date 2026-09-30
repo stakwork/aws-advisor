@@ -51,7 +51,7 @@
  */
 import { AutoScalingClient, DescribeAutoScalingGroupsCommand, DescribeScalingActivitiesCommand, type Activity } from "@aws-sdk/client-auto-scaling";
 import { DescribeLoadBalancersCommand, DescribeTagsCommand, DescribeTargetGroupsCommand, ElasticLoadBalancingV2Client } from "@aws-sdk/client-elastic-load-balancing-v2";
-import { DescribeSecurityGroupsCommand, EC2Client } from "@aws-sdk/client-ec2";
+import { DescribeInstanceTypesCommand, DescribeSecurityGroupsCommand, EC2Client, type _InstanceType } from "@aws-sdk/client-ec2";
 import { CloudWatchClient, DescribeAlarmsCommand, GetMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { DescribeConfigurationSettingsCommand, DescribeEnvironmentResourcesCommand, DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateEnvironmentCommand, type EnvironmentDescription } from "@aws-sdk/client-elastic-beanstalk";
 import { db, getJsonSetting, setSetting } from "../db.js";
@@ -61,7 +61,7 @@ import { CONFIDENT, latestProfile, ringIndex, type QuietWindow } from "../usage_
 import { latestReview, windowsFromSchedule } from "../usage_review.js";
 import { AUTO_SCALE_TAG, SCALE_BAND_TAG, isOff, isOn } from "../consent.js";
 import { decidePattern, learnPattern, pressureEvents, savePattern, PATTERN_DAYS } from "../capacity_pattern.js";
-import { describeSignals, groupSignalsByHour, needByHour, signalModel } from "../capacity_signals.js";
+import { describeSignals, groupSignalsByHour, needByHour, NET_TARGET, netBytesPerMemberHour, signalModel } from "../capacity_signals.js";
 import { metricDimension } from "../elb_inventory.js";
 
 export const KIND = "beanstalk_scale" as const;
@@ -188,6 +188,20 @@ export interface EnvFacts { env: EnvironmentDescription; tags: Record<string, st
 
 const num = (v: string | undefined) => { const n = Number(v); return v != null && v !== "" && Number.isFinite(n) ? n : null; };
 export const hourStart = (t: number) => Math.floor(t / 3600000) * 3600000;
+
+const bandwidthCache = new Map<string, number | null>();
+/** The instance type's baseline network bandwidth in Gbps (the first network card), null when AWS does not say. Cached per region and type. */
+async function baselineGbps(region: string, credentials: any, type: string | undefined): Promise<number | null> {
+  if (!type) return null;
+  const key = `${region}|${type}`;
+  if (bandwidthCache.has(key)) return bandwidthCache.get(key)!;
+  const ec2 = new EC2Client({ region, credentials });
+  try {
+    const r = await ec2.send(new DescribeInstanceTypesCommand({ InstanceTypes: [type as _InstanceType] }));
+    const v = r.InstanceTypes?.[0]?.NetworkInfo?.NetworkCards?.[0]?.BaselineBandwidthInGbps ?? null;
+    bandwidthCache.set(key, v); return v;
+  } catch { return null; } finally { ec2.destroy(); }
+}
 
 async function scalingActivities(as: AutoScalingClient, asg: string, since: number): Promise<Activity[]> {
   const out: Activity[] = [];
@@ -317,7 +331,9 @@ export const beanstalkScaleAction: ActionModule = {
           const allHours = [...sig.hours.keys()].sort((a, b) => a - b);
           const changes = desiredChanges(await scalingActivities(as, f.asg, hourStart(now) - PATTERN_DAYS * 86400000));
           const desiredAll = desiredByHour(allHours, bounds.desired, changes);
-          const targets = { cpu: config.actEbTargetCpu, mem: config.actEbTargetMem, disk: config.actEbHighDisk };
+          const gbps = await baselineGbps(region, acct.read, group.Instances?.[0]?.InstanceType);
+          const targets = { cpu: config.actEbTargetCpu, mem: config.actEbTargetMem, disk: config.actEbHighDisk, net_bytes_per_member: netBytesPerMemberHour(gbps) };
+          sig.notes.push(gbps ? `network capacity: ${gbps} Gbps baseline of ${group.Instances?.[0]?.InstanceType} at ${Math.round(NET_TARGET * 100)} % per member` : `no baseline bandwidth for ${group.Instances?.[0]?.InstanceType ?? "the members' type"}: network capacity is the busiest healthy hour`);
           const sigHours = allHours.map((h) => ({ at: h, desired: desiredAll.get(h) ?? bounds.desired, ...sig.hours.get(h) }));
           const model = signalModel(sigHours, targets);
           const needs = new Map(needByHour(sigHours, targets, model).map((n) => [n.at, n]));

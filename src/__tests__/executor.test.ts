@@ -522,6 +522,27 @@ test("capacity signals: a group held at 6 learns what its hours needed, not the 
   assert.equal(learnPattern({ hours: hours.map((h) => ({ at: h.at, desired: 6, cpu_avg: h.cpu })), pressure: [], floor: 2, ceiling: 8, now }).learned[ringIndex(Date.UTC(2026, 8, 27, 3))], 6);
 });
 
+test("capacity signals: no healthy hour needs more members than ran it; bandwidth is the network's real limit; one-hour dips are smoothed", async () => {
+  const { needByHour, signalModel, netBytesPerMemberHour, NET_TARGET } = await import("../capacity_signals.js");
+  const { smoothDips } = await import("../capacity_pattern.js");
+  const t = { cpu: 60, mem: 75, disk: 85 }; const H = 3600000;
+  // six members at low CPU all month, requests and bytes wandering from hour to hour
+  const hours = Array.from({ length: 28 * 24 }, (_, k) => ({ at: k * H, desired: 6, cpu: 12, requests: 3000 + ((k * 37) % 100) * 30, net_in: 1e8 + ((k * 53) % 100) * 1e7, net_out: 2e8 + ((k * 71) % 100) * 1e7, latency: 0.1, errors_5xx: 0 }));
+  const needs = needByHour(hours, t);
+  assert.ok(needs.every((n) => n.need <= 6), "the busiest healthy hour is proof, not a shortfall");
+  assert.ok(needs.some((n) => (n.by.requests ?? 9) < 6), "quieter hours need fewer");
+  // with the instance type's bandwidth (0.75 Gbps) the network is nowhere near a limit
+  const perMember = netBytesPerMemberHour(0.75)!;
+  assert.equal(Math.round(perMember), Math.round(0.75e9 / 8 * 3600 * NET_TARGET));
+  const m = signalModel(hours, { ...t, net_bytes_per_member: perMember });
+  assert.equal(m.net_out_per_member, perMember);
+  assert.ok(needByHour(hours, { ...t, net_bytes_per_member: perMember }, m).every((n) => n.by.network_out === 1));
+  assert.equal(netBytesPerMemberHour(null), null);
+  // 6 7 6 stays (a lift is the safe side); 6 5 6 becomes 6 6 6; the week wraps
+  assert.deepEqual(smoothDips([6, 5, 6, 7, 6, 6]), [6, 6, 6, 7, 6, 6]);
+  assert.deepEqual(smoothDips([5, 6, 6, 6]), [6, 6, 6, 6], "Sunday 00:00 is next to Saturday 23:00");
+});
+
 test("capacity signals: a full disk, slow answers or 5xx keep the members; memory near its target does not spread; no signal falls back to the trigger", async () => {
   const { needByHour, signalModel } = await import("../capacity_signals.js");
   const t = { cpu: 60, mem: 75, disk: 85 }; const H = 3600000;

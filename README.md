@@ -2257,15 +2257,17 @@ from the scaling activities) is not the measure: it can never fall below the Min
 |---|---|---|
 | CPU | `AWS/EC2` CPUUtilization by the group | members × CPU ÷ `ACT_EB_TARGET_CPU` (60 %) |
 | Memory | CloudWatch agent `mem_used_percent` (by the group, else by its members), else the probes | members × (memory − idle footprint) ÷ (`ACT_EB_TARGET_MEM` (75 %) − idle footprint); the footprint is the group's p5; within 10 points of the target the hour keeps its members |
-| Requests | the environment's ALB `RequestCount` | requests ÷ the per-member rate served in healthy hours (p95) |
-| Network in / out | `AWS/EC2` NetworkIn / NetworkOut by the group | bytes ÷ the per-member rate moved in healthy hours (p95) |
+| Requests | the environment's ALB `RequestCount` | requests ÷ the most one member served in a healthy hour |
+| Network in / out | `AWS/EC2` NetworkIn / NetworkOut by the group | bytes ÷ 60 % of the instance type's baseline bandwidth (`DescribeInstanceTypes`), else the most one member moved in a healthy hour |
 | Disk | CloudWatch agent `disk_used_percent`, else the probes | a member disk at `ACT_EB_HIGH_DISK` (85 %) or more: keeps the members it ran |
 | Latency / 5xx | ALB `TargetResponseTime`, `HTTPCode_Target_5XX_Count` | over twice the healthy median, or 5xx ≥ 1 % of requests: keeps the members it ran |
 
-A healthy hour has CPU and memory under target and normal latency and 5xx; per-member rates need 24 of them,
-so the group is never assumed to serve more per member than it has served well (as quiet hours run leaner the
+A healthy hour has CPU and memory under target and normal latency and 5xx; per-member rates need 24 of them.
+The busiest healthy hour is proof, so no hour needs more members than ran it well and the group is never assumed
+to serve more per member than it has served well (as quiet hours run leaner the
 proven rate rises by itself). An hour with no signal falls back to the capacity the trigger ran. Without the
-CloudWatch agent or probes on the members, memory and disk do not size anything, and the pass notes say so. The
+CloudWatch agent or probes on the members, memory and disk do not size anything, and the pass notes say so. A single hour lower than both its neighbours is lifted to the lower one (a one-hour dip saves nothing and costs
+two environment updates). The
 timeline shows which signal set each hour (`capacity_binding` in the graph). A **pressure event** (the group pinned at its ceiling with
 high CPU, or memory at `ACT_EB_HIGH_MEM` (90 %) when the agent reports it, recorded by the pressure check) lifts that hour and the one before it to the capacity that ran plus
 one. The band clamps everything: never below the bare minimum, never above the ceiling. Once the pattern is

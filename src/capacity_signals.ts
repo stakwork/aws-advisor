@@ -11,10 +11,12 @@
  *  - **Memory** spreads only above the members' idle footprint (the 5th percentile of the group's memory over
  *    the window, what the app and the agents hold with no load): `ceil(members × (mem − idle) / (target − idle))`.
  *    A footprint within ten points of the target leaves nothing to spread, and the hour keeps its members.
- *  - **Requests** and **network in / out** have no percentage to aim at, so their capacity per member is learned:
- *    the p95 of the per-member rate over the healthy hours (CPU and memory under target, latency and 5xx normal).
- *    The group is never assumed to serve more per member than it has been seen to serve well; as quiet hours run
- *    on fewer members the proven rate rises by itself.
+ *  - **Requests** and **network in / out** have no percentage to aim at, so their capacity per member is the most
+ *    a member has been seen to carry in a healthy hour (CPU and memory under target, latency and 5xx normal): the
+ *    busiest healthy hour is proof, anything under it needs fewer members, and no hour can need more members than
+ *    ran it healthily (a percentile would make the busiest hours "need" more than they had, by construction). For
+ *    the network, the instance type's baseline bandwidth at `NET_TARGET` is the real limit and wins when AWS
+ *    publishes it. As quiet hours run on fewer members the proven rate rises by itself.
  *  - **Disk** does not spread (another member does not empty this one's disk) but fewer members concentrate what
  *    fills it: an hour whose fullest member disk is at or above `ACT_EB_HIGH_DISK` keeps the members it ran.
  *  - **Health**: an hour whose latency ran over twice the healthy median, or whose 5xx were 1 % of requests or
@@ -43,10 +45,10 @@ export interface SignalHour {
   requests?: number | null; net_in?: number | null; net_out?: number | null;
   latency?: number | null; errors_5xx?: number | null;
 }
-export interface SignalTargets { cpu: number; mem: number; disk: number }
+export interface SignalTargets { cpu: number; mem: number; disk: number; /** bytes an hour one member may move each way (baseline bandwidth × NET_TARGET), when the instance type says */ net_bytes_per_member?: number | null }
 export interface SignalModel {
   /** the members' memory with no load (p5 over the window), when memory is known */ mem_idle: number | null;
-  /** proven hourly capacity per member (p95 over healthy hours), null when too few healthy hours */
+  /** hourly capacity per member: the busiest healthy hour (network: the bandwidth when known), null when too few healthy hours */
   requests_per_member: number | null; net_in_per_member: number | null; net_out_per_member: number | null;
   /** median latency (s) over the hours with requests */ latency_median: number | null;
   healthy_hours: number;
@@ -60,6 +62,11 @@ export const MIN_HEALTHY_HOURS = 24;
 export const MEM_SPREAD_MIN = 10;
 export const LATENCY_FACTOR = 2;
 export const ERROR_SHARE = 0.01;
+/** The share of an instance type's baseline network bandwidth a member may use before another is needed. */
+export const NET_TARGET = 0.6;
+
+/** Bytes an hour one member may move each way: baseline Gbps × NET_TARGET. Pure. */
+export const netBytesPerMemberHour = (baselineGbps: number | null | undefined) => (baselineGbps && baselineGbps > 0 ? (baselineGbps * 1e9 / 8) * 3600 * NET_TARGET : null);
 
 const pct = (xs: number[], q: number) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))]; };
 const known = (v: number | null | undefined): v is number => v != null && Number.isFinite(v);
@@ -82,9 +89,10 @@ export function signalModel(hours: SignalHour[], t: SignalTargets): SignalModel 
   const healthy = hours.filter((h) => h.desired > 0 && known(h.cpu) && h.cpu < t.cpu && (!known(h.mem) || h.mem < t.mem) && !unhealthy(h, latency_median));
   const rate = (f: (h: SignalHour) => number | null | undefined) => {
     const xs = healthy.filter((h) => known(f(h)) && f(h)! > 0).map((h) => f(h)! / h.desired);
-    return xs.length >= MIN_HEALTHY_HOURS ? pct(xs, 0.95) : null;
+    return xs.length >= MIN_HEALTHY_HOURS ? Math.max(...xs) : null;
   };
-  return { mem_idle, requests_per_member: rate((h) => h.requests), net_in_per_member: rate((h) => h.net_in), net_out_per_member: rate((h) => h.net_out), latency_median, healthy_hours: healthy.length, coverage };
+  const net = (f: (h: SignalHour) => number | null | undefined) => (t.net_bytes_per_member ? Math.max(t.net_bytes_per_member, rate(f) ?? 0) : rate(f));
+  return { mem_idle, requests_per_member: rate((h) => h.requests), net_in_per_member: net((h) => h.net_in), net_out_per_member: net((h) => h.net_out), latency_median, healthy_hours: healthy.length, coverage };
 }
 
 /** Members each hour needed, and the signal that said so. Pure. */

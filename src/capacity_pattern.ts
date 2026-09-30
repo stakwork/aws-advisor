@@ -95,10 +95,19 @@ export function learnPattern(i: PatternInput): CapacityPattern {
     pressure[r] = Math.max(pressure[r], e.desired + 1);
     pressure[before] = Math.max(pressure[before], e.desired + 1);
   }
-  const learned = wanted.map((w, r) => clamp(Math.max(w, pressure[r]), i.floor, i.ceiling));
+  const learned = smoothDips(wanted.map((w, r) => clamp(Math.max(w, pressure[r]), i.floor, i.ceiling)));
   const confident = weeks.size >= MIN_WEEKS && coverage >= MIN_COVERAGE;
   const days = Math.min(PATTERN_DAYS, Math.round((now - Math.min(...i.hours.map((h) => h.at), now)) / 86400000));
   return { computed_at: new Date(now).toISOString(), days, weeks: weeks.size, coverage, confident, floor: i.floor, ceiling: i.ceiling, learned, wanted, trigger, binding, signals: i.signals ?? null, pressure, pressure_events: events, summary: summarise(learned) };
+}
+
+/**
+ * One hour lower than both its neighbours is lifted to the lower neighbour: dropping MinSize for a single hour and
+ * raising it again saves nothing (the trigger scales in slowly) and costs two environment updates. Pure.
+ */
+export function smoothDips(learned: number[]): number[] {
+  const n = learned.length;
+  return learned.map((v, r) => { const a = learned[(r + n - 1) % n], b = learned[(r + 1) % n]; return v < a && v < b ? Math.min(a, b) : v; });
 }
 
 /** "1 for 120 h (Sat 00:00–Mon 06:00, …), 2 for 40 h, 3 for 8 h (Tue 09:00–17:00)": the levels and where they hold. Pure. */
