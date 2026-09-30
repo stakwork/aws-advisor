@@ -4,6 +4,8 @@ import { api } from "../api";
 
 /** The consent switches (src/consent.ts): AdvisorAutoPark on an instance, AdvisorAutoScale on a Beanstalk environment. Each flip is a ledgered auto-action, applied at once. */
 const isOn = (v: string | null | undefined) => /^(on|true|yes|1)$/i.test(String(v ?? "").trim());
+/** What a ledger row says after a click: its result, or on a failed or refused row the error the actuator hit. */
+const rowMsg = (a: { id: number; status: string; title: string; result?: string | null; error?: string | null }) => ({ text: `${a.status}: ${(a.status === "failed" || a.status === "refused") && a.error ? a.error : a.result || a.title}`, err: a.status === "failed" || a.status === "refused", actionId: a.id });
 
 function Switch({ on, busy, onChange, label }: { on: boolean; busy: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -24,13 +26,13 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
   const flip = (want: boolean) => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF" }) })
-      .then((a) => { setValue(want ? "ON" : "OFF"); setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }); })
+      .then((a) => { setValue(want ? "ON" : "OFF"); setMsg(rowMsg(a)); })
       .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
   };
   const power = (action: "stop" | "start") => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/power`, { method: "POST", body: JSON.stringify({ action }) })
-      .then((a) => setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }))
+      .then((a) => setMsg(rowMsg(a)))
       .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
   };
   const handsOff = tags?.["advisor:hands-off"] != null;
@@ -66,7 +68,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
   const flip = (want: boolean) => {
     setBusy(true); setMsg(null);
     api(`/inventory/beanstalk/${encodeURIComponent(env)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF", region, account_id: accountId }) })
-      .then((a) => setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }))
+      .then((a) => setMsg(rowMsg(a)))
       .catch((e) => setMsg({ text: e.message, err: true }))
       .finally(() => read().finally(() => setBusy(false)));
   };
@@ -75,7 +77,7 @@ export function AutoScaleSwitch({ env, region, accountId }: { env: string; regio
   const saveBand = () => {
     setBusy(true); setMsg(null);
     api(`/inventory/beanstalk/${encodeURIComponent(env)}/band`, { method: "POST", body: JSON.stringify({ floor: floor === "" ? null : Number(floor), ceiling: ceiling === "" ? null : Number(ceiling), region, account_id: accountId }) })
-      .then((a) => setMsg({ text: `${a.status}: ${a.result || a.title}`, actionId: a.id }))
+      .then((a) => setMsg(rowMsg(a)))
       .catch((e) => setMsg({ text: e.message, err: true }))
       .finally(() => read().finally(() => setBusy(false)));
   };

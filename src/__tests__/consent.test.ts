@@ -21,8 +21,8 @@ test("consent: the actuator policy carries the tag conditions, writes only the c
   assert.deepEqual(sid("ActuatorBeanstalkConsentTag").Condition["ForAllValues:StringEquals"]["aws:TagKeys"], ["AdvisorAutoScale", "AdvisorScaleBand"]);
   assert.deepEqual(sid("ActuatorAutoParkMarker").Condition["ForAllValues:StringEquals"]["aws:TagKeys"], ["advisor:parked"]);
   const deny = sid("ActuatorHandsOff");
-  for (const a of ["ec2:StopInstances", "ec2:CreateTags", "elasticbeanstalk:UpdateEnvironment", "elasticbeanstalk:UpdateTagsForResource"]) assert.ok(deny.Action.includes(a), a);
-  assert.deepEqual(ACTUATOR_NEEDS.consent_tag, { apply: ["ec2:CreateTags", "elasticbeanstalk:UpdateTagsForResource"], revert: ["ec2:DeleteTags", "elasticbeanstalk:UpdateTagsForResource"] });
+  for (const a of ["ec2:StopInstances", "ec2:CreateTags", "elasticbeanstalk:UpdateEnvironment", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"]) assert.ok(deny.Action.includes(a), a);
+  assert.deepEqual(ACTUATOR_NEEDS.consent_tag, { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags"], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"] });
   // no statement grants an unconditioned tag write on instances
   for (const s of st) if (s.Effect === "Allow" && (s.Action as string[]).includes("ec2:CreateTags")) assert.ok(s.Condition, `${s.Sid} writes tags without a condition`);
 });

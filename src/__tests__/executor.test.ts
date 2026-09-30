@@ -377,7 +377,7 @@ test("capabilities: every registered kind declares what the role needs, all of i
   assert.deepEqual(learned.ebs_iops_trim, { apply: null, revert: null, missing: [], unproven: [], source: "unknown" });
   // a consent tag row is judged on its own family: a Beanstalk row does not need the EC2 tag calls
   const { rowNeeds } = await import("../executor.js");
-  assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "beanstalk" } } as any, "apply"), ["elasticbeanstalk:UpdateTagsForResource"]);
+  assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "beanstalk" } } as any, "apply"), ["elasticbeanstalk:AddTags"]);
   assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "ec2" } } as any, "apply"), ["ec2:CreateTags"]);
   assert.deepEqual(rowNeeds({ kind: "consent_tag", facts: { kind: "ec2" } } as any, "revert"), ["ec2:DeleteTags"]);
 });

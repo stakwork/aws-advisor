@@ -271,7 +271,13 @@ type Learned = Record<string, { kind: string; last_seen: string; message: string
 const DENIALS_KEY = "act:denials";
 const CAP_TTL_MS = 10 * 60_000;
 
-const learnedDenials = (): Learned => getJsonSetting<Learned>(DENIALS_KEY, {});
+/** A learned denial is retried after this long: the role may have been widened, and a policy scoped to ARNs never shows it in the wildcard simulation. */
+const LEARNED_TTL_MS = 60 * 60_000;
+const learnedDenials = (): Learned => {
+  const d = getJsonSetting<Learned>(DENIALS_KEY, {});
+  const cutoff = Date.now() - LEARNED_TTL_MS;
+  return Object.fromEntries(Object.entries(d).filter(([, v]) => new Date(v.last_seen).getTime() > cutoff));
+};
 function learnDenial(action: string, kind: string, message: string): void {
   const d = learnedDenials(); d[action] = { kind, last_seen: new Date().toISOString(), message: message.slice(0, 200) }; setSetting(DENIALS_KEY, JSON.stringify(d)); capCache = null;
 }
@@ -324,6 +330,8 @@ let capCache: { role: string; at: number; caps: Record<string, Capability>; note
 export async function actuatorCapabilities(force = false): Promise<{ caps: Record<string, Capability>; note?: string }> {
   const role = config.actRoleArn;
   if (!role) return { caps: computeCapabilities(null, {}), note: "no actuator role configured" };
+  // A forced re-check (the page's button after the role was widened) drops what was learned: the next apply is the proof.
+  if (force) { setSetting(DENIALS_KEY, "{}"); capCache = null; }
   if (!force && capCache && capCache.role === role && Date.now() - capCache.at < CAP_TTL_MS) return { caps: capCache.caps, note: capCache.note };
   const actions = [...new Set(Object.values(ACTUATOR_NEEDS).flatMap((n) => [...n.apply, ...n.revert]))];
   let allowed: Simulation | null = null; let note: string | undefined;

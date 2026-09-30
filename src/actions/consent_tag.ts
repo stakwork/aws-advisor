@@ -5,8 +5,12 @@
  * or removes the tag when there was none. The actuator policy allows these tag keys and no other.
  */
 import { CreateTagsCommand, DeleteTagsCommand, DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
-import { ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateTagsForResourceCommand } from "@aws-sdk/client-elastic-beanstalk";
+import { DescribeEnvironmentsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateTagsForResourceCommand } from "@aws-sdk/client-elastic-beanstalk";
+import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
+
+/** Beanstalk applies a tag change as an environment update; the list shows it only once that is through. A read-back younger than this is inconclusive, not a failure. */
+export const BEANSTALK_TAG_SETTLE_MS = 10 * 60_000;
 
 export const KIND = "consent_tag" as const;
 
@@ -52,7 +56,19 @@ export const consentTagAction: ActionModule = {
     const v = await readTag(p, creds);
     if (v === undefined) return { ok: false, note: "resource not found on read-back" };
     const want = wanted(p, "after");
-    return v === want ? { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}` } : { ok: false, note: `${tagOf(p)} reads ${v ?? "(absent)"}, expected ${want ?? "(absent)"}` };
+    if (v === want) return { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}` };
+    const mismatch = `${tagOf(p)} reads ${v ?? "(absent)"}, expected ${want ?? "(absent)"}`;
+    if (p.facts.kind === "beanstalk") {
+      // still propagating: the environment is Updating, or the write is recent (the row's applied_at, by dedupe)
+      const eb = new ElasticBeanstalkClient({ region: p.region, credentials: creds.read });
+      let status: string | undefined;
+      try { status = (await eb.send(new DescribeEnvironmentsCommand({ EnvironmentIds: [p.resource], IncludeDeleted: false }))).Environments?.[0]?.Status; } catch { /* the tag read is the verdict then */ } finally { eb.destroy(); }
+      if (status && status !== "Ready") return { ok: null, note: `${mismatch}; the environment is ${status} (tags land when the update is through)` };
+      const row = db.prepare("select applied_at from actions where dedupe = ? and status = 'applied' order by id desc limit 1").get(p.dedupe) as { applied_at: string | null } | undefined;
+      const age = row?.applied_at ? Date.now() - new Date(row.applied_at.includes("T") ? row.applied_at : row.applied_at.replace(" ", "T") + "Z").getTime() : Infinity;
+      if (age < BEANSTALK_TAG_SETTLE_MS) return { ok: null, note: `${mismatch}; written ${Math.round(age / 1000)} s ago, Beanstalk is still propagating it` };
+    }
+    return { ok: false, note: mismatch };
   },
   async revert(p, creds) { const v = wanted(p, "before"); return `${await writeTag(p, creds, v)} (back to ${v ?? "no tag"})`; },
 };
