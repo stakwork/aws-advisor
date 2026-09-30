@@ -189,6 +189,22 @@ export interface EnvFacts { env: EnvironmentDescription; tags: Record<string, st
 const num = (v: string | undefined) => { const n = Number(v); return v != null && v !== "" && Number.isFinite(n) ? n : null; };
 export const hourStart = (t: number) => Math.floor(t / 3600000) * 3600000;
 
+/**
+ * The executor's last hourly MinSize row for the environment when it failed or was refused and the minimum still
+ * reads what that row started from: the change never took, so the minimum is not a person's. Null otherwise.
+ */
+export function changeThatDidNotTake(envId: string, lastSet: number | null, currentMin: number): { id: number; status: string } | null {
+  if (lastSet == null || lastSet === currentMin) return null;
+  const r = db.prepare(`select id, status, before_json, after_json from actions where kind = ? and resource = ?
+    and (coalesce(json_extract(facts_json, '$.pattern'), 0) = 1 or coalesce(json_extract(facts_json, '$.window'), 0) = 1)
+    and json_extract(after_json, '$.MinSize') is not null and status not in ('proposed', 'stale') order by id desc limit 1`).get(KIND, envId) as { id: number; status: string; before_json: string; after_json: string } | undefined;
+  if (!r || !["failed", "refused"].includes(r.status)) return null;
+  try {
+    const before = Number(JSON.parse(r.before_json).MinSize), after = Number(JSON.parse(r.after_json).MinSize);
+    return after === lastSet && before === currentMin ? { id: r.id, status: r.status } : null;
+  } catch { return null; }
+}
+
 const bandwidthCache = new Map<string, number | null>();
 /** The instance type's baseline network bandwidth in Gbps (the first network card), null when AWS does not say. Cached per region and type. */
 async function baselineGbps(region: string, credentials: any, type: string | undefined): Promise<number | null> {
@@ -388,6 +404,8 @@ export const beanstalkScaleAction: ActionModule = {
           }
           // the learned week, once a person set the band and the pattern is confident: MinSize for the coming hour
           if (band.ceiling != null) {
+            const undone = changeThatDidNotTake(env.EnvironmentId!, state.last_set, bounds.min);
+            if (undone) { log(`${name}: MinSize ${state.last_set} from #${undone.id} did not take (${undone.status}); ${bounds.min} is still the executor's, not a hand-set`); state.last_set = bounds.min; state.hand_set_at = null; saveEnvState(env.EnvironmentId!, state); }
             const handSet = state.last_set != null && bounds.min !== state.last_set;
             if (handSet && !state.hand_set_at) { state.hand_set_at = new Date().toISOString(); saveEnvState(env.EnvironmentId!, state); }
             if (!handSet && state.hand_set_at) { state.hand_set_at = null; saveEnvState(env.EnvironmentId!, state); }
@@ -508,7 +526,11 @@ export const beanstalkScaleAction: ActionModule = {
       const f = await environmentFacts(eb, env);
       const [option, value] = Object.entries(p.after)[0];
       const got = option === "MinSize" ? f.cfg.min : f.cfg.max;
-      if (got !== Number(value)) return { ok: false, note: `${option} reads ${got}` };
+      if (got !== Number(value)) {
+        // the update did not take: the minimum the executor remembers setting is the one still there, not a person's
+        if ((p.facts.window || p.facts.pattern) && option === "MinSize" && got === Number(p.before.MinSize)) { const s = envState(p.resource); if (s && s.last_set === Number(value)) saveEnvState(p.resource, { ...s, last_set: got, hand_set_at: null }); }
+        return { ok: false, note: `${option} reads ${got}` };
+      }
       const group = f.asg ? (await as.send(new DescribeAutoScalingGroupsCommand({ AutoScalingGroupNames: [f.asg] }))).AutoScalingGroups?.[0] : null;
       const live = group ? (option === "MinSize" ? group.MinSize : group.MaxSize) : null;
       if (group && live !== Number(value)) return { ok: null, note: `configuration says ${option} ${value}, the group still ${live}` };

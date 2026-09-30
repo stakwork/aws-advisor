@@ -2240,6 +2240,22 @@ aws cloudformation continue-update-rollback --stack-name awseb-<env id>-stack
 aws cloudformation wait stack-rollback-complete --stack-name awseb-<env id>-stack
 ```
 
+**The application bundle.** A configuration update (a MinSize change included) re-stages the running application
+version: Beanstalk copies its source bundle into its own bucket (`elasticbeanstalk-<region>-<account>`, under
+`resources/environments/<env id>/_runtime/_versions/`) **under the caller's rights**, operations role or not. Without
+read on the source and write on the destination the update fails with "Failed to deploy configuration … You don't
+have permission to copy an Amazon S3 object" and MinSize stays where it was; the row's read-back fails and the pass
+does not mistake the old minimum for a hand-set. `actuatorPolicy` grants the Beanstalk bucket side
+(`ActuatorBeanstalkStaging`); the source bucket is the one the version was uploaded to, so add it per environment:
+
+```json
+{ "Sid": "ActuatorBeanstalkBundles", "Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetBucketLocation", "s3:ListBucket"],
+  "Resource": ["arn:aws:s3:::<bundle bucket>", "arn:aws:s3:::<bundle bucket>/<application>/*"] }
+```
+
+A bucket encrypted with a customer-managed KMS key also needs `kms:Decrypt` on that key (and `kms:GenerateDataKey`
+for the Beanstalk bucket if it uses one).
+
 Tag writes are the one thing the operations role does not cover: Beanstalk applies `UpdateTagsForResource` as an
 environment update under the caller's own rights, so the consent tags on an environment are written by a person
 (the **run as me** box on the switch and on the ledger, with temporary credentials used once).

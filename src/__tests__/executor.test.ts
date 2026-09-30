@@ -543,6 +543,20 @@ test("capacity signals: no healthy hour needs more members than ran it; bandwidt
   assert.deepEqual(smoothDips([5, 6, 6, 6]), [6, 6, 6, 6], "Sunday 00:00 is next to Saturday 23:00");
 });
 
+test("a pattern MinSize that did not take is not a hand-set", async () => {
+  const { changeThatDidNotTake, KIND } = await import("../actions/beanstalk_scale.js");
+  const { db } = await import("../db.js");
+  const env = "e-didnottake1";
+  const row = (status: string, from: number, to: number) => db.prepare("insert into actions(kind, resource, dedupe, status, mode, trigger, title, reason, before_json, after_json, facts_json) values (?, ?, ?, ?, 'apply', 'test', 't', 'r', ?, ?, ?)")
+    .run(KIND, env, `${env}:${to}:${status}:${Math.random()}`, status, JSON.stringify({ MinSize: from }), JSON.stringify({ MinSize: to }), JSON.stringify({ pattern: true }));
+  row("failed", 6, 7);
+  assert.deepEqual(changeThatDidNotTake(env, 7, 6)?.status, "failed", "7 never took, 6 is still the executor's");
+  assert.equal(changeThatDidNotTake(env, 7, 5), null, "5 is neither: a person set it");
+  assert.equal(changeThatDidNotTake(env, 6, 6), null, "nothing to heal");
+  row("verified", 6, 7);
+  assert.equal(changeThatDidNotTake(env, 7, 6), null, "7 took, so 6 afterwards is a person's");
+});
+
 test("capacity signals: a full disk, slow answers or 5xx keep the members; memory near its target does not spread; no signal falls back to the trigger", async () => {
   const { needByHour, signalModel } = await import("../capacity_signals.js");
   const t = { cpu: 60, mem: 75, disk: 85 }; const H = 3600000;
