@@ -22,11 +22,44 @@ function Switch({ on, busy, onChange, label }: { on: boolean; busy: boolean; onC
  * as an environment update under the caller's rights, which the narrow actuator lacks. The credentials are used for that
  * one call and forgotten; the ledger records who. Long-lived keys are refused server-side.
  */
+type PreviewCall = { service: string; operation: string; region: string | null; iam: string; cli: string };
+type PreviewSide = { writes: PreviewCall[]; reads: string[]; local: string[]; result: string | null; stopped: string | null };
+type Preview = { apply: PreviewSide; revert: PreviewSide };
+
+/** What the credentials will be used for (GET /actions/:id/preview): the row's own apply or revert run dry, writes recorded and not sent. */
+function PreviewList({ side, error, verb }: { side: PreviewSide | null; error: string; verb: "apply" | "revert" }) {
+  if (error) return <div className="text-red-300">Could not preview: {error}</div>;
+  if (!side) return <div className="text-zinc-500">Working out what this sends…</div>;
+  const perms = [...new Set(["sts:GetCallerIdentity", ...side.writes.map((w) => w.iam)])];
+  const reads = Object.entries(side.reads.reduce<Record<string, number>>((m, r) => ({ ...m, [r]: (m[r] ?? 0) + 1 }), {}));
+  return (
+    <div className="space-y-1 rounded border border-zinc-800 bg-zinc-900/60 p-2">
+      <div className="text-zinc-300">What {verb === "revert" ? "undoing" : "running"} this sends with your credentials <span className="text-zinc-500">(a dry run of the same code; nothing has been sent)</span></div>
+      <ol className="list-decimal space-y-1 pl-5">
+        <li><pre className="whitespace-pre-wrap break-all font-mono text-zinc-400">aws sts get-caller-identity</pre><span className="text-zinc-500">who you are, for the ledger</span></li>
+        {side.writes.map((w, i) => <li key={i}><pre className="whitespace-pre-wrap break-all font-mono text-zinc-200">{w.cli}</pre><span className="text-zinc-500">needs {w.iam}</span></li>)}
+      </ol>
+      {!side.writes.length && !side.stopped && <div className="text-amber-300">No write call: as things stand this would change nothing.</div>}
+      {side.stopped && <div className="text-amber-300">The dry run stopped early ({side.stopped}); a step that needs an earlier call's reply may be missing above.</div>}
+      {reads.length > 0 && <div className="text-zinc-500">Also reads: {reads.map(([r, n]) => `${r}${n > 1 ? ` ×${n}` : ""}`).join(", ")}</div>}
+      {side.local.length > 0 && <div className="text-zinc-500">And records {side.local.length} note{side.local.length > 1 ? "s" : ""} in the advisor's own database.</div>}
+      <div className="text-zinc-500">Permissions your credentials need: <span className="font-mono">{perms.join(", ")}</span>{reads.length > 0 ? ", plus read access for the reads" : ""}</div>
+    </div>
+  );
+}
+
 export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionId: number; verb?: "apply" | "revert"; onDone?: (row: any) => void; compact?: boolean }) {
   const [open, setOpen] = useState(false);
   const [key, setKey] = useState(""); const [secret, setSecret] = useState(""); const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; err?: boolean } | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [previewErr, setPreviewErr] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    setPreview(null); setPreviewErr("");
+    api(`/actions/${actionId}/preview`).then(setPreview).catch((e) => setPreviewErr(e.message));
+  }, [open, actionId]);
   const submit = () => {
     setBusy(true); setNote(null);
     api(`/actions/${actionId}/as-person`, { method: "POST", body: JSON.stringify({ verb, credentials: { access_key_id: key, secret_access_key: secret, session_token: token } }) })
@@ -44,6 +77,7 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
       </button>
       {open && (
         <div className="mt-1 max-w-xl space-y-1 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
+          <PreviewList side={preview?.[verb] ?? null} error={previewErr} verb={verb} />
           <div className="text-zinc-400">Temporary credentials of your own, for this one call. From the console's "Command line or programmatic access", from SSO, or <span className="font-mono">aws sts get-session-token --duration-seconds 900</span>. Long-lived keys (AKIA…) are refused. Nothing is stored; the row records who.</div>
           {field(key, setKey, "AWS_ACCESS_KEY_ID (ASIA…)")}
           {field(secret, setSecret, "AWS_SECRET_ACCESS_KEY", true)}

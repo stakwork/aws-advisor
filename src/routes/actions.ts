@@ -4,6 +4,7 @@ import { authMiddleware } from "../auth.js";
 import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
 import { consentErrorStatus, runAsPerson } from "../consent.js";
+import { PreviewError, previewAsPerson } from "../preview.js";
 import { actuatorCapabilities, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
@@ -82,6 +83,11 @@ actions.post("/actions/:id/messages", async (req, res) => {
     const r = await askAboutAction(Number(req.params.id), String(req.body?.message ?? ""), typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui");
     res.status(202).json(r);
   } catch (e: any) { res.status(e.code === "not_found" ? 404 : e.code === "pending" ? 409 : /empty/.test(e.message) ? 400 : 500).json({ error: e.message }); }
+});
+// What "run as me" would send for a row, applying and undoing: its own apply and revert run with writes recorded, not sent (src/preview.ts).
+actions.get("/actions/:id/preview", async (req, res) => {
+  try { res.json(await previewAsPerson(Number(req.params.id))); }
+  catch (e: any) { res.status(e instanceof PreviewError ? e.status : 500).json({ error: e?.message || String(e) }); }
 });
 // A consent row done with a person's own temporary credentials (src/consent.ts runAsPerson): used once, never stored or logged.
 actions.post("/actions/:id/as-person", async (req, res) => {
