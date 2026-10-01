@@ -113,3 +113,51 @@ test("recording ports: first probe is silent, an opened internet-facing port rai
   assert.ok(fleetPorts().some((f) => f.port === 443 && f.instance_ids.includes(id) && f.exposures.internet === 1));
   db.prepare("delete from instance_ports where instance_id = ?").run(id); db.prepare("delete from instance_app_events where instance_id = ?").run(id); db.prepare("delete from alerts where resource = ?").run(id); db.prepare("delete from inventory_ec2 where instance_id = ?").run(id);
 });
+
+test("ports: which rule lets a port in, what blocks it, a box without a public address, and rules nothing listens on", async () => {
+  const { reachOf, ruleRef, rulesWithoutListener } = await import("../instance_apps.js");
+  const r = (o: Partial<{ ip_protocol: string | null; from_port: number | null; to_port: number | null; cidr_ipv4: string | null; referenced_group_id: string | null; description: string | null }>) =>
+    ({ group_id: "sg-0example1", ip_protocol: "tcp", from_port: null, to_port: null, cidr_ipv4: null, cidr_ipv6: null, referenced_group_id: null, prefix_list_id: null, rule_id: null, description: null, ...o });
+  const names = { "sg-0example1": "web-sg" };
+  const allWorld = r({ ip_protocol: "-1", cidr_ipv4: "0.0.0.0/0" });
+  const https = r({ from_port: 443, to_port: 443, cidr_ipv4: "0.0.0.0/0", description: "web" });
+  const ssh = r({ from_port: 22, to_port: 22, cidr_ipv4: "10.0.0.0/8" });
+  const mqtt = r({ from_port: 1883, to_port: 1883, cidr_ipv4: "0.0.0.0/0" });
+  const redis = { proto: "tcp" as const, port: 6379, scope: "all" as const, bind: "0.0.0.0" };
+
+  assert.deepEqual(ruleRef(allWorld, names), { group_id: "sg-0example1", group_name: "web-sg", rule_id: null, ports: "all traffic", source: "anywhere", description: null, world: true, broad: true });
+  assert.equal(ruleRef(r({ from_port: 7000, to_port: 9200, cidr_ipv4: "0.0.0.0/0" })).broad, true, "a 2,201-port range open to the world is broad");
+  assert.equal(ruleRef(https).broad, false);
+  assert.equal(ruleRef(r({ ip_protocol: "6", from_port: 8000, to_port: 8010, cidr_ipv4: "10.1.0.0/16" })).ports, "tcp 8000-8010");
+
+  const open = reachOf(redis, [https, ssh, allWorld], { public_ip: "203.0.113.10", group_names: names });
+  assert.equal(open.exposure, "internet");
+  assert.equal(open.broad, true);
+  assert.equal(open.allowed_by[0].ports, "all traffic");
+  assert.match(open.reason, /^open to the internet: web-sg allows all traffic from anywhere, a broad rule/);
+
+  const blocked = reachOf(redis, [https, ssh], { public_ip: "203.0.113.10", group_names: names });
+  assert.equal(blocked.exposure, "closed");
+  assert.equal(blocked.reason, "blocked by the security groups: no rule in web-sg (sg-0example1) lets 6379/tcp in");
+
+  const priv = reachOf(redis, [allWorld], { public_ip: null, group_names: names });
+  assert.equal(priv.exposure, "network", "a world rule on a box with no public address is the VPC, not the internet");
+  assert.match(priv.reason, /no public address: reachable from inside the VPC only/);
+  assert.equal(reachOf(redis, [allWorld], {}).exposure, "internet", "an unknown address keeps the old answer");
+
+  assert.equal(reachOf({ ...redis, scope: "loopback", bind: "127.0.0.1" }, [allWorld], { public_ip: "198.51.100.7" }).exposure, "local");
+  assert.equal(reachOf({ proto: "tcp", port: 443, scope: "all", bind: "0.0.0.0" }, [https], { public_ip: "198.51.100.7", group_names: names }).reason, 'open to the internet: web-sg allows tcp 443 from anywhere ("web")');
+  assert.equal(reachOf({ proto: "tcp", port: 7474, scope: "all", bind: "0.0.0.0" }, [r({ from_port: 7000, to_port: 9200, cidr_ipv4: "0.0.0.0/0" })], { public_ip: "198.51.100.7", group_names: names }).reason, "open to the internet: web-sg allows tcp 7000-9200 from anywhere, a broad range that opens whatever listens in it");
+
+  // an all-traffic rule is IPv6-only and the box has no IPv6 address, so it opens nothing
+  const allV6 = { ...r({ ip_protocol: "-1" }), cidr_ipv6: "::/0" };
+  const v6 = reachOf(redis, [https, allV6], { public_ip: "203.0.113.10", ipv6: [], group_names: names });
+  assert.equal(v6.exposure, "closed");
+  assert.equal(v6.reason, "blocked by the security groups: only web-sg's all traffic rule from anywhere over IPv6 covers 6379/tcp, and the box has no IPv6 address");
+  assert.equal(reachOf(redis, [allV6], { public_ip: null, ipv6: ["2001:db8::1"], group_names: names }).exposure, "internet", "with an IPv6 address the IPv6 rule is the internet, public IPv4 or not");
+  assert.equal(reachOf(redis, [allV6], { public_ip: "198.51.100.7", group_names: names }).exposure, "internet", "IPv6 addresses not known yet: the old answer");
+  assert.deepEqual(rulesWithoutListener([allV6, https], [{ proto: "tcp", port: 443, scope: "all" }], names, []).map((u) => [u.ports, u.source, u.unreachable]), [["all traffic", "anywhere over IPv6", true]]);
+
+  const unused = rulesWithoutListener([allWorld, https, ssh, mqtt], [{ proto: "tcp", port: 443, scope: "all" }, { proto: "tcp", port: 22, scope: "loopback" }], names);
+  assert.deepEqual(unused.map((u) => `${u.ports} from ${u.source}`), ["tcp 1883 from anywhere", "tcp 22 from 10.0.0.0/8"], "all-traffic rules always cover something; a loopback socket does not use a rule");
+});

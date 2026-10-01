@@ -77,7 +77,7 @@ idle: the failure mode must be "kept running", not "stopped by mistake".
 
 Then the executor action `swarm_park` (same four verbs as the others):
 
-- **plan**: each idle swarm becomes a proposal "stop sphinx-swarm-27 (esoteric): idle 9 days, last signal 2026-09-16
+- **plan**: each idle swarm becomes a proposal "stop swarm-27 (demo): idle 9 days, last signal 2026-09-16
   (relay: message relayed), 0 requests, 0 connections, 12 MB/day out" with the estimate (list price per hour × 730),
   `rollback: start it again`. Pre-checks: not tagged `advisor:hands-off`, not `advisor:park=never`, no open
   incident or alarm on it, not a member of a pool or a cluster, **has an Elastic IP or a Route 53 record the

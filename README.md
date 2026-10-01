@@ -117,7 +117,7 @@ The detail's "Affected resources" lists every resource the item touches as a lin
 (opened in a new tab): the resource column split up when the agent grouped several ids, each resolved
 against the inventory for its name and kind (`src/affected.ts`, returned as `affected` by
 `GET /api/recommendations/:id`). Ids and inventory names that appear only in the title or the rationale
-("Right-size two boxes: Hive and swarmPExsmg" with one id in the resource column) are listed apart as "also
+("Right-size two boxes: web-1 and swarmAbc123x" with one id in the resource column) are listed apart as "also
 named", because the rationale also names what the agent ruled out.
 
 ### Notifications in Sphinx
@@ -1110,8 +1110,15 @@ merge into one row that names both. Each row's **scope** says which interfaces i
 one `address`) and `src/instance_apps.ts` matches the row to the app inventory (the container's name, or the
 program by its name: `node` finds `node server.js`) and to the ingress rules of the box's security groups, read
 from Steampipe on every inventory refresh (`aws_vpc_security_group_rule`, table `sg_ingress`). The result is the
-port's **exposure**: `internet` (a rule lets 0.0.0.0/0 or ::/0 in), `network` (other addresses or a prefix list),
-`group` (other security groups only), `closed` (no rule lets it in) or `local` (loopback only). Rows live in
+port's **exposure**: `internet` (a rule lets 0.0.0.0/0 in and the box has a public IPv4 address, or ::/0 and it has
+an IPv6 address), `network` (other addresses or a prefix list, or a world rule on a box with no public address),
+`group` (other security groups only), `closed` (no rule lets it in: shown as "blocked by security group") or `local`
+(loopback only). An IPv6-only rule on a box without an IPv6 address lets nothing in; the inventory records each
+box's IPv6 addresses (`network.ipv6` in the snapshot) for that. Every port also carries the rules that let it in
+(`allowed_by`: group name, ports, source, the rule's description) and a `reason` sentence, and a world rule that is
+all traffic or wider than 1,000 ports is flagged `broad` (a banner on the box names the ports public only because of
+it). The other direction is listed too: `unused_rules` are the rules that let nothing reach a listening port (a
+hole without a reason, a leftover, or an IPv6 rule on an IPv4-only box). Rows live in
 `instance_ports` with first and last seen; a port that appears or goes is a `port_opened` / `port_closed` event in
 the app events under its owner's name, and a port open to the internet raises a `port_exposed` alert (warning)
 when first seen, once while it stays open. The EC2 detail's "What runs" tab lists them under **Listens on**, the
@@ -1239,7 +1246,8 @@ day and the next are mixed and skipped), scaled to a month and compared with the
 stored with the verdict, so the recommendation detail shows the bill's shape around the decision: the scope's cost
 per day as bars, the decision day marked, the two medians as dashed lines and the whole bill as a thin line on its
 own scale, with a Check now button for an early read (`GET /api/verifications/:id/impact`). The Overview's
-"Impact of your decisions" card lists every actioned recommendation with what it claimed and what the bill did.
+"Impact of your decisions" card lists every actioned recommendation and every auto-action with what it claimed and
+what the bill did.
 Where the scope is account-wide (Aurora lines, EBS volumes, NAT bytes: resource-level cost data is off by default)
 the chart says so; another change on the same lines moves it too.
 
@@ -1999,6 +2007,17 @@ Results are stored per recommendation per day (`verifications`), shown on the re
 ("Realised") and summed on the Overview next to the top recommendations (claimed vs realised, how many still
 waiting). `GET /api/verifications`, `GET /api/verifications/:id`, `POST /api/verifications/run?force=1&id=`
 (force gives an early read before the seven days). Next: attach the verdict to the decision in the graph.
+
+**Auto-actions are measured the same way.** The executor's applied changes are grouped by kind and resource
+(`actionDecisions`: every applied ledger row of `swarm_park` on one instance is one change, its decision day the
+first application) and read against the cost lines their kind moves (`actionCostScope`: instance hours for
+parking and office hours, snapshot storage for archiving, ECR storage for its lifecycle, ACU-hours for the
+Serverless minimum, and so on), with the same medians and verdicts; the latest per change is kept in
+`action_verifications`. A change that carries out an approved recommendation is measured on that recommendation,
+not twice; kinds that only write a tag or a setting (consent switches, schedule tags, S3 request metrics, a
+hibernation relaunch) are not listed. The impact card marks these rows "auto" and links them to the ledger, the
+totals say how much of the realised saving came from auto-actions, and each AdvisorAction node in the graph
+carries its `bill_verdict` and `realised_usd_month`.
 
 ## Tasks: the agent's work as files
 

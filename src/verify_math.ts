@@ -56,3 +56,34 @@ export function verify(rows: DailyCost[], decidedDay: string, estimate: number |
 export function addDays(day: string, n: number): string {
   const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10);
 }
+
+/**
+ * The cost lines an executor action moves (src/actions/*), so its effect on the bill is measured the same way as a
+ * decision's. Kinds that only write tags or settings (consent, schedule tags, request metrics, a hibernation
+ * relaunch) move no line by themselves and return null. Pure.
+ */
+export function actionCostScope(kind: string, ctx: { instance_type?: string | null } = {}): CostScope | null {
+  switch (kind) {
+    case "swarm_park": case "schedule_hours": return costScopeFor("stop_instance", ctx);
+    case "snapshot_delete": return costScopeFor("delete_snapshot");
+    case "snapshot_archive": return { service: "EC2 - Other", usage_like: ["%EBS:SnapshotUsage%", "%EBS:SnapshotArchive%"], note: "EBS snapshot storage, standard and archive" };
+    case "eip_release": return costScopeFor("release_eip");
+    case "log_retention": case "log_retention_tune": return costScopeFor("set_log_retention");
+    case "s3_lifecycle": case "s3_multipart_abort": return costScopeFor("change_storage_class");
+    case "kms_key_retire": return costScopeFor("retire_kms_key");
+    case "idle_load_balancer": return costScopeFor("delete_load_balancer");
+    case "dynamodb_capacity_mode": return costScopeFor("set_dynamodb_capacity_mode");
+    case "cpu_credit_spec": return costScopeFor("set_credit_specification");
+    case "lambda_memory": return costScopeFor("set_lambda_memory");
+    case "vpc_gateway_endpoint": return costScopeFor("add_vpc_endpoint");
+    case "aurora_storage": return costScopeFor("aurora_set_storage_iopt");
+    case "acu_window": return { service: "Amazon Relational Database Service", usage_like: ["%Aurora:ServerlessV2Usage%", "%Aurora:ServerlessV2IOOptimizedUsage%"], note: "Aurora Serverless v2 ACU-hours of the whole account" };
+    case "ebs_gp3_migrate": return { service: "EC2 - Other", usage_like: ["%EBS:VolumeUsage%"], note: "EBS volume GB-months of the whole account" };
+    case "ebs_iops_trim": case "ebs_throughput_trim": return { service: "EC2 - Other", usage_like: ["%EBS:VolumeP-IOPS%", "%EBS:VolumeP-Throughput%"], note: "provisioned gp3 IOPS and throughput of the whole account" };
+    case "ecr_lifecycle": return { service: "Amazon EC2 Container Registry (ECR)", usage_like: ["%TimedStorage-ByteHrs%"], note: "ECR image storage" };
+    case "efs_lifecycle": return { service: "Amazon Elastic File System", usage_like: ["%TimedStorage%"], note: "EFS storage by class" };
+    case "alarm_cleanup": return { service: "AmazonCloudWatch", usage_like: ["%AlarmMonitorUsage%"], note: "CloudWatch alarm-months" };
+    case "beanstalk_scale": case "beanstalk_pressure": return costScopeFor("rightsize_instance", ctx);
+    default: return null;
+  }
+}

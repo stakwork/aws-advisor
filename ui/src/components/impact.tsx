@@ -103,31 +103,43 @@ export function ImpactChart({ recId, compact = false }: { recId: number; compact
   );
 }
 
-/** Every actioned recommendation with what it claimed and what the bill shows, for the Overview. */
+/** Every actioned recommendation and every auto-action, with what it claimed and what the bill shows, for the Overview. */
 export function ImpactList({ limit = 8 }: { limit?: number }) {
   const [v, setV] = useState<any>(null);
   useEffect(() => { api("/verifications").then(setV).catch(() => setV(null)); }, []);
   if (!v) return <div className="text-sm text-zinc-500">Loading…</div>;
-  if (!v.rows?.length) return <div className="text-sm text-zinc-500">Nothing actioned yet. Approve a recommendation or mark one done and, seven days later, this shows what the bill did.</div>;
+  if (!v.rows?.length) return <div className="text-sm text-zinc-500">Nothing actioned yet. Approve a recommendation, mark one done, or let an auto-action apply and, seven days later, this shows what the bill did.</div>;
   const rows = v.rows.slice(0, limit);
+  const measured = (r: any) => r.verdict && !["too_early", "not_verifiable", "no_data"].includes(r.verdict);
   return (
     <div className="space-y-2">
-      <div className="text-xs text-zinc-500">{v.actioned} actioned · claimed {usd(v.claimed_usd_month)}/mo · realised {usd(v.realised_usd_month)}/mo{v.pending ? ` · ${v.pending} awaiting ${v.min_days_after} days` : ""}</div>
+      <div className="text-xs text-zinc-500">
+        {v.approved} decision{v.approved === 1 ? "" : "s"}{v.auto ? ` · ${v.auto} auto-action${v.auto === 1 ? "" : "s"}` : ""} · claimed {usd(v.claimed_usd_month)}/mo · realised {usd(v.realised_usd_month)}/mo
+        {v.auto ? <span> (auto-actions {usd(v.auto_realised_usd_month)} of {usd(v.auto_claimed_usd_month)})</span> : null}
+        {v.pending ? ` · ${v.pending} awaiting ${v.min_days_after} days` : ""}
+      </div>
       <ul className="divide-y divide-zinc-800">
         {rows.map((r: any) => (
-          <li key={r.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+          <li key={`${r.origin}-${r.id}`} className="flex items-center justify-between gap-3 py-2 text-sm">
             <div className="min-w-0">
-              <Link to={`/recommendations?status=${r.status}&id=${r.id}`} className="block truncate hover:underline">{r.title}</Link>
-              <div className="text-xs text-zinc-500">{r.status} {when(r.decided_at)}{r.merged?.length ? ` · one decision for #${r.merged_ids.join(", #")}` : ""}{r.verdict && r.verdict !== "too_early" && r.verdict !== "not_verifiable" && r.before_usd_day != null ? ` · ${r.before_usd_day.toFixed(2)} → ${r.after_usd_day?.toFixed(2)} USD/day` : r.verdict === "too_early" ? ` · ${r.days_after} of ${v.min_days_after} days` : r.verdict === "not_verifiable" ? " · not measurable on the bill" : " · not checked yet"}</div>
+              <div className="flex min-w-0 items-center gap-2">
+                {r.origin === "auto" && <span className="shrink-0 rounded bg-sky-900/50 px-1.5 text-[10px] font-medium uppercase tracking-wide text-sky-300" title={`Applied by the executor (${r.kind})`}>auto</span>}
+                <Link to={r.origin === "auto" ? `/actions?id=${r.id}` : `/recommendations?status=${r.status}&id=${r.id}`} className={`block truncate hover:underline ${r.origin === "auto" && r.status === "reverted" ? "text-zinc-500 line-through" : ""}`}>{r.title}</Link>
+              </div>
+              <div className="text-xs text-zinc-500">
+                {r.origin === "auto" ? `${r.kind} · first applied ${when(r.decided_at)}${r.applies > 1 ? ` · ${r.applies} times` : ""}${r.status === "reverted" ? " · reverted" : ""}` : `${r.status} ${when(r.decided_at)}`}
+                {r.merged?.length ? ` · one decision for #${r.merged_ids.join(", #")}` : ""}
+                {measured(r) && r.before_usd_day != null ? ` · ${r.before_usd_day.toFixed(2)} → ${r.after_usd_day?.toFixed(2)} USD/day` : r.verdict === "too_early" ? ` · ${r.days_after} of ${v.min_days_after} days` : r.verdict === "not_verifiable" ? " · not measurable on the bill" : " · not checked yet"}
+              </div>
             </div>
             <span className="flex shrink-0 items-center gap-2 text-right">
-              {r.verdict && !["too_early", "not_verifiable", "no_data"].includes(r.verdict) && <span className={`w-20 font-medium ${verdictTone[r.verdict] || "text-zinc-300"}`}>{r.realised_usd_month != null ? `${r.realised_usd_month < 0 ? "+" : ""}${usd(Math.abs(r.realised_usd_month))}` : "—"}</span>}
-              <span className="w-16 text-xs text-zinc-500">of {usd(r.est_monthly_saving)}</span>
+              {measured(r) && <span className={`w-20 font-medium ${verdictTone[r.verdict] || "text-zinc-300"}`}>{r.realised_usd_month != null ? `${r.realised_usd_month < 0 ? "+" : ""}${usd(Math.abs(r.realised_usd_month))}` : "—"}</span>}
+              <span className="w-16 text-xs text-zinc-500">{r.est_monthly_saving != null ? `of ${usd(r.est_monthly_saving)}` : ""}</span>
             </span>
           </li>
         ))}
       </ul>
-      {v.rows.length > limit && <Link to="/recommendations?status=approved" className="text-xs text-zinc-500 hover:text-zinc-300">and {v.rows.length - limit} more →</Link>}
+      {v.rows.length > limit && <span className="flex gap-3 text-xs text-zinc-500"><Link to="/recommendations?status=approved" className="hover:text-zinc-300">decisions →</Link><Link to="/actions" className="hover:text-zinc-300">auto-actions →</Link><span>{v.rows.length - limit} more</span></span>}
     </div>
   );
 }

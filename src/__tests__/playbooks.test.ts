@@ -126,7 +126,7 @@ function fixtureFacts(): GravitonFacts {
       ec2("i-norole", "m6i.xlarge", "example-node-5"),
       ec2("i-protected", "m6i.xlarge", "example-node-2"),
       ec2("i-regex", "m6i.xlarge", "evan - dont delete"),
-      ec2("i-noprice", "t3.large", "legal-synch"),
+      ec2("i-noprice", "t3.large", "docs-sync"),
       ec2("i-stopped", "m6i.xlarge", "parked", "stopped"),
       ec2("i-gpu", "g4dn.8xlarge", "gpu"),
     ]),

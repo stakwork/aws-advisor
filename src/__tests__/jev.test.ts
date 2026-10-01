@@ -45,7 +45,7 @@ test("roles adjust the stopped-instance and idle-instance rules", () => {
     { instance_id: "i-dev", name: "example-dev", instance_type: "t3.large", stopped_on: "2026-01-01", ebs_gb: 30 },
     { instance_id: "i-plain", name: "example-node-3", instance_type: "m6i.xlarge", stopped_on: "2026-01-01", ebs_gb: 100 }];
   const idle = [{ instance_id: "i-btc", name: "Example Bitcoind", instance_type: "m5.large", avg_max_cpu: 4.1, days: 30 },
-    { instance_id: "i-mqtt", name: "mqtt-broker-open", instance_type: "t2.micro", avg_max_cpu: 3, days: 30 },
+    { instance_id: "i-mqtt", name: "broker-open", instance_type: "t2.micro", avg_max_cpu: 3, days: 30 },
     { instance_id: "i-unsure", name: "example-cache", instance_type: "t2.medium", avg_max_cpu: 3, days: 30 },
     { instance_id: "i-devidle", name: "swarm-test", instance_type: "m6i.xlarge", avg_max_cpu: 2, days: 30 },
     { instance_id: "i-none", name: "something", instance_type: "m6i.xlarge", avg_max_cpu: 2, days: 30 }];

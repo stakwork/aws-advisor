@@ -4,12 +4,12 @@ import { awsRangeOf, decodeName, domainsByResource, domainsFor, listRoute53, lis
 
 const idx: ResourceIndex = {
   ec2: [
-    { id: "i-0aaa", name: "web-1", state: "running", public_ip: "54.1.1.1", private_ip: "10.0.1.10", public_dns: "ec2-54-1-1-1.compute-1.amazonaws.com", private_dns: "ip-10-0-1-10.ec2.internal" },
+    { id: "i-0aaa", name: "web-1", state: "running", public_ip: "203.0.113.1", private_ip: "10.0.1.10", public_dns: "ec2-54-1-1-1.compute-1.amazonaws.com", private_dns: "ip-10-0-1-10.ec2.internal" },
     { id: "i-0bbb", name: "web-2", state: "stopped", public_ip: null, private_ip: "10.0.1.11" },
     { id: "i-0ccc", name: "bastion", state: "running", public_ip: null, private_ip: "10.0.9.9" },
   ],
   eips: [{ public_ip: "3.3.3.3", instance_id: "i-0ccc" }, { public_ip: "3.3.3.4", network_interface_id: "eni-nat" }, { public_ip: "3.3.3.5" }],
-  enis: [{ id: "eni-nat", description: "Interface for NAT Gateway nat-0123", interface_type: "nat_gateway", private_ip: "10.0.0.5", public_ip: "3.3.3.4" }, { id: "eni-rds", description: "RDSNetworkInterface", private_ip: "10.0.2.20" }],
+  enis: [{ id: "eni-nat", description: "Interface for NAT Gateway nat-0123", interface_type: "nat_gateway", private_ip: "10.0.0.5", public_ip: "3.3.3.4" }, { id: "eni-rds", description: "RDSNetworkInterface", private_ip: "10.9.2.20" }],
   lbs: [
     { kind: "alb", name: "prod-alb", arn: "arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/app/prod-alb/abc", dns_name: "prod-alb-123.us-east-1.elb.amazonaws.com", state: "active", targets: ["i-0aaa", "i-0bbb", "10.0.9.9"] },
     { kind: "clb", name: "legacy", dns_name: "legacy-456.us-east-1.elb.amazonaws.com", targets: [] },
@@ -52,17 +52,17 @@ test("a CloudFront alias links the distribution and resolves its origins one hop
 
 test("addresses: an Elastic IP, an instance's own IP, a NAT gateway's interface, an unassociated EIP, a stranger", () => {
   assert.deepEqual(r(rec("ssh.example.com.", "A", ["3.3.3.3"])).links.map((l) => [l.kind, l.id, l.via]), [["ec2", "i-0ccc", "Elastic IP 3.3.3.3"]]);
-  assert.equal(r(rec("web.example.com.", "A", ["54.1.1.1"])).summary, "public IP of web-1 (running)");
+  assert.equal(r(rec("web.example.com.", "A", ["203.0.113.1"])).summary, "public IP of web-1 (running)");
   const nat = r(rec("egress.example.com.", "A", ["3.3.3.4"]));
   assert.deepEqual(nat.links.map((l) => [l.kind, l.id]), [["nat", "nat-0123"]]);
   const idle = r(rec("old.example.com.", "A", ["3.3.3.5"]));
   assert.equal(idle.link_state, "linked"); assert.match(idle.summary, /not associated with anything/);
   const ext = r(rec("other.example.com.", "A", ["8.8.8.8"]));
   assert.equal(ext.link_state, "external"); assert.deepEqual(ext.links, []);
-  const priv = r(rec("db-old.internal.", "A", ["10.0.2.20", "10.0.2.99"]));
+  const priv = r(rec("db-old.internal.", "A", ["10.9.2.20", "10.9.2.99"]));
   assert.equal(priv.link_state, "linked", "one of two private addresses is an RDS interface");
-  assert.match(priv.summary, /2 addresses: an RDS instance's interface \(eni-rds\); private IP 10\.0\.2\.99: no interface/);
-  assert.equal(r(rec("gone.internal.", "A", ["10.0.2.99"])).link_state, "unmatched");
+  assert.match(priv.summary, /2 addresses: an RDS instance's interface \(eni-rds\); private IP 10\.9\.2\.99: no interface/);
+  assert.equal(r(rec("gone.internal.", "A", ["10.9.2.99"])).link_state, "unmatched");
 });
 
 test("CNAMEs to RDS, Aurora, ElastiCache, a Lambda URL, an API Gateway domain and an EC2 public DNS name", () => {
@@ -122,19 +122,19 @@ test("Route 53 octal escapes decode, so a wildcard record is *.example.com every
   assert.equal(decodeName("\\052.example.com."), "*.example.com.");
   assert.equal(decodeName("\\100.example.com."), "@.example.com.");
   assert.equal(decodeName("plain.example.com."), "plain.example.com.");
-  const x = makeResolver({ records: [{ name: "\\052.example.com.", type: "A", values: ["54.1.1.1"] }] })(rec("\\052.example.com.", "A", ["54.1.1.1"]));
+  const x = makeResolver({ records: [{ name: "\\052.example.com.", type: "A", values: ["203.0.113.1"] }] })(rec("\\052.example.com.", "A", ["203.0.113.1"]));
   assert.equal(x.link_state, "external");
 });
 
 test("an address in AWS's EC2 ranges that nothing here holds is unmatched (a terminated instance), a stranger's stays external", () => {
-  const ranges = [{ prefix: "54.160.0.0/13", region: "us-east-1", service: "EC2" }, { prefix: "3.0.0.0/8", region: "us-east-1", service: "EC2" }];
-  assert.deepEqual(awsRangeOf("54.162.84.242", ranges), ranges[0]);
+  const ranges = [{ prefix: "198.51.100.0/24", region: "us-east-1", service: "EC2" }, { prefix: "3.0.0.0/8", region: "us-east-1", service: "EC2" }];
+  assert.deepEqual(awsRangeOf("198.51.100.42", ranges), ranges[0]);
   assert.equal(awsRangeOf("8.8.8.8", ranges), null);
   assert.equal(awsRangeOf("not-an-ip", ranges), null);
-  assert.equal(awsRangeOf("54.162.84.242", undefined), null);
+  assert.equal(awsRangeOf("198.51.100.42", undefined), null);
   const rr = makeResolver({ ...idx, awsRanges: ranges });
-  const dead = rr(rec("old-swarm.example.com.", "A", ["54.162.84.242"]));
-  assert.equal(dead.link_state, "unmatched"); assert.match(dead.summary, /AWS EC2 address 54\.162\.84\.242 \(us-east-1\) that nothing in this account holds/);
+  const dead = rr(rec("old-swarm.example.com.", "A", ["198.51.100.42"]));
+  assert.equal(dead.link_state, "unmatched"); assert.match(dead.summary, /AWS EC2 address 198\.51\.100\.42 \(us-east-1\) that nothing in this account holds/);
   assert.equal(rr(rec("ssh.example.com.", "A", ["3.3.3.3"])).link_state, "linked", "an address the account holds is still matched first");
   assert.equal(rr(rec("x.example.com.", "A", ["8.8.8.8"])).link_state, "external");
 });
@@ -162,7 +162,7 @@ test("the store writes zones, records and links that the readers and the per-res
     { name: "example.com.", zone_id: "Z1", type: "NS", ttl: 172800, records: ["ns-1.awsdns-00.org."] },
     { name: "www.example.com.", zone_id: "Z1", type: "A", alias_target: { DNSName: "dualstack.prod-alb-123.us-east-1.elb.amazonaws.com.", HostedZoneId: "Z35SXDOTRQ7X7K" } },
     { name: "db.example.com.", zone_id: "Z1", type: "CNAME", ttl: 300, records: ["main-db.cxyz.us-east-1.rds.amazonaws.com"], set_identifier: "primary", weight: 100 },
-    { name: "old.corp.internal.", zone_id: "Z2", type: "A", ttl: 60, records: '["10.0.2.99"]' },
+    { name: "old.corp.internal.", zone_id: "Z2", type: "A", ttl: 60, records: '["10.9.2.99"]' },
   ];
   const resolve = makeResolver(idx);
   const c = storeRoute53(zones, rows, resolve, new Map([["Z1", 2_500_000]]));

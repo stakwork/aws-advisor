@@ -111,8 +111,8 @@ function ObservationCard() {
 function RealisedLine() {
   const [v, setV] = useState<any>(null);
   useEffect(() => { api("/verifications").then(setV).catch(() => setV(null)); }, []);
-  if (!v || !v.approved) return null;
-  return <Link to="/recommendations?status=approved" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">{v.approved} approved · claimed {usd(v.claimed_usd_month)}/mo · realised {usd(v.realised_usd_month)}/mo{v.pending ? ` · ${v.pending} awaiting ${v.min_days_after} days` : ""}</Link>;
+  if (!v || !v.actioned) return null;
+  return <Link to="/recommendations?status=approved" className="text-xs font-normal text-zinc-500 hover:text-zinc-300">{v.approved} approved{v.auto ? ` + ${v.auto} auto-action${v.auto === 1 ? "" : "s"}` : ""} · claimed {usd(v.claimed_usd_month)}/mo · realised {usd(v.realised_usd_month)}/mo{v.pending ? ` · ${v.pending} awaiting ${v.min_days_after} days` : ""}</Link>;
 }
 
 /** Savings Plan and reservations with 30-day utilisation (Cost Explorer) and days to expiry. */
@@ -291,7 +291,7 @@ export default function Overview() {
                 </ul>
               )}
             </Card>
-            <Card title={<span className="flex items-center justify-between">Impact of your decisions <span className="text-xs font-normal text-zinc-500">what the bill did after each approval, measured from seven days on</span></span>}>
+            <Card title={<span className="flex items-center justify-between">Impact of your decisions <span className="text-xs font-normal text-zinc-500">what the bill did after each approval and auto-action, measured from seven days on</span></span>}>
               <ImpactList />
             </Card>
           </div>

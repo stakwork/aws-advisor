@@ -32,6 +32,8 @@ create table if not exists sg_ingress (
   group_id text not null, region text, ip_protocol text, from_port integer, to_port integer, cidr_ipv4 text, cidr_ipv6 text, referenced_group_id text, prefix_list_id text, refreshed_at text not null
 );
 create index if not exists sg_ingress_group on sg_ingress(group_id);`);
+try { db.exec("alter table sg_ingress add column rule_id text"); } catch { /* exists */ }
+try { db.exec("alter table sg_ingress add column description text"); } catch { /* exists */ }
 
 export type AppKind = "app" | "infra";
 export interface AppRow { name: string; user: string; kind: AppKind; command: string; count: number; cpu_pct: number; rss_bytes: number; oldest_seconds: number }
@@ -176,7 +178,7 @@ export type PortScope = "all" | "loopback" | "address";
 export type PortExposure = "internet" | "network" | "group" | "closed" | "local";
 export interface PortRow { proto: "tcp" | "udp"; port: number; bind: string; scope: PortScope; process: string | null; pid: number | null; container: string | null; container_port: number | null; app_name: string | null; exposure: PortExposure }
 export interface StoredPort extends PortRow { instance_id: string; first_seen: string; last_seen: string; probes: number; gone: boolean }
-export interface IngressRule { group_id: string; ip_protocol: string | null; from_port: number | null; to_port: number | null; cidr_ipv4: string | null; cidr_ipv6: string | null; referenced_group_id: string | null; prefix_list_id: string | null }
+export interface IngressRule { group_id: string; ip_protocol: string | null; from_port: number | null; to_port: number | null; cidr_ipv4: string | null; cidr_ipv6: string | null; referenced_group_id: string | null; prefix_list_id: string | null; rule_id?: string | null; description?: string | null }
 
 /**
  * The listeners of one probe, one per protocol and port: a host socket and the container publishing the same port
@@ -208,17 +210,109 @@ export function ownerOf(l: Pick<ProbeListener, "process" | "container">, apps: P
 const protoMatches = (rule: string | null, proto: string) => rule == null || rule === "-1" || rule.toLowerCase() === proto || (rule === "6" && proto === "tcp") || (rule === "17" && proto === "udp");
 const portMatches = (r: IngressRule, port: number) => (r.from_port == null && r.to_port == null) || (r.from_port === -1) || ((r.from_port ?? 0) <= port && port <= (r.to_port ?? 65535));
 
-/** How far a listening port can be reached, from the ingress rules of the box's security groups. Pure. */
-export function exposureOf(l: Pick<ProbeListener, "proto" | "port" | "scope">, rules: IngressRule[]): PortExposure {
-  if (l.scope === "loopback") return "local";
-  let best: PortExposure = "closed";
+/** One security group rule as people read it: which group, which ports, from where. */
+export interface RuleRef { group_id: string; group_name: string | null; rule_id: string | null; ports: string; source: string; description: string | null; world: boolean; broad: boolean; /** An IPv6 rule on a box without an IPv6 address: it lets nothing in. */ unreachable?: boolean }
+/** How far a port can be reached and why: the rules that let it in (widest first), or what blocks it. */
+export interface PortReach { exposure: PortExposure; allowed_by: RuleRef[]; reason: string; broad: boolean }
+/** What is known about the box itself: its public IPv4 address (null = it has none, undefined = not known), its IPv6 addresses (undefined = not known) and its groups' names. */
+export interface ReachContext { public_ip?: string | null; ipv6?: string[]; group_names?: Record<string, string> }
+
+const WORLD = (r: IngressRule) => r.cidr_ipv4 === "0.0.0.0/0" || r.cidr_ipv6 === "::/0";
+/** An IPv6-only rule does nothing for a box without an IPv6 address: nothing can reach it over IPv6. */
+const V6_ONLY = (r: IngressRule) => Boolean(r.cidr_ipv6) && !r.cidr_ipv4 && !r.referenced_group_id && !r.prefix_list_id;
+const ALL_PROTO = (r: IngressRule) => r.ip_protocol == null || r.ip_protocol === "-1";
+/** An all-traffic rule, or one range wider than this many ports, is "broad": it opens what nobody chose to open. */
+export const BROAD_RANGE = 1000;
+
+/** A rule in words: "all traffic", "tcp 22", "tcp 7000-9200"; from "anywhere", a CIDR, a group or a prefix list. Pure. */
+export function ruleRef(r: IngressRule, names: Record<string, string> = {}): RuleRef {
+  const proto = r.ip_protocol === "6" ? "tcp" : r.ip_protocol === "17" ? "udp" : r.ip_protocol === "1" ? "icmp" : r.ip_protocol;
+  const allPorts = r.from_port == null || r.from_port === -1 || (r.from_port === 0 && r.to_port === 65535);
+  const ports = ALL_PROTO(r) ? "all traffic" : allPorts ? `all ${proto}` : r.from_port === r.to_port ? `${proto} ${r.from_port}` : `${proto} ${r.from_port}-${r.to_port}`;
+  const world = WORLD(r);
+  const source = world ? (r.cidr_ipv4 === "0.0.0.0/0" ? "anywhere" : "anywhere over IPv6") : r.cidr_ipv4 || r.cidr_ipv6 || (r.referenced_group_id ? `${names[r.referenced_group_id] ? `${names[r.referenced_group_id]} ` : ""}${r.referenced_group_id}` : r.prefix_list_id ? `prefix list ${r.prefix_list_id}` : "nowhere");
+  const width = allPorts ? 65536 : (r.to_port ?? 0) - (r.from_port ?? 0) + 1;
+  return { group_id: r.group_id, group_name: names[r.group_id] ?? null, rule_id: r.rule_id ?? null, ports, source, description: r.description ?? null, world, broad: world && (ALL_PROTO(r) || width > BROAD_RANGE) };
+}
+
+const groupLabel = (ids: string[], names: Record<string, string>) => ids.map((g) => names[g] ? `${names[g]} (${g})` : g).join(", ") || "its security groups";
+
+/**
+ * How far a listening port can be reached and why, from the ingress rules of the box's security groups and its public
+ * address. A rule that lets the world in only makes a port public when the box has a public address: without one the
+ * port is reachable from the VPC (network). Pure.
+ */
+export function reachOf(l: Pick<ProbeListener, "proto" | "port" | "scope" | "bind">, rules: IngressRule[], ctx: ReachContext = {}): PortReach {
+  const names = ctx.group_names ?? {};
+  const groups = [...new Set(rules.map((r) => r.group_id))];
+  if (l.scope === "loopback") return { exposure: "local", allowed_by: [], reason: `listens on ${l.bind || "loopback"} only: nothing outside the box can reach it, whatever the security groups say`, broad: false };
   const rank: Record<PortExposure, number> = { local: 0, closed: 0, group: 1, network: 2, internet: 3 };
+  let best: PortExposure = "closed";
+  const allowed: { ref: RuleRef; e: PortExposure }[] = [];
+  const v6Only: RuleRef[] = [];
   for (const r of rules) {
     if (!protoMatches(r.ip_protocol, l.proto) || !portMatches(r, l.port)) continue;
-    const e: PortExposure = r.cidr_ipv4 === "0.0.0.0/0" || r.cidr_ipv6 === "::/0" ? "internet" : r.cidr_ipv4 || r.cidr_ipv6 || r.prefix_list_id ? "network" : r.referenced_group_id ? "group" : "closed";
+    if (V6_ONLY(r) && ctx.ipv6 && ctx.ipv6.length === 0) { v6Only.push(ruleRef(r, names)); continue; }
+    let e: PortExposure = WORLD(r) ? "internet" : r.cidr_ipv4 || r.cidr_ipv6 || r.prefix_list_id ? "network" : r.referenced_group_id ? "group" : "closed";
+    // a world rule makes a port public only through an address the world can reach: the public IPv4 for an IPv4
+    // rule, an IPv6 address (all of them are global in a VPC) for an IPv6 one
+    if (e === "internet" && (r.cidr_ipv4 === "0.0.0.0/0" ? ctx.public_ip === null : false)) e = "network";
+    if (e === "closed") continue;
+    allowed.push({ ref: ruleRef(r, names), e });
     if (rank[e] > rank[best]) best = e;
   }
-  return best;
+  allowed.sort((a, b) => rank[b.e] - rank[a.e] || Number(b.ref.broad) - Number(a.ref.broad));
+  const refs = allowed.map((a) => a.ref);
+  const top = refs[0];
+  const what = `${l.port}/${l.proto}`;
+  const by = (r: RuleRef) => `${r.group_name ?? r.group_id} allows ${r.ports} from ${r.source}${r.description ? ` ("${r.description}")` : ""}`;
+  let reason: string;
+  if (best === "closed") reason = !rules.length ? "no security group rules known for this box (the inventory has not read them yet)"
+    : v6Only.length ? `blocked by the security groups: only ${v6Only[0].group_name ?? v6Only[0].group_id}'s ${v6Only[0].ports} rule from ${v6Only[0].source} covers ${what}, and the box has no IPv6 address`
+    : `blocked by the security groups: no rule in ${groupLabel(groups, names)} lets ${what} in`;
+  else if (best === "internet") reason = `open to the internet: ${by(top)}${!top.broad ? "" : top.ports === "all traffic" ? ", a broad rule that opens every port the box listens on" : ", a broad range that opens whatever listens in it"}`;
+  else if (top.world && ctx.public_ip === null) reason = `${by(top)}, but the box has no public address: reachable from inside the VPC only`;
+  else if (best === "network") reason = `reachable from ${top.source} only: ${by(top)}`;
+  else reason = `reachable from members of ${top.source} only`;
+  return { exposure: best, allowed_by: refs, reason, broad: refs.some((r) => r.broad && r.world) };
+}
+
+/** How far a listening port can be reached, from the ingress rules of the box's security groups. Pure. */
+export function exposureOf(l: Pick<ProbeListener, "proto" | "port" | "scope">, rules: IngressRule[], ctx: ReachContext = {}): PortExposure {
+  return reachOf({ ...l, bind: "" }, rules, ctx).exposure;
+}
+
+/**
+ * The other direction: rules that open ports nothing on the box listens on (all-traffic rules aside, which always
+ * cover something). Each is a hole without a reason, or a leftover from something that moved. Pure.
+ */
+export function rulesWithoutListener(rules: IngressRule[], listening: Pick<ProbeListener, "proto" | "port" | "scope">[], names: Record<string, string> = {}, ipv6?: string[]): RuleRef[] {
+  const open = listening.filter((l) => l.scope !== "loopback");
+  const seen = new Set<string>();
+  const out: RuleRef[] = [];
+  for (const r of rules) {
+    const dead = V6_ONLY(r) && ipv6 != null && ipv6.length === 0;
+    if (!dead && (ALL_PROTO(r) || r.ip_protocol === "1" || r.ip_protocol === "icmp" || r.ip_protocol === "58")) continue;
+    if (!dead && open.some((l) => protoMatches(r.ip_protocol, l.proto) && portMatches(r, l.port))) continue;
+    const ref = { ...ruleRef(r, names), ...(dead ? { unreachable: true } : {}) };
+    const key = `${ref.group_id}|${ref.ports}|${ref.source}`;
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(ref);
+  }
+  return out.sort((a, b) => Number(b.world) - Number(a.world) || a.ports.localeCompare(b.ports, undefined, { numeric: true }));
+}
+
+/** The box's public address (null when it has none) and its security groups' names, from its inventory snapshot. */
+export function reachContextOf(instanceId: string): ReachContext {
+  try {
+    const r = db.prepare("select snapshot from inventory_ec2 where instance_id = ?").get(instanceId) as { snapshot: string | null } | undefined;
+    const net = r?.snapshot ? JSON.parse(r.snapshot)?.network : null;
+    if (!net) return {};
+    const names: Record<string, string> = {};
+    for (const g of Array.isArray(net.security_groups) ? net.security_groups : []) if (g?.GroupId && g?.GroupName) names[g.GroupId] = g.GroupName;
+    // the inventory always writes the key (null when the box has none); a snapshot without it says nothing either way
+    return { public_ip: "public_ip" in net ? (net.public_ip ? String(net.public_ip) : null) : undefined, ipv6: Array.isArray(net.ipv6) ? net.ipv6.map(String) : undefined, group_names: names };
+  } catch { return {}; }
 }
 
 /** The security group ids of an instance, from its inventory snapshot. */
@@ -233,7 +327,7 @@ export function securityGroupsOf(instanceId: string): string[] {
 
 export function ingressRulesFor(groupIds: string[]): IngressRule[] {
   if (!groupIds.length) return [];
-  return db.prepare(`select group_id, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id from sg_ingress where group_id in (${groupIds.map(() => "?").join(",")})`).all(...groupIds) as IngressRule[];
+  return db.prepare(`select group_id, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, rule_id, description from sg_ingress where group_id in (${groupIds.map(() => "?").join(",")})`).all(...groupIds) as IngressRule[];
 }
 
 /** Replaces the ingress rules the inventory read from Steampipe (src/inventory.ts, every refresh). */
@@ -241,16 +335,16 @@ export function replaceIngressRules(rows: (IngressRule & { region?: string | nul
   const at = new Date().toISOString();
   db.transaction(() => {
     db.prepare("delete from sg_ingress").run();
-    const ins = db.prepare("insert into sg_ingress(group_id, region, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, refreshed_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    for (const r of rows) ins.run(r.group_id, r.region ?? null, r.ip_protocol ?? null, r.from_port ?? null, r.to_port ?? null, r.cidr_ipv4 ?? null, r.cidr_ipv6 ?? null, r.referenced_group_id ?? null, r.prefix_list_id ?? null, at);
+    const ins = db.prepare("insert into sg_ingress(group_id, region, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, rule_id, description, refreshed_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    for (const r of rows) ins.run(r.group_id, r.region ?? null, r.ip_protocol ?? null, r.from_port ?? null, r.to_port ?? null, r.cidr_ipv4 ?? null, r.cidr_ipv6 ?? null, r.referenced_group_id ?? null, r.prefix_list_id ?? null, r.rule_id ?? null, r.description ?? null, at);
   })();
   return rows.length;
 }
 
 /** The port rows for one probe, owners matched to the app rows and exposure read from the given rules. Pure. */
-export function portsFromProbe(p: Pick<ProbeResult, "listeners" | "processes">, rules: IngressRule[]): PortRow[] {
+export function portsFromProbe(p: Pick<ProbeResult, "listeners" | "processes">, rules: IngressRule[], ctx: ReachContext = {}): PortRow[] {
   const apps = appsFromProbe(p);
-  return listenersFromProbe(p).map((l) => ({ ...l, app_name: ownerOf(l, apps), exposure: exposureOf(l, rules) }));
+  return listenersFromProbe(p).map((l) => ({ ...l, app_name: ownerOf(l, apps), exposure: exposureOf(l, rules, ctx) }));
 }
 
 const upsertPort = db.prepare(`insert into instance_ports(instance_id, proto, port, bind, scope, process, pid, container, container_port, app_name, exposure, first_seen, last_seen, probes, gone)
@@ -272,7 +366,8 @@ const portLabel = (r: Pick<PortRow, "proto" | "port" | "app_name">) => `${r.port
 export function recordPorts(instanceId: string, collectedAt: string, data: Pick<ProbeResult, "listeners" | "processes">, instanceName: string | null = null): RecordPortsResult | null {
   if (!Array.isArray(data.listeners)) return null;
   const rules = ingressRulesFor(securityGroupsOf(instanceId));
-  const ports = portsFromProbe(data, rules);
+  const ctx = reachContextOf(instanceId);
+  const ports = portsFromProbe(data, rules, ctx);
   const res: RecordPortsResult = { ports: ports.length, opened: [], closed: [], alerts: 0 };
   const label = instanceName ? `${instanceName} (${instanceId})` : instanceId;
   db.transaction(() => {
@@ -289,7 +384,9 @@ export function recordPorts(instanceId: string, collectedAt: string, data: Pick<
       if (fresh) { res.opened.push(portLabel(r)); insertEvent.run(instanceId, r.app_name ?? `:${r.port}`, r.container ? "container" : r.process ?? "", "port_opened", collectedAt, JSON.stringify({ proto: r.proto, port: r.port, scope: r.scope, exposure: r.exposure, container: r.container, process: r.process })); }
       // an internet-facing port is news the first time it is seen, first inventory or not, and again if it closes and reopens or its rules widen
       if (r.exposure === "internet" && (!was || was.gone || was.exposure !== "internet") && !openPortExposed.get(instanceId, r.port, r.proto)) {
-        const msg = `${label}: ${r.port}/${r.proto} is open to the internet${r.app_name ? `, served by ${r.app_name}` : ""} (listening on ${r.scope === "all" ? "every interface" : r.bind}, and a security group rule lets 0.0.0.0/0 in)`;
+        const reach = reachOf(r, rules, ctx);
+        const rule = reach.allowed_by[0];
+        const msg = `${label}: ${r.port}/${r.proto} is open to the internet${r.app_name ? `, served by ${r.app_name}` : ""} (listening on ${r.scope === "all" ? "every interface" : r.bind}; ${rule ? `${rule.group_name ?? rule.group_id} allows ${rule.ports} from anywhere${rule.broad ? ", a broad rule" : ""}` : "a security group rule lets 0.0.0.0/0 in"})`;
         insertAlert.run("port_exposed", instanceId, msg, JSON.stringify({ summary: msg, instance_id: instanceId, name: instanceName, port: r.port, proto: r.proto, app: r.app_name, container: r.container, process: r.process, scope: r.scope, probed_at: collectedAt }));
         res.alerts++;
       }
@@ -308,12 +405,28 @@ export function recordPorts(instanceId: string, collectedAt: string, data: Pick<
 const rowToPort = (r: any): StoredPort => ({ instance_id: r.instance_id, proto: r.proto, port: Number(r.port), bind: r.bind ?? "", scope: r.scope, process: r.process ?? null, pid: r.pid == null ? null : Number(r.pid), container: r.container ?? null, container_port: r.container_port == null ? null : Number(r.container_port), app_name: r.app_name ?? null, exposure: r.exposure, first_seen: r.first_seen, last_seen: r.last_seen, probes: Number(r.probes ?? 1), gone: Boolean(r.gone) });
 
 /** The ports one instance answers on now (and, with `includeGone`, what it used to), exposure re-read from the current rules; widest reach first. */
-export function portsOn(instanceId: string, includeGone = false): StoredPort[] {
+export function portsOn(instanceId: string, includeGone = false): (StoredPort & Partial<Omit<PortReach, "exposure">>)[] {
   const rules = ingressRulesFor(securityGroupsOf(instanceId));
+  const ctx = reachContextOf(instanceId);
   const rank: Record<string, number> = { internet: 0, network: 1, group: 2, closed: 3, local: 4 };
   return (db.prepare(`select * from instance_ports where instance_id = ? ${includeGone ? "" : "and gone = 0"}`).all(instanceId) as any[])
-    .map((r) => { const p = rowToPort(r); return { ...p, exposure: rules.length || p.exposure === "local" ? exposureOf(p, rules) : p.exposure }; })
+    .map((r) => {
+      const p = rowToPort(r);
+      if (!rules.length && p.exposure !== "local") return p;
+      const reach = reachOf(p, rules, ctx);
+      return { ...p, exposure: reach.exposure, allowed_by: reach.allowed_by, reason: reach.reason, broad: reach.broad };
+    })
     .sort((a, b) => Number(a.gone) - Number(b.gone) || rank[a.exposure] - rank[b.exposure] || a.port - b.port);
+}
+
+/** Security group rules on the box that no listening port uses. */
+export function unusedRulesOn(instanceId: string): RuleRef[] {
+  const rules = ingressRulesFor(securityGroupsOf(instanceId));
+  if (!rules.length) return [];
+  const listening = db.prepare("select proto, port, scope from instance_ports where instance_id = ? and gone = 0").all(instanceId) as Pick<ProbeListener, "proto" | "port" | "scope">[];
+  if (!listening.length) return [];
+  const ctx = reachContextOf(instanceId);
+  return rulesWithoutListener(rules, listening, ctx.group_names, ctx.ipv6);
 }
 
 /** Where a port is open across the fleet, widest reach first. */

@@ -37,7 +37,7 @@ const sqliteNow = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
 /** Probe 1.8: the ingress rules of every security group, so a listening port can be told internet-facing from closed (src/instance_apps.ts exposureOf). */
 const SG_RULES_SQL = `
-  select group_id, region, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id
+  select group_id, region, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, security_group_rule_id, description
   from ${S}.aws_vpc_security_group_rule where type = 'ingress'`;
 
 const EC2_SQL = `
@@ -47,6 +47,8 @@ const EC2_SQL = `
          i.iam_instance_profile_arn, i.vpc_id, i.subnet_id, i.root_device_name, i.root_device_type, i.image_id, i.key_name,
          i.instance_lifecycle, i.ebs_optimized, i.monitoring_state, i.state_transition_time, i.state_transition_reason,
          i.cpu_options_core_count as cpu_cores, i.cpu_options_threads_per_core as threads_per_core, i.security_groups,
+         (select coalesce(jsonb_agg(a ->> 'Ipv6Address'), '[]'::jsonb) from jsonb_array_elements(coalesce(i.network_interfaces, '[]'::jsonb)) n,
+            jsonb_array_elements(coalesce(n -> 'Ipv6Addresses', '[]'::jsonb)) a) as ipv6,
          s.ping_status as ssm_status, s.platform_name as ssm_platform_name, s.platform_type as ssm_platform_type,
          s.platform_version as ssm_platform_version, s.agent_version as ssm_agent_version, s.is_latest_version as ssm_agent_latest,
          s.last_ping_date_time as ssm_last_ping, s.iam_role as ssm_iam_role, s.computer_name as ssm_computer_name
@@ -187,7 +189,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     attempt("elasticache cpu", CACHE_CPU_SQL),
     attempt("security group rules", SG_RULES_SQL),
   ]);
-  if (sgRules) { try { const { replaceIngressRules } = await import("./instance_apps.js"); replaceIngressRules(sgRules.map((r: any) => ({ group_id: String(r.group_id), region: r.region ?? null, ip_protocol: r.ip_protocol ?? null, from_port: r.from_port == null ? null : Number(r.from_port), to_port: r.to_port == null ? null : Number(r.to_port), cidr_ipv4: r.cidr_ipv4 ?? null, cidr_ipv6: r.cidr_ipv6 ?? null, referenced_group_id: r.referenced_group_id ?? null, prefix_list_id: r.prefix_list_id ?? null }))); } catch (e: any) { errors.push(`security group rules: ${e?.message || e}`); } }
+  if (sgRules) { try { const { replaceIngressRules } = await import("./instance_apps.js"); replaceIngressRules(sgRules.map((r: any) => ({ group_id: String(r.group_id), region: r.region ?? null, ip_protocol: r.ip_protocol ?? null, from_port: r.from_port == null ? null : Number(r.from_port), to_port: r.to_port == null ? null : Number(r.to_port), cidr_ipv4: r.cidr_ipv4 ?? null, cidr_ipv6: r.cidr_ipv6 ?? null, referenced_group_id: r.referenced_group_id ?? null, prefix_list_id: r.prefix_list_id ?? null, rule_id: r.security_group_rule_id ?? null, description: r.description || null }))); } catch (e: any) { errors.push(`security group rules: ${e?.message || e}`); } }
   // per-resource CloudWatch statistics the daily tables do not cover (a handful of resources, one call each)
   const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
   const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };
@@ -254,7 +256,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
             platform: r.platform || null, platform_details: r.platform_details, architecture: r.architecture, image_id: r.image_id, key_name: r.key_name, instance_lifecycle: r.instance_lifecycle || "on-demand",
             ebs_optimized: r.ebs_optimized, monitoring_state: r.monitoring_state, state_transition_time: iso(r.state_transition_time), state_transition_reason: r.state_transition_reason || null,
             cpu_cores: num(r.cpu_cores), threads_per_core: num(r.threads_per_core), iam_instance_profile_arn: r.iam_instance_profile_arn },
-          network: { private_ip: r.private_ip, public_ip: r.public_ip, private_dns: r.private_dns, public_dns: r.public_dns, vpc_id: r.vpc_id, subnet_id: r.subnet_id, security_groups: r.security_groups || [] },
+          network: { private_ip: r.private_ip, public_ip: r.public_ip, ipv6: Array.isArray(r.ipv6) ? r.ipv6.filter(Boolean) : [], private_dns: r.private_dns, public_dns: r.public_dns, vpc_id: r.vpc_id, subnet_id: r.subnet_id, security_groups: r.security_groups || [] },
           storage: { root_device_name: r.root_device_name, root_device_type: r.root_device_type, ebs_gb: num(ebs?.gb) ?? 0, volumes: ebs?.volumes || [] },
           ssm: r.ssm_status ? { ping_status: r.ssm_status, platform_name: r.ssm_platform_name, platform_type: r.ssm_platform_type, platform_version: r.ssm_platform_version, agent_version: r.ssm_agent_version,
             agent_latest: r.ssm_agent_latest, last_ping: iso(r.ssm_last_ping), iam_role: r.ssm_iam_role, computer_name: r.ssm_computer_name } : null,

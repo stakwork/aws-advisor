@@ -43,7 +43,7 @@ export const SCHEMA_SUMMARY = [
   "(:AdvisorRecommendation)-[:FROM_INCIDENT]->(:AdvisorIncident {id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at})-[:INVESTIGATES]->(:AdvisorAlert {id, kind, level, message, created_at, acknowledged, acknowledged_by})-[:ABOUT]->(:AdvisorResource | :AdvisorResourceRef)",
   "(:AdvisorControl {id, title})-[:FLAGGED {run_id, reason}]->(:AdvisorResource) for the latest completed run's alarm findings; (:AdvisorControl)-[:HAS_PLAYBOOK]->(:AdvisorPlaybook {control_id, title, tier, effort})",
   "(:AdvisorControl {id, title, severity, benchmark})-[:SECURITY_FLAGGED {scan_id, reason, severity, first_seen_at}]->(:AdvisorResource) for the latest security scan (aws_compliance); (:AdvisorSecurityScan {id, status, alarms, new_alarms, resolved, counts})-[:IN_ACCOUNT]->(:AdvisorAccount); security recommendations are AdvisorRecommendation with action_type security_fix",
-  "(:AdvisorAction {id, kind, status: proposed|applied|verified|failed|refused|reverted|stale, mode, trigger, title, reason, rollback, est_usd_month, result, error, created_at, applied_at, verified_at, reverted_at})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef) the executor's ledger: every change the agent planned, made, read back or undid; (:AdvisorAction)-[:CARRIES_OUT]->(:AdvisorRecommendation) when it executes an approved recommendation",
+  "(:AdvisorAction {id, kind, status: proposed|applied|verified|failed|refused|reverted|stale, mode, trigger, title, reason, rollback, est_usd_month, result, error, created_at, applied_at, verified_at, reverted_at, bill_verdict, realised_usd_month})-[:TARGETS]->(:AdvisorResource | :AdvisorResourceRef) the executor's ledger: every change the agent planned, made, read back or undid; (:AdvisorAction)-[:CARRIES_OUT]->(:AdvisorRecommendation) when it executes an approved recommendation",
   "(:AdvisorAction)-[:TOUCHED_IN {event: apply|verify|revert, outcome, at, detail}]->(:AdvisorPass {id, started_at, finished_at, trigger: schedule|manual, mode, proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors}) the executor's activity log: one node per pass (including the ones that did nothing), an edge per apply, read-back or revert made in it",
 ].join("\n");
 
@@ -217,6 +217,8 @@ export interface ActionNode {
   recommendation_ids: number[];
   /** A staged change (a relaunch): the stage it is at and the instance it launched, if any. */
   stage: string | null; new_resource: string | null;
+  /** What the bill did after this kind of change on this resource (src/verify.ts, action_verifications): the latest verdict and USD/month. */
+  bill_verdict: string | null; realised_usd_month: number | null;
 }
 
 /** One executor ledger row (src/executor.ts) as a node; the recommendations it carries out come from its facts. */
@@ -227,7 +229,7 @@ export function actionNode(row: any, inventoryIds: Set<string>): ActionNode {
     rollback: str(row.rollback), est_usd_month: num(row.est_usd_month), result: row.result ? String(row.result).slice(0, 500) : null, error: row.error ? String(row.error).slice(0, 500) : null,
     resource: String(row.resource), resource_name: str(row.resource_name), resource_id: inventoryIdOf(row.resource, inventoryIds), region: str(row.region), created_at: String(row.created_at), seen_at: str(row.seen_at),
     applied_at: str(row.applied_at), verified_at: str(row.verified_at), reverted_at: str(row.reverted_at), recommendation_ids: ids,
-    stage: str(facts.stage), new_resource: str(facts.new_instance_id) };
+    stage: str(facts.stage), new_resource: str(facts.new_instance_id), bill_verdict: str(row.bill_verdict), realised_usd_month: num(row.realised_usd_month) };
 }
 
 export interface IncidentNode { id: number; alert_id: number; status: string; cause: string | null; confidence: number | null; episode_cost_usd: number | null; monthly_run_rate_usd: number | null; created_at: string }
@@ -604,7 +606,8 @@ UNWIND $rows AS row
 MERGE (x:AdvisorAction {id: row.id})
 SET x += {kind: row.kind, status: row.status, mode: row.mode, trigger: row.trigger, title: row.title, reason: row.reason, rollback: row.rollback, est_usd_month: row.est_usd_month,
           result: row.result, error: row.error, resource: row.resource, resource_name: row.resource_name, region: row.region, created_at: row.created_at, seen_at: row.seen_at,
-          applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, stage: row.stage, new_resource: row.new_resource, account_id: $account, updated_at: $now}
+          applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, stage: row.stage, new_resource: row.new_resource,
+          bill_verdict: row.bill_verdict, realised_usd_month: row.realised_usd_month, account_id: $account, updated_at: $now}
 WITH x, row
 FOREACH (_ IN CASE WHEN row.new_resource IS NULL THEN [] ELSE [1] END |
   MERGE (nr:AdvisorResourceRef {id: row.new_resource}) SET nr.account_id = $account, nr.updated_at = $now
@@ -632,7 +635,11 @@ export async function mirrorActions(ids?: number[]): Promise<{ actions: number }
   await mirrorAccount(account);
   const inv = inventoryIds();
   let raw: any[] = [];
-  try { raw = ids ? db.prepare(`select * from actions where id in (${ids.map(() => "?").join(",")})`).all(...ids) : db.prepare("select * from actions").all(); }
+  // the latest bill verdict of the change's kind on its resource rides along (src/verify.ts), when it has been measured
+  const hasV = Boolean(db.prepare("select 1 from sqlite_master where type = 'table' and name = 'action_verifications'").get());
+  const cols = hasV ? `, (select v.verdict from action_verifications v where v.action_key = a.kind || ':' || a.resource order by v.id desc limit 1) as bill_verdict,
+    (select v.realised_usd_month from action_verifications v where v.action_key = a.kind || ':' || a.resource order by v.id desc limit 1) as realised_usd_month` : "";
+  try { raw = ids ? db.prepare(`select a.*${cols} from actions a where a.id in (${ids.map(() => "?").join(",")})`).all(...ids) : db.prepare(`select a.*${cols} from actions a`).all(); }
   catch { return { actions: 0 }; /* the executor has not created its table yet */ }
   const rows = raw.map((r) => actionNode(r, inv));
   const stamp = now();

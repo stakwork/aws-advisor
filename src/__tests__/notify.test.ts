@@ -4,14 +4,14 @@ import { decide, formatMessage, inQuietHours, resourceOfAlert } from "../notify.
 import { validateRuntime } from "../config.js";
 
 test("notify: the resource an alert is about, from its kind and resource column", () => {
-  assert.deepEqual(resourceOfAlert({ kind: "instance_state", resource: "i-0b19ba7373c82230f" }), { kind: "ec2", id: "i-0b19ba7373c82230f" });
-  assert.deepEqual(resourceOfAlert({ kind: "disk_full", resource: "i-0eee40d4ae2c317f8:/" }), { kind: "ec2", id: "i-0eee40d4ae2c317f8" });
-  assert.deepEqual(resourceOfAlert({ kind: "network_step", resource: "i-0fd6f281cb9856479:NetworkIn" }), { kind: "ec2", id: "i-0fd6f281cb9856479" });
-  assert.deepEqual(resourceOfAlert({ kind: "rds_memory_low", resource: "tribes-dev" }), { kind: "rds", id: "tribes-dev" });
-  assert.deepEqual(resourceOfAlert({ kind: "cache_memory_high", resource: "senza-valkey-1" }), { kind: "elasticache", id: "senza-valkey-1" });
+  assert.deepEqual(resourceOfAlert({ kind: "instance_state", resource: "i-0f00000000000a001" }), { kind: "ec2", id: "i-0f00000000000a001" });
+  assert.deepEqual(resourceOfAlert({ kind: "disk_full", resource: "i-0f00000000000a006:/" }), { kind: "ec2", id: "i-0f00000000000a006" });
+  assert.deepEqual(resourceOfAlert({ kind: "network_step", resource: "i-0f00000000000a005:NetworkIn" }), { kind: "ec2", id: "i-0f00000000000a005" });
+  assert.deepEqual(resourceOfAlert({ kind: "rds_memory_low", resource: "app-dev" }), { kind: "rds", id: "app-dev" });
+  assert.deepEqual(resourceOfAlert({ kind: "cache_memory_high", resource: "nodeb-valkey-1" }), { kind: "elasticache", id: "nodeb-valkey-1" });
   assert.deepEqual(resourceOfAlert({ kind: "nat_traffic", resource: "nat-00c56905d5984cf31" }), { kind: "nat", id: "nat-00c56905d5984cf31" });
   assert.deepEqual(resourceOfAlert({ kind: "node_churn", resource: "AWSBatch-production-asg" }), { kind: "pool", id: "AWSBatch-production-asg" });
-  assert.equal(resourceOfAlert({ kind: "commitment_underused", resource: "elasticache_ri:senza-valkey" }), null);
+  assert.equal(resourceOfAlert({ kind: "commitment_underused", resource: "elasticache_ri:nodeb-valkey" }), null);
   assert.equal(resourceOfAlert({ kind: "credentials", resource: "advisor" }), null);
   assert.equal(resourceOfAlert({ kind: "quota", resource: null }), null);
 });

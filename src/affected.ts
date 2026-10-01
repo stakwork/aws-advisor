@@ -3,7 +3,7 @@
  *
  * `recommendations.resource` is one id, or a comma-separated list when the agent grouped several ("i-1, i-2"),
  * sometimes with the name in parentheses ("i-0b19 (Hive)"); `resource_name` pairs with it. The agent also names
- * resources only in the title or the rationale ("Right-size two boxes: Hive and swarmPExsmg" with one id in
+ * resources only in the title or the rationale ("Right-size two boxes: web-1 and swarmAbc123x" with one id in
  * `resource`), so the text is scanned for ids and for inventory names; those are reported apart, as "mentioned",
  * because the rationale also names what the agent ruled out.
  */

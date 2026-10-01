@@ -156,21 +156,45 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
       {gone.length > 0 && !all && <div className="text-zinc-600">{gone.length} left the box</div>}
       {d.has_listeners === false && !d.ports?.length && <div className="mt-1 text-zinc-600">No port list yet: this probe predates 1.8 (update the SSM document, Settings › Permissions).</div>}
       {d.ports?.length > 0 && (() => {
-        const tone: Record<string, string> = { internet: "text-red-300", network: "text-amber-300/90", group: "text-sky-300/90", closed: "text-zinc-400", local: "text-zinc-600" };
-        const word: Record<string, string> = { internet: "internet", network: "network", group: "other groups", closed: "closed by the security groups", local: "this box only" };
+        const tone: Record<string, string> = { internet: "text-red-300", network: "text-amber-300/90", group: "text-sky-300/90", closed: "text-emerald-300/80", local: "text-zinc-500" };
+        const word: Record<string, string> = { internet: "open to the internet", network: "reachable from the network", group: "reachable from other groups", closed: "blocked by security group", local: "this box only" };
         const ports = d.ports.filter((p: any) => !p.gone); const closed = d.ports.filter((p: any) => p.gone);
+        const count = (e: string) => ports.filter((p: any) => p.exposure === e).length;
+        const parts = [["internet", "open to the internet"], ["network", "reachable from the network"], ["group", "from other groups"], ["closed", "blocked by security group"], ["local", "this box only"]]
+          .filter(([e]) => count(e) > 0).map(([e, w]) => `${count(e)} ${w}`);
+        // one broad world-open rule (all traffic, or a huge range) makes every listening port public: say it once, at the top
+        const broad = ports.flatMap((p: any) => (p.allowed_by ?? []).filter((r: any) => r.broad && r.world)).find(Boolean);
+        const exposedBroad = broad ? ports.filter((p: any) => p.exposure === "internet" && (p.allowed_by ?? []).every((r: any) => !r.world || r.broad)) : [];
+        const ruleText = (r: any) => `${r.group_name ?? r.group_id}: ${r.ports} from ${r.source}${r.description ? ` ("${r.description}")` : ""}`;
         return (
           <div className="mt-1.5">
-            <div>Listens on: <span className="text-zinc-500">{ports.length} port{ports.length === 1 ? "" : "s"}{ports.some((p: any) => p.exposure === "internet") ? `, ${ports.filter((p: any) => p.exposure === "internet").length} open to the internet` : ""}</span></div>
+            <div>Listens on: <span className="text-zinc-500">{ports.length} port{ports.length === 1 ? "" : "s"}{parts.length ? `: ${parts.join(", ")}` : ""}</span></div>
+            {broad && (
+              <div className="mt-1 rounded border border-red-900/60 bg-red-950/30 px-2 py-1 text-red-200">
+                {broad.group_name ?? broad.group_id} ({broad.group_id}) lets <b>{broad.ports}</b> in from {broad.source}, so {broad.ports === "all traffic" ? "every port this box listens on is public" : "everything this box listens on in that range is public"}.
+                {exposedBroad.length > 0 && <> Public only because of it: {exposedBroad.slice(0, 12).map((p: any) => `${p.port}/${p.proto}${p.app_name ? ` ${p.app_name}` : ""}`).join(", ")}{exposedBroad.length > 12 ? ` and ${exposedBroad.length - 12} more` : ""}.</>}
+                <span className="text-red-300/70"> Replace it with rules for the ports that should be public.</span>
+              </div>
+            )}
             <ul className="mt-0.5 space-y-0.5">
               {[...ports, ...closed].slice(0, 60).map((p: any) => (
-                <li key={`${p.proto}:${p.port}`} className={`flex flex-wrap gap-x-2 ${p.gone ? "text-zinc-600 line-through" : "text-zinc-200"}`} title={`${p.bind || "?"} · ${p.scope} · first seen ${when(p.first_seen)} · seen on ${p.probes} probe${p.probes === 1 ? "" : "s"}${p.pid ? ` · pid ${p.pid}` : ""}`}>
+                <li key={`${p.proto}:${p.port}`} className={`flex flex-wrap gap-x-2 ${p.gone ? "text-zinc-600 line-through" : "text-zinc-200"}`} title={`${p.bind || "?"} · ${p.scope} · first seen ${when(p.first_seen)} · seen on ${p.probes} probe${p.probes === 1 ? "" : "s"}${p.pid ? ` · pid ${p.pid}` : ""}${p.reason ? `\n${p.reason}` : ""}`}>
                   <span className="font-mono">{p.port}/{p.proto}</span>
                   <span className="text-zinc-400">→ {p.container ? <>container <span className="font-mono text-zinc-200">{p.container}</span>{p.container_port && p.container_port !== p.port ? <span className="text-zinc-500"> :{p.container_port}</span> : null}</> : p.app_name ? <span className="font-mono text-zinc-200">{p.app_name}</span> : p.process ? <span className="font-mono">{p.process}</span> : <span className="text-zinc-600">unknown owner</span>}</span>
                   <span className={tone[p.exposure] || "text-zinc-500"}>{word[p.exposure] || p.exposure}</span>
+                  {!p.gone && p.exposure !== "local" && p.exposure !== "closed" && p.allowed_by?.[0] && <span className="text-zinc-500">via {ruleText(p.allowed_by[0])}{p.allowed_by.length > 1 ? ` (+${p.allowed_by.length - 1} more rule${p.allowed_by.length > 2 ? "s" : ""})` : ""}</span>}
+                  {!p.gone && p.exposure === "network" && p.allowed_by?.[0]?.world && <span className="text-zinc-500">· no public address</span>}
                 </li>
               ))}
             </ul>
+            {d.unused_rules?.length > 0 && (
+              <details className="mt-1"><summary className="cursor-pointer text-zinc-500">Security group rules that open nothing ({d.unused_rules.length})</summary>
+                <ul className="mt-0.5 space-y-0.5">{d.unused_rules.slice(0, 30).map((r: any) => (
+                  <li key={`${r.group_id}|${r.ports}|${r.source}`} className={r.unreachable ? "text-zinc-500" : r.world ? "text-amber-300/80" : "text-zinc-400"}>{ruleText(r)}{r.unreachable ? " · IPv6 only, and this box has no IPv6 address: it lets nothing in" : ""}</li>
+                ))}</ul>
+                <div className="text-zinc-600">These rules let nothing reach a listening port. If nothing should, the rule can go.</div>
+              </details>
+            )}
           </div>
         );
       })()}

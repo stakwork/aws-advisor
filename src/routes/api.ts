@@ -468,11 +468,11 @@ api.get("/instances/:id/metrics", (req, res) => {
 // ---- what runs on the instances (probe 1.6, src/instance_apps.ts) ------------------------------------------------
 // One instance: its apps (current, and with ?gone=1 the ones that left), its recent appear/disappear events and where its agents ship logs.
 api.get("/instances/:id/apps", async (req, res) => {
-  const { appsOn, appEvents, portsOn } = await import("../instance_apps.js");
+  const { appsOn, appEvents, portsOn, unusedRulesOn } = await import("../instance_apps.js");
   const { instanceStatusOf, statusEvents } = await import("../status_checks.js");
   const id = String(req.params.id);
   const latest = latestProbe(id);
-  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), has_listeners: Array.isArray(latest?.data.listeners), apps: appsOn(id, req.query.gone === "1"), ports: portsOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [],
+  res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, has_processes: Array.isArray(latest?.data.processes), has_listeners: Array.isArray(latest?.data.listeners), apps: appsOn(id, req.query.gone === "1"), ports: portsOn(id, req.query.gone === "1"), unused_rules: unusedRulesOn(id), events: appEvents({ instance_id: id, limit: 50 }), log_shipping: latest?.data.log_shipping ?? [],
     status: instanceStatusOf(id), status_events: statusEvents({ instance_id: id, limit: 20 }) });
 });
 

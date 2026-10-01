@@ -16,7 +16,7 @@ const { resourceFacts } = await import("../resolve.js");
 
 const T0 = Date.UTC(2026, 8, 9, 0, 0, 0); // 2026-09-09T00:00Z
 const NOW = T0 + 14 * 86400000;
-const target = (over: Partial<any> = {}) => ({ kind: "cluster", id: "sphinx-hub-production", region: "us-east-1", engine: "aurora-postgresql", engine_version: "16.11", storage_type: "aurora", serverless: true, configured_min_acu: 0.5, configured_max_acu: 2, instance_class: "db.serverless", members: 1, writer: "sphinx-hub-production-instance-1", dbi_resource_id: "db-ABC", performance_insights: false, ...over }) as any;
+const target = (over: Partial<any> = {}) => ({ kind: "cluster", id: "main-hub-production", region: "us-east-1", engine: "aurora-postgresql", engine_version: "16.11", storage_type: "aurora", serverless: true, configured_min_acu: 0.5, configured_max_acu: 2, instance_class: "db.serverless", members: 1, writer: "main-hub-production-instance-1", dbi_resource_id: "db-ABC", performance_insights: false, ...over }) as any;
 
 /** A minute series like the real cluster: idle at 0.5 ACU, a burst to 2.0 at minute 9 of every hour for 12 minutes, decaying through 1.0 for 4 minutes. */
 function burstyAcu(days: number, from = NOW - days * 86400000) {
@@ -147,28 +147,28 @@ test("profileHash ignores small drift and changes with the picture", () => {
 
 test("rdsLoadTargets: one entry per cluster, standalone instances by id, fresh profiles skipped; resourceFacts finds a cluster and carries its load", () => {
   const ins = db.prepare("insert into inventory_rds(db_instance_identifier, class, engine, engine_version, storage_type, storage_gb, status, region, created, cluster, monthly_usd, snapshot) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  ins.run("sphinx-hub-production-instance-1", "db.serverless", "aurora-postgresql", "16.11", "aurora", 6.39, "available", "us-east-1", "2025-01-01T00:00:00Z", "sphinx-hub-production", 150, JSON.stringify({ tags: { Name: "sphinx" } }));
+  ins.run("main-hub-production-instance-1", "db.serverless", "aurora-postgresql", "16.11", "aurora", 6.39, "available", "us-east-1", "2025-01-01T00:00:00Z", "main-hub-production", 150, JSON.stringify({ tags: { Name: "sphinx" } }));
   ins.run("lnd-db-1", "db.r7g.xlarge", "aurora-postgresql", "16.4", "aurora-iopt1", 200, "available", "us-east-1", "2025-01-01T00:00:00Z", "lnd-cluster", 400, "{}");
   ins.run("lnd-db-2", "db.r7g.xlarge", "aurora-postgresql", "16.4", "aurora-iopt1", 200, "available", "us-east-1", "2025-01-01T00:00:00Z", "lnd-cluster", 400, "{}");
   ins.run("legacy-mysql", "db.t4g.medium", "mysql", "8.0", "gp3", 50, "available", "us-east-1", "2025-01-01T00:00:00Z", null, 60, "{}");
-  assert.deepEqual(rdsLoadTargets(1).map((t) => t.id), ["legacy-mysql", "lnd-cluster", "sphinx-hub-production"]);
+  assert.deepEqual(rdsLoadTargets(1).map((t) => t.id), ["legacy-mysql", "lnd-cluster", "main-hub-production"]);
 
   const series = { reads: flat(14, 300, 330_000), writes: flat(14, 300, 1_000), storage: flat(14, 3600, 6.39e9), cache_hit: flat(14, 300, 91), acu_1m: burstyAcu(3), acu_avg: flat(14, 300, 0.8), cpu_avg: flat(14, 300, 20), cpu_max: flat(14, 300, 90) };
   const profile = buildProfile(target(), series, NOW);
   const jev = parseLoadAnswers({ shape: { type: "choice", choice: "scheduled_bursts", confidence: 0.8 }, io_cause: { type: "choice", choice: "cache_starved_reads", confidence: 0.9 }, throttled_by_cap: { type: "noul", noul: 0.7 }, structural: { type: "noul", noul: 0.95 }, lever: { type: "choice", choice: "io_optimized_storage", confidence: 0.6 } });
   db.prepare("insert into rds_load_profiles(target_id, kind, region, profile, statements, slow_log, jev, profile_hash) values (?, 'cluster', 'us-east-1', ?, ?, ?, ?, ?)")
-    .run("sphinx-hub-production", JSON.stringify(profile), JSON.stringify({ enabled: false, window_days: 7, statements: [], note: "PI off" }), JSON.stringify({ files: [], lines_scanned: 0, duration_lines: 0, temp_file_lines: 0, checkpoint_lines: 0, statements: [], note: "no durations" }), JSON.stringify(jev), profileHash(profile, null));
+    .run("main-hub-production", JSON.stringify(profile), JSON.stringify({ enabled: false, window_days: 7, statements: [], note: "PI off" }), JSON.stringify({ files: [], lines_scanned: 0, duration_lines: 0, temp_file_lines: 0, checkpoint_lines: 0, statements: [], note: "no durations" }), JSON.stringify(jev), profileHash(profile, null));
   assert.deepEqual(rdsLoadTargets(1).map((t) => t.id), ["legacy-mysql", "lnd-cluster"], "a profile from this minute is fresh");
 
   // by the cluster id, and through a member instance id
-  assert.equal(latestRdsLoad("sphinx-hub-production")?.jev?.lever, "io_optimized_storage");
-  assert.equal(latestRdsLoad("sphinx-hub-production-instance-1")?.target_id, "sphinx-hub-production");
+  assert.equal(latestRdsLoad("main-hub-production")?.jev?.lever, "io_optimized_storage");
+  assert.equal(latestRdsLoad("main-hub-production-instance-1")?.target_id, "main-hub-production");
   assert.equal(latestRdsLoad("legacy-mysql"), null);
 
-  const facts = resourceFacts({ resource: "sphinx-hub-production", resource_name: null, rule: "aurora_storage_tier" });
+  const facts = resourceFacts({ resource: "main-hub-production", resource_name: null, rule: "aurora_storage_tier" });
   assert.equal(facts.kind, "rds");
-  assert.equal(facts.id, "sphinx-hub-production");
-  assert.deepEqual(facts.cluster, { id: "sphinx-hub-production", members: ["sphinx-hub-production-instance-1"], storage_type: "aurora" });
+  assert.equal(facts.id, "main-hub-production");
+  assert.deepEqual(facts.cluster, { id: "main-hub-production", members: ["main-hub-production-instance-1"], storage_type: "aurora" });
   assert.equal(facts.engine, "aurora-postgresql 16.11");
   assert.deepEqual(facts.tags, { Name: "sphinx" });
   assert.equal(facts.load?.shape, "scheduled_bursts");
@@ -181,7 +181,7 @@ test("rdsLoadTargets: one entry per cluster, standalone instances by id, fresh p
   assert.equal(two.load, null);
 
   // the rule cites the profile and trusts a structural pattern more
-  const sum = loadSummary(latestRdsLoad("sphinx-hub-production"));
+  const sum = loadSummary(latestRdsLoad("main-hub-production"));
   const note = auroraLoadNote(sum!, 0.6);
   assert.equal(note.confidence, 0.8);
   assert.match(note.note, /95\.0M reads/);

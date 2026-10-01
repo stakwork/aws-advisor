@@ -177,9 +177,9 @@ test("recommendations: same (resource, action) merge into the highest estimate, 
     rec(7, { resource: null, est_monthly_saving: 90 }),
     rec(8, { status: "approved", est_monthly_saving: 50 }),   // same resource/action, other status: its own entry
     // One Aurora cluster named three ways by three answers: one decision, one impact row.
-    rec(9, { source: "agent", rule: "agent:iopt", resource: "sphinx-hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 470 }),
-    rec(10, { source: "agent", rule: "agent:iopt", resource: "rds:sphinx-hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 465 }),
-    rec(11, { source: "rules", rule: "aurora_storage_tier", resource: "arn:aws:rds:us-east-1:123456789012:cluster:sphinx-hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 351 }),
+    rec(9, { source: "agent", rule: "agent:iopt", resource: "hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 470 }),
+    rec(10, { source: "agent", rule: "agent:iopt", resource: "rds:hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 465 }),
+    rec(11, { source: "rules", rule: "aurora_storage_tier", resource: "arn:aws:rds:us-east-1:123456789012:cluster:hub-production", action_type: "aurora_set_storage_iopt", status: "approved", est_monthly_saving: 351 }),
   ];
   const merged = mergeRecommendations(rows);
   assert.deepEqual(merged.map((r) => r.id), [9, 6, 7, 8, 2, 5, 3]);

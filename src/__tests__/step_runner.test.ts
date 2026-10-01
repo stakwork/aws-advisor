@@ -68,7 +68,7 @@ test("step runner: the verdict for a whole command covers every chain and every 
   assert.equal(runnable("").runnable, false);
   assert.equal(runnable(undefined).runnable, false);
   // the three verify lines of the NAT study, as the agent wrote them
-  assert.equal(runnable("aws s3api get-bucket-lifecycle-configuration --bucket stakwork-vpc-flowlogs-745666712914-us-east-1").runnable, true);
+  assert.equal(runnable("aws s3api get-bucket-lifecycle-configuration --bucket stakwork-vpc-flowlogs-210987654321-us-east-1").runnable, true);
   assert.equal(runnable("aws ec2 describe-flow-logs --region us-east-1 --filter Name=resource-id,Values=subnet-1 --query 'FlowLogs[].[FlowLogId,ResourceId,FlowLogStatus,DeliverLogsStatus]'").runnable, true);
   assert.equal(runnable("aws ec2 describe-route-tables --route-table-ids rtb-0d3e848690a31239d").runnable, true);
 });

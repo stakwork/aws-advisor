@@ -73,14 +73,26 @@ test("impactFor: the stored series and the medians for an actioned recommendatio
   assert.equal(impactFor(99), null);
 
   const sum = verificationSummary();
-  assert.equal(sum.actioned, 2, "the duplicate is the same decision");
-  assert.equal(sum.rows.map((r: any) => r.status).join(","), "approved,done");
-  const aurora = sum.rows.find((r: any) => r.action_type === "aurora_set_storage_iopt");
+  assert.equal(sum.approved, 2, "the duplicate is the same decision");
+  const decided = sum.rows.filter((r: any) => r.origin === "decision");
+  assert.equal(decided.map((r: any) => r.status).join(","), "approved,done");
+  const aurora = decided.find((r: any) => r.action_type === "aurora_set_storage_iopt");
   assert.equal(aurora.id, 3, "the higher estimate is primary");
   assert.deepEqual(aurora.merged_ids, [3, 1]);
-  assert.equal(sum.claimed_usd_month, 474, "470 + 3.65, not 470 + 467 + 3.65");
+  assert.equal(sum.decision_claimed_usd_month, 474, "470 + 3.65, not 470 + 467 + 3.65");
   assert.equal(aurora.verdict, "realised", "the member that was checked lends the decision its verdict");
   assert.equal(aurora.verified_id, 1);
-  assert.equal(sum.realised_usd_month, 498, "counted once");
-  assert.equal(sum.pending, 1);
+  assert.equal(sum.decision_realised_usd_month, 498, "counted once");
+  assert.equal(decided.filter((r: any) => !r.verdict || r.verdict === "too_early").length, 1);
+});
+
+test("auto-actions are measured on the cost lines they move; tag and setting changes move none", async () => {
+  const { actionCostScope } = await import("../verify_math.js");
+  assert.equal(actionCostScope("swarm_park", { instance_type: "m6i.large" })?.usage_like[0], "%BoxUsage:m6i.large");
+  assert.equal(actionCostScope("schedule_hours", {})?.service, "Amazon Elastic Compute Cloud - Compute");
+  assert.deepEqual(actionCostScope("snapshot_archive")?.usage_like, ["%EBS:SnapshotUsage%", "%EBS:SnapshotArchive%"]);
+  assert.equal(actionCostScope("eip_release")?.service, "Amazon Virtual Private Cloud");
+  assert.equal(actionCostScope("ecr_lifecycle")?.service, "Amazon EC2 Container Registry (ECR)");
+  assert.equal(actionCostScope("acu_window")?.service, "Amazon Relational Database Service");
+  for (const k of ["consent_tag", "usage_schedule", "s3_request_metrics", "ec2_hibernate_migrate", "unknown_kind"]) assert.equal(actionCostScope(k), null, k);
 });
