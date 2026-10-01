@@ -79,3 +79,49 @@ test("support plan from severity codes and the charge per plan", async () => {
   assert.equal(supportCharge("enterprise", 20_000), 15_000);
   assert.equal(supportCharge("unknown", 20_000), null);
 });
+
+test("computeForecast: on the 1st, with nothing billed yet, the newest reconciled month stands in", () => {
+  const prior = {
+    month: "2026-08", days: 31, ri_amortized: 310, tax: 62,
+    lines: [
+      line("Amazon Relational Database Service", "InstanceUsage:db.r7g.large", 300, 1000),
+      line("EC2 - Other", "NatGateway-Bytes", 620),
+      line("AmazonCloudWatch", "DataProcessing-Bytes", 310),
+    ],
+  };
+  const f = computeForecast({
+    month: "2026-10", elapsed_days: 0, days_in_month: 31, lines: [],
+    records: { usage_net: 0, sp_fee: 0, sp_covered_od: 0, ri_amortized: 0, support: 0, tax: 0, other: 0, net_total: 0 },
+    sp_hourly: 7.3, sp_discount_rate: 0.27, support_plan: "basic",
+    now: { ec2_od_hourly: 10, ec2_running: 5, rds_od_hourly: 1, cache_od_hourly: 0, rds_reserved_hourly: null, cache_reserved_hourly: null, ebs_month: 0, s3_month: 0, lambda_month: 0 },
+    last_month: null, prior,
+  }, new Date("2026-10-01T08:00:00Z"));
+  const cat = (k: string) => f.categories.find((c) => c.key === k)!;
+  assert.equal(f.elapsed_days, 0); assert.equal(f.remaining_days, 31, "the whole month is still ahead");
+  assert.equal(cat("ec2_compute").per_day, 0, "the plan still covers the fleet");
+  assert.equal(cat("rds_instances").per_day, 7.2, "1 USD/h at August's 30 % billed share, times 24");
+  assert.equal(cat("usage").per_day, 30, "(620 + 310) over August's 31 days");
+  assert.equal(cat("reservations").per_day, 10);
+  assert.equal(cat("tax").per_day, 2);
+  assert.equal(f.locked_in, Math.round((7.3 * 24 * 31 + 10 * 31) * 100) / 100);
+  assert.ok(f.categories.every((c) => Number.isFinite(c.mtd_per_day)));
+});
+
+test("computeForecast: on the 1st the services table carries each leg, split by the reconciled month's lines", () => {
+  const prior = { month: "2026-09", days: 30, ri_amortized: 0, tax: 0, lines: [
+    line("EC2 - Other", "NatGateway-Bytes", 600), line("AmazonCloudWatch", "DataProcessing-Bytes", 300),
+    line("Amazon Relational Database Service", "InstanceUsage:db.r7g.large", 300, 1000),
+  ] };
+  const f = computeForecast({
+    month: "2026-10", elapsed_days: 0, days_in_month: 31, lines: [],
+    records: { usage_net: 0, sp_fee: 0, sp_covered_od: 0, ri_amortized: 0, support: 0, tax: 0, other: 0, net_total: 0 },
+    sp_hourly: null, sp_discount_rate: 0, support_plan: "basic",
+    now: { ec2_od_hourly: 0, ec2_running: 0, rds_od_hourly: 1, cache_od_hourly: 0, rds_reserved_hourly: null, cache_reserved_hourly: null, ebs_month: 310, s3_month: 0, lambda_month: 0 },
+    last_month: { total: 1200, services: { "EC2 - Other": 600, AmazonCloudWatch: 300, "Amazon Relational Database Service": 300 } }, prior,
+  }, new Date("2026-10-01T08:00:00Z"));
+  const svc = (s: string) => f.services.find((x) => x.service === s)!;
+  assert.equal(svc("AmazonCloudWatch").forecast, 310, "10 a day for 31 days");
+  assert.equal(svc("EC2 - Other").forecast, 620 + 310, "NAT at September's rate plus the volumes, which bill under EC2 - Other");
+  assert.equal(svc("Amazon Relational Database Service").forecast, 223.2, "1 USD/h at September's 30 % share");
+  assert.equal(Math.round(f.services.reduce((s, x) => s + x.forecast, 0) * 100) / 100, f.forecast_net, "the rows add up to the total");
+});

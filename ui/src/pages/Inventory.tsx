@@ -1225,6 +1225,36 @@ function EbsDetail({ d }: { d: any }) {
   );
 }
 
+/** The lifecycle rules already on a bucket: a one-line tally, the table folded away when there are many. */
+function LifecycleRules({ rules }: { rules: any[] }) {
+  const days = (d: number | null | undefined) => (d != null ? `${d} d` : "—");
+  const enabled = rules.filter((r) => r.status === "Enabled").length;
+  const tally = [
+    `${rules.length} rule${rules.length > 1 ? "s" : ""} on the bucket${enabled < rules.length ? ` (${enabled} enabled)` : ""}`,
+    rules.some((r) => r.abort_multipart_days != null) && "aborts incomplete uploads",
+    rules.filter((r) => r.transitions.length).length && `${rules.filter((r) => r.transitions.length).length} tier`,
+    rules.filter((r) => r.expiration_days != null).length && `${rules.filter((r) => r.expiration_days != null).length} expire`,
+  ].filter(Boolean).join(" · ");
+  return (
+    <details className="text-xs" open={rules.length <= 6}>
+      <summary className="cursor-pointer text-zinc-400">{tally}</summary>
+      <div className="mt-1 max-h-72 overflow-auto">
+        <table className="w-full"><thead className="sticky top-0 bg-zinc-900"><tr className="text-zinc-500"><th className="text-left font-normal">Rule</th><th className="text-left font-normal">Prefix</th><th className="text-left font-normal">Tiers</th><th className="text-right font-normal">Expire</th><th className="text-right font-normal">Noncurrent</th><th className="text-right font-normal">Abort uploads</th></tr></thead>
+          <tbody>{rules.map((r, i) => (
+            <tr key={`${r.id}-${i}`} className={`border-t border-zinc-800/60 ${r.status === "Enabled" ? "" : "text-zinc-600"}`}>
+              <td className="py-0.5 font-mono text-zinc-300">{r.id || "(no id)"}{r.status !== "Enabled" && <span className="ml-1 text-zinc-500">{r.status.toLowerCase()}</span>}</td>
+              <td className="font-mono text-zinc-400">{r.prefix || "(all)"}</td>
+              <td className="text-zinc-400">{r.transitions.length ? r.transitions.map((t: any) => `${t.storage_class} @ ${t.days ?? "?"} d`).join(", ") : "—"}</td>
+              <td className="text-right">{days(r.expiration_days)}</td>
+              <td className="text-right">{days(r.noncurrent_expiration_days)}</td>
+              <td className="text-right">{days(r.abort_multipart_days)}</td>
+            </tr>
+          ))}</tbody></table>
+      </div>
+    </details>
+  );
+}
+
 /** The usage analysis: bytes by age, what is read, and the lifecycle rules the advisor proposes (src/s3_usage.ts). */
 function S3UsageBlock({ name }: { name: string }) {
   const [u, setU] = useState<any>(null);
@@ -1235,6 +1265,8 @@ function S3UsageBlock({ name }: { name: string }) {
   useEffect(() => { load(); }, [name]);
   const refresh = async () => { setBusy(true); setErr(""); try { setU(await api(`/inventory/s3/${encodeURIComponent(name)}/usage/refresh`, { method: "POST", body: "{}" })); setState("ok"); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const gbOf = (b: number) => (b / 1e9).toFixed(2);
+  // the rules table already lists what is on the bucket; the note that repeats it is for the recommendation text
+  const notes: string[] = (u?.proposal?.notes ?? []).filter((n: string) => !(u?.lifecycle?.length && /lifecycle rule\(s\) already on the bucket/.test(n)));
   return (
     <Group title="Usage and lifecycle" action={<Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={refresh} disabled={busy} title="list up to ten thousand keys, the multipart uploads, the versions, the rules and the request metrics">{busy ? "Analysing…" : u ? "Analyse again" : "Analyse"}</Button>}>
       {state === "loading" ? <div className="text-sm text-zinc-500">…</div>
@@ -1251,8 +1283,11 @@ function S3UsageBlock({ name }: { name: string }) {
             </div>
             <table className="w-full text-xs"><thead><tr className="text-zinc-500"><th className="text-left font-normal">Standard bytes by age</th>{["0-30", "30-90", "90-365", "365+"].map((a) => <th key={a} className="text-right font-normal">{a} days</th>)}</tr></thead>
               <tbody><tr className="border-t border-zinc-800/60"><td className="py-0.5 text-zinc-400">GB</td>{["0-30", "30-90", "90-365", "365+"].map((a) => <td key={a} className="text-right">{gbOf(u.standard_by_age[a].bytes)}</td>)}</tr></tbody></table>
-            {u.by_prefix?.length > 1 && <div className="text-xs text-zinc-500">Top prefixes: {u.by_prefix.slice(0, 5).map((p: any) => `${p.prefix} ${gbOf(p.bytes)} GB${p.old_bytes ? ` (${gbOf(p.old_bytes)} old)` : ""}`).join(" · ")}</div>}
-            {u.lifecycle?.length > 0 && <div className="text-xs text-zinc-500">Rules on the bucket: {u.lifecycle.map((r: any) => `${r.id || "(no id)"} ${r.status}${r.transitions.length ? ` → ${r.transitions.map((t: any) => `${t.storage_class}@${t.days}d`).join(", ")}` : ""}${r.expiration_days ? ` expire@${r.expiration_days}d` : ""}${r.noncurrent_expiration_days ? ` noncurrent@${r.noncurrent_expiration_days}d` : ""}${r.abort_multipart_days ? ` abort-multipart@${r.abort_multipart_days}d` : ""}`).join(" · ")}</div>}
+            {u.by_prefix?.length > 1 && (
+              <table className="w-full text-xs"><thead><tr className="text-zinc-500"><th className="text-left font-normal">Top prefixes</th><th className="text-right font-normal">GB</th><th className="text-right font-normal">older than 30 days</th></tr></thead>
+                <tbody>{u.by_prefix.slice(0, 5).map((p: any) => <tr key={p.prefix} className="border-t border-zinc-800/60"><td className="py-0.5 font-mono text-zinc-300">{p.prefix}</td><td className="text-right">{gbOf(p.bytes)}</td><td className="text-right text-zinc-400">{p.old_bytes ? gbOf(p.old_bytes) : "—"}</td></tr>)}</tbody></table>
+            )}
+            {u.lifecycle?.length > 0 && <LifecycleRules rules={u.lifecycle} />}
             {u.proposal.rules.length ? (
               <div className="rounded border border-zinc-800 bg-zinc-950/60 p-2">
                 <div className="text-zinc-200">Proposed: {u.proposal.rules.length} rule{u.proposal.rules.length > 1 ? "s" : ""}{u.proposal.est_usd_month ? <span className="ml-2 text-emerald-300">≈ {usd(u.proposal.est_usd_month, 2)}/mo</span> : null} <span className="text-zinc-500">· also a recommendation (tier approve)</span></div>
@@ -1260,7 +1295,7 @@ function S3UsageBlock({ name }: { name: string }) {
                 <details className="mt-1 text-xs"><summary className="cursor-pointer text-zinc-500">put-bucket-lifecycle-configuration JSON <CopyButton text={JSON.stringify(u.proposal.lifecycle, null, 2)} /></summary><Code className="max-h-64 overflow-auto">{JSON.stringify(u.proposal.lifecycle, null, 2)}</Code></details>
               </div>
             ) : <div className="text-xs text-zinc-500">Nothing to propose.</div>}
-            {u.proposal.notes?.length > 0 && <div className="text-xs text-zinc-500">{u.proposal.notes.join(" · ")}</div>}
+            {notes.length > 0 && <ul className="list-disc space-y-0.5 pl-4 text-xs text-zinc-500">{notes.map((n: string) => <li key={n}>{n}</li>)}</ul>}
             {err && <div className="text-xs text-red-300">{err}</div>}
           </div>
         )}

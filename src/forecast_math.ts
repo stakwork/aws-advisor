@@ -23,7 +23,7 @@ export interface InventoryNow {
 }
 export interface ForecastInput {
   month: string;
-  /** complete days the month-to-date figures cover (Cost Explorer lags a day) */
+  /** complete days the month-to-date figures cover (Cost Explorer lags a day); 0 on the 1st */
   elapsed_days: number; days_in_month: number;
   lines: PricedLine[]; records: RecordTotals;
   sp_hourly: number | null;
@@ -34,6 +34,9 @@ export interface ForecastInput {
   support_plan: "basic" | "developer" | "business" | "enterprise" | "unknown";
   /** last full month's billed net per service and in total, for the comparison */
   last_month: { total: number; services: Record<string, number> } | null;
+  /** the newest reconciled month, standing in where this month has nothing yet: the billed share of a leg with no lines,
+   *  and on day 0 the usage, reservation and tax run rates */
+  prior?: { month: string; days: number; lines: PricedLine[]; ri_amortized: number; tax: number } | null;
 }
 export interface ForecastService { service: string; mtd: number; per_day: number; remaining: number; forecast: number; basis: Basis; last_month: number | null; delta: number | null }
 export interface ForecastCategory { key: string; label: string; basis: Basis; mtd: number; mtd_per_day: number; per_day: number; remaining: number; detail: string }
@@ -52,6 +55,11 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const SP_FEE_SERVICE = /^Savings Plans for /;
 const SUPPORT_SERVICE = /Support/;
 const TAX_SERVICE = /^Tax$/;
+/** the service an inventory leg bills under, for a leg with no lines to split by */
+const LEG_SERVICE: Record<string, string> = {
+  ec2_compute: "Amazon Elastic Compute Cloud - Compute", ebs: "EC2 - Other", s3_storage: "Amazon Simple Storage Service",
+  rds_instances: "Amazon Relational Database Service", cache_nodes: "Amazon ElastiCache", lambda: "AWS Lambda",
+};
 
 /** Which inventory-priced bucket a usage line belongs to, or null for a usage-based line. */
 export function categoryOf(l: { service: string; usage_type: string; rule: string | null }): string | null {
@@ -66,14 +74,19 @@ export function categoryOf(l: { service: string; usage_type: string; rule: strin
 }
 
 export function computeForecast(input: ForecastInput, now = new Date()): Forecast {
-  const elapsed = Math.max(1, input.elapsed_days);
+  const elapsed = Math.max(0, input.elapsed_days);
+  const mtdDays = Math.max(1, elapsed);
   const remaining = Math.max(0, input.days_in_month - elapsed);
   const r = input.records;
-  const ratio = (ls: PricedLine[]) => { const od = ls.reduce((s, l) => s + l.actual_od, 0); const net = ls.reduce((s, l) => s + l.net, 0); return od > 1 ? Math.min(1, Math.max(0, net / od)) : 1; };
+  const prior = input.prior && input.prior.days > 0 ? input.prior : null;
+  const fresh = elapsed === 0 && prior != null;
   const sum = (ls: PricedLine[]) => ls.reduce((s, l) => s + l.net, 0);
+  const billedShare = (ls: PricedLine[]): number | null => { const od = ls.reduce((s, l) => s + l.actual_od, 0); return od > 1 ? Math.min(1, Math.max(0, sum(ls) / od)) : null; };
+  // a leg with no lines yet takes the billed share of the newest reconciled month, else full on demand
+  const ratio = (key: string) => billedShare(get(key)) ?? (prior ? billedShare(prior.lines.filter((l) => (categoryOf(l) ?? "usage") === key)) : null) ?? 1;
   const byCat = new Map<string, PricedLine[]>();
   for (const l of input.lines) { const c = categoryOf(l) ?? "usage"; byCat.set(c, [...(byCat.get(c) || []), l]); }
-  const get = (c: string) => byCat.get(c) || [];
+  function get(c: string) { return byCat.get(c) || []; }
   // Savings Plan: the fee is fixed; it covers on-demand value up to fee / (1 - discount) per hour, EC2 first
   const rate = input.sp_discount_rate > 0 && input.sp_discount_rate < 1 ? input.sp_discount_rate : 0;
   const spHourly = input.sp_hourly ?? (elapsed > 0 ? r.sp_fee / (elapsed * 24) : 0);
@@ -82,13 +95,13 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   const categories: ForecastCategory[] = [];
   const cat = (key: string, label: string, basis: Basis, perDay: number, detail: string) => {
     const ls = get(key); const mtd = sum(ls);
-    categories.push({ key, label, basis, mtd: round2(mtd), mtd_per_day: round2(mtd / elapsed), per_day: round2(perDay), remaining: round2(perDay * remaining), detail });
+    categories.push({ key, label, basis, mtd: round2(mtd), mtd_per_day: round2(mtd / mtdDays), per_day: round2(perDay), remaining: round2(perDay * remaining), detail });
   };
   cat("ec2_compute", "EC2 instances", "inventory", ec2NetHourly * 24,
     `${input.now.ec2_running} running at ${round2(input.now.ec2_od_hourly)} USD/h on demand${coveredCapHourly > 0 ? `; the Savings Plan covers ${round2(coveredCapHourly)} USD/h of it` : ""}`);
   cat("ebs", "EBS volumes", "inventory", input.now.ebs_month / input.days_in_month, `volumes as they are now, ${round2(input.now.ebs_month)} USD a month at list`);
   cat("s3_storage", "S3 storage", "inventory", input.now.s3_month / input.days_in_month, `buckets as they are now, ${round2(input.now.s3_month)} USD a month at list`);
-  const rdsRatio = ratio(get("rds_instances")); const cacheRatio = ratio(get("cache_nodes")); const lambdaRatio = ratio(get("lambda"));
+  const rdsRatio = ratio("rds_instances"); const cacheRatio = ratio("cache_nodes"); const lambdaRatio = ratio("lambda");
   // reservations: two estimates of what is left to pay on demand, the month's own billed share (catches reservations the
   // list misses) and the reservation list against the inventory (catches ones bought late in the month); the lower wins
   const toPay = (od: number, reserved: number | null, billedRatio: number): { hourly: number; how: string } => {
@@ -101,12 +114,14 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   cat("cache_nodes", "ElastiCache nodes", "inventory", cachePay.hourly * 24, `${round2(input.now.cache_od_hourly)} USD/h on demand, ${cachePay.how}`);
   cat("lambda", "Lambda", "inventory", (input.now.lambda_month / 30) * lambdaRatio, `30-day rate of the functions, ${round2(input.now.lambda_month)} USD a month at list, ${Math.round(lambdaRatio * 100)} % of it to pay`);
   const usageLines = get("usage");
-  cat("usage", "Usage-based lines", "run_rate", sum(usageLines) / elapsed, `${usageLines.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at their month-to-date daily average`);
+  const priorUsage = prior ? prior.lines.filter((l) => categoryOf(l) == null) : [];
+  if (fresh) cat("usage", "Usage-based lines", "run_rate", sum(priorUsage) / prior!.days, `nothing billed yet; ${priorUsage.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at ${prior!.month}'s daily average`);
+  else cat("usage", "Usage-based lines", "run_rate", sum(usageLines) / mtdDays, `${usageLines.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at their month-to-date daily average`);
   // fixed legs from the record totals
   const spFeeRemaining = spHourly * 24 * remaining;
-  const riPerDay = r.ri_amortized / elapsed;
-  categories.push({ key: "sp_fee", label: "Savings Plan fee", basis: "fixed", mtd: round2(r.sp_fee), mtd_per_day: round2(r.sp_fee / elapsed), per_day: round2(spHourly * 24), remaining: round2(spFeeRemaining), detail: `${round2(spHourly)} USD/h committed` });
-  categories.push({ key: "reservations", label: "Reservations", basis: "fixed", mtd: round2(r.ri_amortized), mtd_per_day: round2(riPerDay), per_day: round2(riPerDay), remaining: round2(riPerDay * remaining), detail: "amortized, at the month-to-date rate" });
+  const riPerDay = fresh ? prior!.ri_amortized / prior!.days : r.ri_amortized / mtdDays;
+  categories.push({ key: "sp_fee", label: "Savings Plan fee", basis: "fixed", mtd: round2(r.sp_fee), mtd_per_day: round2(r.sp_fee / mtdDays), per_day: round2(spHourly * 24), remaining: round2(spFeeRemaining), detail: `${round2(spHourly)} USD/h committed` });
+  categories.push({ key: "reservations", label: "Reservations", basis: "fixed", mtd: round2(r.ri_amortized), mtd_per_day: round2(r.ri_amortized / mtdDays), per_day: round2(riPerDay), remaining: round2(riPerDay * remaining), detail: fresh ? `amortized, at ${prior!.month}'s daily rate` : "amortized, at the month-to-date rate" });
   // charges before support and tax
   const usageRemaining = categories.filter((c) => c.key !== "sp_fee" && c.key !== "reservations").reduce((s, c) => s + c.remaining, 0);
   const chargesMtd = input.lines.reduce((s, l) => s + l.net, 0) + r.sp_fee;
@@ -118,9 +133,9 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   const supportDetail = input.support_plan === "basic" ? (r.support > 0 ? "Basic plan: no more support charges; what was posted stays (a cancelled plan is billed to the day)" : "Basic plan: no support charge")
     : input.support_plan === "unknown" ? "plan unknown (grant support:DescribeSeverityLevels), taken as billed so far"
     : `${input.support_plan[0].toUpperCase()}${input.support_plan.slice(1)} Support on the month's charges`;
-  categories.push({ key: "support", label: "Support", basis: "fixed", mtd: round2(r.support), mtd_per_day: round2(r.support / elapsed), per_day: round2(supportRemaining / Math.max(1, remaining)), remaining: round2(supportRemaining), detail: supportDetail });
-  const taxPerDay = r.tax / elapsed;
-  categories.push({ key: "tax", label: "Tax", basis: "run_rate", mtd: round2(r.tax), mtd_per_day: round2(taxPerDay), per_day: round2(taxPerDay), remaining: round2(taxPerDay * remaining), detail: "as billed so far, pro rata" });
+  categories.push({ key: "support", label: "Support", basis: "fixed", mtd: round2(r.support), mtd_per_day: round2(r.support / mtdDays), per_day: round2(supportRemaining / Math.max(1, remaining)), remaining: round2(supportRemaining), detail: supportDetail });
+  const taxPerDay = fresh ? prior!.tax / prior!.days : r.tax / mtdDays;
+  categories.push({ key: "tax", label: "Tax", basis: "run_rate", mtd: round2(r.tax), mtd_per_day: round2(r.tax / mtdDays), per_day: round2(taxPerDay), remaining: round2(taxPerDay * remaining), detail: fresh ? `${prior!.month}'s daily rate` : "as billed so far, pro rata" });
   const remainingNet = categories.reduce((s, c) => s + c.remaining, 0);
   const mtdNet = r.net_total;
   const forecastNet = round2(mtdNet + remainingNet);
@@ -130,14 +145,24 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   for (const c of categories) {
     if (["sp_fee", "reservations", "support", "tax"].includes(c.key)) continue;
     const ls = get(c.key); const catMtd = sum(ls);
-    // split a category's remaining across its services in proportion to their month-to-date net (one service almost always)
+    // split a category's remaining across its services in proportion to their month-to-date net (one service almost always);
+    // a leg with no lines yet splits by the newest reconciled month's, else goes to the service that bills it
     const byService = new Map<string, number>(); for (const l of ls) byService.set(l.service, (byService.get(l.service) || 0) + l.net);
-    if (!byService.size) continue;
-    for (const [service, mtd] of byService) { const share = catMtd > 0 ? mtd / catMtd : 1 / byService.size; add(service, mtd, c.remaining * share, c.basis); }
+    if (byService.size) {
+      for (const [service, mtd] of byService) { const share = catMtd > 0 ? mtd / catMtd : 1 / byService.size; add(service, mtd, c.remaining * share, c.basis); }
+      continue;
+    }
+    if (c.remaining <= 0) continue;
+    const priorLs = prior ? prior.lines.filter((l) => (categoryOf(l) ?? "usage") === c.key) : [];
+    const weight = (l: PricedLine) => (l.net > 0 ? l.net : l.actual_od);
+    const byPrior = new Map<string, number>(); for (const l of priorLs) byPrior.set(l.service, (byPrior.get(l.service) || 0) + weight(l));
+    const priorTotal = [...byPrior.values()].reduce((s, v) => s + v, 0);
+    if (priorTotal > 0) for (const [service, w] of byPrior) add(service, 0, c.remaining * (w / priorTotal), c.basis);
+    else if (LEG_SERVICE[c.key]) add(LEG_SERVICE[c.key], 0, c.remaining, c.basis);
   }
   add("Savings Plans for AWS Compute usage", r.sp_fee, spFeeRemaining, "fixed");
   if (r.support > 0) add("AWS Support", r.support, supportRemaining, "fixed");
-  if (r.tax !== 0) add("Tax", r.tax, taxPerDay * remaining, "run_rate");
+  if (r.tax !== 0 || taxPerDay !== 0) add("Tax", r.tax, taxPerDay * remaining, "run_rate");
   const lastServices = input.last_month?.services ?? {};
   const lastKey = (service: string) => Object.keys(lastServices).find((k) => k === service || (SP_FEE_SERVICE.test(service) && SP_FEE_SERVICE.test(k)) || (SUPPORT_SERVICE.test(service) && SUPPORT_SERVICE.test(k)) || (TAX_SERVICE.test(service) && TAX_SERVICE.test(k)));
   const serviceRows: ForecastService[] = [...services.entries()].map(([service, e]) => {
@@ -161,6 +186,7 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
     last_month_total: lastTotal != null ? round2(lastTotal) : null, delta_pct: lastTotal ? round2(((forecastNet - lastTotal) / lastTotal) * 100) : null,
     services: serviceRows, categories, movers,
     assumptions: [
+      ...(fresh ? [`Nothing is billed for the month yet, so the usage-based lines, reservations and tax run at ${prior!.month}'s daily rates, and RDS, ElastiCache and Lambda take ${prior!.month}'s billed share until this month has lines.`] : []),
       `Month to date is what Cost Explorer has for ${elapsed} complete day${elapsed === 1 ? "" : "s"}; the remaining ${remaining} are priced from the inventory as it is now (instances, databases, cache nodes, volumes, buckets, functions), usage-based lines at their month-to-date daily average, and the commitments and support as fixed.`,
       `The Savings Plan fee is fixed (${round2(spHourly)} USD/h); at its ${Math.round(rate * 100)} % discount it covers ${round2(coveredCapHourly)} USD/h of on-demand compute, and only compute above that is paid on demand. Reservations are taken at their month-to-date amortized rate and the instances and nodes they cover cost nothing more; what is left is priced on demand.`,
       "Spot instances are billed at market price and stay in the usage-based leg; Batch workers count while they run, so the compute leg moves with the queue.",

@@ -5,7 +5,7 @@
  */
 import { db } from "./db.js";
 import { credentialGate } from "./gate.js";
-import { computeReconciliation, getReconciliation, lastFullMonth, loadMonthInput } from "./reconcile.js";
+import { computeReconciliation, getReconciliation, lastFullMonth, listReconciliations, loadMonthInput } from "./reconcile.js";
 import { Forecast, ForecastInput, computeForecast } from "./forecast_math.js";
 import { daysInMonth, localDay } from "./localdate.js";
 import { listCommitments } from "./commitments.js";
@@ -81,11 +81,11 @@ export function resourceChanges(month: string): { new_resources: ResourceChange[
   return { new_resources, gone_resources };
 }
 
-/** Complete days Cost Explorer has for the month: the latest stored day before today, else yesterday. */
+/** Complete days Cost Explorer has for the month: the latest stored day before today, else yesterday (0 on the 1st). */
 export function elapsedDays(month: string, today = localDay()): number {
   const last = (db.prepare("select max(day) as d from spend_daily where day < ? and day >= ?").get(today, `${month}-01`) as { d: string | null }).d;
   const fallback = Number(today.slice(8, 10)) - 1;
-  return Math.max(1, last ? Number(last.slice(8, 10)) : fallback);
+  return Math.max(0, last ? Number(last.slice(8, 10)) : fallback);
 }
 
 export async function runForecast(onLog: (s: string) => void = () => {}, today = localDay()): Promise<StoredForecast> {
@@ -95,13 +95,20 @@ export async function runForecast(onLog: (s: string) => void = () => {}, today =
   const input = await loadMonthInput(month, onLog);
   const priced = computeReconciliation(input);
   const lastMonth = getReconciliation(lastFullMonth(new Date(`${today}T12:00:00`)));
-  const rate = lastMonth ? lastMonth.totals.sp_discount_rate / 100 : input.records.sp_covered_od > 0 ? 1 - input.records.sp_fee / input.records.sp_covered_od : 0;
+  // last month is reconciled from the 3rd; until then the newest reconciled month stands in, so the Savings Plan
+  // discount is never taken as 0 (that prices the whole fleet on demand on top of the fee)
+  const newest = listReconciliations().find((m) => m.month < month);
+  const prior = lastMonth ?? (newest ? getReconciliation(newest.month) : null);
+  const rate = lastMonth ? lastMonth.totals.sp_discount_rate / 100
+    : input.records.sp_covered_od > 0 ? 1 - input.records.sp_fee / input.records.sp_covered_od
+    : prior ? prior.totals.sp_discount_rate / 100 : 0;
   const last = lastMonth ? {
     total: lastMonth.totals.actual_net,
     services: { ...Object.fromEntries(lastMonth.services.map((s) => [s.service, s.actual_net])), "Savings Plans for AWS Compute usage": lastMonth.totals.sp_fee_actual, "AWS Support": lastMonth.totals.support_actual, Tax: lastMonth.totals.tax_actual },
   } : null;
   const plan = (await refreshSupportPlan(onLog)).plan;
-  const f = computeForecast({ month, elapsed_days: elapsedDays(month, today), days_in_month: daysInMonth(`${month}-01`), lines: priced.lines, records: input.records, sp_hourly: input.sp_hourly, sp_discount_rate: rate, now: inventoryNow(), support_plan: plan, last_month: last });
+  const f = computeForecast({ month, elapsed_days: elapsedDays(month, today), days_in_month: daysInMonth(`${month}-01`), lines: priced.lines, records: input.records, sp_hourly: input.sp_hourly, sp_discount_rate: rate, now: inventoryNow(), support_plan: plan, last_month: last,
+    prior: prior ? { month: prior.month, days: daysInMonth(`${prior.month}-01`), lines: prior.lines, ri_amortized: prior.totals.ri_amortized, tax: prior.totals.tax_actual } : null });
   const stored: StoredForecast = { ...f, ...resourceChanges(month), support_plan: plan };
   db.prepare("insert into forecasts(day, month, computed_at, json) values (?, ?, ?, ?) on conflict(day) do update set month = excluded.month, computed_at = excluded.computed_at, json = excluded.json").run(today, month, f.computed_at, JSON.stringify(stored));
   onLog(`${month}: ${f.mtd_net} so far over ${f.elapsed_days} days, on track for ${f.forecast_net}${f.last_month_total != null ? ` (last month ${f.last_month_total}, ${f.delta_pct! >= 0 ? "+" : ""}${f.delta_pct} %)` : ""}`);

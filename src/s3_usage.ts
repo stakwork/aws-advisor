@@ -160,7 +160,7 @@ export function proposeLifecycle(u: S3Usage): LifecycleProposal {
   const k = scale(u);
   const existing = u.lifecycle ?? [];
   const has = (f: (r: NonNullable<S3Usage["lifecycle"]>[number]) => boolean) => existing.some((r) => r.status === "Enabled" && f(r));
-  if (existing.length) notes.push(`${existing.length} lifecycle rule(s) already on the bucket: ${existing.map((r) => `${r.id || "(no id)"}${r.transitions.length ? ` → ${r.transitions.map((t) => `${t.storage_class}@${t.days}d`).join(", ")}` : ""}${r.expiration_days ? ` expire@${r.expiration_days}d` : ""}`).join("; ")}`);
+  if (existing.length) notes.push(`${existing.length} lifecycle rule(s) already on the bucket: ${existing.slice(0, 5).map((r) => `${r.id || "(no id)"}${r.transitions.length ? ` → ${r.transitions.map((t) => `${t.storage_class}@${t.days}d`).join(", ")}` : ""}${r.expiration_days ? ` expire@${r.expiration_days}d` : ""}`).join("; ")}${existing.length > 5 ? `; and ${existing.length - 5} more` : ""}`);
   if (u.sample.truncated) notes.push(`the listing was sampled (${u.sample.objects.toLocaleString()} of about ${u.inventory.objects ? Math.round(u.inventory.objects).toLocaleString() : "?"} objects); bytes are scaled to the bucket`);
 
   if (u.multipart.uploads > 0 && !has((r) => r.abort_multipart_days != null)) {
