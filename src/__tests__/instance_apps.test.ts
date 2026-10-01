@@ -161,3 +161,51 @@ test("ports: which rule lets a port in, what blocks it, a box without a public a
   const unused = rulesWithoutListener([allWorld, https, ssh, mqtt], [{ proto: "tcp", port: 443, scope: "all" }, { proto: "tcp", port: 22, scope: "loopback" }], names);
   assert.deepEqual(unused.map((u) => `${u.ports} from ${u.source}`), ["tcp 1883 from anywhere", "tcp 22 from 10.0.0.0/8"], "all-traffic rules always cover something; a loopback socket does not use a rule");
 });
+
+test("network ACLs: first matching rule by number wins, narrow denies are exceptions, the replies need an outbound rule", async () => {
+  const { cidrContains, naclDecide, naclVerdict, reachOf } = await import("../instance_apps.js");
+  type E = import("../instance_apps.js").NaclEntry;
+  const e = (RuleNumber: number, RuleAction: string, Egress: boolean, CidrBlock: string, Protocol = "-1", PortRange: E["PortRange"] = null): E => ({ RuleNumber, RuleAction, Egress, Protocol, CidrBlock, Ipv6CidrBlock: null, PortRange });
+  const DEFAULT: E[] = [e(100, "allow", false, "0.0.0.0/0"), e(32767, "deny", false, "0.0.0.0/0"), e(100, "allow", true, "0.0.0.0/0"), e(32767, "deny", true, "0.0.0.0/0")];
+
+  assert.ok(cidrContains("0.0.0.0/0", "203.0.113.0/24"));
+  assert.ok(cidrContains("10.0.0.0/8", "10.9.0.0/16"));
+  assert.ok(!cidrContains("10.9.0.0/16", "10.0.0.0/8"));
+  assert.ok(!cidrContains("203.0.113.7/32", "0.0.0.0/0"));
+  assert.ok(cidrContains("::/0", "2001:db8::/32"));
+
+  assert.equal(naclVerdict(DEFAULT, "tcp", 443, "0.0.0.0/0").verdict, "allow", "the default ACL lets everything in and out");
+  // a few attackers blocked does not close the port to the internet
+  const blocklist = [e(90, "deny", false, "203.0.113.7/32"), ...DEFAULT];
+  assert.equal(naclDecide(blocklist, false, "tcp", 443, "0.0.0.0/0").entry?.RuleNumber, 100);
+  assert.equal(naclVerdict(blocklist, "tcp", 443, "0.0.0.0/0").verdict, "allow");
+  // a deny on the port from anywhere, before the allow, blocks it
+  const noRedis = [e(50, "deny", false, "0.0.0.0/0", "6", { From: 6379, To: 6379 }), ...DEFAULT];
+  assert.equal(naclVerdict(noRedis, "tcp", 6379, "0.0.0.0/0").verdict, "deny");
+  assert.equal(naclVerdict(noRedis, "tcp", 443, "0.0.0.0/0").verdict, "allow");
+  assert.equal(naclVerdict(noRedis, "udp", 6379, "0.0.0.0/0").verdict, "allow", "the deny is tcp only");
+  // only one network allowed in, the rest of the world denied: reachable from that network only
+  const office = [e(10, "allow", false, "198.51.100.0/24", "6", { From: 22, To: 22 }), e(20, "deny", false, "0.0.0.0/0", "6", { From: 22, To: 22 }), ...DEFAULT];
+  assert.deepEqual(naclVerdict(office, "tcp", 22, "0.0.0.0/0"), { verdict: "narrow", cidrs: ["198.51.100.0/24"], entry: office[1], reply_entry: null, partial_reply: false });
+  // stateless: no outbound rule for the replies means nobody can use the port
+  const noOut: E[] = [e(100, "allow", false, "0.0.0.0/0"), e(32767, "deny", true, "0.0.0.0/0")];
+  assert.equal(naclVerdict(noOut, "tcp", 443, "0.0.0.0/0").verdict, "no_reply");
+  const linuxOnly: E[] = [e(100, "allow", false, "0.0.0.0/0"), e(100, "allow", true, "0.0.0.0/0", "6", { From: 32768, To: 60999 })];
+  const half = naclVerdict(linuxOnly, "tcp", 443, "0.0.0.0/0");
+  assert.equal(half.verdict, "allow"); assert.equal(half.partial_reply, true, "clients on 61000-65535 get no reply");
+
+  // through reachOf: the security group lets it in, the ACL does not
+  const sg = [{ group_id: "sg-0example1", ip_protocol: "tcp", from_port: 6379, to_port: 6379, cidr_ipv4: "0.0.0.0/0", cidr_ipv6: null, referenced_group_id: null, prefix_list_id: null }];
+  const redis = { proto: "tcp" as const, port: 6379, scope: "all" as const, bind: "0.0.0.0" };
+  const blocked = reachOf(redis, sg, { public_ip: "203.0.113.10", group_names: { "sg-0example1": "web-sg" }, nacl: { acl_id: "acl-0example1", entries: noRedis } });
+  assert.equal(blocked.exposure, "closed");
+  assert.equal(blocked.blocked_by, "network_acl");
+  assert.equal(blocked.reason, "blocked by network ACL: web-sg lets 6379/tcp in from anywhere, but acl-0example1 rule #50 denies tcp 6379 from 0.0.0.0/0");
+  const open = reachOf(redis, sg, { public_ip: "203.0.113.10", nacl: { acl_id: "acl-0example1", entries: DEFAULT } });
+  assert.equal(open.exposure, "internet"); assert.equal(open.blocked_by, null);
+  assert.equal(reachOf(redis, [], { public_ip: "203.0.113.10" }).blocked_by, "security_group");
+  const narrow = reachOf({ ...redis, port: 22 }, [{ ...sg[0], from_port: 22, to_port: 22 }], { public_ip: "203.0.113.10", nacl: { acl_id: "acl-0example1", entries: office } });
+  assert.equal(narrow.exposure, "network");
+  assert.equal(narrow.allowed_by[0].source, "198.51.100.0/24");
+  assert.match(narrow.nacl_note ?? "", /lets in only 198\.51\.100\.0\/24/);
+});

@@ -159,8 +159,9 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
         const tone: Record<string, string> = { internet: "text-red-300", network: "text-amber-300/90", group: "text-sky-300/90", closed: "text-emerald-300/80", local: "text-zinc-500" };
         const word: Record<string, string> = { internet: "open to the internet", network: "reachable from the network", group: "reachable from other groups", closed: "blocked by security group", local: "this box only" };
         const ports = d.ports.filter((p: any) => !p.gone); const closed = d.ports.filter((p: any) => p.gone);
-        const count = (e: string) => ports.filter((p: any) => p.exposure === e).length;
-        const parts = [["internet", "open to the internet"], ["network", "reachable from the network"], ["group", "from other groups"], ["closed", "blocked by security group"], ["local", "this box only"]]
+        const exposureKey = (p: any) => (p.exposure === "closed" && p.blocked_by === "network_acl" ? "nacl" : p.exposure);
+        const count = (e: string) => ports.filter((p: any) => exposureKey(p) === e).length;
+        const parts = [["internet", "open to the internet"], ["network", "reachable from the network"], ["group", "from other groups"], ["closed", "blocked by security group"], ["nacl", "blocked by network ACL"], ["local", "this box only"]]
           .filter(([e]) => count(e) > 0).map(([e, w]) => `${count(e)} ${w}`);
         // one broad world-open rule (all traffic, or a huge range) makes every listening port public: say it once, at the top
         const broad = ports.flatMap((p: any) => (p.allowed_by ?? []).filter((r: any) => r.broad && r.world)).find(Boolean);
@@ -181,9 +182,11 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
                 <li key={`${p.proto}:${p.port}`} className={`flex flex-wrap gap-x-2 ${p.gone ? "text-zinc-600 line-through" : "text-zinc-200"}`} title={`${p.bind || "?"} · ${p.scope} · first seen ${when(p.first_seen)} · seen on ${p.probes} probe${p.probes === 1 ? "" : "s"}${p.pid ? ` · pid ${p.pid}` : ""}${p.reason ? `\n${p.reason}` : ""}`}>
                   <span className="font-mono">{p.port}/{p.proto}</span>
                   <span className="text-zinc-400">→ {p.container ? <>container <span className="font-mono text-zinc-200">{p.container}</span>{p.container_port && p.container_port !== p.port ? <span className="text-zinc-500"> :{p.container_port}</span> : null}</> : p.app_name ? <span className="font-mono text-zinc-200">{p.app_name}</span> : p.process ? <span className="font-mono">{p.process}</span> : <span className="text-zinc-600">unknown owner</span>}</span>
-                  <span className={tone[p.exposure] || "text-zinc-500"}>{word[p.exposure] || p.exposure}</span>
+                  <span className={tone[p.exposure] || "text-zinc-500"} title={p.reason || undefined}>{p.exposure === "closed" && p.blocked_by === "network_acl" ? "blocked by network ACL" : word[p.exposure] || p.exposure}</span>
                   {!p.gone && p.exposure !== "local" && p.exposure !== "closed" && p.allowed_by?.[0] && <span className="text-zinc-500">via {ruleText(p.allowed_by[0])}{p.allowed_by.length > 1 ? ` (+${p.allowed_by.length - 1} more rule${p.allowed_by.length > 2 ? "s" : ""})` : ""}</span>}
                   {!p.gone && p.exposure === "network" && p.allowed_by?.[0]?.world && <span className="text-zinc-500">· no public address</span>}
+                  {!p.gone && p.exposure === "closed" && p.blocked_by === "network_acl" && p.reason && <span className="text-zinc-500">{p.reason.replace(/^blocked by network ACL: /, "")}</span>}
+                  {!p.gone && p.nacl_note && p.exposure !== "closed" && <span className="text-amber-300/80">· {p.nacl_note}</span>}
                 </li>
               ))}
             </ul>

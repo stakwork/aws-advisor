@@ -1117,7 +1117,14 @@ an IPv6 address), `network` (other addresses or a prefix list, or a world rule o
 box's IPv6 addresses (`network.ipv6` in the snapshot) for that. Every port also carries the rules that let it in
 (`allowed_by`: group name, ports, source, the rule's description) and a `reason` sentence, and a world rule that is
 all traffic or wider than 1,000 ports is flagged `broad` (a banner on the box names the ports public only because of
-it). The other direction is listed too: `unused_rules` are the rules that let nothing reach a listening port (a
+it). The subnet's **network ACL** is checked as well (`aws_vpc_network_acl`, table `nacls`, refreshed with the
+inventory; the subnet's own ACL, else the VPC's default): for every security group rule with a CIDR source, the
+lowest-numbered matching entry decides, a narrow deny before a world allow is an exception (a blocklist does not
+close a port), a world deny with narrower allows before it narrows the port to those networks, and because ACLs
+are stateless the replies need an outbound entry to the client's ephemeral ports (40000, 55000 and 62000 are
+sampled: Linux and Windows/macOS ranges). A port the groups let in but the ACL stops is `closed` with `blocked_by:
+"network_acl"` ("blocked by network ACL" and the deciding rule in the UI); one where only some clients' replies get
+out carries a `nacl_note`. The other direction is listed too: `unused_rules` are the rules that let nothing reach a listening port (a
 hole without a reason, a leftover, or an IPv6 rule on an IPv4-only box). Rows live in
 `instance_ports` with first and last seen; a port that appears or goes is a `port_opened` / `port_closed` event in
 the app events under its owner's name, and a port open to the internet raises a `port_exposed` alert (warning)

@@ -35,6 +35,13 @@ const sqliteNow = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
 // ---- Steampipe queries ------------------------------------------------------------------------------
 
+/** The network ACLs (entries and the subnets they cover), so a port the security groups let in can still be "blocked by network ACL". */
+const NACL_SQL = `
+  select network_acl_id as acl_id, vpc_id, region, is_default,
+         coalesce((select jsonb_agg(a ->> 'SubnetId') from jsonb_array_elements(coalesce(associations, '[]'::jsonb)) a), '[]'::jsonb) as subnets,
+         coalesce(entries, '[]'::jsonb) as entries
+  from ${S}.aws_vpc_network_acl`;
+
 /** Probe 1.8: the ingress rules of every security group, so a listening port can be told internet-facing from closed (src/instance_apps.ts exposureOf). */
 const SG_RULES_SQL = `
   select group_id, region, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, security_group_rule_id, description
@@ -177,7 +184,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     try { return await query<any>(sql); } catch (e: any) { errors.push(`${what}: ${describeError(e, `inventory ${what} (${tablesIn(sql).join(", ")})`, 300)}`); return undefined; }
   };
 
-  const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules] = await Promise.all([
+  const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules, nacls] = await Promise.all([
     attempt("ec2", EC2_SQL),
     attempt("ebs", EBS_SQL),
     attempt("ec2 cpu", EC2_CPU_SQL),
@@ -188,8 +195,10 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     attempt("rds iops", RDS_IOPS_SQL),
     attempt("elasticache cpu", CACHE_CPU_SQL),
     attempt("security group rules", SG_RULES_SQL),
+    attempt("network ACLs", NACL_SQL),
   ]);
   if (sgRules) { try { const { replaceIngressRules } = await import("./instance_apps.js"); replaceIngressRules(sgRules.map((r: any) => ({ group_id: String(r.group_id), region: r.region ?? null, ip_protocol: r.ip_protocol ?? null, from_port: r.from_port == null ? null : Number(r.from_port), to_port: r.to_port == null ? null : Number(r.to_port), cidr_ipv4: r.cidr_ipv4 ?? null, cidr_ipv6: r.cidr_ipv6 ?? null, referenced_group_id: r.referenced_group_id ?? null, prefix_list_id: r.prefix_list_id ?? null, rule_id: r.security_group_rule_id ?? null, description: r.description || null }))); } catch (e: any) { errors.push(`security group rules: ${e?.message || e}`); } }
+  if (nacls) { try { const { replaceNacls } = await import("./instance_apps.js"); replaceNacls(nacls.map((r: any) => ({ acl_id: String(r.acl_id), vpc_id: r.vpc_id ?? null, region: r.region ?? null, is_default: Boolean(r.is_default), subnets: Array.isArray(r.subnets) ? r.subnets.filter(Boolean).map(String) : [], entries: Array.isArray(r.entries) ? r.entries : [] }))); } catch (e: any) { errors.push(`network ACLs: ${String(e?.message || e).slice(0, 200)}`); } }
   // per-resource CloudWatch statistics the daily tables do not cover (a handful of resources, one call each)
   const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
   const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };

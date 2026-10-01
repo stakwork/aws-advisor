@@ -32,6 +32,9 @@ create table if not exists sg_ingress (
   group_id text not null, region text, ip_protocol text, from_port integer, to_port integer, cidr_ipv4 text, cidr_ipv6 text, referenced_group_id text, prefix_list_id text, refreshed_at text not null
 );
 create index if not exists sg_ingress_group on sg_ingress(group_id);`);
+db.exec(`create table if not exists nacls (
+  acl_id text primary key, vpc_id text, region text, is_default integer not null default 0, subnets text not null default '[]', entries text not null default '[]', refreshed_at text not null
+)`);
 try { db.exec("alter table sg_ingress add column rule_id text"); } catch { /* exists */ }
 try { db.exec("alter table sg_ingress add column description text"); } catch { /* exists */ }
 
@@ -213,9 +216,78 @@ const portMatches = (r: IngressRule, port: number) => (r.from_port == null && r.
 /** One security group rule as people read it: which group, which ports, from where. */
 export interface RuleRef { group_id: string; group_name: string | null; rule_id: string | null; ports: string; source: string; description: string | null; world: boolean; broad: boolean; /** An IPv6 rule on a box without an IPv6 address: it lets nothing in. */ unreachable?: boolean }
 /** How far a port can be reached and why: the rules that let it in (widest first), or what blocks it. */
-export interface PortReach { exposure: PortExposure; allowed_by: RuleRef[]; reason: string; broad: boolean }
+export interface PortReach {
+  exposure: PortExposure; allowed_by: RuleRef[]; reason: string; broad: boolean;
+  /** What stops it when it is closed: no security group rule, or the subnet's network ACL (in, or the replies out). */
+  blocked_by?: "security_group" | "network_acl" | null;
+  /** The network ACL's say when it narrows or half-blocks the port (some clients' replies dropped). */
+  nacl_note?: string | null;
+}
 /** What is known about the box itself: its public IPv4 address (null = it has none, undefined = not known), its IPv6 addresses (undefined = not known) and its groups' names. */
-export interface ReachContext { public_ip?: string | null; ipv6?: string[]; group_names?: Record<string, string> }
+export interface ReachContext { public_ip?: string | null; ipv6?: string[]; group_names?: Record<string, string>; nacl?: { acl_id: string; entries: NaclEntry[] } | null }
+
+/** One network ACL entry as EC2 describes it (Steampipe aws_vpc_network_acl.entries). */
+export interface NaclEntry { RuleNumber: number; RuleAction: "allow" | "deny" | string; Egress: boolean; Protocol: string; CidrBlock?: string | null; Ipv6CidrBlock?: string | null; PortRange?: { From?: number; To?: number } | null }
+
+// ---- network ACLs: stateless, first matching rule by number wins, and the replies need an outbound rule too ----------
+
+const v4 = (cidr: string): [number, number] | null => {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(cidr);
+  if (!m) return null;
+  const ip = ((+m[1] << 24) >>> 0) + (+m[2] << 16) + (+m[3] << 8) + +m[4];
+  const bits = +m[5]; const size = 2 ** (32 - bits);
+  const start = Math.floor(ip / size) * size;
+  return [start, start + size - 1];
+};
+/** Whether CIDR `outer` holds every address of `inner` (IPv4 by arithmetic; IPv6 only ::/0 or the same block). Pure. */
+export function cidrContains(outer: string, inner: string): boolean {
+  if (outer.includes(":") || inner.includes(":")) return outer === "::/0" ? inner.includes(":") : outer === inner;
+  const o = v4(outer), i = v4(inner);
+  return Boolean(o && i && o[0] <= i[0] && i[1] <= o[1]);
+}
+const naclProto = (p: string, proto: string) => p === "-1" || (p === "6" && proto === "tcp") || (p === "17" && proto === "udp");
+const naclPort = (e: NaclEntry, port: number) => !e.PortRange || e.PortRange.From == null || ((e.PortRange.From ?? 0) <= port && port <= (e.PortRange.To ?? 65535));
+const isWorld = (cidr: string) => cidr === "0.0.0.0/0" || cidr === "::/0";
+
+/**
+ * The entry that decides traffic of `proto` on `port` with the far end in `cidr`, in or out: the lowest-numbered
+ * entry that matches the protocol and port and holds the whole of `cidr`. For a world source, narrower entries
+ * before it are exceptions: allows are recorded (only those addresses get in if the world entry denies), denies are
+ * ignored (a few addresses blocked does not close a port to the internet). No entry = the implicit deny. Pure.
+ */
+export function naclDecide(entries: NaclEntry[], egress: boolean, proto: string, port: number, cidr: string): { action: "allow" | "deny"; entry: NaclEntry | null; narrower_allows: string[] } {
+  const v6 = cidr.includes(":");
+  const narrower: string[] = [];
+  for (const e of [...entries].filter((x) => Boolean(x.Egress) === egress).sort((a, b) => a.RuleNumber - b.RuleNumber)) {
+    const block = v6 ? e.Ipv6CidrBlock : e.CidrBlock;
+    if (!block || !naclProto(String(e.Protocol), proto) || !naclPort(e, port)) continue;
+    if (cidrContains(block, cidr)) return { action: e.RuleAction === "allow" ? "allow" : "deny", entry: e, narrower_allows: narrower };
+    if (isWorld(cidr) && e.RuleAction === "allow") narrower.push(block);
+  }
+  return { action: "deny", entry: null, narrower_allows: narrower };
+}
+
+/** Client ephemeral ports the replies go to: Linux (32768-60999), both, Windows and macOS (49152-65535). */
+export const EPHEMERAL_SAMPLES = [40000, 55000, 62000];
+
+export interface NaclVerdict { verdict: "allow" | "deny" | "narrow" | "no_reply"; cidrs: string[]; entry: NaclEntry | null; reply_entry: NaclEntry | null; partial_reply: boolean }
+
+/** Whether a network ACL lets `cidr` reach `port` and the replies get back out. Pure. */
+export function naclVerdict(entries: NaclEntry[], proto: string, port: number, cidr: string): NaclVerdict {
+  const inbound = naclDecide(entries, false, proto, port, cidr);
+  const reply = (to: string) => EPHEMERAL_SAMPLES.map((p) => naclDecide(entries, true, proto, p, to));
+  if (inbound.action === "deny") {
+    const ok = inbound.narrower_allows.filter((c) => reply(c).some((r) => r.action === "allow"));
+    if (ok.length) return { verdict: "narrow", cidrs: ok, entry: inbound.entry, reply_entry: null, partial_reply: false };
+    return { verdict: "deny", cidrs: [], entry: inbound.entry, reply_entry: null, partial_reply: false };
+  }
+  const out = reply(cidr);
+  const allowed = out.filter((r) => r.action === "allow").length;
+  if (!allowed) return { verdict: "no_reply", cidrs: [], entry: inbound.entry, reply_entry: out.find((r) => r.entry)?.entry ?? null, partial_reply: false };
+  return { verdict: "allow", cidrs: [cidr], entry: inbound.entry, reply_entry: out.find((r) => r.action === "deny")?.entry ?? null, partial_reply: allowed < out.length };
+}
+
+const entryText = (e: NaclEntry | null, egress = false) => e ? `rule #${e.RuleNumber} ${e.RuleAction === "allow" ? "allows" : "denies"} ${String(e.Protocol) === "-1" ? "all traffic" : `${e.Protocol === "6" ? "tcp" : e.Protocol === "17" ? "udp" : e.Protocol}${e.PortRange?.From != null ? ` ${e.PortRange.From === e.PortRange.To ? e.PortRange.From : `${e.PortRange.From}-${e.PortRange.To}`}` : ""}`} ${egress ? "to" : "from"} ${e.CidrBlock ?? e.Ipv6CidrBlock}` : "the implicit deny (no rule matches)";
 
 const WORLD = (r: IngressRule) => r.cidr_ipv4 === "0.0.0.0/0" || r.cidr_ipv6 === "::/0";
 /** An IPv6-only rule does nothing for a box without an IPv6 address: nothing can reach it over IPv6. */
@@ -250,6 +322,8 @@ export function reachOf(l: Pick<ProbeListener, "proto" | "port" | "scope" | "bin
   let best: PortExposure = "closed";
   const allowed: { ref: RuleRef; e: PortExposure }[] = [];
   const v6Only: RuleRef[] = [];
+  const naclBlocked: { ref: RuleRef; why: string }[] = [];
+  const naclNotes: string[] = [];
   for (const r of rules) {
     if (!protoMatches(r.ip_protocol, l.proto) || !portMatches(r, l.port)) continue;
     if (V6_ONLY(r) && ctx.ipv6 && ctx.ipv6.length === 0) { v6Only.push(ruleRef(r, names)); continue; }
@@ -258,7 +332,18 @@ export function reachOf(l: Pick<ProbeListener, "proto" | "port" | "scope" | "bin
     // rule, an IPv6 address (all of them are global in a VPC) for an IPv6 one
     if (e === "internet" && (r.cidr_ipv4 === "0.0.0.0/0" ? ctx.public_ip === null : false)) e = "network";
     if (e === "closed") continue;
-    allowed.push({ ref: ruleRef(r, names), e });
+    let ref = ruleRef(r, names);
+    // the subnet's network ACL sits in front of the security group for traffic from outside the subnet; a source
+    // that is another group or a prefix list has no address to judge, so only CIDR sources are checked
+    const src = r.cidr_ipv4 || r.cidr_ipv6;
+    if (ctx.nacl && src) {
+      const n = naclVerdict(ctx.nacl.entries, l.proto, l.port, src);
+      if (n.verdict === "deny") { naclBlocked.push({ ref, why: `${ctx.nacl.acl_id} ${entryText(n.entry)}` }); continue; }
+      if (n.verdict === "no_reply") { naclBlocked.push({ ref, why: `${ctx.nacl.acl_id} lets it in but drops the replies: ${entryText(n.reply_entry, true)}` }); continue; }
+      if (n.verdict === "narrow") { e = "network"; ref = { ...ref, source: n.cidrs.join(", "), world: false, broad: false }; naclNotes.push(`the network ACL ${ctx.nacl.acl_id} denies the rest of the internet (${entryText(n.entry)}) and lets in only ${n.cidrs.join(", ")}`); }
+      else if (n.partial_reply) naclNotes.push(`the network ACL ${ctx.nacl.acl_id} drops replies to some client ports (${entryText(n.reply_entry, true)}): some clients cannot connect`);
+    }
+    allowed.push({ ref, e });
     if (rank[e] > rank[best]) best = e;
   }
   allowed.sort((a, b) => rank[b.e] - rank[a.e] || Number(b.ref.broad) - Number(a.ref.broad));
@@ -267,14 +352,17 @@ export function reachOf(l: Pick<ProbeListener, "proto" | "port" | "scope" | "bin
   const what = `${l.port}/${l.proto}`;
   const by = (r: RuleRef) => `${r.group_name ?? r.group_id} allows ${r.ports} from ${r.source}${r.description ? ` ("${r.description}")` : ""}`;
   let reason: string;
-  if (best === "closed") reason = !rules.length ? "no security group rules known for this box (the inventory has not read them yet)"
+  if (best === "closed" && naclBlocked.length) reason = `blocked by network ACL: ${naclBlocked[0].ref.group_name ?? naclBlocked[0].ref.group_id} lets ${what} in from ${naclBlocked[0].ref.source}, but ${naclBlocked[0].why}`;
+  else if (best === "closed") reason = !rules.length ? "no security group rules known for this box (the inventory has not read them yet)"
     : v6Only.length ? `blocked by the security groups: only ${v6Only[0].group_name ?? v6Only[0].group_id}'s ${v6Only[0].ports} rule from ${v6Only[0].source} covers ${what}, and the box has no IPv6 address`
     : `blocked by the security groups: no rule in ${groupLabel(groups, names)} lets ${what} in`;
   else if (best === "internet") reason = `open to the internet: ${by(top)}${!top.broad ? "" : top.ports === "all traffic" ? ", a broad rule that opens every port the box listens on" : ", a broad range that opens whatever listens in it"}`;
   else if (top.world && ctx.public_ip === null) reason = `${by(top)}, but the box has no public address: reachable from inside the VPC only`;
   else if (best === "network") reason = `reachable from ${top.source} only: ${by(top)}`;
   else reason = `reachable from members of ${top.source} only`;
-  return { exposure: best, allowed_by: refs, reason, broad: refs.some((r) => r.broad && r.world) };
+  const nacl_note = naclNotes[0] ?? null;
+  if (nacl_note && best !== "closed") reason += `; ${nacl_note}`;
+  return { exposure: best, allowed_by: refs, reason, broad: refs.some((r) => r.broad && r.world), blocked_by: best === "closed" ? (naclBlocked.length ? "network_acl" : "security_group") : null, nacl_note };
 }
 
 /** How far a listening port can be reached, from the ingress rules of the box's security groups. Pure. */
@@ -302,6 +390,26 @@ export function rulesWithoutListener(rules: IngressRule[], listening: Pick<Probe
   return out.sort((a, b) => Number(b.world) - Number(a.world) || a.ports.localeCompare(b.ports, undefined, { numeric: true }));
 }
 
+/** The network ACL of a subnet: the one associated with it, else the VPC's default. null when none is known. */
+export function naclOf(subnetId: string | null | undefined, vpcId: string | null | undefined): { acl_id: string; entries: NaclEntry[] } | null {
+  if (!subnetId && !vpcId) return null;
+  const rows = db.prepare("select acl_id, vpc_id, is_default, subnets, entries from nacls where vpc_id = ? or ? is null").all(vpcId ?? null, vpcId ?? null) as { acl_id: string; vpc_id: string | null; is_default: number; subnets: string; entries: string }[];
+  const parse = (x: string) => { try { return JSON.parse(x); } catch { return []; } };
+  const hit = (subnetId ? rows.find((r) => (parse(r.subnets) as string[]).includes(subnetId)) : undefined) ?? rows.find((r) => r.is_default && r.vpc_id === vpcId);
+  return hit ? { acl_id: hit.acl_id, entries: parse(hit.entries) as NaclEntry[] } : null;
+}
+
+/** Replaces the network ACLs the inventory read from Steampipe (src/inventory.ts, every refresh). */
+export function replaceNacls(rows: { acl_id: string; vpc_id: string | null; region: string | null; is_default: boolean; subnets: string[]; entries: NaclEntry[] }[]): number {
+  const at = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare("delete from nacls").run();
+    const ins = db.prepare("insert into nacls(acl_id, vpc_id, region, is_default, subnets, entries, refreshed_at) values (?, ?, ?, ?, ?, ?, ?)");
+    for (const r of rows) ins.run(r.acl_id, r.vpc_id, r.region, r.is_default ? 1 : 0, JSON.stringify(r.subnets), JSON.stringify(r.entries), at);
+  })();
+  return rows.length;
+}
+
 /** The box's public address (null when it has none) and its security groups' names, from its inventory snapshot. */
 export function reachContextOf(instanceId: string): ReachContext {
   try {
@@ -311,7 +419,7 @@ export function reachContextOf(instanceId: string): ReachContext {
     const names: Record<string, string> = {};
     for (const g of Array.isArray(net.security_groups) ? net.security_groups : []) if (g?.GroupId && g?.GroupName) names[g.GroupId] = g.GroupName;
     // the inventory always writes the key (null when the box has none); a snapshot without it says nothing either way
-    return { public_ip: "public_ip" in net ? (net.public_ip ? String(net.public_ip) : null) : undefined, ipv6: Array.isArray(net.ipv6) ? net.ipv6.map(String) : undefined, group_names: names };
+    return { public_ip: "public_ip" in net ? (net.public_ip ? String(net.public_ip) : null) : undefined, ipv6: Array.isArray(net.ipv6) ? net.ipv6.map(String) : undefined, group_names: names, nacl: naclOf(net.subnet_id, net.vpc_id) };
   } catch { return {}; }
 }
 
@@ -414,7 +522,7 @@ export function portsOn(instanceId: string, includeGone = false): (StoredPort & 
       const p = rowToPort(r);
       if (!rules.length && p.exposure !== "local") return p;
       const reach = reachOf(p, rules, ctx);
-      return { ...p, exposure: reach.exposure, allowed_by: reach.allowed_by, reason: reach.reason, broad: reach.broad };
+      return { ...p, exposure: reach.exposure, allowed_by: reach.allowed_by, reason: reach.reason, broad: reach.broad, blocked_by: reach.blocked_by ?? null, nacl_note: reach.nacl_note ?? null };
     })
     .sort((a, b) => Number(a.gone) - Number(b.gone) || rank[a.exposure] - rank[b.exposure] || a.port - b.port);
 }
