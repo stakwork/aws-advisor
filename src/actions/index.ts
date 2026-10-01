@@ -28,6 +28,7 @@ import { beanstalkScaleAction } from "./beanstalk_scale.js";
 import { beanstalkPressureAction } from "./beanstalk_pressure.js";
 import { usageScheduleAction } from "./usage_schedule.js";
 import { consentTagAction } from "./consent_tag.js";
+import { ec2HibernateMigrateAction } from "./ec2_hibernate_migrate.js";
 
 registerAction(acuWindowAction);
 registerAction(snapshotArchiveAction);
@@ -57,3 +58,4 @@ registerAction(beanstalkScaleAction);
 registerAction(beanstalkPressureAction);
 registerAction(usageScheduleAction);
 registerAction(consentTagAction);
+registerAction(ec2HibernateMigrateAction);

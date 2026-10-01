@@ -67,7 +67,8 @@ addColumn("actions", "check_json", "text");
 addColumn("actions", "revived_at", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
-  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule" | "consent_tag" | "beanstalk_pressure";
+  | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule" | "consent_tag" | "beanstalk_pressure"
+  | "ec2_hibernate_migrate";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -130,6 +131,13 @@ export function credsForAccount(creds: Creds, accountId: string | null | undefin
 
 export interface PlanResult { proposals: Proposal[]; notes: string[] }
 
+/**
+ * What one stage of a staged change did. The module records its progress (an AMI id, the new instance) in
+ * `p.facts`, which the executor saves after apply, advance and step. `wait_ms`: when to look again; null when
+ * nothing moves until a person acts or the change is complete (`done`).
+ */
+export interface Advance { note: string; changed: boolean; done?: boolean; wait_ms: number | null; announce?: string }
+
 export interface ActionModule {
   kind: ActionKind;
   label: string;
@@ -147,6 +155,14 @@ export interface ActionModule {
   announce?: boolean;
   /** The change answers something happening now (a group under pressure): the pass applies it in the same breath and Jev's hold is recorded as advice, not waited on. */
   urgent?: boolean;
+  /**
+   * A change made in stages that take minutes to hours (a migration): apply starts it, `advance` moves an applied
+   * row one stage on under the actuator role (the driver calls it until it waits for a person or is done, and every
+   * pass calls it as the fallback), and `verify` answers null until the last stage is done.
+   */
+  advance?(p: Proposal, creds: Creds): Promise<Advance>;
+  /** A stage only a person starts on an applied row (the cut-over of a live migration); `p.facts.offers` names the steps the page shows. */
+  step?(name: string, p: Proposal, creds: Creds, by: string): Promise<Advance>;
 }
 
 export class NoActuator extends Error { constructor(m: string) { super(m); this.name = "NoActuator"; } }
@@ -340,7 +356,7 @@ export async function actuatorCapabilities(force = false): Promise<{ caps: Recor
     const iam = new IAMClient({ region: base.region, credentials: base.provider });
     try {
       const r = await iam.send(new SimulatePrincipalPolicyCommand({ PolicySourceArn: role, ActionNames: actions, MaxItems: 200,
-        ContextEntries: [{ ContextKeyName: "aws:ResourceTag/advisor:park", ContextKeyValues: ["auto"], ContextKeyType: "string" }, { ContextKeyName: "aws:ResourceTag/advisor:schedule", ContextKeyValues: ["weekdays 08-20"], ContextKeyType: "string" }] }));
+        ContextEntries: [{ ContextKeyName: "aws:ResourceTag/advisor:park", ContextKeyValues: ["auto"], ContextKeyType: "string" }, { ContextKeyName: "aws:ResourceTag/advisor:schedule", ContextKeyValues: ["weekdays 08-20"], ContextKeyType: "string" }, { ContextKeyName: "aws:ResourceTag/advisor:hibernate", ContextKeyValues: ["stop"], ContextKeyType: "string" }] }));
       const results = r.EvaluationResults ?? [];
       allowed = { allowed: new Set(results.filter((e) => e.EvalDecision === "allowed").map((e) => String(e.EvalActionName))), explicit: new Set(results.filter((e) => e.EvalDecision === "explicitDeny").map((e) => String(e.EvalActionName))) };
       const learned = learnedDenials();
@@ -581,7 +597,7 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   try {
     const result = (await mod.apply(p, creds)) + overrode;
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.apply ?? []);
-    db.prepare("update actions set status = 'applied', mode = 'apply', trigger = ?, result = ?, error = null, applied_at = datetime('now') where id = ?").run(trigger, result, id);
+    db.prepare("update actions set status = 'applied', mode = 'apply', trigger = ?, result = ?, error = null, applied_at = datetime('now'), facts_json = ? where id = ?").run(trigger, result, JSON.stringify(p.facts), id);
     logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "applied", trigger, detail: result });
   } catch (e) {
     const error = actuatorDenied(e, row.kind, "apply") ?? describeError(e, `${row.kind} ${row.resource}`);
@@ -590,7 +606,109 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
     console.error(`[executor] #${id} failed: ${error}`);
     return getAction(id)!;
   }
+  if (mod.advance) { driveInBackground(id, trigger); return getAction(id)!; }
   await verifyAction(id, creds, trigger);
+  return getAction(id)!;
+}
+
+// ---- staged changes -----------------------------------------------------------------------------------------------
+
+/** A staged change that failed part-way (the old box stopped, the launch refused): Revert undoes the stages already done. */
+export const stagedFailure = (row: Pick<ActionRow, "kind" | "status" | "facts">): boolean => row.status === "failed" && Boolean(modules.get(row.kind)?.advance) && Boolean(row.facts?.stage);
+
+/** Rows being advanced right now: the driver, the pass and a person's step never run one row's stage twice at once. */
+const advancing = new Set<number>();
+const driving = new Set<number>();
+/** How long the driver follows one row before leaving it to the passes (a warm image of a large disk can take hours). */
+export const DRIVE_MAX_MS = 6 * 3600_000;
+
+async function announceStage(row: ActionRow, line: string): Promise<void> {
+  if (!notifyConfigured() || config.notifyLevel === "off" || inQuietHours(config.notifyQuietHours, new Date().getHours())) return;
+  try { await sendSphinx(`${line}\n${config.notifyLinkUrl}/actions?id=${row.id}`); } catch (e: any) { console.log(`[executor] stage notice #${row.id} failed: ${e?.message || e}`); }
+}
+
+/** Saves what a stage did: the facts the module recorded, the note on the result when the stage changed, the event, the graph. */
+function recordStage(row: ActionRow, p: Proposal, a: Advance, event: "advance" | "step", trigger: string): void {
+  if (a.changed) db.prepare("update actions set facts_json = ?, result = coalesce(result, '') || ' · ' || ? where id = ?").run(JSON.stringify(p.facts), a.note, row.id);
+  else db.prepare("update actions set facts_json = ? where id = ?").run(JSON.stringify(p.facts), row.id);
+  if (a.changed || event === "step") logEvent({ action_id: row.id, kind: row.kind, event, outcome: a.done ? "applied" : "pending", trigger, detail: a.note });
+  mirrorActionsInBackground([row.id]);
+  if (a.announce) announceStage(row, a.announce).catch(() => {});
+}
+
+/**
+ * Moves an applied staged row one stage on. A failed stage fails the row (Revert undoes what was done so far);
+ * the last stage hands the row to verify. Never throws for an AWS failure.
+ */
+export async function advanceAction(id: number, trigger = "schedule"): Promise<{ row: ActionRow; wait_ms: number | null }> {
+  const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
+  const mod = modules.get(row.kind);
+  if (row.status !== "applied" || !mod?.advance) return { row, wait_ms: null };
+  if (config.actMode === "off" || pauseState().paused) return { row, wait_ms: null };
+  if (advancing.has(id)) return { row, wait_ms: 20_000 };
+  // No credentials is a setup problem, not a failed stage: the row waits for the next pass.
+  let creds: Creds;
+  try { creds = credsForAccount(executorCreds(), row.account_id); } catch (e: any) { console.error(`[executor] #${id} not advanced: ${e?.message || e}`); return { row, wait_ms: null }; }
+  advancing.add(id);
+  try {
+    const p = proposalOf(row);
+    let a: Advance;
+    try { a = await mod.advance(p, creds); }
+    catch (e) {
+      const error = actuatorDenied(e, row.kind, "apply") ?? describeError(e, `${row.kind} ${row.resource}`);
+      db.prepare("update actions set status = 'failed', facts_json = ?, error = ? where id = ?").run(JSON.stringify(p.facts), `stage ${String(p.facts?.stage ?? "?")} failed: ${error}; Revert undoes what was done so far`, id);
+      logEvent({ action_id: id, kind: row.kind, event: "advance", outcome: "failed", trigger, detail: error });
+      mirrorActionsInBackground([id]);
+      console.error(`[executor] #${id} stage failed: ${error}`);
+      return { row: getAction(id)!, wait_ms: null };
+    }
+    recordStage(row, p, a, "advance", trigger);
+    if (a.done) { await verifyAction(id, undefined, trigger); return { row: getAction(id)!, wait_ms: null }; }
+    return { row: getAction(id)!, wait_ms: a.wait_ms };
+  } finally { advancing.delete(id); }
+}
+
+/** Follows a staged row in the background, stage after stage, until it waits for a person, is done, fails or runs out of time; the passes carry on from there. */
+export function driveInBackground(id: number, trigger = "schedule"): void {
+  if (driving.has(id)) return;
+  driving.add(id);
+  const t0 = Date.now();
+  (async () => {
+    let wait: number | null = 0;
+    while (wait != null && Date.now() - t0 < DRIVE_MAX_MS) {
+      if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait!, 5 * 60_000)).unref?.());
+      const r = await advanceAction(id, trigger);
+      wait = r.wait_ms;
+    }
+  })().catch((e) => console.error(`[executor] driving #${id}: ${e?.message || e}`)).finally(() => { driving.delete(id); dispatchActionNotifications().catch(() => {}); });
+}
+
+/** A stage only a person starts (the cut-over): runs it under the actuator role, then the driver follows the row. */
+export async function stepAction(id: number, name: string, by: string): Promise<ActionRow> {
+  const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
+  const mod = modules.get(row.kind);
+  if (!mod?.step) throw new Error(`${row.kind} has no steps`);
+  if (row.status !== "applied") throw new Error(`action #${id} is ${row.status}; steps are taken on an applied row`);
+  const offers = Array.isArray(row.facts?.offers) ? row.facts.offers.map((o: any) => String(o?.name)) : [];
+  if (!offers.includes(name)) throw new Error(`#${id} does not offer "${name}" now${offers.length ? ` (it offers ${offers.join(", ")})` : ""}`);
+  if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
+  const paused = pauseState();
+  if (paused.paused) throw new Error(`auto-actions are paused by ${paused.by}${paused.reason ? ` (${paused.reason})` : ""}; resume from the page or the chat`);
+  if (advancing.has(id)) throw new Error(`#${id} is moving a stage right now; try again in a minute`);
+  advancing.add(id);
+  const trigger = by || "manual";
+  try {
+    const p = proposalOf(row);
+    try { recordStage(row, p, await mod.step(name, p, credsForAccount(executorCreds(), row.account_id), trigger), "step", trigger); }
+    catch (e) {
+      const error = actuatorDenied(e, row.kind, "apply") ?? describeError(e, `${row.kind} ${name}`);
+      db.prepare("update actions set facts_json = ?, error = ? where id = ?").run(JSON.stringify(p.facts), `${name} failed: ${error}`, id);
+      logEvent({ action_id: id, kind: row.kind, event: "step", outcome: "failed", trigger, detail: `${name}: ${error}` });
+      mirrorActionsInBackground([id]);
+      throw new Error(error);
+    }
+  } finally { advancing.delete(id); }
+  driveInBackground(id, trigger);
   return getAction(id)!;
 }
 
@@ -620,18 +738,20 @@ async function verifyInner(row: ActionRow, mod: ActionModule, creds?: Creds, tri
 
 export async function revertAction(id: number, by = "manual"): Promise<ActionRow> {
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
-  if (!["applied", "verified"].includes(row.status)) throw new Error(`action #${id} is ${row.status}; only an applied or verified change can be reverted`);
+  if (!["applied", "verified"].includes(row.status) && !stagedFailure(row)) throw new Error(`action #${id} is ${row.status}; only an applied or verified change can be reverted`);
   if (config.actMode === "off") throw new Error("auto-actions are off (Settings > Auto-actions > Mode)");
   // Deliberately not checked here: a pause (pauseState) stops planning and applying, never undoing. Revert is the safety valve.
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
+  if (advancing.has(id)) throw new Error(`#${id} is moving a stage right now; revert in a minute`);
   const missingRevert = by === "manual" ? [] : rowMissing(row, "revert", (await actuatorCapabilities()).caps[row.kind]);
   if (missingRevert.length) throw new Error(`the actuator role is not allowed ${missingRevert.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
   const creds = credsForAccount(executorCreds(), row.account_id); creds.act();
   console.log(`[executor] reverting #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""} (${by})`);
   try {
-    const result = await mod.revert(proposalOf(row), creds);
+    const p = proposalOf(row);
+    const result = await mod.revert(p, creds);
     forgetDenials(ACTUATOR_NEEDS[row.kind]?.revert ?? []);
-    db.prepare("update actions set status = 'reverted', reverted_at = datetime('now'), result = coalesce(result, '') || ' · reverted: ' || ?, notified_at = null, notify_result = null where id = ?").run(result, id);
+    db.prepare("update actions set status = 'reverted', reverted_at = datetime('now'), result = coalesce(result, '') || ' · reverted: ' || ?, facts_json = ?, notified_at = null, notify_result = null where id = ?").run(result, JSON.stringify(p.facts), id);
     logEvent({ action_id: id, kind: row.kind, event: "revert", outcome: "reverted", trigger: by, detail: result });
   } catch (e) {
     const error = actuatorDenied(e, row.kind, "revert") ?? describeError(e, `${row.kind} revert ${row.resource}`);
@@ -665,8 +785,15 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
     if (paused.paused) { const n = `${pauseLine(paused)}; nothing planned or applied`; out.notes.push(n); log(n); out.took_ms = Date.now() - t0; return out; }
     let creds: Creds;
     try { creds = executorCreds(); } catch (e: any) { out.errors.push(e?.message || String(e)); out.took_ms = Date.now() - t0; return out; }
+    // Staged rows (a migration) move a stage on, and the driver picks them up again (after a restart, or past its time).
+    for (const r of db.prepare("select id, kind from actions where status = 'applied' order by id").all() as { id: number; kind: ActionKind }[]) {
+      if (!modules.get(r.kind)?.advance) continue;
+      const a = await advanceAction(r.id, trigger);
+      log(`#${r.id} ${a.row.status === "failed" ? `stage failed: ${a.row.error}` : `stage ${String(a.row.facts?.stage ?? "?")}`}`);
+      if (a.wait_ms != null) driveInBackground(r.id, trigger);
+    }
     // Rows applied earlier and still unverified (a snapshot still archiving) get read back first.
-    for (const r of db.prepare("select id from actions where status = 'applied' order by id").all() as { id: number }[]) { const v = await verifyAction(r.id, creds, trigger); if (v.status === "verified") { out.verified++; log(`#${r.id} read back: verified`); } }
+    for (const r of db.prepare("select id, kind from actions where status = 'applied' order by id").all() as { id: number; kind: ActionKind }[]) { if (modules.get(r.kind)?.advance) continue; const v = await verifyAction(r.id, creds, trigger); if (v.status === "verified") { out.verified++; log(`#${r.id} read back: verified`); } }
     const budget = { left: Math.max(1, config.actMaxPerPass) };
     const touched = new Set<number>();
     const caps = mode === "apply" ? (await actuatorCapabilities()).caps : {};

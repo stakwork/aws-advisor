@@ -5,7 +5,7 @@ import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
 import { consentErrorStatus, runAsPerson } from "../consent.js";
 import { PreviewError, previewAsPerson } from "../preview.js";
-import { actuatorCapabilities, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, verifyAction } from "../executor.js";
+import { actuatorCapabilities, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, stepAction, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
 import { environmentTimeline } from "../capacity_timeline.js";
@@ -106,6 +106,10 @@ actions.post("/actions/:id/apply", async (req, res) => {
 });
 actions.post("/actions/:id/verify", async (req, res) => {
   try { res.json(await verifyAction(Number(req.params.id))); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
+});
+// A stage only a person starts on a staged row (the cut-over of a live hibernation relaunch): the row's facts.offers name them.
+actions.post("/actions/:id/step/:name", async (req, res) => {
+  try { res.json(await stepAction(Number(req.params.id), String(req.params.name), "page")); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }
 });
 actions.post("/actions/:id/revert", async (req, res) => {
   try { const a = await revertAction(Number(req.params.id), "manual"); dispatchActionNotifications().catch(() => {}); res.json(a); } catch (e: any) { res.status(400).json({ error: e?.message || String(e) }); }

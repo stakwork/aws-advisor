@@ -270,6 +270,7 @@ export async function runAsPerson(id: number, verb: "apply" | "revert", input: u
   if (verb === "revert" && !["applied", "verified"].includes(row.status)) throw new ConsentError(`#${id} is ${row.status}; only an applied or verified row is reverted`, 409);
   const mod = actionModules().find((m) => m.kind === row.kind);
   if (!mod) throw new ConsentError(`no module for ${row.kind}`, 500);
+  if (mod.advance) throw new ConsentError(`${row.kind} is a staged change that runs for minutes to hours after the first call: it runs under the actuator role only (Apply and Revert on the page)`, 409);
   const region = row.region || executorCreds().region;
   const provider: AwsCredentialIdentityProvider = async () => ({ accessKeyId: creds.access_key_id, secretAccessKey: creds.secret_access_key, sessionToken: creds.session_token });
   // who: the identity behind the credentials, for the ledger

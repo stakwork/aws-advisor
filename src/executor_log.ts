@@ -39,8 +39,8 @@ export const LOG_KEEP_DAYS = 90;
 /** How much of a result or error a line keeps: enough to read, never the whole stack. */
 const DETAIL_MAX = 500;
 
-/** apply: the change under the actuator role; verify: the read-back; revert: the undo. */
-export type ExecutorEventName = "apply" | "verify" | "revert";
+/** apply: the change under the actuator role; verify: the read-back; revert: the undo; advance: a staged change moved one stage on; step: a stage only a person starts (a cut-over). */
+export type ExecutorEventName = "apply" | "verify" | "revert" | "advance" | "step";
 /** The row's status after the event, or `pending` when a read-back could not tell yet, `error` when the read-back itself failed. */
 export type ExecutorEventOutcome = "applied" | "verified" | "failed" | "refused" | "reverted" | "pending" | "error";
 

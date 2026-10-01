@@ -204,6 +204,8 @@ export interface ActionNode {
   id: number; kind: string; status: string; mode: string; trigger: string; title: string; reason: string; rollback: string | null; est_usd_month: number | null; result: string | null; error: string | null;
   resource: string; resource_name: string | null; resource_id: string | null; region: string | null; created_at: string; seen_at: string | null; applied_at: string | null; verified_at: string | null; reverted_at: string | null;
   recommendation_ids: number[];
+  /** A staged change (a relaunch): the stage it is at and the instance it launched, if any. */
+  stage: string | null; new_resource: string | null;
 }
 
 /** One executor ledger row (src/executor.ts) as a node; the recommendations it carries out come from its facts. */
@@ -213,7 +215,8 @@ export function actionNode(row: any, inventoryIds: Set<string>): ActionNode {
   return { id: Number(row.id), kind: String(row.kind), status: String(row.status), mode: String(row.mode), trigger: String(row.trigger), title: String(row.title), reason: String(row.reason || "").slice(0, 1000),
     rollback: str(row.rollback), est_usd_month: num(row.est_usd_month), result: row.result ? String(row.result).slice(0, 500) : null, error: row.error ? String(row.error).slice(0, 500) : null,
     resource: String(row.resource), resource_name: str(row.resource_name), resource_id: inventoryIdOf(row.resource, inventoryIds), region: str(row.region), created_at: String(row.created_at), seen_at: str(row.seen_at),
-    applied_at: str(row.applied_at), verified_at: str(row.verified_at), reverted_at: str(row.reverted_at), recommendation_ids: ids };
+    applied_at: str(row.applied_at), verified_at: str(row.verified_at), reverted_at: str(row.reverted_at), recommendation_ids: ids,
+    stage: str(facts.stage), new_resource: str(facts.new_instance_id) };
 }
 
 export interface IncidentNode { id: number; alert_id: number; status: string; cause: string | null; confidence: number | null; episode_cost_usd: number | null; monthly_run_rate_usd: number | null; created_at: string }
@@ -585,7 +588,11 @@ UNWIND $rows AS row
 MERGE (x:AdvisorAction {id: row.id})
 SET x += {kind: row.kind, status: row.status, mode: row.mode, trigger: row.trigger, title: row.title, reason: row.reason, rollback: row.rollback, est_usd_month: row.est_usd_month,
           result: row.result, error: row.error, resource: row.resource, resource_name: row.resource_name, region: row.region, created_at: row.created_at, seen_at: row.seen_at,
-          applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, account_id: $account, updated_at: $now}
+          applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, stage: row.stage, new_resource: row.new_resource, account_id: $account, updated_at: $now}
+WITH x, row
+FOREACH (_ IN CASE WHEN row.new_resource IS NULL THEN [] ELSE [1] END |
+  MERGE (nr:AdvisorResourceRef {id: row.new_resource}) SET nr.account_id = $account, nr.updated_at = $now
+  MERGE (x)-[:LAUNCHED]->(nr))
 WITH x, row
 OPTIONAL MATCH (x)-[t:TARGETS]->() DELETE t
 WITH DISTINCT x, row
