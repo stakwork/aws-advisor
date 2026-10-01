@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, when } from "../api";
 import { Badge, Button, Card, Empty, Pager, Td, Th } from "../components/ui";
 import { IncidentSummary, IncidentView, InvestigateButton, incidentOfAlertRow, pct } from "../components/incident";
@@ -9,6 +9,14 @@ import { alertLevel } from "../alertLevel";
 const FILTERS = ["open", "acknowledged", "all"];
 const PAGE_SIZE = 10;
 const gb = (b: number | null | undefined) => (b == null ? "—" : `${(Number(b) / 1e9).toFixed(2)} GB`);
+
+/** The EC2 instance an alert is about, from its details or its resource ("i-…" or "i-…:NetworkIn"), so the row can link to it. */
+function instanceOf(alert: any): string | null {
+  let d: any = {};
+  try { d = JSON.parse(alert.details || "{}"); } catch { /* resource only */ }
+  if (typeof d?.instance_id === "string" && /^i-[0-9a-f]+$/.test(d.instance_id)) return d.instance_id;
+  return /^(i-[0-9a-f]{8,17})\b/.exec(alert.resource || "")?.[1] ?? null;
+}
 
 /** The parsed details of one alert: NAT figures with the top receivers table, or the state change. */
 function Details({ alert }: { alert: any }) {
@@ -143,6 +151,7 @@ export default function Alerts() {
               const inc = incidentOfAlertRow(a);
               const triage = triageOfAlertRow(a);
               const open = String(a.id) === selectedId;
+              const instance = instanceOf(a);
               return (
                 <Fragment key={a.id}>
                   <tr id={`alert-${a.id}`} onClick={() => toggle(a.id)} className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60 ${open ? "bg-zinc-900" : ""}`}>
@@ -150,7 +159,7 @@ export default function Alerts() {
                     <Td><Badge>{alertLevel(a)}</Badge><div className="mt-0.5 text-xs text-zinc-500"><button className={`hover:text-zinc-300 ${kind === a.kind ? "text-zinc-300 underline" : ""}`} title={kind === a.kind ? "Show every kind" : `Only ${a.kind} alerts`} onClick={(e) => { e.stopPropagation(); set("kind", kind === a.kind ? null : a.kind); }}>{a.kind}</button></div></Td>
                     <Td>
                       <div className={open ? "" : "line-clamp-2"}>{a.message}</div>
-                      <div className="font-mono text-xs text-zinc-500">{a.resource}{a.acknowledged ? ` · acknowledged${a.acknowledged_by ? ` by ${a.acknowledged_by}` : ""}` : ""}</div>
+                      <div className="font-mono text-xs text-zinc-500">{instance ? <Link className="hover:text-zinc-300 hover:underline" onClick={(e) => e.stopPropagation()} to={`/inventory?tab=ec2&id=${encodeURIComponent(instance)}`} title="Open the instance in the inventory">{a.resource}</Link> : a.resource}{a.acknowledged ? ` · acknowledged${a.acknowledged_by ? ` by ${a.acknowledged_by}` : ""}` : ""}</div>
                       {triage && <div className="mt-0.5" onClick={(e) => e.stopPropagation()}><TriageLine alert={a} triage={triage} onUndo={() => reopen(a.id)} /></div>}
                       {a.notify_result && <div className={`mt-0.5 text-xs ${a.notify_result === "sent" ? "text-emerald-300" : a.notify_result.startsWith("failed") ? "text-red-300" : "text-zinc-500"}`}>{a.notify_result === "sent" ? `sent to Sphinx ${when(a.notified_at)}` : a.notify_result}</div>}
                     </Td>
@@ -159,6 +168,7 @@ export default function Alerts() {
                     </Td>
                     <Td className="whitespace-nowrap text-right">
                       <span className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                        {instance && <Link className="rounded border border-zinc-700 px-2 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800" to={`/inventory?tab=ec2&id=${encodeURIComponent(instance)}`} title={`Open ${instance} in the inventory`}>Instance</Link>}
                         <InvestigateButton incident={inc} enabled={canInvestigate} busy={busy === a.id} onClick={() => investigate(a.id)} />
                         {notify?.configured && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => sendNow(a.id)} disabled={sending === a.id} title={a.notify_result === "sent" ? "Send it again" : "Send this alert to the Sphinx chat now, whatever the rules say"}>{a.notify_result === "sent" ? "Resend" : "Send to Sphinx"}</Button>}
                         {!a.acknowledged && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => ack(a.id)}>Acknowledge</Button>}

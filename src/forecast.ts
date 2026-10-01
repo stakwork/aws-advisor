@@ -50,17 +50,31 @@ export function reservedHourly(): { rds_reserved_hourly: number | null; cache_re
   return seen ? { rds_reserved_hourly: round2(rds), cache_reserved_hourly: round2(cache) } : { rds_reserved_hourly: null, cache_reserved_hourly: null };
 }
 
+/**
+ * Standalone instances only: pool members (Batch, Karpenter, EKS node groups, ASGs; src/pools.ts) come and go with
+ * demand, so their launches and terminations are churn, not a change to the bill's shape. Rows written before
+ * pool_kind existed are checked against the snapshot's tags.
+ */
+const EC2_STANDALONE = `pool_kind is null
+  and json_extract(snapshot, '$.tags."aws:autoscaling:groupName"') is null and json_extract(snapshot, '$.tags.AWSBatchServiceTag') is null
+  and json_extract(snapshot, '$.tags."karpenter.sh/nodepool"') is null and json_extract(snapshot, '$.tags."eks:nodegroup-name"') is null`;
+/**
+ * New means the advisor first saw it this month: a stop and start resets LaunchTime, not first_seen. Instances
+ * from the account's first sweep (within a day of its earliest first_seen) were already there, not launched.
+ */
+const EC2_FIRST_SEEN = `first_seen >= ? and first_seen > (select datetime(min(x.first_seen), '+1 day') from inventory_ec2 x where coalesce(x.account_id, '') = coalesce(inventory_ec2.account_id, ''))`;
+
 /** Resources that appeared or disappeared this month, so a moved forecast has names behind it. */
 export function resourceChanges(month: string): { new_resources: ResourceChange[]; gone_resources: ResourceChange[] } {
   const from = `${month}-01`;
   const rows = (sql: string, ...p: unknown[]) => db.prepare(sql).all(...p) as ResourceChange[];
   const new_resources = [
-    ...rows("select 'ec2' as kind, instance_id as id, name, instance_type as type, monthly_usd, launch_time as at from inventory_ec2 where gone = 0 and state = 'running' and launch_time >= ? order by monthly_usd desc", from),
+    ...rows(`select 'ec2' as kind, instance_id as id, name, instance_type as type, monthly_usd, launch_time as at from inventory_ec2 where gone = 0 and state = 'running' and launch_time >= ? and ${EC2_FIRST_SEEN} and ${EC2_STANDALONE} order by monthly_usd desc`, from, from),
     ...rows("select 'rds' as kind, db_instance_identifier as id, null as name, class as type, monthly_usd, created as at from inventory_rds where gone = 0 and created >= ? order by monthly_usd desc", from),
     ...rows("select 'elasticache' as kind, cache_cluster_id as id, null as name, node_type as type, monthly_usd, created as at from inventory_elasticache where gone = 0 and created >= ? order by monthly_usd desc", from),
   ];
   const gone_resources = [
-    ...rows("select 'ec2' as kind, instance_id as id, name, instance_type as type, monthly_usd, last_seen as at from inventory_ec2 where gone = 1 and last_seen >= ? order by monthly_usd desc", from),
+    ...rows(`select 'ec2' as kind, instance_id as id, name, instance_type as type, monthly_usd, last_seen as at from inventory_ec2 where gone = 1 and last_seen >= ? and ${EC2_STANDALONE} order by monthly_usd desc`, from),
     ...rows("select 'rds' as kind, db_instance_identifier as id, null as name, class as type, monthly_usd, last_seen as at from inventory_rds where gone = 1 and last_seen >= ? order by monthly_usd desc", from),
     ...rows("select 'elasticache' as kind, cache_cluster_id as id, null as name, node_type as type, monthly_usd, last_seen as at from inventory_elasticache where gone = 1 and last_seen >= ? order by monthly_usd desc", from),
   ];
