@@ -492,6 +492,9 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
   // UpdateTagsForResource is the API; the IAM actions it checks are AddTags (TagsToAdd) and RemoveTags (TagsToRemove).
   consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags"], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"] },
+  // A staged relaunch: apply, the stages (advance) and the cut-over (step) are all checked as apply.
+  ec2_hibernate_migrate: { apply: ["ec2:CreateImage", "ec2:StopInstances", "ec2:RunInstances", "ec2:CreateTags", "iam:PassRole", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"],
+    revert: ["ec2:StartInstances", "ec2:StopInstances", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets", "ec2:DeleteTags"] },
 };
 
 export const actuatorPolicy = (): IamPolicy => ({
@@ -540,9 +543,21 @@ export const actuatorPolicy = (): IamPolicy => ({
     // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one: UPSERT of A records only.
     { Sid: "ActuatorDnsReattach", Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: "arn:aws:route53:::hostedzone/*", Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } } },
     { Sid: "ActuatorDnsReattachRead", Effect: "Allow", Action: ["route53:ListResourceRecordSets", "route53:GetChange", "ec2:DescribeInstances"], Resource: "*" },
+    // Hibernation-ready relaunch: only an instance someone tagged advisor:hibernate is imaged or stopped; the new box must carry advisor:migrated-from from its launch, and is the only other box the role may stop or start.
+    { Sid: "ActuatorHibernateImage", Effect: "Allow", Action: ["ec2:CreateImage", "ec2:StopInstances", "ec2:StartInstances"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringLike: { "aws:ResourceTag/advisor:hibernate": "*" } } },
+    { Sid: "ActuatorHibernateImageOut", Effect: "Allow", Action: ["ec2:CreateImage"], Resource: ["arn:aws:ec2:*::image/*", "arn:aws:ec2:*::snapshot/*"] },
+    { Sid: "ActuatorHibernateLaunch", Effect: "Allow", Action: ["ec2:RunInstances"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringLike: { "aws:RequestTag/advisor:migrated-from": "i-*" } } },
+    { Sid: "ActuatorHibernateLaunchParts", Effect: "Allow", Action: ["ec2:RunInstances"], Resource: ["arn:aws:ec2:*::image/*", "arn:aws:ec2:*::snapshot/*", "arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*:*:network-interface/*", "arn:aws:ec2:*:*:subnet/*", "arn:aws:ec2:*:*:security-group/*", "arn:aws:ec2:*:*:key-pair/*", "arn:aws:ec2:*:*:placement-group/*"] },
+    { Sid: "ActuatorHibernateLaunchTags", Effect: "Allow", Action: ["ec2:CreateTags"], Resource: "*", Condition: { StringEquals: { "ec2:CreateAction": ["RunInstances", "CreateImage"] } } },
+    { Sid: "ActuatorHibernateNewBox", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringLike: { "aws:ResourceTag/advisor:migrated-from": "i-*" } } },
+    { Sid: "ActuatorHibernateMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringLike: { "aws:ResourceTag/advisor:hibernate": "*" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:migrated-to"] } } },
+    { Sid: "ActuatorHibernateMove", Effect: "Allow", Action: ["ec2:AssociateAddress", "ec2:DescribeImages", "ec2:DescribeInstanceStatus", "ec2:DescribeVolumes", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"], Resource: "*" },
+    { Sid: "ActuatorHibernatePassRole", Effect: "Allow", Action: ["iam:PassRole"], Resource: "*", Condition: { StringEquals: { "iam:PassedToService": "ec2.amazonaws.com" } } },
+    // Encrypting at launch with a customer-managed default EBS key needs these through EC2; the AWS-managed aws/ebs key needs nothing.
+    { Sid: "ActuatorHibernateKms", Effect: "Allow", Action: ["kms:CreateGrant", "kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKeyWithoutPlaintext", "kms:ReEncrypt*"], Resource: "*", Condition: { StringLike: { "kms:ViaService": "ec2.*.amazonaws.com" } } },
     { Sid: "ActuatorBeanstalkScaleDescribe", Effect: "Allow", Action: ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "autoscaling:DescribeAutoScalingGroups"], Resource: "*" },
     { Sid: "ActuatorHandsOff", Effect: "Deny", Action: ["rds:ModifyDBCluster", "ec2:ModifySnapshotTier", "ec2:RestoreSnapshotTier", "ec2:ModifyVolume", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy", "s3:PutMetricsConfiguration", "s3:DeleteMetricsConfiguration", "s3:PutLifecycleConfiguration", "ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ec2:StopInstances", "ec2:StartInstances",
-      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration", "elasticbeanstalk:UpdateEnvironment", "ec2:CreateTags", "ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
+      "ec2:ReleaseAddress", "ec2:DeleteSnapshot", "elasticloadbalancing:DeleteLoadBalancer", "ec2:DeleteVpcEndpoints", "kms:ScheduleKeyDeletion", "dynamodb:UpdateTable", "rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster", "ec2:ModifyInstanceCreditSpecification", "elasticfilesystem:PutLifecycleConfiguration", "cloudwatch:DeleteAlarms", "lambda:UpdateFunctionConfiguration", "elasticbeanstalk:UpdateEnvironment", "ec2:CreateTags", "ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", "ec2:CreateImage"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:hands-off": "*" } } },
   ],
 });
 
