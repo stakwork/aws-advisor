@@ -865,6 +865,22 @@ outcome under the row.
 - `AGENT_AUTO_DISPATCH`: `changes` (default) hands a scheduled run to the agent only when change detection
   found something material (a first run always counts), `always` after every run, `never` only on the button.
 
+## Who changed an instance's state
+
+Every `instance_state` alert is explained as it is raised (`src/alert_cause.ts`): who started, stopped, launched
+or terminated the instance, how and from where. Three sources, cheapest first: the advisor's own ledger (an
+executor row on the instance in the window: office hours, parking, a wake, Revert, the Stop / Start buttons),
+EC2's own state reason (the only witness for an OS shutdown, a Spot interruption or an AWS scheduled event), and
+CloudTrail `LookupEvents` by the instance id between the previous watcher sample and the alert (the person or
+role and session, the channel such as the console, the CLI, Terraform, an SDK, Auto Scaling or a Lambda, and the
+source IP). CloudTrail delivers 5 to 15 minutes late, so an alert usually starts `pending`; the watcher and a
+ten-minute timer look again until the event arrives or two hours pass. The verdict is stored on `alerts.cause`,
+added once to the message as `· Why: …` (so the Sphinx message, Jev's triage, the investigation and the graph
+carry it), shown under Details on the Alerts page, and mirrored to the alert's graph node with a `CAUSED_BY` edge
+to the ledger row when the advisor did it. An alert already sent to Sphinx before its cause was known gets the
+"Why:" as a short follow-up. Needs `ec2:DescribeInstances` and `cloudtrail:LookupEvents`, both already in the
+read policy.
+
 ## Alert-triggered investigations
 
 A watcher alert says *that* something happened; the investigation says *why* and *what it costs*. The

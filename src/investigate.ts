@@ -13,6 +13,7 @@ import { NatReceiver, attributeNatTraffic } from "./watcher.js";
 import { flowLogRecommendations, vpcFlowLogFacts } from "./flowlogs.js";
 import { checkTiers } from "./tiercheck.js";
 import { mirrorAlertsInBackground, mirrorRecommendationsInBackground } from "./graph_mirror.js";
+import { attributeAlert, causeOf } from "./alert_cause.js";
 
 /**
  * Alert-triggered investigations. A watcher alert (a NAT traffic spike, an instance that changed state) is
@@ -110,7 +111,7 @@ export function alertContext(alertId: number, hours = 24) {
   const alert = getAlert(alertId);
   if (!alert) return null;
   const incidents = db.prepare("select id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at, finished_at, error from incidents where alert_id = ? order by id desc").all(alertId);
-  return { alert: { ...alert, details: safeJson(alert.details), triage: safeJson(alert.triage) }, watch_samples: alertWatchSamples(alert, hours), incidents };
+  return { alert: { ...alert, details: safeJson(alert.details), triage: safeJson(alert.triage), cause: safeJson((alert as any).cause ?? null) }, watch_samples: alertWatchSamples(alert, hours), incidents };
 }
 
 interface InstanceFacts { instance_id: string; name: string | null; instance_type: string | null; state: string | null; launch_time: string | null; monthly_usd: number | null; cpu_30d: number | null; ssm_status: string | null; nodegroup: string | null; cluster: string | null; pool: Pool | null; vpc_id: string | null; subnet_id: string | null; tags: Record<string, string> }
@@ -205,6 +206,15 @@ export async function buildIncidentPrompt(alert: AlertRow, incidentId: number): 
 
   if (alert.kind === "instance_state" && alert.resource) {
     instanceIds.add(alert.resource);
+    // who or what made the change (src/alert_cause.ts); looked up now when the watcher had not yet
+    try {
+      const cause = (await attributeAlert(alert.id)) ?? causeOf(alert as any);
+      if (cause) {
+        lines.push("", "## Cause of the state change (advisor ledger, EC2 state reason, CloudTrail)", `- ${cause.status}: ${cause.summary}`);
+        const facts = { actor_kind: cause.actor_kind, actor: cause.actor, via: cause.via, event: cause.event_name, at: cause.event_time, source_ip: cause.source_ip, principal_arn: cause.principal_arn, user_agent: cause.user_agent, failed_call: cause.error_code, ledger_row: cause.action_id, state_reason: cause.state_reason, window: cause.window };
+        lines.push("```json", JSON.stringify(facts, null, 1), "```");
+      }
+    } catch (e) { note("cause of the state change", e); }
     const samples = alertWatchSamples(alert, 24);
     lines.push("", "## Watcher state samples for this instance, last 24 h");
     if (!samples.length) lines.push("- none");

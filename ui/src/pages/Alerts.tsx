@@ -18,6 +18,37 @@ function instanceOf(alert: any): string | null {
   return /^(i-[0-9a-f]{8,17})\b/.exec(alert.resource || "")?.[1] ?? null;
 }
 
+const ACTOR_LABEL: Record<string, string> = { person: "a person", advisor: "the advisor", automation: "automation", aws: "AWS", unknown: "unknown" };
+
+/** Why the instance changed state (src/alert_cause.ts): the advisor's ledger, EC2's own reason or the CloudTrail call. */
+function Cause({ alert }: { alert: any }) {
+  let c: any = null;
+  try { c = alert.cause ? JSON.parse(alert.cause) : null; } catch { /* none */ }
+  if (!c) return <div className="text-xs text-zinc-500">Why: not looked up yet (the watcher does it on its next sample).</div>;
+  const tone = c.status === "found" ? "text-zinc-200" : "text-zinc-400";
+  const row = (k: string, v: any) => (v == null || v === "" ? null : <Fragment key={k}><dt className="text-zinc-500">{k}</dt><dd className="break-all font-mono text-zinc-300">{String(v)}</dd></Fragment>);
+  return (
+    <div className="space-y-1 text-sm">
+      <div className={tone}><span className="text-zinc-500">Why:</span> {c.summary}</div>
+      {c.status === "found" && (
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
+          {row("who", c.actor ? `${c.actor} (${ACTOR_LABEL[c.actor_kind] ?? c.actor_kind})` : null)}
+          {row("via", c.via)}
+          {row("call", c.event_name ? `${c.event_name}${c.error_code ? ` (failed: ${c.error_code})` : ""}` : null)}
+          {row("at", c.event_time ? when(c.event_time) : null)}
+          {row("from", c.source_ip)}
+          {row("principal", c.principal_arn)}
+          {row("user agent", c.user_agent)}
+          {row("EC2 says", c.state_reason)}
+          {row("source", c.source === "cloudtrail" ? `CloudTrail event ${c.event_id}` : c.source === "ledger" ? "the advisor's ledger" : "EC2 state reason")}
+        </dl>
+      )}
+      {c.action_id != null && <Link className="text-xs text-sky-300 hover:underline" to={`/actions?id=${c.action_id}`}>Open ledger row #{c.action_id}</Link>}
+      {c.status !== "found" && <div className="text-xs text-zinc-500">Searched {when(c.window?.from)} to {when(c.window?.to)}; checked {c.tries} time{c.tries === 1 ? "" : "s"}, last {when(c.checked_at)}.</div>}
+    </div>
+  );
+}
+
 /** The parsed details of one alert: NAT figures with the top receivers table, or the state change. */
 function Details({ alert }: { alert: any }) {
   let d: any = {};
@@ -50,7 +81,12 @@ function Details({ alert }: { alert: any }) {
     );
   }
   if (alert.kind === "instance_state") {
-    return <div className="text-xs text-zinc-400">{d.name || alert.resource} · {d.type} · {d.region} · {d.from ?? "new"} → {d.to ?? "gone"}</div>;
+    return (
+      <div className="space-y-2">
+        <div className="text-xs text-zinc-400">{d.name || alert.resource} · {d.type} · {d.region} · {d.from ?? "new"} → {d.to ?? "gone"}</div>
+        <Cause alert={alert} />
+      </div>
+    );
   }
   if (d?.summary) return <div className="space-y-1 text-sm"><div className="text-zinc-200">{d.summary}</div><div className="text-xs text-zinc-500">From the daily review of the collected statistics (probes, roll-ups, baselines).</div></div>;
   return <pre className="max-h-40 overflow-auto rounded bg-zinc-950 p-2 text-xs">{alert.details}</pre>;

@@ -3,6 +3,7 @@ import { credentialGate } from "./gate.js";
 import { db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { askJev, jevEnabled, mapLimit } from "./jev.js";
+import { causeOf } from "./alert_cause.js";
 
 /**
  * Alert triage with Jev (purpose alert_triage). Right after the watcher creates a nat_traffic or
@@ -77,9 +78,9 @@ const gb = (b: unknown) => Math.round((Number(b || 0) / 1e9) * 100) / 100;
 const ageDays = (iso: string | null | undefined) => (iso ? Math.round((Date.now() - new Date(iso).getTime()) / 86400000) : null);
 const hourOf = (iso: string) => new Date(iso).getUTCHours();
 
-const HOW_ALERTS_ARE_RAISED = "A watcher samples the account every 30 minutes. nat_traffic: a NAT gateway moved more than 2x the average of its previous 6 samples and more than 5 GB in the last hour. instance_state: an instance changed state, appeared or disappeared since the previous sample; members of autoscaling pools (Karpenter, EKS node groups, ASGs) never alert individually.";
+const HOW_ALERTS_ARE_RAISED = "A watcher samples the account every 30 minutes. nat_traffic: a NAT gateway moved more than 2x the average of its previous 6 samples and more than 5 GB in the last hour. instance_state: an instance changed state, appeared or disappeared since the previous sample; members of autoscaling pools (Karpenter, EKS node groups, ASGs) never alert individually. cause (when present): who or what made the change, from the advisor's own ledger, EC2's state reason or the CloudTrail call; status pending means the CloudTrail event has not arrived yet, not that nobody did it.";
 
-interface AlertRowLite { id: number; created_at: string; kind: string; resource: string | null; message: string; details: string | null }
+interface AlertRowLite { id: number; created_at: string; kind: string; resource: string | null; message: string; details: string | null; cause?: string | null }
 
 /** The inventory's view of an instance, reduced to what a triage needs. */
 function instanceFacts(id: string) {
@@ -164,6 +165,9 @@ export async function buildTriageState(alert: AlertRowLite) {
     state.instance = { ...(facts || { instance_id: alert.resource, name: rest.name ?? null, type: rest.type ?? null, region: rest.region ?? null, pool: rest.pool ?? null, cluster: rest.cluster ?? null }), change: { from: rest.from ?? "did not exist", to: rest.to ?? "gone" } };
     vpcId = vpcId || facts?.vpc_id || null;
   }
+  // who or what caused it (src/alert_cause.ts): the advisor's ledger, EC2's own reason or the CloudTrail call
+  const cause = causeOf(alert);
+  if (cause) state.cause = { status: cause.status, summary: cause.summary, actor_kind: cause.actor_kind, actor: cause.actor, via: cause.via, event: cause.event_name, at: cause.event_time, failed_call: cause.error_code };
   state.watch_samples = sampleSummary(alert);
   state.history = history(alert);
   if (alert.kind === "nat_traffic") state.vpc_endpoints = await vpcEndpoints(vpcId);
@@ -180,7 +184,7 @@ export async function buildTriageState(alert: AlertRowLite) {
 export async function triageAlert(alertId: number): Promise<Triage | null> {
   if (!(await credentialGate("triage")).ok) return null;
   if (!jevEnabled()) return null;
-  const alert = db.prepare("select id, created_at, kind, resource, message, details from alerts where id = ?").get(alertId) as AlertRowLite | undefined;
+  const alert = db.prepare("select id, created_at, kind, resource, message, details, cause from alerts where id = ?").get(alertId) as AlertRowLite | undefined;
   if (!alert || !["nat_traffic", "instance_state"].includes(alert.kind)) return null;
   const state = await buildTriageState(alert);
   const res = await askJev(state, triageQuestions(), { purpose: "alert_triage" });

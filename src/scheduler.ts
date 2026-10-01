@@ -27,9 +27,10 @@ import { dispatchPassReports } from "./pass_report.js";
 import { refreshSwarmCosts } from "./swarm_costs.js";
 import { refreshTagHygiene } from "./tag_hygiene.js";
 import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
-import { mirrorKnowledgeInBackground } from "./graph_mirror.js";
+import { mirrorAlertsInBackground, mirrorKnowledgeInBackground } from "./graph_mirror.js";
 import { refreshStatusChecks } from "./status_checks.js";
 import { complianceBusy, startComplianceScan } from "./compliance.js";
+import { attributePendingAlerts } from "./alert_cause.js";
 
 export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
 
@@ -162,5 +163,12 @@ export function startScheduler(): Record<string, string | null> {
     if (key === "observeCron" && !config.repo2graphUrl) { console.log("Observation (OBSERVE_CRON) disabled: no repo2graph URL (Settings > Agent)"); out[key] = null; continue; }
     out[key] = schedule(names[key], crons[key], () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });
   }
+  // CloudTrail delivers 5 to 15 minutes late: alerts still waiting for their event are looked at again between
+  // watcher samples (src/alert_cause.ts), and the ones explained go out with their "Why:".
+  if (!cronOff(config.watchCron)) schedule("Alert causes (every 10 minutes)", "*/10 * * * *", () => {
+    attributePendingAlerts()
+      .then((r) => { if (r.found) { mirrorAlertsInBackground(); } })
+      .catch((e: any) => console.error(`[cause] failed: ${e?.message || e}`));
+  });
   return out;
 }

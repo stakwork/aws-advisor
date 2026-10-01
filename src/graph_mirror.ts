@@ -192,12 +192,23 @@ export function recommendationNode(row: any, inventoryIds: Set<string>, concepts
     resource_id: inventoryIdOf(row.resource, inventoryIds), concept_id: conceptId || null, run_id: runId && runId > 0 ? runId : null, incident_id: num(ev.incident_id) };
 }
 
-export interface AlertNode { id: number; kind: string; level: string; message: string; created_at: string; acknowledged: boolean; acknowledged_by: string | null; resource: string | null; resource_id: string | null }
+export interface AlertNode {
+  id: number; kind: string; level: string; message: string; created_at: string; acknowledged: boolean; acknowledged_by: string | null; resource: string | null; resource_id: string | null;
+  /** Why it happened (src/alert_cause.ts): the sentence, who, of what kind, through what, and the advisor's ledger row when it was the advisor. */
+  cause_status: string | null; cause: string | null; cause_actor: string | null; cause_actor_kind: string | null; cause_via: string | null; cause_event: string | null; cause_at: string | null; cause_action_id: number | null;
+}
 
 /** The level rule of src/alert_level.ts is duplicated here in its result only; the message is cut so a node stays small. */
 export function alertNode(row: any, inventoryIds: Set<string>, level: string): AlertNode {
   return { id: Number(row.id), kind: String(row.kind), level, message: String(row.message || "").slice(0, 500), created_at: String(row.created_at), acknowledged: Boolean(row.acknowledged),
-    acknowledged_by: str(row.acknowledged_by), resource: str(row.resource), resource_id: inventoryIdOf(row.resource, inventoryIds) };
+    acknowledged_by: str(row.acknowledged_by), resource: str(row.resource), resource_id: inventoryIdOf(row.resource, inventoryIds), ...causeFields(row.cause) };
+}
+
+function causeFields(raw: unknown): Pick<AlertNode, "cause_status" | "cause" | "cause_actor" | "cause_actor_kind" | "cause_via" | "cause_event" | "cause_at" | "cause_action_id"> {
+  let c: any = null;
+  try { c = typeof raw === "string" ? JSON.parse(raw) : null; } catch { /* none */ }
+  return { cause_status: str(c?.status), cause: c?.summary ? String(c.summary).slice(0, 300) : null, cause_actor: str(c?.actor), cause_actor_kind: str(c?.actor_kind), cause_via: str(c?.via),
+    cause_event: str(c?.event_name), cause_at: str(c?.event_time), cause_action_id: c?.action_id != null ? Number(c.action_id) : null };
 }
 
 export interface ActionNode {
@@ -545,7 +556,12 @@ const ALERT_CYPHER = `
 UNWIND $rows AS row
 MERGE (a:AdvisorAlert {id: row.id})
 SET a += {kind: row.kind, level: row.level, message: row.message, created_at: row.created_at, acknowledged: row.acknowledged, acknowledged_by: row.acknowledged_by,
-          resource: row.resource, account_id: $account, updated_at: $now}
+          resource: row.resource, cause_status: row.cause_status, cause: row.cause, cause_actor: row.cause_actor, cause_actor_kind: row.cause_actor_kind, cause_via: row.cause_via,
+          cause_event: row.cause_event, cause_at: row.cause_at, account_id: $account, updated_at: $now}
+WITH a, row
+FOREACH (_ IN CASE WHEN row.cause_action_id IS NULL THEN [] ELSE [1] END |
+  MERGE (x:AdvisorAction {id: row.cause_action_id})
+  MERGE (a)-[:CAUSED_BY]->(x))
 WITH a, row
 OPTIONAL MATCH (a)-[t:ABOUT]->() DELETE t
 WITH DISTINCT a, row
@@ -572,7 +588,7 @@ export async function mirrorAlertsAndIncidents(): Promise<{ alerts: number; inci
   const account = accountId();
   await mirrorAccount(account);
   const inv = inventoryIds();
-  const alerts = (db.prepare("select id, kind, resource, message, created_at, acknowledged, acknowledged_by, triage from alerts").all() as any[])
+  const alerts = (db.prepare("select id, kind, resource, message, created_at, acknowledged, acknowledged_by, triage, cause from alerts").all() as any[])
     .map((r) => alertNode(r, inv, alertLevel({ ...r, triage: safeJson(r.triage) })));
   const incidents = (db.prepare("select id, alert_id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at from incidents").all() as any[]).map(incidentNode);
   const stamp = now();

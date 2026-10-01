@@ -6,6 +6,7 @@ import { credentialGate } from "./gate.js";
 import { investigateAlertInBackground, refreshFlowLogRecommendations, shouldAutoInvestigate } from "./investigate.js";
 import { describeError } from "./permissions.js";
 import { triageAlerts } from "./triage.js";
+import { attributeAlerts, attributePendingAlerts } from "./alert_cause.js";
 import { mirrorAlertsInBackground, mirrorResourcesInBackground } from "./graph_mirror.js";
 import { getBaseline, scoreValue } from "./baselines.js";
 import { MIN_DAYS_FOR_SEASONAL } from "./baseline_math.js";
@@ -209,6 +210,10 @@ export async function watchOnce(): Promise<WatchResult> {
     try { await refreshFlowLogRecommendations(alertedVpcs.size ? [...alertedVpcs] : undefined); }
     catch (e: any) { errors.push(`flow logs: ${e?.message || e}`); }
   }
+  // Why each instance changed state (ledger, EC2's reason, CloudTrail), before triage so Jev judges with it; the
+  // CloudTrail event often arrives after the alert, so earlier alerts still waiting for theirs are looked at again.
+  if (stateAlerts.length) await attributeAlerts(stateAlerts).catch((e: any) => errors.push(`cause: ${String(e?.message || e).slice(0, 200)}`));
+  await attributePendingAlerts().then((r) => { if (r.checked) console.log(`[cause] re-checked ${r.checked} pending alert(s), ${r.found} explained`); }).catch((e: any) => errors.push(`cause: ${String(e?.message || e).slice(0, 200)}`));
   // Jev triage (no-op without TYPESAFE_API_KEY): routine alerts are acknowledged, unexpected ones are marked for the agent.
   let triaged = new Map<number, { decision: string }>();
   try { triaged = await triageAlerts([...natAlerts.map((a) => a.id), ...stateAlerts]); }
