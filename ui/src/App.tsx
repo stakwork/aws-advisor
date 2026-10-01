@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
+import { ConnectionBanner } from "./components/connection";
 import { Activity, Bell, Boxes, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert } from "lucide-react";
 import { api, signIn, token } from "./api";
 import Overview from "./pages/Overview";
@@ -92,6 +93,7 @@ function AppShell() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-6">
+        <ConnectionBanner />
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/runs" element={<Runs />} />
