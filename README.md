@@ -1134,6 +1134,25 @@ when first seen, once while it stays open. The EC2 detail's "What runs" tab list
 with `(:AdvisorApp)-[:SERVES]->(:AdvisorPort)`. Update the SSM document to 1.8 (Settings › Permissions prints the
 command) so the probe sends the section.
 
+### Security groups and the Ports tab
+
+The EC2 detail has a **Ports** tab (after Usage): every listening port in a table with what serves it, the interfaces it
+binds, its reach (open to the internet, reachable from the network, from other groups, blocked by security group,
+blocked by network ACL, this box only) and why, naming the rule with a link to its group; the rules that open nothing
+on the box are listed under it. The Inventory has a **Security groups** tab (`src/security_groups.ts`, read with the
+inventory: `aws_vpc_security_group`, `aws_vpc` for whether each VPC has IPv6, `aws_ec2_network_interface` for who
+wears each group): every group with its VPC, its rules, the instances and other interfaces (databases, load
+balancers, Lambdas, endpoints) using it and its flags (a broad rule, listening ports it opens to the internet, a
+dormant IPv6 rule, unattached), the troubled ones first; a row opens the rules with what listens behind each.
+`GET /api/security-groups`, `GET /api/security-groups/:id`.
+
+An IPv6 rule cannot open anything in a VPC without an IPv6 block, so such ports read as blocked whatever the
+instance snapshot says. The same rule is flagged, though, when it is dangerous the day IPv6 is turned on: all traffic
+or a range wider than 1,000 ports from `::/0`, or a port the group does not open to `0.0.0.0/0` as well. Each such
+group gets one recommendation (rule `sg_dormant_ipv6`, `security_fix`, tier approve, no saving) naming the rules,
+the listening ports they would open and the revoke command; it is refreshed with every inventory and resolved when
+the rule is gone.
+
 ### Testing the probe
 
 Prerequisites are on two sides. The instance needs the SSM agent online: the Inventory page's SSM column (or

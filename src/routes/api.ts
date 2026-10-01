@@ -465,6 +465,18 @@ api.get("/instances/:id/metrics", (req, res) => {
   res.json(instanceMetrics(String(req.params.id), limit).map((p) => ({ ...p, summary: summarizeProbe(p.data) })));
 });
 
+// ---- security groups (src/security_groups.ts): every group with its trouble flags, and one group in full ---------------
+api.get("/security-groups", async (_req, res) => {
+  const { listSecurityGroups } = await import("../security_groups.js");
+  res.json({ groups: listSecurityGroups() });
+});
+api.get("/security-groups/:id", async (req, res) => {
+  const { securityGroupDetail } = await import("../security_groups.js");
+  const d = securityGroupDetail(String(req.params.id));
+  if (!d) return res.status(404).json({ error: "not found" });
+  res.json(d);
+});
+
 // ---- what runs on the instances (probe 1.6, src/instance_apps.ts) ------------------------------------------------
 // One instance: its apps (current, and with ?gone=1 the ones that left), its recent appear/disappear events and where its agents ship logs.
 api.get("/instances/:id/apps", async (req, res) => {

@@ -35,6 +35,18 @@ const sqliteNow = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
 // ---- Steampipe queries ------------------------------------------------------------------------------
 
+/** Security groups, VPCs (whether they have IPv6) and the network interfaces wearing each group (src/security_groups.ts). */
+const SG_SQL = `select group_id, group_name, description, vpc_id, region, account_id from ${S}.aws_vpc_security_group`;
+const VPC_SQL = `
+  select vpc_id, region, account_id, cidr_block, is_default,
+         (select count(*) from jsonb_array_elements(coalesce(ipv6_cidr_block_association_set, '[]'::jsonb)) a
+           where coalesce(a -> 'Ipv6CidrBlockState' ->> 'State', 'associated') = 'associated') as ipv6_blocks
+  from ${S}.aws_vpc`;
+const ENI_SQL = `
+  select network_interface_id as eni_id, interface_type, description, attached_instance_id as instance_id,
+         coalesce((select jsonb_agg(g ->> 'GroupId') from jsonb_array_elements(coalesce(groups, '[]'::jsonb)) g), '[]'::jsonb) as group_ids
+  from ${S}.aws_ec2_network_interface`;
+
 /** The network ACLs (entries and the subnets they cover), so a port the security groups let in can still be "blocked by network ACL". */
 const NACL_SQL = `
   select network_acl_id as acl_id, vpc_id, region, is_default,
@@ -184,7 +196,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     try { return await query<any>(sql); } catch (e: any) { errors.push(`${what}: ${describeError(e, `inventory ${what} (${tablesIn(sql).join(", ")})`, 300)}`); return undefined; }
   };
 
-  const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules, nacls] = await Promise.all([
+  const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules, nacls, sgRows, vpcRows, eniRows] = await Promise.all([
     attempt("ec2", EC2_SQL),
     attempt("ebs", EBS_SQL),
     attempt("ec2 cpu", EC2_CPU_SQL),
@@ -196,9 +208,24 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     attempt("elasticache cpu", CACHE_CPU_SQL),
     attempt("security group rules", SG_RULES_SQL),
     attempt("network ACLs", NACL_SQL),
+    attempt("security groups", SG_SQL),
+    attempt("VPCs", VPC_SQL),
+    attempt("network interfaces", ENI_SQL),
   ]);
   if (sgRules) { try { const { replaceIngressRules } = await import("./instance_apps.js"); replaceIngressRules(sgRules.map((r: any) => ({ group_id: String(r.group_id), region: r.region ?? null, ip_protocol: r.ip_protocol ?? null, from_port: r.from_port == null ? null : Number(r.from_port), to_port: r.to_port == null ? null : Number(r.to_port), cidr_ipv4: r.cidr_ipv4 ?? null, cidr_ipv6: r.cidr_ipv6 ?? null, referenced_group_id: r.referenced_group_id ?? null, prefix_list_id: r.prefix_list_id ?? null, rule_id: r.security_group_rule_id ?? null, description: r.description || null }))); } catch (e: any) { errors.push(`security group rules: ${e?.message || e}`); } }
   if (nacls) { try { const { replaceNacls } = await import("./instance_apps.js"); replaceNacls(nacls.map((r: any) => ({ acl_id: String(r.acl_id), vpc_id: r.vpc_id ?? null, region: r.region ?? null, is_default: Boolean(r.is_default), subnets: Array.isArray(r.subnets) ? r.subnets.filter(Boolean).map(String) : [], entries: Array.isArray(r.entries) ? r.entries : [] }))); } catch (e: any) { errors.push(`network ACLs: ${String(e?.message || e).slice(0, 200)}`); } }
+  if (sgRows || vpcRows || eniRows) {
+    try {
+      const { replaceSecurityGroups, syncSecurityGroupRecommendations } = await import("./security_groups.js");
+      replaceSecurityGroups(
+        sgRows ? sgRows.map((r: any) => ({ group_id: String(r.group_id), group_name: r.group_name ?? null, description: r.description ?? null, vpc_id: r.vpc_id ?? null, region: r.region ?? null, account_id: r.account_id ?? null })) : null,
+        vpcRows ? vpcRows.map((r: any) => ({ vpc_id: String(r.vpc_id), region: r.region ?? null, account_id: r.account_id ?? null, cidr_block: r.cidr_block ?? null, is_default: Boolean(r.is_default), ipv6_blocks: Number(r.ipv6_blocks ?? 0) })) : null,
+        eniRows ? eniRows.map((r: any) => ({ eni_id: String(r.eni_id), interface_type: r.interface_type ?? null, description: r.description ?? null, instance_id: r.instance_id ?? null, group_ids: Array.isArray(r.group_ids) ? r.group_ids.filter(Boolean).map(String) : [] })) : null,
+      );
+      // after the ports' rules and the VPCs are both in: a dormant IPv6 rule is a recommendation (rule sg_dormant_ipv6)
+      if (sgRules && vpcRows && sgRows) syncSecurityGroupRecommendations();
+    } catch (e: any) { errors.push(`security groups: ${String(e?.message || e).slice(0, 200)}`); }
+  }
   // per-resource CloudWatch statistics the daily tables do not cover (a handful of resources, one call each)
   const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
   const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };

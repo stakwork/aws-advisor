@@ -419,7 +419,10 @@ export function reachContextOf(instanceId: string): ReachContext {
     const names: Record<string, string> = {};
     for (const g of Array.isArray(net.security_groups) ? net.security_groups : []) if (g?.GroupId && g?.GroupName) names[g.GroupId] = g.GroupName;
     // the inventory always writes the key (null when the box has none); a snapshot without it says nothing either way
-    return { public_ip: "public_ip" in net ? (net.public_ip ? String(net.public_ip) : null) : undefined, ipv6: Array.isArray(net.ipv6) ? net.ipv6.map(String) : undefined, group_names: names, nacl: naclOf(net.subnet_id, net.vpc_id) };
+    // a VPC without an IPv6 block cannot give the box an IPv6 address, whatever the snapshot says (src/security_groups.ts reads the VPCs)
+    let ipv6: string[] | undefined = Array.isArray(net.ipv6) ? net.ipv6.map(String) : undefined;
+    try { const v = net.vpc_id ? db.prepare("select ipv6_blocks from inventory_vpc where vpc_id = ?").get(net.vpc_id) as { ipv6_blocks: number } | undefined : undefined; if (v && v.ipv6_blocks === 0) ipv6 = []; } catch { /* the table arrives with the first refresh */ }
+    return { public_ip: "public_ip" in net ? (net.public_ip ? String(net.public_ip) : null) : undefined, ipv6, group_names: names, nacl: naclOf(net.subnet_id, net.vpc_id) };
   } catch { return {}; }
 }
 

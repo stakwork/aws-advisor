@@ -8,6 +8,7 @@ import { RoleLine } from "../components/jev";
 import { InstanceCharts } from "../components/instanceCharts";
 import { UsageProfile } from "../components/usageProfile";
 import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
+import { GroupLink, PortsPanel, SecurityGroupsPanel } from "../components/securityGroups";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
 /** One chip per matched use-signal kind; click marks it noise for this image (or lifts the rule), so the count stops fooling the last-use line. */
@@ -154,53 +155,7 @@ function AppsBlock({ instanceId, probedAt }: { instanceId: string; probedAt: str
         ))}
       </ul>
       {gone.length > 0 && !all && <div className="text-zinc-600">{gone.length} left the box</div>}
-      {d.has_listeners === false && !d.ports?.length && <div className="mt-1 text-zinc-600">No port list yet: this probe predates 1.8 (update the SSM document, Settings › Permissions).</div>}
-      {d.ports?.length > 0 && (() => {
-        const tone: Record<string, string> = { internet: "text-red-300", network: "text-amber-300/90", group: "text-sky-300/90", closed: "text-emerald-300/80", local: "text-zinc-500" };
-        const word: Record<string, string> = { internet: "open to the internet", network: "reachable from the network", group: "reachable from other groups", closed: "blocked by security group", local: "this box only" };
-        const ports = d.ports.filter((p: any) => !p.gone); const closed = d.ports.filter((p: any) => p.gone);
-        const exposureKey = (p: any) => (p.exposure === "closed" && p.blocked_by === "network_acl" ? "nacl" : p.exposure);
-        const count = (e: string) => ports.filter((p: any) => exposureKey(p) === e).length;
-        const parts = [["internet", "open to the internet"], ["network", "reachable from the network"], ["group", "from other groups"], ["closed", "blocked by security group"], ["nacl", "blocked by network ACL"], ["local", "this box only"]]
-          .filter(([e]) => count(e) > 0).map(([e, w]) => `${count(e)} ${w}`);
-        // one broad world-open rule (all traffic, or a huge range) makes every listening port public: say it once, at the top
-        const broad = ports.flatMap((p: any) => (p.allowed_by ?? []).filter((r: any) => r.broad && r.world)).find(Boolean);
-        const exposedBroad = broad ? ports.filter((p: any) => p.exposure === "internet" && (p.allowed_by ?? []).every((r: any) => !r.world || r.broad)) : [];
-        const ruleText = (r: any) => `${r.group_name ?? r.group_id}: ${r.ports} from ${r.source}${r.description ? ` ("${r.description}")` : ""}`;
-        return (
-          <div className="mt-1.5">
-            <div>Listens on: <span className="text-zinc-500">{ports.length} port{ports.length === 1 ? "" : "s"}{parts.length ? `: ${parts.join(", ")}` : ""}</span></div>
-            {broad && (
-              <div className="mt-1 rounded border border-red-900/60 bg-red-950/30 px-2 py-1 text-red-200">
-                {broad.group_name ?? broad.group_id} ({broad.group_id}) lets <b>{broad.ports}</b> in from {broad.source}, so {broad.ports === "all traffic" ? "every port this box listens on is public" : "everything this box listens on in that range is public"}.
-                {exposedBroad.length > 0 && <> Public only because of it: {exposedBroad.slice(0, 12).map((p: any) => `${p.port}/${p.proto}${p.app_name ? ` ${p.app_name}` : ""}`).join(", ")}{exposedBroad.length > 12 ? ` and ${exposedBroad.length - 12} more` : ""}.</>}
-                <span className="text-red-300/70"> Replace it with rules for the ports that should be public.</span>
-              </div>
-            )}
-            <ul className="mt-0.5 space-y-0.5">
-              {[...ports, ...closed].slice(0, 60).map((p: any) => (
-                <li key={`${p.proto}:${p.port}`} className={`flex flex-wrap gap-x-2 ${p.gone ? "text-zinc-600 line-through" : "text-zinc-200"}`} title={`${p.bind || "?"} · ${p.scope} · first seen ${when(p.first_seen)} · seen on ${p.probes} probe${p.probes === 1 ? "" : "s"}${p.pid ? ` · pid ${p.pid}` : ""}${p.reason ? `\n${p.reason}` : ""}`}>
-                  <span className="font-mono">{p.port}/{p.proto}</span>
-                  <span className="text-zinc-400">→ {p.container ? <>container <span className="font-mono text-zinc-200">{p.container}</span>{p.container_port && p.container_port !== p.port ? <span className="text-zinc-500"> :{p.container_port}</span> : null}</> : p.app_name ? <span className="font-mono text-zinc-200">{p.app_name}</span> : p.process ? <span className="font-mono">{p.process}</span> : <span className="text-zinc-600">unknown owner</span>}</span>
-                  <span className={tone[p.exposure] || "text-zinc-500"} title={p.reason || undefined}>{p.exposure === "closed" && p.blocked_by === "network_acl" ? "blocked by network ACL" : word[p.exposure] || p.exposure}</span>
-                  {!p.gone && p.exposure !== "local" && p.exposure !== "closed" && p.allowed_by?.[0] && <span className="text-zinc-500">via {ruleText(p.allowed_by[0])}{p.allowed_by.length > 1 ? ` (+${p.allowed_by.length - 1} more rule${p.allowed_by.length > 2 ? "s" : ""})` : ""}</span>}
-                  {!p.gone && p.exposure === "network" && p.allowed_by?.[0]?.world && <span className="text-zinc-500">· no public address</span>}
-                  {!p.gone && p.exposure === "closed" && p.blocked_by === "network_acl" && p.reason && <span className="text-zinc-500">{p.reason.replace(/^blocked by network ACL: /, "")}</span>}
-                  {!p.gone && p.nacl_note && p.exposure !== "closed" && <span className="text-amber-300/80">· {p.nacl_note}</span>}
-                </li>
-              ))}
-            </ul>
-            {d.unused_rules?.length > 0 && (
-              <details className="mt-1"><summary className="cursor-pointer text-zinc-500">Security group rules that open nothing ({d.unused_rules.length})</summary>
-                <ul className="mt-0.5 space-y-0.5">{d.unused_rules.slice(0, 30).map((r: any) => (
-                  <li key={`${r.group_id}|${r.ports}|${r.source}`} className={r.unreachable ? "text-zinc-500" : r.world ? "text-amber-300/80" : "text-zinc-400"}>{ruleText(r)}{r.unreachable ? " · IPv6 only, and this box has no IPv6 address: it lets nothing in" : ""}</li>
-                ))}</ul>
-                <div className="text-zinc-600">These rules let nothing reach a listening port. If nothing should, the rule can go.</div>
-              </details>
-            )}
-          </div>
-        );
-      })()}
+      {d.ports?.some((p: any) => !p.gone) && <div className="mt-1.5 text-zinc-500">Listens on {d.ports.filter((p: any) => !p.gone).length} ports: see the Ports tab.</div>}
       {d.events?.length > 0 && <details className="mt-0.5"><summary className="cursor-pointer text-zinc-500">App events ({d.events.length})</summary>
         <ul className="mt-0.5 space-y-0.5">{d.events.slice(0, 20).map((e: any) => <li key={e.id} className={e.event === "disappeared" ? "text-amber-300/80" : "text-zinc-400"}>{when(e.at)} · {e.event} <span className="font-mono">{e.name}</span>{e.details?.oldest_seconds ? ` (had run ${age(e.details.oldest_seconds)})` : ""}</li>)}</ul></details>}
     </div>
@@ -263,10 +218,10 @@ function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, r
 import { RdsLoadPanel } from "../components/rdsLoad";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache", "lambda", "elb", "ebs", "s3", "route53", "tags"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "elb", "ebs", "s3", "route53", "sg", "tags"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", elb: "Load balancers", ebs: "EBS", s3: "S3", route53: "Route 53", tags: "Tags" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", tags: "resource" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", elb: "Load balancers", ebs: "EBS", s3: "S3", route53: "Route 53", sg: "Security groups", tags: "Tags" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", sg: "group_id", tags: "resource" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
@@ -404,7 +359,8 @@ export default function Inventory() {
     if (tableRef.current) tableHeight.current = tableRef.current.offsetHeight;
     setRows(null);
     // The Tags tab is its own report (src/tag_hygiene.ts): nothing to fetch here.
-    if (tab === "tags") { setRows([]); return Promise.resolve(); }
+    // So is Security groups (src/security_groups.ts): its panel fetches its own rows.
+    if (tab === "tags" || tab === "sg") { setRows([]); return Promise.resolve(); }
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (tab === "ebs" && state) qs.set("state", state);
@@ -494,6 +450,7 @@ export default function Inventory() {
       </div>
 
       {tab === "tags" && <TagsPanel />}
+      {tab === "sg" && <SecurityGroupsPanel selected={selectedId} onSelect={(id) => set({ id })} />}
 
       {tab === "ec2" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
@@ -565,7 +522,7 @@ export default function Inventory() {
         </div>
       )}
 
-      {tab !== "tags" && <div className="flex flex-wrap items-center gap-2">
+      {tab !== "tags" && tab !== "sg" && <div className="flex flex-wrap items-center gap-2">
         {tab === "ec2" && (
           <>
             <select value={state} onChange={(e) => set({ state: e.target.value })}>
@@ -601,7 +558,7 @@ export default function Inventory() {
         {rows && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
       </div>}
 
-      {tab !== "tags" && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
+      {tab !== "tags" && tab !== "sg" && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
         {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>{s?.refreshed_at ? "Nothing matches." : "No snapshot yet."}</Empty> : (
           <div className="min-w-0 overflow-x-auto self-start">
             <table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
@@ -790,7 +747,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, elb: 9, ebs: 10, s3: 8, route53: 6, tags: 5 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, elb: 9, ebs: 10, s3: 8, route53: 6, sg: 5, tags: 5 };
 
 /** What a balancer fronts, in one line: the instances (linked), Lambda targets, the Beanstalk environment, ASGs and ECS services. */
 function ElbFronts({ r }: { r: any }) {
@@ -990,8 +947,8 @@ const Glance = ({ label, value, hint, tone }: { label: string; value: ReactNode;
   </div>
 );
 
-type Ec2Tab = "overview" | "usage" | "running" | "logs" | "links";
-const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["running", "What runs"], ["logs", "Logs"], ["links", "Links & history"]];
+type Ec2Tab = "overview" | "usage" | "ports" | "running" | "logs" | "links";
+const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["ports", "Ports"], ["running", "What runs"], ["logs", "Logs"], ["links", "Links & history"]];
 
 /**
  * The EC2 detail in four tabs, every fact once: a header with what identifies the box and the two switches, a glance
@@ -1065,7 +1022,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
               ["Private IP", net.private_ip && <Mono>{net.private_ip}{net.private_dns ? <span className="text-zinc-500"> · {net.private_dns}</span> : null}</Mono>],
               ["Public IP", net.public_ip ? <Mono>{net.public_ip}{net.public_dns ? <span className="text-zinc-500"> · {net.public_dns}</span> : null}</Mono> : <span className="text-zinc-500">none</span>],
               ["VPC / subnet", (net.vpc_id || net.subnet_id) && <Mono>{net.vpc_id} / {net.subnet_id}</Mono>],
-              ["Security groups", net.security_groups?.length ? net.security_groups.map((g: any) => `${g.GroupName || ""} (${g.GroupId})`).join(", ") : null],
+              ["Security groups", net.security_groups?.length ? <>{net.security_groups.map((g: any, k: number) => <Fragment key={g.GroupId}>{k ? ", " : ""}<GroupLink id={g.GroupId} name={g.GroupName} /></Fragment>)}</> : null],
               ["DNS and balancers", (domains || behind) ? <button className="text-sky-300 hover:underline" onClick={() => setTab("links")}>{[domains ? `${domains} record${domains === 1 ? "" : "s"}` : null, behind ? `behind ${behind} balancer${behind === 1 ? "" : "s"}` : null].filter(Boolean).join(", ")}</button> : "none reach it"],
             ]} />
           </Group>
@@ -1111,6 +1068,8 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
           </div>
         </div>
       )}
+
+      {tab === "ports" && <PortsPanel instanceId={d.instance_id} probedAt={latest?.collected_at ?? null} groups={Array.isArray(net.security_groups) ? net.security_groups.filter((g: any) => g?.GroupId) : []} />}
 
       {tab === "running" && (
         <>
