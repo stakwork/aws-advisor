@@ -11,7 +11,8 @@ test("hibernate: only a tagged, single-interface, EBS-rooted box on a supported 
   assert.equal(skipReason(ok), null);
   assert.equal(skipReason({ ...ok, mode: "live" }), null);
   assert.match(skipReason({ ...ok, mode: null, tag_value: null })!, /not tagged advisor:hibernate/);
-  assert.match(skipReason({ ...ok, mode: null, tag_value: "yes" })!, /expected "stop".*or "live"/);
+  assert.match(skipReason({ ...ok, mode: null, tag_value: "yes" })!, /expected "stop".*"live".*or "no"/);
+  assert.equal(skipReason({ ...ok, mode: null, tag_value: "no" }), "advisor:hibernate=no: the owner keeps stop/start");
   assert.match(skipReason({ ...ok, configured: true })!, /already hibernation-ready/);
   assert.match(skipReason({ ...ok, migrated_to: "i-new" })!, /already migrated to i-new/);
   assert.match(skipReason({ ...ok, in_flight: true })!, /under way/);

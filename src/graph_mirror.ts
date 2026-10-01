@@ -1015,6 +1015,23 @@ export const mirrorCapacityPatternsInBackground = () => inBackground("capacity p
 export const mirrorComplianceScanInBackground = (scanId: number) => inBackground(`security scan mirror (${scanId})`, () => mirrorComplianceScan(scanId));
 export const mirrorRecommendationsInBackground = (ids?: number[]) => inBackground(`recommendation mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorRecommendations(ids));
 export const mirrorAlertsInBackground = () => inBackground("alert mirror", mirrorAlertsAndIncidents);
+
+/**
+ * One instance's wake profile (src/wake_profiles.ts) on its AdvisorResource node: whether the automatic wake is on,
+ * the domains and the whole profile as JSON; a deleted profile clears them. Fire-and-forget from every save.
+ */
+export function mirrorWakeProfile(instanceId: string): void {
+  inBackground(`wake profile ${instanceId}`, async () => {
+    if (!enabled()) return;
+    await ensureSchema();
+    const row = db.prepare("select enabled, profile, updated_at, updated_by from wake_profiles where instance_id = ?").get(instanceId) as { enabled: number; profile: string; updated_at: string; updated_by: string | null } | undefined;
+    let domains: string[] = [];
+    try { domains = row ? (JSON.parse(row.profile).domains ?? []) : []; } catch { /* kept empty */ }
+    await write(`MERGE (r:AdvisorResource {id: $id})
+      SET r.wake_profile = $profile, r.wake_enabled = $enabled, r.wake_domains = $domains, r.wake_updated_at = $updated_at, r.wake_updated_by = $by, r.updated_at = $now`,
+      { id: instanceId, profile: row?.profile ?? null, enabled: row ? Boolean(row.enabled) : null, domains: row ? domains : null, updated_at: row?.updated_at ?? null, by: row?.updated_by ?? null, now: now() });
+  });
+}
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */
 export const mirrorActionsInBackground = (ids?: number[]) => inBackground(`action mirror${ids ? ` (${ids.join(", ")})` : ""}`, () => mirrorActions(ids));
 

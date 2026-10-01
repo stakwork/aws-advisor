@@ -30,6 +30,8 @@ import { recordsNamingIp, upsertChange, IP_WAIT_MS, type DnsRecord } from "./sch
 
 export const KIND = "ec2_hibernate_migrate" as const;
 export const HIBERNATE_TAG = "advisor:hibernate";
+/** `advisor:hibernate=no`: the owner keeps stop/start; parking never hibernates the box and the page stops suggesting the migration. */
+export const NO_HIBERNATE = "no";
 export const MIGRATED_TO_TAG = "advisor:migrated-to";
 export const MIGRATED_FROM_TAG = "advisor:migrated-from";
 /** AWS limits for hibernation: RAM of the instance, Linux and Windows. */
@@ -54,7 +56,7 @@ export interface Candidate {
 
 /** Why an instance cannot be migrated as it is, or null. Pure. */
 export function skipReason(c: Candidate): string | null {
-  if (!c.mode) return c.tag_value != null ? `${HIBERNATE_TAG}=${c.tag_value}: expected "stop" (downtime fine) or "live" (warm image, cut-over on a click)` : `not tagged ${HIBERNATE_TAG}`;
+  if (!c.mode) return c.tag_value === NO_HIBERNATE ? `${HIBERNATE_TAG}=${NO_HIBERNATE}: the owner keeps stop/start` : c.tag_value != null ? `${HIBERNATE_TAG}=${c.tag_value}: expected "stop" (downtime fine), "live" (warm image, cut-over on a click) or "${NO_HIBERNATE}" (keep stop/start)` : `not tagged ${HIBERNATE_TAG}`;
   if (c.hands_off) return "tagged advisor:hands-off";
   if (c.migrated_to) return `already migrated to ${c.migrated_to} (this is the stopped original, kept for Revert)`;
   if (c.configured) return `already hibernation-ready (launched with hibernation on); remove the ${HIBERNATE_TAG} tag`;
@@ -136,6 +138,21 @@ export function movedIp(r: Pick<DnsRecord, "old_ip">, from: { public_ip?: string
 const tagOf = (i: Instance, key: string) => i.Tags?.find((t) => t.Key === key)?.Value ?? null;
 const hasTag = (i: Instance, key: string) => Boolean(i.Tags?.some((t) => t.Key === key));
 const gib = (mib: number | undefined) => (mib ? Math.round((mib / 1024) * 10) / 10 : null);
+
+/** What the eligibility rules (skipReason) need about one instance, from EC2's view of it, its type and the ledger. */
+export function candidateFor(inst: Instance, t: InstanceTypeInfo | undefined, poolKind: string | null, instanceId: string): Candidate {
+  const tagValue = tagOf(inst, HIBERNATE_TAG);
+  const inFlight = Boolean(db.prepare("select 1 from actions where kind = ? and resource = ? and (status = 'applied' or (status = 'failed' and json_extract(facts_json, '$.stage') is not null and json_extract(facts_json, '$.stage') != 'reverted')) limit 1").get(KIND, instanceId));
+  return {
+    mode: tagValue === "stop" || tagValue === "live" ? tagValue : null, tag_value: tagValue, state: String(inst.State?.Name), hands_off: hasTag(inst, "advisor:hands-off"),
+    configured: Boolean(inst.HibernationOptions?.Configured), root_device_type: inst.RootDeviceType ?? null, spot: inst.InstanceLifecycle === "spot",
+    managed_by: poolKind ? `a ${poolKind} pool` : tagOf(inst, "aws:autoscaling:groupName") ? `Auto Scaling group ${tagOf(inst, "aws:autoscaling:groupName")}` : tagOf(inst, "elasticbeanstalk:environment-name") ? `Beanstalk ${tagOf(inst, "elasticbeanstalk:environment-name")}` : null,
+    enis: inst.NetworkInterfaces?.length ?? 1, private_ips: inst.NetworkInterfaces?.[0]?.PrivateIpAddresses?.length ?? 1, source_dest_check: inst.SourceDestCheck !== false,
+    instance_store: Boolean(t?.InstanceStorageSupported), type_supports: t ? Boolean(t.HibernationSupported) : null, ram_gib: gib(t?.MemoryInfo?.SizeInMiB),
+    windows: /windows/i.test(inst.PlatformDetails || inst.Platform || ""), migrated_to: tagOf(inst, MIGRATED_TO_TAG), in_flight: inFlight,
+    reverted_at: (db.prepare("select reverted_at from actions where kind = ? and resource = ? and status = 'reverted' and datetime(reverted_at) > datetime('now', ?) order by id desc limit 1").get(KIND, instanceId, `-${REVERT_COOLDOWN_DAYS} days`) as { reverted_at: string } | undefined)?.reverted_at ?? null,
+  };
+}
 
 async function describe(ec2: EC2Client, id: string): Promise<Instance | null> {
   return (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [id] }))).Reservations?.[0]?.Instances?.[0] ?? null;
@@ -241,21 +258,11 @@ export const ec2HibernateMigrateAction: ActionModule = {
           const inst = live.get(r.instance_id); if (!inst) continue;
           const name = r.name || r.instance_id;
           const t = types.get(String(inst.InstanceType));
-          const tagValue = tagOf(inst, HIBERNATE_TAG);
-          const inFlight = Boolean(db.prepare("select 1 from actions where kind = ? and resource = ? and (status = 'applied' or (status = 'failed' and json_extract(facts_json, '$.stage') is not null and json_extract(facts_json, '$.stage') != 'reverted')) limit 1").get(KIND, r.instance_id));
-          const c: Candidate = {
-            mode: tagValue === "stop" || tagValue === "live" ? tagValue : null, tag_value: tagValue, state: String(inst.State?.Name), hands_off: hasTag(inst, "advisor:hands-off"),
-            configured: Boolean(inst.HibernationOptions?.Configured), root_device_type: inst.RootDeviceType ?? null, spot: inst.InstanceLifecycle === "spot",
-            managed_by: r.pool_kind ? `a ${r.pool_kind} pool` : tagOf(inst, "aws:autoscaling:groupName") ? `Auto Scaling group ${tagOf(inst, "aws:autoscaling:groupName")}` : tagOf(inst, "elasticbeanstalk:environment-name") ? `Beanstalk ${tagOf(inst, "elasticbeanstalk:environment-name")}` : null,
-            enis: inst.NetworkInterfaces?.length ?? 1, private_ips: inst.NetworkInterfaces?.[0]?.PrivateIpAddresses?.length ?? 1, source_dest_check: inst.SourceDestCheck !== false,
-            instance_store: Boolean(t?.InstanceStorageSupported), type_supports: t ? Boolean(t.HibernationSupported) : null, ram_gib: gib(t?.MemoryInfo?.SizeInMiB),
-            windows: /windows/i.test(inst.PlatformDetails || inst.Platform || ""), migrated_to: tagOf(inst, MIGRATED_TO_TAG), in_flight: inFlight,
-            reverted_at: (db.prepare("select reverted_at from actions where kind = ? and resource = ? and status = 'reverted' and datetime(reverted_at) > datetime('now', ?) order by id desc limit 1").get(KIND, r.instance_id, `-${REVERT_COOLDOWN_DAYS} days`) as { reverted_at: string } | undefined)?.reverted_at ?? null,
-          };
+          const c = candidateFor(inst, t, r.pool_kind, r.instance_id);
           const why = skipReason(c);
           if (why) {
-            if (c.mode || tagValue != null) { notes.push(`${name}: ${why}`); log(`${name}: ${why}`); }
-            else if (!skipReason({ ...c, mode: "stop" })) couldBe++;
+            if (c.mode || (c.tag_value != null && c.tag_value !== NO_HIBERNATE)) { notes.push(`${name}: ${why}`); log(`${name}: ${why}`); }
+            else if (c.tag_value !== NO_HIBERNATE && !skipReason({ ...c, mode: "stop" })) couldBe++;
             continue;
           }
           tagged++;

@@ -16,12 +16,14 @@
  * made and the pass waits ACT_PARK_GRACE_HOURS before stopping, so anyone can object; a swarm parked or woken
  * in the last 48 hours waits, and one woken twice in a week is left alone (somebody uses it irregularly).
  */
-import { CreateTagsCommand, DeleteTagsCommand, DescribeAddressesCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand, StopInstancesCommand, type Instance } from "@aws-sdk/client-ec2";
+import { CreateTagsCommand, DeleteTagsCommand, DescribeAddressesCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand, type Instance } from "@aws-sdk/client-ec2";
 import { db } from "../db.js";
 import { config } from "../config.js";
 import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
 import { reattachDns, recordsNamingIp, type DnsRecord } from "./schedule_hours.js";
+import { stopOrHibernate } from "../hibernation.js";
+import { explainRefusal } from "../autopark_grant.js";
 
 export const KIND = "swarm_park" as const;
 export const PARK_TAG = "advisor:park";
@@ -153,14 +155,15 @@ export const swarmParkAction: ActionModule = {
 
   async apply(p, creds) {
     const ec2 = new EC2Client({ region: p.region, credentials: creds.act() });
+    const reader = new EC2Client({ region: p.region, credentials: creds.read });
     try {
-      const r = await ec2.send(new StopInstancesCommand({ InstanceIds: [p.resource] }));
-      const state = r.StoppingInstances?.[0]?.CurrentState?.Name || "stopping";
+      // hibernated when the box was launched for it (back in about a minute with its memory), stopped otherwise
+      const stop = await stopOrHibernate(ec2, p.resource, reader);
       let marker = "";
       try { await ec2.send(new CreateTagsCommand({ Resources: [p.resource], Tags: [{ Key: PARKED_TAG, Value: new Date().toISOString() }] })); marker = `, tagged ${PARKED_TAG}`; }
       catch (e: any) { marker = `, tag ${PARKED_TAG} not written (${String(e?.message || e).slice(0, 80)})`; }
-      return `StopInstances: ${state}${marker}`;
-    } finally { ec2.destroy(); }
+      return `${stop.line}${marker}`;
+    } finally { ec2.destroy(); reader.destroy(); }
   },
 
   async verify(p, creds) {
@@ -178,7 +181,8 @@ export const swarmParkAction: ActionModule = {
   async revert(p, creds) {
     const ec2 = new EC2Client({ region: p.region, credentials: creds.act() });
     try {
-      const r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] }));
+      let r;
+      try { r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] })); } catch (e) { throw explainRefusal(e, p.resource); }
       try { await ec2.send(new DeleteTagsCommand({ Resources: [p.resource], Tags: [{ Key: PARKED_TAG }] })); } catch { /* the marker is informational */ }
       const line = `StartInstances: ${r.StartingInstances?.[0]?.CurrentState?.Name || "pending"}`;
       if (p.facts.elastic_ip === false) {

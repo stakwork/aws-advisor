@@ -461,6 +461,9 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
  * makes. The executor checks these against the role (iam:SimulatePrincipalPolicy from the read identity) and
  * learns them from denied applies, so a role narrower than the policy below hides Apply instead of failing.
  */
+/** Actions a module declares that only a person's own credentials perform ("Run as me"): never in the actuator policy, never counted as its gap. */
+export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"]);
+
 export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
   acu_window: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
   snapshot_archive: { apply: ["ec2:ModifySnapshotTier"], revert: ["ec2:RestoreSnapshotTier"] },
@@ -491,7 +494,8 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   beanstalk_pressure: { apply: ["elasticbeanstalk:UpdateEnvironment"], revert: ["elasticbeanstalk:UpdateEnvironment"] },
   usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
   // UpdateTagsForResource is the API; the IAM actions it checks are AddTags (TagsToAdd) and RemoveTags (TagsToRemove).
-  consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags"], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"] },
+  // the AdvisorAutoPark and advisor:hibernate switches are done with a person's credentials ("Run as me"; PERSON_ONLY_ACTIONS are never the actuator's) ("Run as me"): the tag, and for Auto-park the grant on the actuator role
+  consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags", "iam:GetRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", "iam:GetRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"] },
   // A staged relaunch: apply, the stages (advance) and the cut-over (step) are all checked as apply.
   ec2_hibernate_migrate: { apply: ["ec2:CreateImage", "ec2:StopInstances", "ec2:RunInstances", "ec2:CreateTags", "iam:PassRole", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"],
     revert: ["ec2:StartInstances", "ec2:StopInstances", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets", "ec2:DeleteTags"] },
@@ -508,10 +512,10 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorS3RequestMetrics", Effect: "Allow", Action: ["s3:PutMetricsConfiguration", "s3:GetMetricsConfiguration", "s3:DeleteMetricsConfiguration"], Resource: "*" },
     { Sid: "ActuatorS3Lifecycle", Effect: "Allow", Action: ["s3:PutLifecycleConfiguration", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging"], Resource: "*" },
     { Sid: "ActuatorEcrLifecycle", Effect: "Allow", Action: ["ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ecr:GetLifecyclePolicy", "ecr:DescribeRepositories", "ecr:ListTagsForResource"], Resource: "*" },
-    // Parking: only instances someone tagged advisor:park=auto can be stopped or started, and the only tag the role may write is its own marker.
+    // Stopping and starting EC2 instances: no statement here. Each instance a person switched Auto-park on for is
+    // listed in the role's own inline policy AdvisorAutoParkInstances (src/autopark_grant.ts), written with that
+    // person's credentials ("Run as me"); the actuator has no IAM write right and no tag it can write opens a stop.
     { Sid: "ActuatorSwarmParkDescribe", Effect: "Allow", Action: ["ec2:DescribeInstances", "ec2:DescribeAddresses"], Resource: "*" },
-    { Sid: "ActuatorSwarmPark", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringEquals: { "aws:ResourceTag/advisor:park": "auto" } } },
-    { Sid: "ActuatorSwarmParkMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringEquals: { "aws:ResourceTag/advisor:park": "auto" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
     // Approved deletes: an Elastic IP nobody uses, a snapshot a person approved deleting, an idle load balancer. AllocateAddress is the EIP recovery path (the same address, while nobody else has it).
     { Sid: "ActuatorEipRelease", Effect: "Allow", Action: ["ec2:ReleaseAddress", "ec2:AllocateAddress", "ec2:DescribeAddresses"], Resource: "*" },
     { Sid: "ActuatorSnapshotDelete", Effect: "Allow", Action: ["ec2:DeleteSnapshot", "ec2:DescribeImages"], Resource: "*" },
@@ -522,8 +526,7 @@ export const actuatorPolicy = (): IamPolicy => ({
     // KMS: schedule (never immediate) and cancel; a cancelled key comes back disabled, so EnableKey completes the revert.
     { Sid: "ActuatorKmsRetire", Effect: "Allow", Action: ["kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:EnableKey", "kms:DescribeKey", "kms:ListResourceTags"], Resource: "*" },
     { Sid: "ActuatorDynamoCapacity", Effect: "Allow", Action: ["dynamodb:UpdateTable", "dynamodb:DescribeTable", "dynamodb:ListTagsOfResource"], Resource: "*" },
-    // Office hours: only instances and databases someone tagged advisor:schedule can be stopped or started on it.
-    { Sid: "ActuatorScheduleEc2", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:schedule": "*" } } },
+    // Office hours on databases: only those someone tagged advisor:schedule (EC2 instances need their Auto-park grant, above).
     { Sid: "ActuatorScheduleRds", Effect: "Allow", Action: ["rds:StopDBInstance", "rds:StartDBInstance", "rds:StopDBCluster", "rds:StartDBCluster"], Resource: "*", Condition: { StringLike: { "aws:ResourceTag/advisor:schedule": "*" } } },
     { Sid: "ActuatorScheduleDescribe", Effect: "Allow", Action: ["rds:DescribeDBInstances"], Resource: "*" },
     { Sid: "ActuatorCreditSpec", Effect: "Allow", Action: ["ec2:ModifyInstanceCreditSpecification", "ec2:DescribeInstanceCreditSpecifications"], Resource: "*" },
@@ -533,12 +536,10 @@ export const actuatorPolicy = (): IamPolicy => ({
     // Beanstalk capacity: only an environment someone tagged advisor:scale can have its MinSize/MaxSize moved. With an operations role on the environment Beanstalk does the CloudFormation and Auto Scaling work under that role; without one the caller needs those rights too (README).
     { Sid: "ActuatorBeanstalkScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringLike: { "aws:ResourceTag/advisor:scale": "*" } } },
     // Usage schedules: the one tag the role may write on any instance is advisor:schedule (an approved usage_schedule recommendation); the office-hours action then does the stops and starts.
-    { Sid: "ActuatorUsageScheduleTag", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:schedule", "AdvisorAutoPark"] } } },
+    { Sid: "ActuatorUsageScheduleTag", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:schedule"] } } },
     // Consent switches from the page (src/consent.ts): AdvisorAutoPark on instances (above), AdvisorAutoScale and its band on environments.
     { Sid: "ActuatorBeanstalkConsentTag", Effect: "Allow", Action: ["elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["AdvisorAutoScale", "AdvisorScaleBand"] } } },
-    // AdvisorAutoPark=ON is the same consent as advisor:park=auto and advisor:schedule: stop, start and the parked marker on those boxes; AdvisorAutoScale=ON the same as advisor:scale.
-    { Sid: "ActuatorAutoPark", Effect: "Allow", Action: ["ec2:StopInstances", "ec2:StartInstances"], Resource: "*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoPark": "ON" } } },
-    { Sid: "ActuatorAutoParkMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoPark": "ON" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
+    // AdvisorAutoScale=ON lets the capacity action move an environment's MinSize and MaxSize.
     { Sid: "ActuatorAutoScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoScale": "ON" } } },
     // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one: UPSERT of A records only.
     { Sid: "ActuatorDnsReattach", Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: "arn:aws:route53:::hostedzone/*", Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } } },

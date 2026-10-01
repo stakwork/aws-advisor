@@ -385,6 +385,32 @@ api.post("/inventory/ec2/:id/consent", async (req, res) => {
   try { const a = await requestConsent({ kind: "ec2", id: String(req.params.id), value: normaliseConsent(req.body?.value), by: by(req) }); dispatchActionNotifications().catch(() => {}); res.json(a); }
   catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
 });
+// Whether the actuator role may stop and start this instance (src/autopark_grant.ts), as IAM simulates every policy on it.
+api.get("/inventory/ec2/:id/autopark-grant", async (req, res) => {
+  const { checkGrant, instanceArn, accountOfArn } = await import("../autopark_grant.js");
+  const { actuatorRoleFor } = await import("../accounts.js");
+  const { executorCreds } = await import("../executor.js");
+  const row = db.prepare("select account_id, region from inventory_ec2 where instance_id = ?").get(String(req.params.id)) as { account_id: string | null; region: string | null } | undefined;
+  if (!row) return res.status(404).json({ error: "not in the inventory" });
+  const creds = executorCreds();
+  const role = actuatorRoleFor(row.account_id);
+  if (!role) return res.json({ granted: null, detail: "no actuator role configured for this account", role_arn: null });
+  const arn = instanceArn(row.region || creds.region, accountOfArn(role), String(req.params.id));
+  res.json({ ...(await checkGrant(creds.forAccount(row.account_id || null).read, role, arn)), role_arn: role, instance_arn: arn });
+});
+// Hibernation on the Auto-park row (src/hibernation.ts): ready or not and why, and the owner's choice as advisor:hibernate.
+api.get("/inventory/ec2/:id/hibernation", async (req, res) => {
+  const { hibernationStatus } = await import("../hibernation.js");
+  try { const st = await hibernationStatus(String(req.params.id), { fresh: req.query.fresh === "1" }); if (!st) return res.status(404).json({ error: "not found" }); res.json(st); }
+  catch (e: any) { res.status(502).json({ error: String(e?.message || e).slice(0, 300) }); }
+});
+api.post("/inventory/ec2/:id/hibernation", async (req, res) => {
+  const { requestHibernateChoice } = await import("../consent.js");
+  const v = req.body?.value;
+  const value = v === "stop" || v === "live" || v === "no" ? v : v == null || v === "" || v === "none" ? null : "invalid";
+  try { const a = await requestHibernateChoice(String(req.params.id), value as any, by(req)); dispatchActionNotifications().catch(() => {}); res.json(a); }
+  catch (e: any) { res.status(consentErrorStatus(e)).json({ error: e?.message || String(e) }); }
+});
 api.post("/inventory/ec2/:id/power", async (req, res) => {
   const action = req.body?.action === "stop" ? "stop" : req.body?.action === "start" ? "start" : null;
   if (!action) return res.status(400).json({ error: "action is stop or start" });
@@ -463,6 +489,37 @@ api.get("/instances/:id/logs", (req, res) => {
 api.get("/instances/:id/metrics", (req, res) => {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   res.json(instanceMetrics(String(req.params.id), limit).map((p) => ({ ...p, summary: summarizeProbe(p.data) })));
+});
+
+// ---- wake profiles (src/wake_profiles.ts) and the doorman's view of them (src/doorman.ts) --------------------------------
+api.get("/wake-profiles", async (_req, res) => {
+  const { listProfiles } = await import("../wake_profiles.js");
+  res.json({ profiles: listProfiles() });
+});
+api.get("/wake-profiles/:id", async (req, res) => {
+  const { getProfile, suggestProfile } = await import("../wake_profiles.js");
+  const { expectedWakeSeconds } = await import("../doorman.js");
+  const { config: c } = await import("../config.js");
+  const id = String(req.params.id);
+  const saved = getProfile(id);
+  const events = db.prepare("select id, at, by, path, outcome, detail, ready_after_s, action_id from wake_events where instance_id = ? order by id desc limit 20").all(id);
+  res.json({ profile: saved, suggested: saved ? null : suggestProfile(id), doorman_port: c.doormanPort || null, test_path: `/__wake/test/${id}`, expected_wake_s: expectedWakeSeconds(id), events });
+});
+api.put("/wake-profiles/:id", async (req, res) => {
+  const { saveProfile } = await import("../wake_profiles.js");
+  try { res.json(saveProfile(String(req.params.id), req.body ?? {}, by(req))); }
+  catch (e: any) { res.status(e?.status || 400).json({ error: e?.message || String(e), errors: e?.errors ?? [] }); }
+});
+api.delete("/wake-profiles/:id", async (req, res) => {
+  const { deleteProfile } = await import("../wake_profiles.js");
+  res.json({ deleted: deleteProfile(String(req.params.id)) });
+});
+api.get("/wake-profiles/:id/status", async (req, res) => {
+  const { getProfile } = await import("../wake_profiles.js");
+  const { statusOf } = await import("../doorman.js");
+  const p = getProfile(String(req.params.id));
+  if (!p) return res.status(404).json({ error: "no wake profile" });
+  res.json(await statusOf(p));
 });
 
 // ---- security groups (src/security_groups.ts): every group with its trouble flags, and one group in full ---------------

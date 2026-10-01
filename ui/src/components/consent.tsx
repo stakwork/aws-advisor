@@ -96,12 +96,19 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
   const [value, setValue] = useState<string | null>(tags?.AdvisorAutoPark ?? null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
-  useEffect(() => { setValue(tags?.AdvisorAutoPark ?? null); setMsg(null); }, [instanceId, tags?.AdvisorAutoPark]);
+  const [grant, setGrant] = useState<{ granted: boolean | null; detail: string; role_arn: string | null } | null>(null);
+  const loadGrant = () => api(`/inventory/ec2/${encodeURIComponent(instanceId)}/autopark-grant`).then(setGrant).catch(() => setGrant(null));
+  useEffect(() => { setValue(tags?.AdvisorAutoPark ?? null); setMsg(null); setGrant(null); loadGrant(); }, [instanceId, tags?.AdvisorAutoPark]);
   const on = isOn(value);
+  // Switching is done with the person's own credentials: the row is proposed here and "Run as me" (below) writes the
+  // tag and the grant on the actuator role (src/autopark_grant.ts); the switch moves once it is done.
   const flip = (want: boolean) => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF" }) })
-      .then((a) => { setValue(want ? "ON" : "OFF"); setMsg(rowMsg(a)); })
+      .then((a) => {
+        if (a.status === "applied" || a.status === "verified") { setValue(want ? "ON" : "OFF"); setMsg(rowMsg(a)); loadGrant(); return; }
+        setMsg({ ...rowMsg(a), err: false, text: want ? "Needs your own AWS credentials: Run as me tags the box and lets the actuator stop and start this instance only." : "Needs your own AWS credentials: Run as me sets the tag to OFF and removes this instance from the actuator's grant." });
+      })
       .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
   };
   const power = (action: "stop" | "start") => {
@@ -125,7 +132,62 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
         )}
       </div>
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
-      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setValue(row.after?.AdvisorAutoPark ?? null); } }} /> : null}
+      {on && grant && !msg && (
+        <div className={`mt-1 ${grant.granted === false ? "text-amber-300/90" : "text-zinc-500"}`}>
+          {grant.granted === true ? <>Granted: {grant.detail}.</> : grant.granted === false ? <>Tagged ON but not granted: {grant.detail}. <button className="text-sky-300 hover:underline" disabled={busy} onClick={() => flip(true)}>Grant it</button></> : <>Grant not checked: {grant.detail}.</>}
+        </div>
+      )}
+      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setValue(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
+      {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} />}
+    </div>
+  );
+}
+
+type Hibernation = { status: "ready" | "chosen_stop" | "can_migrate" | "cannot" | "migrating" | "kept_stop"; configured: boolean; tag: string | null; reason: string | null; ram_gib: number | null; instance_type: string | null };
+
+/**
+ * Whether parking hibernates this box (src/hibernation.ts): ready (back in about a minute, memory kept), or a cold
+ * start with the migration offered, never forced: "Keep stop/start" is a first-class answer and hides the suggestion.
+ * Each choice is the advisor:hibernate tag, written as a ledgered consent row (Revert puts it back).
+ */
+function HibernationNote({ instanceId, handsOff }: { instanceId: string; handsOff: boolean }) {
+  const [h, setH] = useState<Hibernation | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
+  const load = (fresh = false) => api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation${fresh ? "?fresh=1" : ""}`).then(setH).catch(() => setH(null));
+  useEffect(() => { setH(undefined); setMsg(null); load(); }, [instanceId]);
+  const choose = (value: "stop" | "live" | "no" | null) => {
+    setBusy(true); setMsg(null);
+    api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation`, { method: "POST", body: JSON.stringify({ value }) })
+      .then((a) => { setMsg(a.status === "proposed" ? { ...rowMsg(a), err: false, text: "Needs your own AWS credentials: Run as me writes the advisor:hibernate tag." } : rowMsg(a)); return load(true); })
+      .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
+  };
+  if (h === undefined) return <div className="mt-1.5 text-zinc-600">Checking hibernation…</div>;
+  if (h === null) return null;
+  const chip = (tone: string, text: string) => <span className={`rounded border px-1.5 py-px ${tone}`}>{text}</span>;
+  const btn = (label: string, value: "stop" | "live" | "no" | null, title: string) => (
+    <button key={label} className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={busy || handsOff} onClick={() => choose(value)} title={title}>{label}</button>
+  );
+  return (
+    <div className="mt-1.5 border-t border-zinc-800/70 pt-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        {h.status === "ready" && <>{chip("border-emerald-900/60 bg-emerald-950/50 text-emerald-300", "Hibernation ready")}<span className="text-zinc-500">parking hibernates it: back in about a minute, memory and containers as they were</span><span className="ml-auto">{btn("Use stop/start instead", "no", "Tag advisor:hibernate=no: parking stops it instead of hibernating it")}</span></>}
+        {h.status === "chosen_stop" && <>{chip("border-zinc-700 bg-zinc-900 text-zinc-300", "Stop/start chosen")}<span className="text-zinc-500">launched for hibernation, but advisor:hibernate=no keeps parking on a plain stop (cold start, 2–4 min)</span><span className="ml-auto">{btn("Hibernate again", null, "Remove advisor:hibernate=no")}</span></>}
+        {h.status === "migrating" && <>{chip("border-sky-900/60 bg-sky-950/50 text-sky-300", "Migration under way")}<span className="text-zinc-500">the relaunch with hibernation on is in progress: follow it on the <Link className="text-sky-300 hover:underline" to="/actions">Auto-actions</Link> page</span></>}
+        {h.status === "kept_stop" && <>{chip("border-zinc-700 bg-zinc-900 text-zinc-300", "Stop/start kept")}<span className="text-zinc-500">cold start, 2–4 min on a wake; the migration is not suggested</span><span className="ml-auto">{btn("Suggest hibernation again", null, "Remove advisor:hibernate=no")}</span></>}
+        {(h.status === "can_migrate" || h.status === "cannot") && <>
+          {chip("border-amber-900/60 bg-amber-950/50 text-amber-300", "Cold start")}
+          <span className="text-zinc-500">{h.status === "cannot" ? <>wakes in 2–4 min, and cannot be made hibernation-ready: {h.reason}</> : <>wakes in 2–4 min: not launched with hibernation. A relaunch would make it resume in about a minute{h.ram_gib ? ` (${h.ram_gib} GiB RAM goes to disk)` : ""}.</>}{h.tag === "stop" || h.tag === "live" ? <> Migration requested ({h.tag}): the next executor pass proposes it.</> : null}</span>
+          {h.status === "can_migrate" && h.tag !== "stop" && h.tag !== "live" && <span className="ml-auto flex gap-1">
+            {btn("Migrate (with downtime)", "stop", "Tag advisor:hibernate=stop: the box is stopped, imaged and relaunched with hibernation on; announced, after the grace period")}
+            {btn("Migrate live", "live", "Tag advisor:hibernate=live: a warm image while it runs; the cut-over waits for your click")}
+            {btn("Keep stop/start", "no", "Tag advisor:hibernate=no: stay on cold starts and stop suggesting the migration")}
+          </span>}
+          {(h.tag === "stop" || h.tag === "live") && <span className="ml-auto">{btn("Cancel the request", null, "Remove advisor:hibernate")}</span>}
+        </>}
+      </div>
+      {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
+      {msg?.actionId && msg.status === "proposed" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { setMsg({ ...rowMsg(row) }); load(true); }} /> : null}
     </div>
   );
 }

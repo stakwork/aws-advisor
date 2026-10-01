@@ -62,6 +62,6 @@ ENV DATA_DIR=/data/advisor \
     POWERPIPE_MOD_DIR=/usr/src/app/mod \
     PORT=9034 \
     NODE_ENV=production
-EXPOSE 9034
+EXPOSE 9034 9035
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["node", "--import", "tsx", "src/index.ts"]

@@ -9,6 +9,7 @@ import { InstanceCharts } from "../components/instanceCharts";
 import { UsageProfile } from "../components/usageProfile";
 import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 import { GroupLink, PortsPanel, SecurityGroupsPanel } from "../components/securityGroups";
+import { WakeProfilePanel } from "../components/wakeProfile";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
 /** One chip per matched use-signal kind; click marks it noise for this image (or lifts the rule), so the count stops fooling the last-use line. */
@@ -947,8 +948,8 @@ const Glance = ({ label, value, hint, tone }: { label: string; value: ReactNode;
   </div>
 );
 
-type Ec2Tab = "overview" | "usage" | "ports" | "running" | "logs" | "links";
-const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["ports", "Ports"], ["running", "What runs"], ["logs", "Logs"], ["links", "Links & history"]];
+type Ec2Tab = "overview" | "usage" | "ports" | "ondemand" | "running" | "logs" | "links";
+const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["ports", "Ports"], ["ondemand", "On-demand"], ["running", "What runs"], ["logs", "Logs"], ["links", "Links & history"]];
 
 /**
  * The EC2 detail in four tabs, every fact once: a header with what identifies the box and the two switches, a glance
@@ -1070,6 +1071,8 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
       )}
 
       {tab === "ports" && <PortsPanel instanceId={d.instance_id} probedAt={latest?.collected_at ?? null} groups={Array.isArray(net.security_groups) ? net.security_groups.filter((g: any) => g?.GroupId) : []} />}
+
+      {tab === "ondemand" && <WakeProfilePanel instanceId={d.instance_id} autoPark={/^(on|true|yes|1)$/i.test(String(s.tags?.AdvisorAutoPark ?? ""))} />}
 
       {tab === "running" && (
         <>

@@ -2514,6 +2514,65 @@ Later the same day: incomplete multipart uploads aborted on every bucket as a st
 right-sizing from the REPORT lines (approval-tier), and the kill switch below. Still to come: a wake-on-visit
 parking page, and "wake <name>" in the chat covering scheduled boxes as well as parked swarms.
 
+#### Auto-park grants: stop and start one instance at a time
+
+The actuator role may stop and start an EC2 instance only when a person granted that one instance
+(`src/autopark_grant.ts`). Switching **Auto-park** on is done with your own credentials (**Run as me** on the row the
+switch proposes): it writes `AdvisorAutoPark=ON` and adds the instance's ARN to an inline policy on the actuator role,
+`AdvisorAutoParkInstances` (`ec2:StartInstances`/`ec2:StopInstances`, and the `advisor:parked` marker, on exactly
+those instances). Switching it off sets the tag to OFF and removes the ARN (the policy goes when it is empty); Revert
+on either row puts both back. The actuator has no IAM write right and may write neither `AdvisorAutoPark` nor
+`advisor:hibernate`, and no statement opens a stop or a start by a tag it can write itself (the tag-conditioned
+statements for `AdvisorAutoPark`, `advisor:schedule` and `advisor:park` are gone), so it can never grant itself an
+instance. The row under the switch says whether the instance is granted, read with `iam:SimulatePrincipalPolicy` on
+the role (`GET /api/inventory/ec2/:id/autopark-grant`); a box tagged ON from before grants existed shows "not
+granted" with a **Grant it** link. Everything that stops or starts (idle parking, office hours on instances, the
+Stop/Start buttons, the doorman's wake) needs the grant, and a refusal says so. Office hours on RDS keep their
+`advisor:schedule` condition. The hibernation choice (`advisor:hibernate`) is a Run-as-me row too.
+
+#### Wake profiles and the doorman
+
+A parked instance can be woken by its own traffic. Its **wake profile** (`src/wake_profiles.ts`, the instance's
+**On-demand** tab, `GET/PUT/DELETE /api/wake-profiles/:id`) names the domains it answers for, what happens on each
+port while it sleeps (`page`: the waiting page for browsers and a hold for API and WebSocket calls; `hold`;
+`redirect`; `ignore`, the only choice for UDP), how to tell it is ready (an HTTP(S) status or a TCP connect on the
+private address), the sleep mode, the minimum awake time, the hold time, instances to start first, commands for
+after the wake and before the sleep, the wake filter (host match, ignored paths, scanner user agents, wakes per day)
+and the page's title and text. A new profile is suggested from the A records naming the box and its listening ports.
+Saving changes nothing in AWS; every save is mirrored onto the instance's AdvisorResource node (`wake_enabled`,
+`wake_domains`, `wake_profile`).
+
+The **doorman** (`src/doorman.ts`) listens on `DOORMAN_PORT` (9035; `0` turns it off), plain HTTP, meant to sit
+behind the swarm's Traefik. A request is matched to a profile by its Host header: while the box is not ready a
+browser gets the waiting page (503 with Retry-After; it polls `/__wake/status` and reloads when the box answers),
+other requests and WebSocket upgrades are held up to the hold time, and a visit that passes the filter wakes the box
+when the profile's **Wake on traffic** switch is on. Once the ready check passes, requests are reverse-proxied to
+the private address. A wake is the Inventory's Start (`manualPower`: a ledger row, DNS re-pointed when there is no
+Elastic IP, only on a box tagged `AdvisorAutoPark=ON`), dependencies first, recorded in `wake_events` with how long
+it took to be ready (the page's "usually about" figure).
+
+**Trying it by hand.** `http://<advisor host>:9035/__wake/test/<instance-id>` serves the waiting page for that
+instance with a **Start it now** button, whatever the switch says; it is answered only to private addresses and
+never for a profile's own host, so it cannot be reached through Traefik. Publish the port next to 9034 (`-p
+9035:9035`) and open it over the VPN; the On-demand tab links to it. To see the host-routed path without DNS:
+`curl -H 'Host: <domain>' -H 'Accept: text/html' -A Mozilla/5.0 http://<advisor host>:9035/`.
+
+#### Hibernation when parking
+
+Every stop the executor makes (idle parking, office hours, the Stop button) goes through `stopOrHibernate`
+(`src/hibernation.ts`): an instance launched with hibernation on is hibernated, so it comes back in about a minute
+with its memory and containers as they were; any other instance is stopped as before. If EC2 refuses the
+hibernation (the guest agent not ready, the root volume too small for the RAM) the stop falls back to a plain one
+and the ledger row says so. Under the Auto-park switch a note says which it is: **Hibernation ready**, or **Cold
+start** with the reason it cannot be migrated (an EKS or Auto Scaling member, Spot, too much RAM, an unsupported
+type: the same `skipReason` the relaunch uses) or with three answers: Migrate (with downtime), Migrate live, Keep
+stop/start. Each is the `advisor:hibernate` tag (`stop`, `live`, `no`) written as a ledgered consent row
+(`POST /api/inventory/ec2/:id/hibernation`, Revert puts it back; the actuator may write that one key on any
+instance, statement `ActuatorHibernateChoiceTag`); `stop` and `live` hand the box to the relaunch action
+(announced, after its grace period), `no` keeps cold starts, stops the suggestion, and on a box already launched for
+hibernation makes parking use a plain stop. `GET /api/inventory/ec2/:id/hibernation` reads the state from EC2
+(cached ten minutes).
+
 ## Member accounts
 
 One parent, the children it reaches through a role. The credentials in Settings are the parent (in an

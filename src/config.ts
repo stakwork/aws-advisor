@@ -164,6 +164,8 @@ export const config = {
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, ""),
   /** Interface to listen on. Unset = every interface (containers reach the host that way); 127.0.0.1 for a laptop with no swarm. */
   bindAddr: (process.env.BIND_ADDR || "").trim(),
+  /** The doorman (src/doorman.ts): the internal port the waiting page and the wake-on-traffic proxy listen on. 0 or off = not started. */
+  doormanPort: /^(0|off|false|none)$/i.test(String(process.env.DOORMAN_PORT ?? "").trim()) ? 0 : Number(process.env.DOORMAN_PORT || 9035),
   /** Bearer token the MCP fact server at /mcp expects. Unset = open (local dev only). */
   mcpToken: process.env.MCP_TOKEN || "",
   /** SSM document the probe runs through. The custom document embeds the fixed script, so ssm:SendCommand

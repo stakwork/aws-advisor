@@ -24,6 +24,10 @@ import { logEvent } from "./executor_log.js";
 import { mirrorActionsInBackground } from "./graph_mirror.js";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { KIND as SCHEDULE_KIND, recordsForStart, recordsNamingIp } from "./actions/schedule_hours.js";
+import { HIBERNATE_TAG } from "./actions/ec2_hibernate_migrate.js";
+import { forgetHibernationStatus } from "./hibernation.js";
+import { AUTOPARK_POLICY, accountOfArn, checkGrant, instanceArn, roleNameOf } from "./autopark_grant.js";
+import { actuatorRoleFor } from "./accounts.js";
 
 export const AUTO_PARK_TAG = "AdvisorAutoPark";
 export const AUTO_SCALE_TAG = "AdvisorAutoScale";
@@ -56,19 +60,27 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
     const tags = Object.fromEntries((inst.Tags ?? []).map((t) => [t.Key!, t.Value ?? ""]));
     if (tags["advisor:hands-off"] != null) throw new ConsentError(`${row.name || r.id} is tagged advisor:hands-off: remove that first`, 409);
     const before = tags[AUTO_PARK_TAG] ?? null;
-    if (before != null && normaliseConsent(before) === r.value) throw new ConsentError(`${row.name || r.id} already carries ${AUTO_PARK_TAG}=${before}`, 409);
+    // the grant on the actuator role is half of the switch (src/autopark_grant.ts): a box tagged ON without it (from
+    // before grants existed) can be switched ON again to add it
+    const roleArn = actuatorRoleFor(row.account_id);
+    if (!roleArn) throw new ConsentError(`no actuator role is configured for account ${row.account_id || "(parent)"}: there is nothing to grant stop and start on (Settings > Auto-actions)`, 409);
+    const arn = instanceArn(region, accountOfArn(roleArn), r.id);
+    if (before != null && normaliseConsent(before) === r.value) {
+      const g = await checkGrant(creds.forAccount(row.account_id || null).read, roleArn, arn);
+      if (r.value === "OFF" || g.granted !== false) throw new ConsentError(`${row.name || r.id} already carries ${AUTO_PARK_TAG}=${before}${r.value === "ON" ? ` and ${g.detail}` : ""}`, 409);
+    }
     const p: Proposal = {
       kind: CONSENT_KIND, resource: r.id, resource_name: row.name, region, account_id: row.account_id ?? null,
       dedupe: `${CONSENT_KIND}:${r.id}:${r.value}`,
       title: `${row.name || r.id}: ${AUTO_PARK_TAG} ${before ?? "(none)"} → ${r.value}`,
-      reason: r.value === "ON" ? `${by} switched auto-park on from the page: the executor may stop this box when it is idle or in its confident quiet hours and start it again before it is needed, re-pointing its DNS records when it has no Elastic IP. Stop and Start on the page work from now on.` : `${by} switched auto-park off from the page: the executor never stops or starts this box until it is switched on again (a box it stopped stays stopped until Start on the page or Revert on the row).`,
+      reason: r.value === "ON" ? `${by} switched auto-park on from the page: the executor may stop this box when it is idle or in its confident quiet hours and start it again before it is needed, re-pointing its DNS records when it has no Elastic IP. Done with your own credentials ("Run as me"): the tag, and a grant on the actuator role (${roleNameOf(roleArn)}, policy ${AUTOPARK_POLICY}) to stop and start this one instance. Stop and Start on the page work from then on.` : `${by} switched auto-park off from the page: the tag goes to OFF and this instance leaves the actuator role's grant, so nothing can stop or start it until it is switched on again (a box it stopped stays stopped until Start on the page or Revert on the row). Done with your own credentials ("Run as me").`,
       before: { [AUTO_PARK_TAG]: before }, after: { [AUTO_PARK_TAG]: r.value },
-      facts: { kind: "ec2", tag: AUTO_PARK_TAG, by, state: inst.State?.Name ?? row.state ?? null },
-      rollback: before == null ? `DeleteTags ${AUTO_PARK_TAG}` : `CreateTags ${AUTO_PARK_TAG}=${before}`,
+      facts: { kind: "ec2", tag: AUTO_PARK_TAG, by, state: inst.State?.Name ?? row.state ?? null, grant: { role_arn: roleArn, instance_arn: arn, on: r.value === "ON", before: isOn(before) } },
+      rollback: `${before == null ? `DeleteTags ${AUTO_PARK_TAG}` : `CreateTags ${AUTO_PARK_TAG}=${before}`}, and the grant back to how it was`,
       est_usd_month: null,
     };
-    const rec = recordProposal(p, config.actMode, "manual");
-    return applyAction(rec.row.id, "manual");
+    // never tried with the actuator: it has no IAM write rights and may not write this tag. The row waits for "Run as me".
+    return recordProposal(p, config.actMode, "manual").row;
   }
   const region = r.region || creds.region;
   const acct = creds.forAccount(r.account_id || null);
@@ -95,6 +107,49 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
   };
   const rec = recordProposal(p, config.actMode, "manual");
   return applyAction(rec.row.id, "manual");
+}
+
+export type HibernateChoice = "stop" | "live" | "no" | null;
+
+/**
+ * The owner's hibernation choice from the Auto-park row, as the `advisor:hibernate` tag (one ledgered consent row,
+ * Revert puts the old value back): `stop` or `live` asks the relaunch (src/actions/ec2_hibernate_migrate.ts) to make
+ * the box hibernation-ready, announced and after its grace period; `no` keeps stop/start and stops the suggestion;
+ * null removes the tag.
+ */
+export async function requestHibernateChoice(instanceId: string, value: HibernateChoice, by = "ui"): Promise<ActionRow> {
+  if (value != null && !["stop", "live", "no"].includes(value)) throw new ConsentError(`the choice is stop, live, no or none, not ${value}`, 400);
+  const creds = executorCreds();
+  const row = db.prepare("select instance_id, account_id, name, region, state from inventory_ec2 where instance_id = ?").get(instanceId) as any;
+  if (!row) throw new ConsentError(`${instanceId} is not in the inventory`, 404);
+  const region = row.region || creds.region;
+  const ec2 = new EC2Client({ region, credentials: creds.forAccount(row.account_id || null).read });
+  let inst;
+  try { inst = (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }))).Reservations?.[0]?.Instances?.[0]; } finally { ec2.destroy(); }
+  if (!inst) throw new ConsentError(`${instanceId} not found by DescribeInstances`, 404);
+  const tags = Object.fromEntries((inst.Tags ?? []).map((t) => [t.Key!, t.Value ?? ""]));
+  if (tags["advisor:hands-off"] != null) throw new ConsentError(`${row.name || instanceId} is tagged advisor:hands-off: remove that first`, 409);
+  const before = tags[HIBERNATE_TAG] ?? null;
+  if (before === value) throw new ConsentError(`${row.name || instanceId} already carries ${HIBERNATE_TAG}=${before ?? "(none)"}`, 409);
+  const name = row.name || instanceId;
+  const what = value === "stop" ? `make ${name} hibernation-ready with downtime: the next executor pass proposes the relaunch (image, new instance launched with hibernation on, addresses moved), announced and after its grace period; the old box is stopped, never terminated`
+    : value === "live" ? `make ${name} hibernation-ready without downtime: a warm image while it runs, and the cut-over waits for a person to click Cut over`
+    : value === "no" ? `keep ${name} on stop/start: parking stops it instead of hibernating it, and the page stops suggesting the migration`
+    : `clear the hibernation choice on ${name}`;
+  const p: Proposal = {
+    kind: CONSENT_KIND, resource: instanceId, resource_name: row.name, region, account_id: row.account_id ?? null,
+    dedupe: `${CONSENT_KIND}:${instanceId}:${HIBERNATE_TAG}:${value ?? "none"}`,
+    title: `${name}: ${HIBERNATE_TAG} ${before ?? "(none)"} → ${value ?? "(none)"}`,
+    reason: `${by} chose on the Auto-park row to ${what}. Done with your own credentials ("Run as me").`,
+    before: { [HIBERNATE_TAG]: before }, after: { [HIBERNATE_TAG]: value },
+    facts: { kind: "ec2", tag: HIBERNATE_TAG, by, state: inst.State?.Name ?? row.state ?? null, configured: Boolean(inst.HibernationOptions?.Configured) },
+    rollback: before == null ? `DeleteTags ${HIBERNATE_TAG}` : `CreateTags ${HIBERNATE_TAG}=${before}`,
+    est_usd_month: null,
+  };
+  // a person's own credentials write it ("Run as me"): advisor:hibernate opens the relaunch (image, stop, start) on the box,
+  // so the actuator may not set it on itself
+  forgetHibernationStatus(instanceId);
+  return recordProposal(p, config.actMode, "manual").row;
 }
 
 /** The band as text for the tag, or null to remove it; the numbers are checked the way the capacity action reads them (parseBand). */

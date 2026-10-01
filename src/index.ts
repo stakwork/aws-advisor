@@ -83,6 +83,8 @@ const onListen = () => {
   checkCli().catch(() => {});
   console.log(`aws-advisor listening on ${config.bindAddr || "all interfaces"}:${config.port}, public URL ${config.publicUrl} (schema "${config.schema}", mod ${config.modDir}); MCP fact server at ${config.publicUrl}/mcp`);
   startScheduler();
+  // the doorman: the waiting page and wake-on-traffic proxy for parked instances (src/doorman.ts), on its own internal port
+  import("./doorman.js").then((m) => m.startDoorman()).catch((e) => console.error(`[doorman] not started: ${e?.message || e}`));
   // the knowledge layer of the graph (Kn labels) is rebuilt from what the database holds, so a deploy never leaves it empty
   setTimeout(() => import("./graph_mirror.js").then((m) => m.mirrorKnowledgeInBackground("server start")).catch((e) => console.error(`[graph] knowledge layer at start: ${e?.message || e}`)), 15_000).unref();
   // the EC2 status checks of the running fleet, read now rather than at the watcher's next cycle: an impaired box alerts within a minute of a deploy

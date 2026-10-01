@@ -8,6 +8,7 @@ import { CreateTagsCommand, DeleteTagsCommand, DescribeInstancesCommand, EC2Clie
 import { DescribeEnvironmentsCommand, DescribeEventsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateTagsForResourceCommand } from "@aws-sdk/client-elastic-beanstalk";
 import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
+import { checkGrant, setGrant } from "../autopark_grant.js";
 
 /** Beanstalk applies a tag change as an environment update; the list shows it only once that is through. A read-back younger than this is inconclusive, not a failure. */
 export const BEANSTALK_TAG_SETTLE_MS = 10 * 60_000;
@@ -50,15 +51,36 @@ async function readTag(p: Proposal, creds: Creds): Promise<string | null | undef
   } finally { ec2.destroy(); }
 }
 
+/** The instance's grant on the actuator role, when the row carries one (an AdvisorAutoPark switch). */
+async function writeGrant(p: Proposal, creds: Creds, on: boolean): Promise<string | null> {
+  const g = p.facts.grant as { role_arn: string; instance_arn: string } | undefined;
+  if (!g?.role_arn || !g.instance_arn) return null;
+  return setGrant(creds.act(), g.role_arn, g.instance_arn, on);
+}
+
 export const consentTagAction: ActionModule = {
   kind: KIND,
   label: "Consent switches (AdvisorAutoPark, AdvisorAutoScale) and the scale band (AdvisorScaleBand) set from the page",
   async plan() { return { proposals: [], notes: ["switches are flipped from the Inventory page, never planned"] }; },
-  async apply(p, creds) { return writeTag(p, creds, wanted(p, "after")); },
+  async apply(p, creds) {
+    const grantOn = (p.facts.grant as any)?.on;
+    if (grantOn == null) return writeTag(p, creds, wanted(p, "after"));
+    // switching on: the grant first, so the tag never says ON without it; switching off: the tag first
+    if (grantOn) { const g = await writeGrant(p, creds, true); return `${g}; ${await writeTag(p, creds, wanted(p, "after"))}`; }
+    const t = await writeTag(p, creds, wanted(p, "after"));
+    return `${t}; ${await writeGrant(p, creds, false)}`;
+  },
   async verify(p, creds) {
     const v = await readTag(p, creds);
     if (v === undefined) return { ok: false, note: "resource not found on read-back" };
     const want = wanted(p, "after");
+    const g = p.facts.grant as { role_arn: string; instance_arn: string; on: boolean } | undefined;
+    if (v === want && g?.role_arn) {
+      const c = await checkGrant(creds.read, g.role_arn, g.instance_arn);
+      if (c.granted === null) return { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}; grant not checked (${c.detail})` };
+      if (c.granted !== g.on) return { ok: false, note: `${tagOf(p)}=${v ?? "(absent)"}, but IAM says ${c.detail}` };
+      return { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}; ${c.detail}` };
+    }
     if (v === want) return { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}` };
     const mismatch = `${tagOf(p)} reads ${v ?? "(absent)"}, expected ${want ?? "(absent)"}`;
     if (p.facts.kind === "beanstalk") {
@@ -91,5 +113,11 @@ export const consentTagAction: ActionModule = {
     }
     return { ok: false, note: mismatch };
   },
-  async revert(p, creds) { const v = wanted(p, "before"); return `${await writeTag(p, creds, v)} (back to ${v ?? "no tag"})`; },
+  async revert(p, creds) {
+    const v = wanted(p, "before");
+    const tag = `${await writeTag(p, creds, v)} (back to ${v ?? "no tag"})`;
+    const g = p.facts.grant as { before?: boolean } | undefined;
+    if (!g) return tag;
+    return `${tag}; ${await writeGrant(p, creds, Boolean(g.before))}`;
+  },
 };

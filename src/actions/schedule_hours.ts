@@ -24,6 +24,8 @@ import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53
 import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
+import { stopOrHibernate } from "../hibernation.js";
+import { explainRefusal } from "../autopark_grant.js";
 
 export const KIND = "schedule_hours" as const;
 export const SCHEDULE_TAG = "advisor:schedule";
@@ -421,8 +423,13 @@ async function transition(p: Proposal, creds: Creds, action: "stop" | "start"): 
   if (kind === "ec2") {
     const ec2 = new EC2Client({ region: p.region, credentials: creds.act() });
     try {
-      if (action === "stop") { const r = await ec2.send(new StopInstancesCommand({ InstanceIds: [p.resource] })); return `StopInstances: ${r.StoppingInstances?.[0]?.CurrentState?.Name || "stopping"}`; }
-      const r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] }));
+      if (action === "stop") {
+        // hibernated when the box was launched for it (src/hibernation.ts), stopped otherwise
+        const reader = new EC2Client({ region: p.region, credentials: creds.read });
+        try { return (await stopOrHibernate(ec2, p.resource, reader)).line; } finally { reader.destroy(); }
+      }
+      let r;
+      try { r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] })); } catch (e) { throw explainRefusal(e, p.resource); }
       const line = `StartInstances: ${r.StartingInstances?.[0]?.CurrentState?.Name || "pending"}`;
       if (p.facts.elastic_ip !== false) return line;
       const records = Array.isArray(p.facts.dns_records) ? (p.facts.dns_records as DnsRecord[]) : [];

@@ -21,7 +21,7 @@ import { config } from "./config.js";
 import { addColumn, db, getJsonSetting, setSetting } from "./db.js";
 import { credentialsMeta, sdkCredentials } from "./steampipe.js";
 import { accountCredentials, listMembers } from "./accounts.js";
-import { ACTUATOR_NEEDS, describeError, explainPermissionError } from "./permissions.js";
+import { ACTUATOR_NEEDS, PERSON_ONLY_ACTIONS, describeError, explainPermissionError } from "./permissions.js";
 import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
 import { canonicalResource } from "./resource_id.js";
 import { mirrorActionsInBackground, mirrorRecommendationsInBackground } from "./graph_mirror.js";
@@ -307,7 +307,9 @@ function forgetDenials(actions: string[]): void {
 export function computeCapabilities(sim: Simulation | Set<string> | null, learned: Learned, needs = ACTUATOR_NEEDS): Record<string, Capability> {
   const s: Simulation | null = sim == null ? null : sim instanceof Set ? { allowed: sim, explicit: new Set() } : sim;
   const out: Record<string, Capability> = {};
-  for (const [kind, n] of Object.entries(needs)) {
+  for (const [kind, n0] of Object.entries(needs)) {
+    // what a person does with their own credentials is not the actuator's to have
+    const n = { apply: n0.apply.filter((a) => !PERSON_ONLY_ACTIONS.has(a)), revert: n0.revert.filter((a) => !PERSON_ONLY_ACTIONS.has(a)) };
     const missing = (list: string[]) => list.filter((a) => Boolean(learned[a]) || (s ? s.explicit.has(a) : false));
     const unproven = (list: string[]) => (s ? list.filter((a) => !s.allowed.has(a) && !s.explicit.has(a) && !learned[a]) : []);
     const ma = missing(n.apply), mr = missing(n.revert), ua = unproven(n.apply), ur = unproven(n.revert);
@@ -325,7 +327,8 @@ export function computeCapabilities(sim: Simulation | Set<string> | null, learne
  */
 export function rowNeeds(row: Pick<ActionRow, "kind" | "facts">, verb: "apply" | "revert", needs = ACTUATOR_NEEDS): string[] {
   const all = needs[row.kind]?.[verb] ?? [];
-  if (row.kind === "consent_tag") return all.filter((a) => (row.facts?.kind === "beanstalk" ? a.startsWith("elasticbeanstalk:") : a.startsWith("ec2:")));
+  // an AdvisorAutoPark switch also writes the instance's grant on the actuator role (src/autopark_grant.ts)
+  if (row.kind === "consent_tag") return all.filter((a) => (row.facts?.kind === "beanstalk" ? a.startsWith("elasticbeanstalk:") : a.startsWith("ec2:") || (Boolean(row.facts?.grant) && a.startsWith("iam:"))));
   return all;
 }
 
@@ -545,7 +548,8 @@ export function recordProposal(p: Proposal, mode: string, trigger: string): { ro
 export const keepKey = (dedupe: string, accountId: string | null | undefined) => `${accountId ?? ""}|${dedupe}`;
 
 function closeStale(kind: ActionKind, keep: Set<string>): number[] {
-  const open = db.prepare("select id, dedupe, account_id from actions where kind = ? and status = 'proposed'").all(kind) as { id: number; dedupe: string; account_id: string | null }[];
+  // rows a person proposed from the page (a consent switch waiting for "Run as me") are not the pass's to close
+  const open = db.prepare("select id, dedupe, account_id from actions where kind = ? and status = 'proposed' and trigger <> 'manual'").all(kind) as { id: number; dedupe: string; account_id: string | null }[];
   const ids: number[] = [];
   for (const o of open) if (!keep.has(keepKey(o.dedupe, o.account_id))) { db.prepare("update actions set status = 'stale', result = 'no longer proposed by the latest pass' where id = ?").run(o.id); ids.push(o.id); }
   return ids;
