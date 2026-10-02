@@ -462,7 +462,7 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
  * learns them from denied applies, so a role narrower than the policy below hides Apply instead of failing.
  */
 /** Actions a module declares that only a person's own credentials perform ("Run as me"): never in the actuator policy, never counted as its gap. */
-export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"]);
+export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy"]);
 
 export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
   acu_window: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
@@ -495,7 +495,7 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
   // UpdateTagsForResource is the API; the IAM actions it checks are AddTags (TagsToAdd) and RemoveTags (TagsToRemove).
   // the AdvisorAutoPark and advisor:hibernate switches are done with a person's credentials ("Run as me"; PERSON_ONLY_ACTIONS are never the actuator's) ("Run as me"): the tag, and for Auto-park the grant on the actuator role
-  consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags", "iam:GetRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", "iam:GetRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"] },
+  consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags", ...PERSON_ONLY_ACTIONS], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", ...PERSON_ONLY_ACTIONS] },
   // A staged relaunch: apply, the stages (advance) and the cut-over (step) are all checked as apply.
   ec2_hibernate_migrate: { apply: ["ec2:CreateImage", "ec2:StopInstances", "ec2:RunInstances", "ec2:CreateTags", "iam:PassRole", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"],
     revert: ["ec2:StartInstances", "ec2:StopInstances", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets", "ec2:DeleteTags"] },
@@ -512,9 +512,12 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorS3RequestMetrics", Effect: "Allow", Action: ["s3:PutMetricsConfiguration", "s3:GetMetricsConfiguration", "s3:DeleteMetricsConfiguration"], Resource: "*" },
     { Sid: "ActuatorS3Lifecycle", Effect: "Allow", Action: ["s3:PutLifecycleConfiguration", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging"], Resource: "*" },
     { Sid: "ActuatorEcrLifecycle", Effect: "Allow", Action: ["ecr:PutLifecyclePolicy", "ecr:DeleteLifecyclePolicy", "ecr:GetLifecyclePolicy", "ecr:DescribeRepositories", "ecr:ListTagsForResource"], Resource: "*" },
+    // The parked marker the executor puts on an instance it stopped: a label, it opens nothing (and no statement reads it).
+    { Sid: "ActuatorParkedMarker", Effect: "Allow", Action: ["ec2:CreateTags", "ec2:DeleteTags"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } } },
     // Stopping and starting EC2 instances: no statement here. Each instance a person switched Auto-park on for is
-    // listed in the role's own inline policy AdvisorAutoParkInstances (src/autopark_grant.ts), written with that
-    // person's credentials ("Run as me"); the actuator has no IAM write right and no tag it can write opens a stop.
+    // listed in the customer-managed policy /aws-advisor/AdvisorAutoParkInstances attached to this role
+    // (src/autopark_grant.ts), written with that person's credentials ("Run as me"); the actuator has no IAM write
+    // right and no tag it can write opens a stop.
     { Sid: "ActuatorSwarmParkDescribe", Effect: "Allow", Action: ["ec2:DescribeInstances", "ec2:DescribeAddresses"], Resource: "*" },
     // Approved deletes: an Elastic IP nobody uses, a snapshot a person approved deleting, an idle load balancer. AllocateAddress is the EIP recovery path (the same address, while nobody else has it).
     { Sid: "ActuatorEipRelease", Effect: "Allow", Action: ["ec2:ReleaseAddress", "ec2:AllocateAddress", "ec2:DescribeAddresses"], Resource: "*" },

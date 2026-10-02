@@ -33,26 +33,39 @@ test("consent: the actuator policy carries the tag conditions, writes only the c
   for (const s of st) for (const a of s.Action as string[]) assert.ok(!/^iam:(Put|Attach|Delete|Create|Update)/.test(a), `${s.Sid}: the actuator never writes IAM (${a})`);
   const deny = sid("ActuatorHandsOff");
   for (const a of ["ec2:StopInstances", "ec2:CreateTags", "elasticbeanstalk:UpdateEnvironment", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"]) assert.ok(deny.Action.includes(a), a);
-  assert.ok(ACTUATOR_NEEDS.consent_tag.apply.includes("iam:PutRolePolicy"), "a person switching Auto-park on writes the grant");
+  assert.ok(ACTUATOR_NEEDS.consent_tag.apply.includes("iam:CreatePolicyVersion"), "a person switching Auto-park on writes the grant");
+  assert.deepEqual(sid("ActuatorParkedMarker").Condition["ForAllValues:StringEquals"]["aws:TagKeys"], ["advisor:parked"]);
   // no statement grants an unconditioned tag write on instances
   for (const s of st) if (s.Effect === "Allow" && (s.Action as string[]).includes("ec2:CreateTags")) assert.ok(s.Condition, `${s.Sid} writes tags without a condition`);
 });
 
-test("auto-park grant: one inline policy listing exactly the granted instances, emptied away when the last one goes", async () => {
-  const { grantDocument, grantedArnsOf, withArn, instanceArn, roleNameOf, accountOfArn, explainRefusal } = await import("../autopark_grant.js");
-  const a = instanceArn("us-east-1", "123456789012", "i-0f0000000000e0001"), b = instanceArn("us-east-1", "123456789012", "i-0f0000000000e0002");
+test("auto-park grant: one managed policy listing exactly the granted instances (any region, their account), refused before it outgrows AWS's limit", async () => {
+  const { grantDocument, grantedArnsOf, withArn, instanceArn, grantArn, grantPolicyArn, roleNameOf, accountOfArn, explainRefusal, sizeProblem, versionsToPrune, policySize, MANAGED_POLICY_LIMIT } = await import("../autopark_grant.js");
+  const a = instanceArn("us-east-1", "123456789012", "i-0f0000000000e0001"), b = instanceArn("eu-west-1", "123456789012", "i-0f0000000000e0002");
   assert.equal(a, "arn:aws:ec2:us-east-1:123456789012:instance/i-0f0000000000e0001");
+  assert.equal(grantArn(a), "arn:aws:ec2:*:123456789012:instance/i-0f0000000000e0001");
+  assert.equal(grantPolicyArn("123456789012"), "arn:aws:iam::123456789012:policy/aws-advisor/AdvisorAutoParkInstances");
   assert.equal(roleNameOf("arn:aws:iam::123456789012:role/advisor-actuator"), "advisor-actuator");
   assert.equal(accountOfArn("arn:aws:iam::123456789012:role/advisor-actuator"), "123456789012");
   const doc: any = grantDocument([b, a, a]);
-  assert.deepEqual(doc.Statement[0], { Sid: "AutoParkStartStop", Effect: "Allow", Action: ["ec2:StartInstances", "ec2:StopInstances"], Resource: [a, b] });
-  assert.deepEqual(doc.Statement[1].Condition, { "ForAllValues:StringEquals": { "aws:TagKeys": ["advisor:parked"] } });
-  assert.deepEqual(grantedArnsOf(doc), [a, b]);
-  assert.deepEqual(grantedArnsOf({ Statement: { Sid: "AutoParkStartStop", Resource: a } }), [a]);
+  assert.deepEqual(doc.Statement, [{ Sid: "AutoParkStartStop", Effect: "Allow", Action: ["ec2:StartInstances", "ec2:StopInstances"], Resource: [grantArn(a), grantArn(b)] }]);
+  assert.deepEqual(grantedArnsOf(doc), [grantArn(a), grantArn(b)]);
+  assert.deepEqual(grantedArnsOf({ Statement: { Sid: "AutoParkStartStop", Resource: a } }), [grantArn(a)], "an ARN written with its region reads as the same grant");
   assert.deepEqual(grantedArnsOf({ Statement: [{ Sid: "Other", Resource: [a] }] }), []);
-  assert.deepEqual(withArn([a], b, true), [a, b]);
-  assert.deepEqual(withArn([a, b], a, false), [b]);
+  assert.deepEqual(withArn([grantArn(a)], b, true), [grantArn(a), grantArn(b)]);
+  assert.deepEqual(withArn([grantArn(a), grantArn(b)], a, false), [grantArn(b)]);
   assert.equal(grantDocument(withArn([a], a, false)), null, "no instance left: the policy is deleted");
+  // about a hundred instances fit; more is refused with a message, before AWS refuses it
+  const many = (n: number) => Array.from({ length: n }, (_, i) => instanceArn("us-east-1", "123456789012", `i-0f${String(i).padStart(15, "0")}`));
+  assert.equal(sizeProblem(grantDocument(many(100)), 100), null);
+  const over = grantDocument(many(110));
+  assert.ok(policySize(over) > MANAGED_POLICY_LIMIT - 128);
+  assert.match(sizeProblem(over, 110)!, /holds 6144: switch Auto-park off on an instance/);
+  // five versions at most: the oldest non-default goes before a new one is added
+  const v = (id: string, day: number, def = false) => ({ VersionId: id, IsDefaultVersion: def, CreateDate: new Date(Date.UTC(2026, 9, day)) });
+  assert.deepEqual(versionsToPrune([v("v1", 1), v("v2", 2), v("v3", 3), v("v4", 4), v("v5", 5, true)]), ["v1"]);
+  assert.deepEqual(versionsToPrune([v("v3", 3), v("v4", 4, true)]), []);
+  assert.deepEqual(versionsToPrune([v("v9", 1, true), v("v2", 2), v("v3", 3), v("v4", 4), v("v5", 5)]), ["v2"], "never the default, whatever its age");
   assert.match(explainRefusal(Object.assign(new Error("You are not authorized to perform this operation."), { name: "UnauthorizedOperation" }), "i-0f0000000000e0001").message, /switch Auto-park on with "Run as me"/);
   assert.equal(explainRefusal(new Error("InsufficientInstanceCapacity"), "i-x").message, "InsufficientInstanceCapacity");
 });

@@ -2518,17 +2518,25 @@ parking page, and "wake <name>" in the chat covering scheduled boxes as well as 
 
 The actuator role may stop and start an EC2 instance only when a person granted that one instance
 (`src/autopark_grant.ts`). Switching **Auto-park** on is done with your own credentials (**Run as me** on the row the
-switch proposes): it writes `AdvisorAutoPark=ON` and adds the instance's ARN to an inline policy on the actuator role,
-`AdvisorAutoParkInstances` (`ec2:StartInstances`/`ec2:StopInstances`, and the `advisor:parked` marker, on exactly
-those instances). Switching it off sets the tag to OFF and removes the ARN (the policy goes when it is empty); Revert
-on either row puts both back. The actuator has no IAM write right and may write neither `AdvisorAutoPark` nor
-`advisor:hibernate`, and no statement opens a stop or a start by a tag it can write itself (the tag-conditioned
-statements for `AdvisorAutoPark`, `advisor:schedule` and `advisor:park` are gone), so it can never grant itself an
-instance. The row under the switch says whether the instance is granted, read with `iam:SimulatePrincipalPolicy` on
-the role (`GET /api/inventory/ec2/:id/autopark-grant`); a box tagged ON from before grants existed shows "not
-granted" with a **Grant it** link. Everything that stops or starts (idle parking, office hours on instances, the
-Stop/Start buttons, the doorman's wake) needs the grant, and a refusal says so. Office hours on RDS keep their
-`advisor:schedule` condition. The hibernation choice (`advisor:hibernate`) is a Run-as-me row too.
+switch proposes): it writes `AdvisorAutoPark=ON` and adds the instance to a customer-managed policy attached to the
+actuator role, `/aws-advisor/AdvisorAutoParkInstances` (created and attached on the first grant): `ec2:StartInstances`
+and `ec2:StopInstances` on exactly those instances, one ARN each with the region as `*`. A managed policy, because a
+role's inline policies share 10,240 characters and the actuator policy, pasted inline, uses about 9,000 of them; the
+managed one has 6,144 of its own, about 100 instances, and a grant that would not fit is refused with a message. Each
+change is a new default version (AWS keeps five; the oldest is deleted first). Switching it off removes the
+instance; with none left the policy is detached and deleted. Revert on either row puts both the tag and the grant
+back. Your credentials need `ec2:CreateTags` and `iam:GetPolicy`, `GetPolicyVersion`, `ListPolicyVersions`,
+`CreatePolicy`, `CreatePolicyVersion`, `DeletePolicyVersion`, `DeletePolicy`, `AttachRolePolicy`, `DetachRolePolicy`
+(the Run-as-me panel previews them).
+
+The actuator has no IAM write right and may write neither `AdvisorAutoPark` nor `advisor:hibernate`, and no
+statement opens a stop or a start by a tag it can write itself (the tag-conditioned statements for `AdvisorAutoPark`,
+`advisor:schedule` and `advisor:park` are gone; the `advisor:parked` marker it may still write opens nothing), so it
+can never grant itself an instance. The row under the switch says whether the instance is granted, read with
+`iam:SimulatePrincipalPolicy` on the role (`GET /api/inventory/ec2/:id/autopark-grant`); a box tagged ON from before
+grants existed shows "not granted" with a **Grant it** link. Everything that stops or starts (idle parking, office
+hours on instances, the Stop/Start buttons, the doorman's wake) needs the grant, and a refusal says so. Office hours
+on RDS keep their `advisor:schedule` condition. The hibernation choice (`advisor:hibernate`) is a Run-as-me row too.
 
 #### Wake profiles and the doorman
 
