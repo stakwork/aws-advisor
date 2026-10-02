@@ -121,12 +121,16 @@ export async function parkDns(p: Proposal, creds: Creds): Promise<string | null>
 export function upsertChange(r: DnsRecord, newIp: string): Change & { ResourceRecordSet: ResourceRecordSet } {
   const routing = (r.routing || {}) as Record<string, any>;
   const set: ResourceRecordSet = { Name: r.name, Type: "A", TTL: r.ttl ?? 300, ResourceRecords: [...new Set(r.values.map((v) => (v === r.old_ip ? newIp : v)))].map((Value) => ({ Value })) };
-  if (routing.set_identifier) set.SetIdentifier = String(routing.set_identifier);
-  if (routing.weight != null) set.Weight = Number(routing.weight);
-  if (routing.failover) set.Failover = routing.failover;
-  if (routing.multi_value_answer) set.MultiValueAnswer = true;
-  if (routing.region) set.Region = routing.region;
-  if (routing.geo_location) set.GeoLocation = routing.geo_location;
+  // Every routing policy comes with a set identifier; a record without one is a plain record whatever else the stored
+  // routing says (older inventories kept the table's `region` column, "global" on every record, which is not a latency region).
+  if (routing.set_identifier) {
+    set.SetIdentifier = String(routing.set_identifier);
+    if (routing.weight != null) set.Weight = Number(routing.weight);
+    if (routing.failover) set.Failover = routing.failover;
+    if (routing.multi_value_answer) set.MultiValueAnswer = true;
+    if (routing.latency_region) set.Region = routing.latency_region;
+    if (routing.geo_location) set.GeoLocation = routing.geo_location;
+  }
   return { Action: "UPSERT", ResourceRecordSet: set };
 }
 

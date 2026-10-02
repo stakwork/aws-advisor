@@ -88,6 +88,17 @@ test("dns flip on sleep: only with a profile asking for it, no Elastic IP, recor
   assert.deepEqual(dnsParkPlan({ profile: dns, elasticIp: false, records: [rec], doormanIp: "198.51.100.5" }), { to: "198.51.100.5", records: [rec] });
 });
 
+test("dns upsert: a plain record stays plain whatever the stored routing says; a routed record keeps its policy", async () => {
+  const { upsertChange } = await import("../actions/schedule_hours.js");
+  const base = { zone_id: "Z0000000EXAMPLE1", name: "app.example.com", ttl: 300, values: ["203.0.113.10"], old_ip: "203.0.113.10" };
+  // what older inventories stored on every record: the table's region column, which Route 53 would read as a latency policy
+  const plain = upsertChange({ ...base, routing: { region: "global" } }, "203.0.113.20").ResourceRecordSet;
+  assert.deepEqual(plain, { Name: "app.example.com", Type: "A", TTL: 300, ResourceRecords: [{ Value: "203.0.113.20" }] });
+  const routed = upsertChange({ ...base, routing: { set_identifier: "eu", latency_region: "eu-west-1", region: "global" } }, "203.0.113.20").ResourceRecordSet;
+  assert.equal(routed.SetIdentifier, "eu"); assert.equal(routed.Region, "eu-west-1");
+  assert.deepEqual(upsertChange({ ...base, routing: null }, "203.0.113.20").Action, "UPSERT");
+});
+
 test("off hours: what a stop saves per week", () => {
   assert.equal(offHoursPerWeek(sched("weekdays 08-20")), 168 - 60);
   assert.equal(offHoursPerWeek(sched("daily 00-24")), 0);

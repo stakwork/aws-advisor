@@ -445,7 +445,8 @@ export function storeRoute53(zones: ZoneRow[], records: RecordRow[], resolve: (r
       const rec: RecordIn = { name: r.name, type: r.type, alias_target: obj(r.alias_target), values: arr(r.records).map(String) };
       const res = resolve(rec);
       const routing: Record<string, unknown> = {};
-      for (const k of ["set_identifier", "weight", "failover", "region", "geo_location", "latency_region", "multi_value_answer"] as const) if (r[k] != null && r[k] !== false && r[k] !== "") routing[k] = obj(r[k]) ?? r[k];
+      // the routing policy's own fields only: the table's `region` column is the account region ("global"), not a latency region
+      for (const k of ["set_identifier", "weight", "failover", "geo_location", "latency_region", "multi_value_answer"] as const) if (r[k] != null && r[k] !== false && r[k] !== "") routing[k] = obj(r[k]) ?? r[k];
       const id = `${zid}|${host(r.name)}|${r.type}|${r.set_identifier ?? ""}`;
       upRec.run({ id, zone_id: zid, zone_name: zname, name: host(r.name), type: r.type, ttl: r.ttl != null ? Number(r.ttl) : null, alias: rec.alias_target?.DNSName ? 1 : 0,
         values: JSON.stringify(rec.values), alias_target: rec.alias_target?.DNSName ? host(rec.alias_target.DNSName) : null, routing: Object.keys(routing).length ? JSON.stringify(routing) : null,
