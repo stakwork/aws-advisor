@@ -22,7 +22,7 @@ import { DescribeAddressesCommand, DescribeInstancesCommand, EC2Client, StartIns
 import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient, type DescribeDBClustersCommandOutput, type DescribeDBInstancesCommandOutput, StartDBClusterCommand, StartDBInstanceCommand, StopDBClusterCommand, StopDBInstanceCommand, type DBCluster, type DBInstance } from "@aws-sdk/client-rds";
 import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53Client, type Change, type ResourceRecordSet } from "@aws-sdk/client-route-53";
 import { db } from "../db.js";
-import type { ActionModule, Creds, Proposal } from "../executor.js";
+import { stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
 import { stopOrHibernate } from "../hibernation.js";
 import { explainRefusal } from "../autopark_grant.js";
@@ -348,6 +348,7 @@ export const scheduleHoursAction: ActionModule = {
       return { ok: true, note: `read back: ${state}` };
     }
     if (["stopping", "pending", "starting", "modifying", "configuring-enhanced-monitoring", "backing-up"].includes(state)) return { ok: null, note: `still ${state}` };
+    if (stillLanding(p, state)) return { ok: null, note: `still ${state}: the call was accepted and the state has not moved yet; the next pass reads it again` };
     return { ok: false, note: `state reads ${state}` };
   },
 

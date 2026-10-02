@@ -19,7 +19,7 @@
 import { CreateTagsCommand, DeleteTagsCommand, DescribeAddressesCommand, DescribeInstancesCommand, EC2Client, StartInstancesCommand, type Instance } from "@aws-sdk/client-ec2";
 import { db } from "../db.js";
 import { config } from "../config.js";
-import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { approvedRecs, stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
 import { reattachDns, recordsNamingIp, type DnsRecord } from "./schedule_hours.js";
 import { stopOrHibernate } from "../hibernation.js";
@@ -174,6 +174,7 @@ export const swarmParkAction: ActionModule = {
       if (!inst) return { ok: false, note: "instance not found on read-back" };
       if (state === "stopped") return { ok: true, note: "read back: stopped" };
       if (state === "stopping") return { ok: null, note: "still stopping" };
+      if (stillLanding(p, state)) return { ok: null, note: `still ${state}: the call was accepted and the state has not moved yet; the next pass reads it again` };
       return { ok: false, note: `state reads ${state}` };
     } finally { ec2.destroy(); }
   },

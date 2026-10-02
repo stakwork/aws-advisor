@@ -717,6 +717,21 @@ export async function stepAction(id: number, name: string, by: string): Promise<
 }
 
 /** Reads an applied row back; `verified` when the change is in place, left `applied` while it is still in flight. */
+/** How long ago the applied row with this dedupe was applied, in ms, or null when there is none. */
+export function appliedAgoMs(dedupe: string): number | null {
+  const row = db.prepare("select applied_at from actions where dedupe = ? and status = 'applied' order by id desc limit 1").get(dedupe) as { applied_at: string | null } | undefined;
+  if (!row?.applied_at) return null;
+  const at = new Date(row.applied_at.includes("T") ? row.applied_at : row.applied_at.replace(" ", "T") + "Z").getTime();
+  return Number.isFinite(at) ? Date.now() - at : null;
+}
+/**
+ * EC2 goes on reporting the old state for some seconds after StopInstances or StartInstances is accepted, and the
+ * read-back runs right after the call: a row this young whose state has not moved is in flight, not a failure.
+ */
+export const STATE_SETTLE_MS = 3 * 60_000;
+/** Whether a read-back that still shows the state before the change is too young to call a failure. */
+export const stillLanding = (p: Proposal, state: string | undefined): boolean => { const ago = state != null && state === String(p.before?.state) ? appliedAgoMs(p.dedupe) : null; return ago != null && ago < STATE_SETTLE_MS; };
+
 export async function verifyAction(id: number, creds?: Creds, trigger?: string): Promise<ActionRow> {
   const row = getAction(id); if (!row) throw new Error(`no action #${id}`);
   if (row.status !== "applied") return row;
