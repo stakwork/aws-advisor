@@ -51,6 +51,30 @@ export function recordsNamingIp(ip: string | null | undefined): DnsRecord[] {
       .map((r) => ({ zone_id: r.zone_id, name: r.name, ttl: r.ttl ?? null, values: jsonArr(r.values), routing: jsonObj(r.routing), old_ip: ip })).filter((r) => r.values.includes(ip));
   } catch { return []; }
 }
+/** The A records (no alias) in the account's zones with exactly this name. */
+export function recordsNamed(name: string): DnsRecord[] {
+  const n = name.trim().toLowerCase().replace(/\.$/, "");
+  if (!n || n.startsWith("*.")) return [];
+  try {
+    return (db.prepare(`select zone_id, name, ttl, "values", routing from inventory_route53_record where gone = 0 and alias = 0 and type = 'A' and lower(rtrim(name, '.')) = ?`).all(n) as any[])
+      .map((r) => { const values = jsonArr(r.values); return { zone_id: r.zone_id, name: r.name, ttl: r.ttl ?? null, values, routing: jsonObj(r.routing), old_ip: values.find((v) => /^\d+\.\d+\.\d+\.\d+$/.test(v)) || "" }; });
+  } catch { return []; }
+}
+const recordKey = (r: DnsRecord) => `${r.zone_id}/${r.name.toLowerCase().replace(/\.$/, "")}/${r.routing?.set_identifier ?? ""}`;
+/** Records without repeats (zone, name, set identifier), first one wins. Pure. */
+export function uniqueRecords(records: DnsRecord[]): DnsRecord[] { const seen = new Set<string>(); return records.filter((r) => { const k = recordKey(r); if (seen.has(k)) return false; seen.add(k); return true; }); }
+/** The A records of the box's wake profile domains (the owner's own list; wildcards aside), as the inventory knows them. */
+export function profileRecords(instanceId: string): DnsRecord[] {
+  const profile = getProfile(instanceId);
+  return uniqueRecords((profile?.domains ?? []).flatMap((d) => recordsNamed(d)));
+}
+/**
+ * Every A record that belongs to this box: the wake profile's domains first (by name, whatever they point at now:
+ * the inventory may be older than the last start), then what names its addresses and what the Route 53 links tie to it.
+ */
+export function recordsOfInstance(instanceId: string, publicIp: string | null | undefined, privateIp?: string | null): DnsRecord[] {
+  return uniqueRecords([...profileRecords(instanceId), ...recordsNamingIp(publicIp), ...(privateIp ? recordsNamingIp(privateIp) : []), ...recordsLinkedTo(instanceId)]);
+}
 /** The A records (no alias) the Route 53 links tie to this instance directly. */
 export function recordsLinkedTo(instanceId: string): DnsRecord[] {
   try {
@@ -62,14 +86,15 @@ export function recordsLinkedTo(instanceId: string): DnsRecord[] {
 export function recordsForStart(instanceId: string): DnsRecord[] {
   const last = db.prepare("select facts_json from actions where kind = ? and resource = ? and json_extract(after_json, '$.state') = 'stopped' and status in ('applied', 'verified', 'reverted') order by id desc limit 1").get(KIND, instanceId) as { facts_json: string } | undefined;
   try { const recs = last ? JSON.parse(last.facts_json)?.dns_records : null; if (Array.isArray(recs) && recs.length) return recs; } catch { /* fall through */ }
-  return recordsLinkedTo(instanceId);
+  const row = db.prepare("select public_ip from inventory_ec2 where instance_id = ?").get(instanceId) as { public_ip: string | null } | undefined;
+  return recordsOfInstance(instanceId, row?.public_ip ?? null);
 }
 /**
  * The A records the Auto-park grant lets the actuator re-point for this instance (src/autopark_grant.ts): those naming
  * its public and private addresses now and those the Route 53 links tie to it. Zones and names only; null when none.
  */
 export function dnsGrantFor(instanceId: string, publicIp: string | null | undefined, privateIp: string | null | undefined): DnsGrant | null {
-  const recs = [...recordsNamingIp(publicIp), ...recordsNamingIp(privateIp), ...recordsLinkedTo(instanceId)];
+  const recs = recordsOfInstance(instanceId, publicIp, privateIp);
   return normalDns({ zones: recs.map((r) => r.zone_id), names: recs.map((r) => r.name) });
 }
 /**
@@ -88,33 +113,64 @@ export function dnsParkPlan(opts: { profile: Pick<WakeProfile, "front_door"> | n
   return { to: opts.doormanIp, records };
 }
 
+/** The record's values as Route 53 has them now (read credentials), or null when it is not there, is an alias, or could not be read. */
+async function liveValues(r53: Route53Client, r: DnsRecord): Promise<string[] | null> {
+  try {
+    const sets = (await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: r.zone_id, StartRecordName: r.name, StartRecordType: "A", MaxItems: 5 }))).ResourceRecordSets ?? [];
+    const set = sets.find((s) => s.Name?.replace(/\.$/, "") === r.name.replace(/\.$/, "") && s.Type === "A" && (!r.routing?.set_identifier || s.SetIdentifier === r.routing.set_identifier));
+    if (!set || set.AliasTarget) return null;
+    return (set.ResourceRecords ?? []).map((v) => String(v.Value)).filter(Boolean);
+  } catch { return null; }
+}
+
 /**
- * After a stop: points the recorded A records at the doorman, so visitors get the waiting page and a visit can wake
- * the box, when its wake profile asks for the DNS flip. What was done goes into the row's facts (dns_parked); the
- * start's UPSERT puts the records back on the box. A refused zone is reported, never thrown: the stop itself is done.
- * Null when the box has no wake profile (nothing to say).
+ * Before a stop: points the box's A records at the doorman, so visitors get the waiting page and a visit can wake
+ * it, when its wake profile asks for the DNS flip. The records are the profile's domains (by name: what they point
+ * at now is read from Route 53, not from the inventory, which may predate the last start) and whatever named the
+ * box's address. First, so the change propagates while the box still answers; the doorman proxies to it meanwhile.
+ * The records as flipped go into the row's facts (dns_records, so the start puts them back; dns_parked, the record
+ * of it). A refused zone is reported, never thrown. Null when the box has no wake profile (nothing to say).
  */
 export async function parkDns(p: Proposal, creds: Creds): Promise<string | null> {
   const profile = getProfile(p.resource);
   if (!profile) return null;
-  const records = Array.isArray(p.facts.dns_records) ? (p.facts.dns_records as DnsRecord[]) : [];
-  const plan = dnsParkPlan({ profile, elasticIp: p.facts.elastic_ip !== false, records, doormanIp: config.doormanPublicIp });
-  if ("skip" in plan) return `DNS left on the box's old address (${plan.skip})`;
+  const recorded = Array.isArray(p.facts.dns_records) ? (p.facts.dns_records as DnsRecord[]) : [];
+  const candidates = uniqueRecords([...profileRecords(p.resource), ...recorded]);
+  const unknown = (profile.domains ?? []).filter((d) => !d.startsWith("*.") && !candidates.some((r) => r.name.toLowerCase().replace(/\.$/, "") === d));
+  const first = dnsParkPlan({ profile, elasticIp: p.facts.elastic_ip !== false, records: candidates, doormanIp: config.doormanPublicIp });
+  if ("skip" in first) return `DNS left as it is (${first.skip}${unknown.length ? `; no A record in the inventory for ${unknown.join(", ")}` : ""})`;
+  // what each record says now, so the start knows what to swap back
+  const reader = new Route53Client({ region: "us-east-1", credentials: creds.read });
+  const current: DnsRecord[] = [];
+  try {
+    for (const r of first.records) {
+      const values = await liveValues(reader, r);
+      const v = values ?? r.values;
+      current.push({ ...r, values: v, old_ip: v.find((x) => /^\d+\.\d+\.\d+\.\d+$/.test(x)) || r.old_ip });
+    }
+  } finally { reader.destroy(); }
+  const plan = dnsParkPlan({ profile, elasticIp: false, records: current, doormanIp: config.doormanPublicIp });
+  if ("skip" in plan) return `DNS left as it is (${plan.skip})`;
   const r53 = new Route53Client({ region: "us-east-1", credentials: creds.act() });
-  const done: string[] = []; const failed: string[] = [];
+  const done: DnsRecord[] = []; const failed: string[] = [];
   try {
     const byZone = new Map<string, DnsRecord[]>();
     for (const r of plan.records) byZone.set(r.zone_id, [...(byZone.get(r.zone_id) || []), r]);
     for (const [zone, recs] of byZone) {
       try {
         await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: zone, ChangeBatch: { Comment: `aws-advisor: ${p.resource} parked, ${recs[0].old_ip} → doorman ${plan.to}`, Changes: recs.map((r) => upsertChange(r, plan.to)) } }));
-        done.push(...recs.map((r) => r.name));
+        done.push(...recs);
       } catch (e: any) { failed.push(`${recs.map((r) => r.name).join(", ")}: ${String(e?.message || e).slice(0, 120)}`); }
     }
   } finally { r53.destroy(); }
-  const names = [...new Set(done)];
+  const names = [...new Set(done.map((r) => r.name))];
+  if (done.length) p.facts.dns_records = uniqueRecords([...done, ...recorded]);
   p.facts.dns_parked = { to: plan.to, names, at: new Date().toISOString(), failed: failed.length ? failed : null };
-  return [names.length ? `DNS parked at the doorman ${plan.to}: ${names.join(", ")} (the start points them back)` : "", failed.length ? `DNS NOT parked (${failed.join("; ")}): visitors see nothing until the box is started` : ""].filter(Boolean).join("; ");
+  return [
+    names.length ? `DNS parked at the doorman ${plan.to}: ${names.map((n) => { const r = done.find((x) => x.name === n); return r?.old_ip ? `${n} (was ${r.old_ip})` : n; }).join(", ")}; the start points them back` : "",
+    failed.length ? `DNS NOT parked (${failed.join("; ")}): visitors see nothing until the box is started` : "",
+    unknown.length ? `no A record in the inventory for ${unknown.join(", ")}` : "",
+  ].filter(Boolean).join("; ");
 }
 
 /** The record set an UPSERT sends: the old address swapped for the new one, the routing kept. Pure. */
@@ -272,7 +328,7 @@ function propose(t: Target, s: Schedule, d: Decision, notes: string[], log: (l: 
   const skip = (why: string) => { notes.push(`${name}: ${why}`); log(`${name}: ${why}`); return null; };
   if (!d.action) return skip(d.reason);
   if (d.action === "stop" && wokenByHand(t.resource)) return skip(`woken by hand in the last ${WOKEN_BY_HAND_HOURS} h; left until the window closes`);
-  const dns = t.kind === "ec2" && t.elastic_ip === false ? (d.action === "stop" ? recordsNamingIp(t.public_ip) : recordsForStart(t.resource)) : [];
+  const dns = t.kind === "ec2" && t.elastic_ip === false ? (d.action === "stop" ? recordsOfInstance(t.resource, t.public_ip) : recordsForStart(t.resource)) : [];
   const names = [...new Set(dns.map((r) => r.name))];
   const ipNote = t.kind === "ec2" && d.action === "start" && t.elastic_ip === false ? ` No Elastic IP: the public address changes on start${names.length ? `; ${names.join(", ")} will be pointed at the new one` : "; no A record in the account's zones names the old one"}.` : t.kind === "ec2" && d.action === "stop" && t.elastic_ip === false ? ` No Elastic IP: the public address changes when it starts again${names.length ? `; the start re-points ${names.join(", ")}` : ""}.` : "";
   const rdsNote = t.kind !== "ec2" && d.action === "stop" ? " AWS starts a stopped database again after seven days; the next scheduled stop takes it down again." : "";
@@ -460,13 +516,7 @@ async function dnsReadBack(p: Proposal, creds: Creds): Promise<string> {
   const r53 = new Route53Client({ region: "us-east-1", credentials: creds.read });
   const ok: string[] = []; const stale: string[] = [];
   try {
-    for (const r of records) {
-      try {
-        const sets = (await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: r.zone_id, StartRecordName: r.name, StartRecordType: "A", MaxItems: 5 }))).ResourceRecordSets ?? [];
-        const set = sets.find((s) => s.Name?.replace(/\.$/, "") === r.name.replace(/\.$/, "") && s.Type === "A" && (!r.routing?.set_identifier || s.SetIdentifier === r.routing.set_identifier));
-        (set?.ResourceRecords?.some((v) => v.Value === ip) ? ok : stale).push(r.name);
-      } catch (e: any) { stale.push(`${r.name} (${String(e?.message || e).slice(0, 80)})`); }
-    }
+    for (const r of records) ((await liveValues(r53, r))?.includes(ip) ? ok : stale).push(r.name);
   } finally { r53.destroy(); }
   return `${ok.length ? `DNS ${[...new Set(ok)].join(", ")} → ${ip}` : ""}${ok.length && stale.length ? "; " : ""}${stale.length ? `DNS NOT updated: ${[...new Set(stale)].join(", ")} do not name ${ip}` : ""}`;
 }
@@ -492,11 +542,12 @@ async function transition(p: Proposal, creds: Creds, action: "stop" | "start"): 
     try {
       if (action === "stop") {
         // hibernated when the box was launched for it (src/hibernation.ts), stopped otherwise
+        // the DNS flip first, so it propagates while the box still answers (the doorman proxies to it until it is down)
+        const parked = await parkDns(p, creds);
         const reader = new EC2Client({ region: p.region, credentials: creds.read });
         let line: string;
         try { line = (await stopOrHibernate(ec2, p.resource, reader)).line; } finally { reader.destroy(); }
-        const parked = await parkDns(p, creds);
-        return parked ? `${line}; ${parked}` : line;
+        return parked ? `${parked}; ${line}` : line;
       }
       let r;
       try { r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] })); } catch (e) { throw explainRefusal(e, p.resource); }

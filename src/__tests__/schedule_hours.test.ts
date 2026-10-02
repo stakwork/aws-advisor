@@ -99,6 +99,29 @@ test("dns upsert: a plain record stays plain whatever the stored routing says; a
   assert.deepEqual(upsertChange({ ...base, routing: null }, "203.0.113.20").Action, "UPSERT");
 });
 
+test("the box's records are found by the wake profile's domains, whatever they point at now", async () => {
+  const { db } = await import("../db.js");
+  const { recordsOfInstance, profileRecords, dnsGrantFor } = await import("../actions/schedule_hours.js");
+  const id = "i-0f0000000000d0b0x";
+  db.prepare("delete from inventory_route53_record where id like 'ZT|%'").run();
+  db.prepare("delete from wake_profiles where instance_id = ?").run(id);
+  db.prepare("delete from inventory_ec2 where instance_id = ?").run(id);
+  db.prepare("insert into inventory_ec2 (instance_id, name, state, region, public_ip, snapshot) values (?, 'box', 'running', 'us-east-1', '203.0.113.20', '{}')").run(id);
+  const ins = db.prepare(`insert into inventory_route53_record(id, zone_id, zone_name, name, type, ttl, alias, "values", alias_target, routing, health_check_id, link_state, target, summary, links, first_seen, last_seen, gone)
+    values (?, 'ZT', 'example.com', ?, 'A', 300, 0, ?, null, null, null, 'unmatched', null, null, '[]', '2026-10-01', '2026-10-01', 0)`);
+  // the inventory still has the address from before the last start; a wildcard in the profile is ignored; an unknown name finds nothing
+  ins.run("ZT|swarm", "swarm.example.com.", JSON.stringify(["203.0.113.10"]));
+  ins.run("ZT|other", "other.example.com", JSON.stringify(["203.0.113.99"]));
+  db.prepare("insert into wake_profiles (instance_id, enabled, profile) values (?, 1, ?)").run(id, JSON.stringify({ domains: ["Swarm.Example.com", "*.example.com", "missing.example.com"], front_door: "dns" }));
+  const found = recordsOfInstance(id, "203.0.113.20");
+  assert.deepEqual(found.map((r) => [r.name, r.old_ip]), [["swarm.example.com.", "203.0.113.10"]], "by name, not by the stale value");
+  assert.equal(profileRecords(id).length, 1);
+  assert.deepEqual(dnsGrantFor(id, "203.0.113.20", null), { zones: ["ZT"], names: ["swarm.example.com"] }, "the grant names the profile's record");
+  db.prepare("delete from inventory_route53_record where id like 'ZT|%'").run();
+  db.prepare("delete from wake_profiles where instance_id = ?").run(id);
+  db.prepare("delete from inventory_ec2 where instance_id = ?").run(id);
+});
+
 test("off hours: what a stop saves per week", () => {
   assert.equal(offHoursPerWeek(sched("weekdays 08-20")), 168 - 60);
   assert.equal(offHoursPerWeek(sched("daily 00-24")), 0);

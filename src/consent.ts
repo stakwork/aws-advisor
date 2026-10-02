@@ -23,7 +23,7 @@ import { actionModules, applyAction, executorCreds, getAction, proposalOf, recor
 import { logEvent } from "./executor_log.js";
 import { mirrorActionsInBackground } from "./graph_mirror.js";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
-import { KIND as SCHEDULE_KIND, dnsGrantFor, recordsForStart, recordsNamingIp } from "./actions/schedule_hours.js";
+import { KIND as SCHEDULE_KIND, dnsGrantFor, recordsForStart, recordsOfInstance } from "./actions/schedule_hours.js";
 import { HIBERNATE_TAG } from "./actions/ec2_hibernate_migrate.js";
 import { forgetHibernationStatus } from "./hibernation.js";
 import { AUTOPARK_POLICY, accountOfArn, checkGrant, instanceArn, roleNameOf } from "./autopark_grant.js";
@@ -266,7 +266,7 @@ export async function manualPower(instanceId: string, action: "stop" | "start", 
   const state = inst.State?.Name || "unknown";
   if (action === "stop" && state !== "running") throw new ConsentError(`${name} is ${state}, not running`, 409);
   if (action === "start" && state !== "stopped") throw new ConsentError(`${name} is ${state}, not stopped`, 409);
-  const dns = hasEip ? [] : action === "stop" ? recordsNamingIp(inst.PublicIpAddress) : recordsForStart(instanceId);
+  const dns = hasEip ? [] : action === "stop" ? recordsOfInstance(instanceId, inst.PublicIpAddress) : recordsForStart(instanceId);
   const names = [...new Set(dns.map((r) => r.name))];
   const p: Proposal = {
     kind: SCHEDULE_KIND, resource: instanceId, resource_name: row.name, region, account_id: row.account_id ?? null,

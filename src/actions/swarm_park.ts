@@ -21,7 +21,7 @@ import { db } from "../db.js";
 import { config } from "../config.js";
 import { approvedRecs, stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
-import { parkDns, reattachDns, recordsNamingIp, type DnsRecord } from "./schedule_hours.js";
+import { parkDns, reattachDns, recordsOfInstance, type DnsRecord } from "./schedule_hours.js";
 import { patchEc2State } from "../inventory.js";
 import { stopOrHibernate } from "../hibernation.js";
 import { explainRefusal } from "../autopark_grant.js";
@@ -125,7 +125,7 @@ export const swarmParkAction: ActionModule = {
           const hasEip = eips.has(r.instance_id);
           // advisor:park=auto keeps the old rule (an Elastic IP or nothing); AdvisorAutoPark=ON accepts a box without one, since the wake re-points its A records
           if (!hasEip && !isOn(tag(inst, AUTO_PARK_TAG))) { skip("no Elastic IP: a stop and start would change the public address and break what points at it"); continue; }
-          const dns: DnsRecord[] = hasEip ? [] : recordsNamingIp(inst.PublicIpAddress);
+          const dns: DnsRecord[] = hasEip ? [] : recordsOfInstance(r.instance_id, inst.PublicIpAddress);
           const openAlert = db.prepare("select kind from alerts where resource = ? and acknowledged = 0 order by id desc limit 1").get(r.instance_id) as { kind: string } | undefined;
           if (openAlert) { skip(`an open ${openAlert.kind} alert on it`); continue; }
           const recent = db.prepare("select status, applied_at, reverted_at from actions where kind = ? and resource = ? and status in ('applied', 'verified', 'reverted') order by id desc limit 1").get(KIND, r.instance_id) as { status: string; applied_at: string | null; reverted_at: string | null } | undefined;
@@ -158,14 +158,14 @@ export const swarmParkAction: ActionModule = {
     const ec2 = new EC2Client({ region: p.region, credentials: creds.act() });
     const reader = new EC2Client({ region: p.region, credentials: creds.read });
     try {
+      // the wake-on-traffic DNS flip first: the A records go to the doorman while the box sleeps (the start puts them back)
+      const parked = await parkDns(p, creds);
       // hibernated when the box was launched for it (back in about a minute with its memory), stopped otherwise
       const stop = await stopOrHibernate(ec2, p.resource, reader);
       let marker = "";
       try { await ec2.send(new CreateTagsCommand({ Resources: [p.resource], Tags: [{ Key: PARKED_TAG, Value: new Date().toISOString() }] })); marker = `, tagged ${PARKED_TAG}`; }
       catch (e: any) { marker = `, tag ${PARKED_TAG} not written (${String(e?.message || e).slice(0, 80)})`; }
-      // the wake-on-traffic DNS flip: the A records go to the doorman while the box sleeps (the start puts them back)
-      const parked = await parkDns(p, creds);
-      return `${stop.line}${marker}${parked ? `; ${parked}` : ""}`;
+      return `${parked ? `${parked}; ` : ""}${stop.line}${marker}`;
     } finally { ec2.destroy(); reader.destroy(); }
   },
 
