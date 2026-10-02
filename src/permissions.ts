@@ -462,6 +462,8 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
  * learns them from denied applies, so a role narrower than the policy below hides Apply instead of failing.
  */
 /** Actions a module declares that only a person's own credentials perform ("Run as me"): never in the actuator policy, never counted as its gap. */
+/** Actions the actuator holds only through an instance's Auto-park grant (src/autopark_grant.ts), never in the static policy: the right is scoped to that instance's own records. */
+export const GRANT_ONLY_ACTIONS: ReadonlySet<string> = new Set(["route53:ChangeResourceRecordSets"]);
 export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy"]);
 
 export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
@@ -544,8 +546,9 @@ export const actuatorPolicy = (): IamPolicy => ({
     { Sid: "ActuatorBeanstalkConsentTag", Effect: "Allow", Action: ["elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["AdvisorAutoScale", "AdvisorScaleBand"] } } },
     // AdvisorAutoScale=ON lets the capacity action move an environment's MinSize and MaxSize.
     { Sid: "ActuatorAutoScale", Effect: "Allow", Action: ["elasticbeanstalk:UpdateEnvironment"], Resource: "arn:aws:elasticbeanstalk:*:*:environment/*/*", Condition: { StringEqualsIgnoreCase: { "aws:ResourceTag/AdvisorAutoScale": "ON" } } },
-    // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one: UPSERT of A records only.
-    { Sid: "ActuatorDnsReattach", Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: "arn:aws:route53:::hostedzone/*", Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } } },
+    // On a start without an Elastic IP the office-hours action points the A records that named the old public address at the new one
+    // (the hibernation relaunch moves them too). No write statement here: the right to UPSERT exactly those A records in their zones
+    // is part of the instance's Auto-park grant in /aws-advisor/AdvisorAutoParkInstances (src/autopark_grant.ts), written by a person.
     { Sid: "ActuatorDnsReattachRead", Effect: "Allow", Action: ["route53:ListResourceRecordSets", "route53:GetChange", "ec2:DescribeInstances"], Resource: "*" },
     // Hibernation-ready relaunch: only an instance someone tagged advisor:hibernate is imaged or stopped; the new box must carry advisor:migrated-from from its launch, and is the only other box the role may stop or start.
     { Sid: "ActuatorHibernateImage", Effect: "Allow", Action: ["ec2:CreateImage", "ec2:StopInstances", "ec2:StartInstances"], Resource: "arn:aws:ec2:*:*:instance/*", Condition: { StringLike: { "aws:ResourceTag/advisor:hibernate": "*" } } },

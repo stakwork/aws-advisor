@@ -52,6 +52,10 @@ export interface Candidate {
   type_supports: boolean | null; ram_gib: number | null; windows: boolean; migrated_to: string | null; in_flight: boolean;
   /** When a migration of it was last reverted, if within REVERT_COOLDOWN_DAYS. */
   reverted_at?: string | null;
+  /** AdvisorAutoPark=ON: the box has an Auto-park grant, which is where the actuator's right to re-point its A records lives. */
+  auto_park?: boolean;
+  /** The A record names that name the box's addresses now (what the relaunch moves). */
+  dns_names?: string[];
 }
 
 /** Why an instance cannot be migrated as it is, or null. Pure. */
@@ -61,6 +65,8 @@ export function skipReason(c: Candidate): string | null {
   if (c.migrated_to) return `already migrated to ${c.migrated_to} (this is the stopped original, kept for Revert)`;
   if (c.configured) return `already hibernation-ready (launched with hibernation on); remove the ${HIBERNATE_TAG} tag`;
   if (c.in_flight) return "a migration of it is under way";
+  // the relaunch re-points the A records at the new box, and the actuator may touch exactly the records in the instance's Auto-park grant
+  if (c.dns_names?.length && !c.auto_park) return `${c.dns_names.length} A record${c.dns_names.length > 1 ? "s" : ""} (${c.dns_names.join(", ")}) would move to the new box, and the actuator may re-point them only through the Auto-park grant: switch Auto-park on first`;
   if (c.reverted_at) return `a migration was reverted ${c.reverted_at.slice(0, 16)} UTC: not proposed again for ${REVERT_COOLDOWN_DAYS} days (remove the tag to stop it for good)`;
   if (c.state !== "running" && !(c.mode === "stop" && c.state === "stopped")) return `state ${c.state}${c.mode === "live" ? " (a live migration needs it running)" : ""}`;
   if (c.root_device_type !== "ebs") return "root device is not EBS";
@@ -150,6 +156,8 @@ export function candidateFor(inst: Instance, t: InstanceTypeInfo | undefined, po
     enis: inst.NetworkInterfaces?.length ?? 1, private_ips: inst.NetworkInterfaces?.[0]?.PrivateIpAddresses?.length ?? 1, source_dest_check: inst.SourceDestCheck !== false,
     instance_store: Boolean(t?.InstanceStorageSupported), type_supports: t ? Boolean(t.HibernationSupported) : null, ram_gib: gib(t?.MemoryInfo?.SizeInMiB),
     windows: /windows/i.test(inst.PlatformDetails || inst.Platform || ""), migrated_to: tagOf(inst, MIGRATED_TO_TAG), in_flight: inFlight,
+    auto_park: /^(on|true|yes|1)$/i.test(tagOf(inst, "AdvisorAutoPark") ?? ""),
+    dns_names: [...new Set([...recordsNamingIp(inst.PublicIpAddress), ...recordsNamingIp(inst.PrivateIpAddress)].map((r) => r.name))].sort(),
     reverted_at: (db.prepare("select reverted_at from actions where kind = ? and resource = ? and status = 'reverted' and datetime(reverted_at) > datetime('now', ?) order by id desc limit 1").get(KIND, instanceId, `-${REVERT_COOLDOWN_DAYS} days`) as { reverted_at: string } | undefined)?.reverted_at ?? null,
   };
 }

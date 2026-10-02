@@ -23,6 +23,7 @@ import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient, type 
 import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53Client, type Change, type ResourceRecordSet } from "@aws-sdk/client-route-53";
 import { db } from "../db.js";
 import { stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { normalDns, type DnsGrant } from "../autopark_grant.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
 import { stopOrHibernate } from "../hibernation.js";
 import { explainRefusal } from "../autopark_grant.js";
@@ -47,14 +48,26 @@ export function recordsNamingIp(ip: string | null | undefined): DnsRecord[] {
       .map((r) => ({ zone_id: r.zone_id, name: r.name, ttl: r.ttl ?? null, values: jsonArr(r.values), routing: jsonObj(r.routing), old_ip: ip })).filter((r) => r.values.includes(ip));
   } catch { return []; }
 }
-/** The records to move on a start: what the last stop of this box recorded, else the A records the Route 53 links still tie to it. */
-export function recordsForStart(instanceId: string): DnsRecord[] {
-  const last = db.prepare("select facts_json from actions where kind = ? and resource = ? and json_extract(after_json, '$.state') = 'stopped' and status in ('applied', 'verified', 'reverted') order by id desc limit 1").get(KIND, instanceId) as { facts_json: string } | undefined;
-  try { const recs = last ? JSON.parse(last.facts_json)?.dns_records : null; if (Array.isArray(recs) && recs.length) return recs; } catch { /* fall through */ }
+/** The A records (no alias) the Route 53 links tie to this instance directly. */
+export function recordsLinkedTo(instanceId: string): DnsRecord[] {
   try {
     return (db.prepare(`select r.zone_id, r.name, r.ttl, r."values", r.routing from inventory_route53_link l join inventory_route53_record r on r.id = l.record_id where l.resource_kind = 'ec2' and l.resource_id = ? and l.hop = 1 and r.gone = 0 and r.alias = 0 and r.type = 'A'`).all(instanceId) as any[])
       .map((r) => { const values = jsonArr(r.values); return { zone_id: r.zone_id, name: r.name, ttl: r.ttl ?? null, values, routing: jsonObj(r.routing), old_ip: values.find((v) => /^\d+\.\d+\.\d+\.\d+$/.test(v)) || "" }; }).filter((r) => r.old_ip);
   } catch { return []; }
+}
+/** The records to move on a start: what the last stop of this box recorded, else the A records the Route 53 links still tie to it. */
+export function recordsForStart(instanceId: string): DnsRecord[] {
+  const last = db.prepare("select facts_json from actions where kind = ? and resource = ? and json_extract(after_json, '$.state') = 'stopped' and status in ('applied', 'verified', 'reverted') order by id desc limit 1").get(KIND, instanceId) as { facts_json: string } | undefined;
+  try { const recs = last ? JSON.parse(last.facts_json)?.dns_records : null; if (Array.isArray(recs) && recs.length) return recs; } catch { /* fall through */ }
+  return recordsLinkedTo(instanceId);
+}
+/**
+ * The A records the Auto-park grant lets the actuator re-point for this instance (src/autopark_grant.ts): those naming
+ * its public and private addresses now and those the Route 53 links tie to it. Zones and names only; null when none.
+ */
+export function dnsGrantFor(instanceId: string, publicIp: string | null | undefined, privateIp: string | null | undefined): DnsGrant | null {
+  const recs = [...recordsNamingIp(publicIp), ...recordsNamingIp(privateIp), ...recordsLinkedTo(instanceId)];
+  return normalDns({ zones: recs.map((r) => r.zone_id), names: recs.map((r) => r.name) });
 }
 /** The record set an UPSERT sends: the old address swapped for the new one, the routing kept. Pure. */
 export function upsertChange(r: DnsRecord, newIp: string): Change & { ResourceRecordSet: ResourceRecordSet } {

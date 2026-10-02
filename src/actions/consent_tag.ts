@@ -8,7 +8,7 @@ import { CreateTagsCommand, DeleteTagsCommand, DescribeInstancesCommand, EC2Clie
 import { DescribeEnvironmentsCommand, DescribeEventsCommand, ElasticBeanstalkClient, ListTagsForResourceCommand, UpdateTagsForResourceCommand } from "@aws-sdk/client-elastic-beanstalk";
 import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
-import { checkGrant, setGrant } from "../autopark_grant.js";
+import { checkGrant, setGrant, type DnsGrant } from "../autopark_grant.js";
 import { patchEc2Tag } from "../inventory.js";
 
 /** Beanstalk applies a tag change as an environment update; the list shows it only once that is through. A read-back younger than this is inconclusive, not a failure. */
@@ -56,9 +56,9 @@ async function readTag(p: Proposal, creds: Creds): Promise<string | null | undef
 
 /** The instance's grant on the actuator role, when the row carries one (an AdvisorAutoPark switch). */
 async function writeGrant(p: Proposal, creds: Creds, on: boolean): Promise<string | null> {
-  const g = p.facts.grant as { role_arn: string; instance_arn: string } | undefined;
+  const g = p.facts.grant as { role_arn: string; instance_arn: string; dns?: DnsGrant | null } | undefined;
   if (!g?.role_arn || !g.instance_arn) return null;
-  return setGrant(creds.act(), g.role_arn, g.instance_arn, on);
+  return setGrant(creds.act(), g.role_arn, g.instance_arn, on, g.dns ?? null);
 }
 
 export const consentTagAction: ActionModule = {
@@ -77,9 +77,9 @@ export const consentTagAction: ActionModule = {
     const v = await readTag(p, creds);
     if (v === undefined) return { ok: false, note: "resource not found on read-back" };
     const want = wanted(p, "after");
-    const g = p.facts.grant as { role_arn: string; instance_arn: string; on: boolean } | undefined;
+    const g = p.facts.grant as { role_arn: string; instance_arn: string; on: boolean; dns?: DnsGrant | null } | undefined;
     if (v === want && g?.role_arn) {
-      const c = await checkGrant(creds.read, g.role_arn, g.instance_arn);
+      const c = await checkGrant(creds.read, g.role_arn, g.instance_arn, g.on ? g.dns ?? null : null);
       if (c.granted === null) return { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}; grant not checked (${c.detail})` };
       if (c.granted !== g.on) return { ok: false, note: `${tagOf(p)}=${v ?? "(absent)"}, but IAM says ${c.detail}` };
       return { ok: true, note: `read back: ${tagOf(p)}=${v ?? "(absent)"}; ${c.detail}` };

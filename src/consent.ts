@@ -23,7 +23,7 @@ import { actionModules, applyAction, executorCreds, getAction, proposalOf, recor
 import { logEvent } from "./executor_log.js";
 import { mirrorActionsInBackground } from "./graph_mirror.js";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
-import { KIND as SCHEDULE_KIND, recordsForStart, recordsNamingIp } from "./actions/schedule_hours.js";
+import { KIND as SCHEDULE_KIND, dnsGrantFor, recordsForStart, recordsNamingIp } from "./actions/schedule_hours.js";
 import { HIBERNATE_TAG } from "./actions/ec2_hibernate_migrate.js";
 import { forgetHibernationStatus } from "./hibernation.js";
 import { AUTOPARK_POLICY, accountOfArn, checkGrant, instanceArn, roleNameOf } from "./autopark_grant.js";
@@ -65,17 +65,20 @@ export async function requestConsent(r: ConsentRequest): Promise<ActionRow> {
     const roleArn = actuatorRoleFor(row.account_id);
     if (!roleArn) throw new ConsentError(`no actuator role is configured for account ${row.account_id || "(parent)"}: there is nothing to grant stop and start on (Settings > Auto-actions)`, 409);
     const arn = instanceArn(region, accountOfArn(roleArn), r.id);
+    // the A records that lead to the box go into the grant too, so a start (or a relaunch) may re-point exactly those
+    const dns = dnsGrantFor(r.id, inst.PublicIpAddress, inst.PrivateIpAddress);
+    const dnsText = dns ? ` and, for the A record${dns.names.length > 1 ? "s" : ""} ${dns.names.join(", ")}, to re-point ${dns.names.length > 1 ? "them" : "it"} after a start (UPSERT only, nothing else in Route 53)` : "";
     if (before != null && normaliseConsent(before) === r.value) {
-      const g = await checkGrant(creds.forAccount(row.account_id || null).read, roleArn, arn);
+      const g = await checkGrant(creds.forAccount(row.account_id || null).read, roleArn, arn, dns);
       if (r.value === "OFF" || g.granted !== false) throw new ConsentError(`${row.name || r.id} already carries ${AUTO_PARK_TAG}=${before}${r.value === "ON" ? ` and ${g.detail}` : ""}`, 409);
     }
     const p: Proposal = {
       kind: CONSENT_KIND, resource: r.id, resource_name: row.name, region, account_id: row.account_id ?? null,
       dedupe: `${CONSENT_KIND}:${r.id}:${r.value}`,
       title: `${row.name || r.id}: ${AUTO_PARK_TAG} ${before ?? "(none)"} → ${r.value}`,
-      reason: r.value === "ON" ? `${by} switched auto-park on from the page: the executor may stop this box when it is idle or in its confident quiet hours and start it again before it is needed, re-pointing its DNS records when it has no Elastic IP. Done with your own credentials ("Run as me"): the tag, and a grant on the actuator role (${roleNameOf(roleArn)}, policy ${AUTOPARK_POLICY}) to stop and start this one instance. Stop and Start on the page work from then on.` : `${by} switched auto-park off from the page: the tag goes to OFF and this instance leaves the actuator role's grant, so nothing can stop or start it until it is switched on again (a box it stopped stays stopped until Start on the page or Revert on the row). Done with your own credentials ("Run as me").`,
+      reason: r.value === "ON" ? `${by} switched auto-park on from the page: the executor may stop this box when it is idle or in its confident quiet hours and start it again before it is needed, re-pointing its DNS records when it has no Elastic IP. Done with your own credentials ("Run as me"): the tag, and a grant on the actuator role (${roleNameOf(roleArn)}, policy ${AUTOPARK_POLICY}) to stop and start this one instance${dnsText}. Stop and Start on the page work from then on.` : `${by} switched auto-park off from the page: the tag goes to OFF and this instance leaves the actuator role's grant, so nothing can stop or start it until it is switched on again (a box it stopped stays stopped until Start on the page or Revert on the row). Done with your own credentials ("Run as me").`,
       before: { [AUTO_PARK_TAG]: before }, after: { [AUTO_PARK_TAG]: r.value },
-      facts: { kind: "ec2", tag: AUTO_PARK_TAG, by, state: inst.State?.Name ?? row.state ?? null, grant: { role_arn: roleArn, instance_arn: arn, on: r.value === "ON", before: isOn(before) } },
+      facts: { kind: "ec2", tag: AUTO_PARK_TAG, by, state: inst.State?.Name ?? row.state ?? null, grant: { role_arn: roleArn, instance_arn: arn, on: r.value === "ON", before: isOn(before), dns } },
       rollback: `${before == null ? `DeleteTags ${AUTO_PARK_TAG}` : `CreateTags ${AUTO_PARK_TAG}=${before}`}, and the grant back to how it was`,
       est_usd_month: null,
     };

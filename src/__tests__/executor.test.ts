@@ -355,13 +355,14 @@ test("grace: a fresh proposal waits, an old one does not, and the announcement s
 test("capabilities: every registered kind declares what the role needs, all of it inside the actuator policy", async () => {
   await import("../actions/index.js");
   const { actionModules, computeCapabilities } = await import("../executor.js");
-  const { ACTUATOR_NEEDS, PERSON_ONLY_ACTIONS, actuatorPolicy } = await import("../permissions.js");
+  const { ACTUATOR_NEEDS, PERSON_ONLY_ACTIONS, GRANT_ONLY_ACTIONS, actuatorPolicy } = await import("../permissions.js");
   const allowed = new Set(actuatorPolicy().Statement.filter((s: any) => s.Effect === "Allow").flatMap((s: any) => s.Action));
   for (const m of actionModules()) {
     const n = ACTUATOR_NEEDS[m.kind];
     assert.ok(n, `${m.kind} has no ACTUATOR_NEEDS entry`);
     for (const a of [...n.apply, ...n.revert]) {
       if (PERSON_ONLY_ACTIONS.has(a)) { assert.ok(!allowed.has(a), `${a} is a person's, never the actuator's`); continue; }
+      if (GRANT_ONLY_ACTIONS.has(a)) { assert.ok(!allowed.has(a), `${a} comes with the instance's Auto-park grant, not the static policy`); continue; }
       assert.ok(allowed.has(a), `${m.kind} needs ${a}, which the actuator policy does not allow`);
     }
   }

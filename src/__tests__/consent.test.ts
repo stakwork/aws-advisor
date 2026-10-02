@@ -55,6 +55,23 @@ test("auto-park grant: one managed policy listing exactly the granted instances 
   assert.deepEqual(withArn([grantArn(a)], b, true), [grantArn(a), grantArn(b)]);
   assert.deepEqual(withArn([grantArn(a), grantArn(b)], a, false), [grantArn(b)]);
   assert.equal(grantDocument(withArn([a], a, false)), null, "no instance left: the policy is deleted");
+  // the DNS half of a grant: one statement per instance, on its zones, for UPSERT of A records with exactly its names
+  const { dnsGrantsOf, withDns, normalDns, dnsSid, zoneArn } = await import("../autopark_grant.js");
+  const idA = "i-0f0000000000e0001";
+  const dns = { [idA]: { zones: ["/hostedzone/Z0000000EXAMPLE1", "Z0000000EXAMPLE1"], names: ["App.Example.com.", "api.example.com"] } };
+  const withDnsDoc: any = grantDocument([a, b], dns);
+  assert.equal(withDnsDoc.Statement.length, 2);
+  assert.deepEqual(withDnsDoc.Statement[1], {
+    Sid: dnsSid(idA), Effect: "Allow", Action: ["route53:ChangeResourceRecordSets"], Resource: [zoneArn("Z0000000EXAMPLE1")],
+    Condition: { "ForAllValues:StringEquals": { "route53:ChangeResourceRecordSetsNormalizedRecordNames": ["api.example.com", "app.example.com"], "route53:ChangeResourceRecordSetsRecordTypes": ["A"], "route53:ChangeResourceRecordSetsActions": ["UPSERT"] } },
+  });
+  assert.equal(dnsSid(idA), "AutoParkDnsi0f0000000000e0001", "Sids are alphanumeric");
+  assert.deepEqual(dnsGrantsOf(withDnsDoc), { [idA]: { zones: ["Z0000000EXAMPLE1"], names: ["api.example.com", "app.example.com"] } }, "read back from the document");
+  assert.deepEqual(grantedArnsOf(withDnsDoc), [grantArn(a), grantArn(b)], "the stop/start statement is unchanged");
+  assert.equal((grantDocument([b], dns) as any).Statement.length, 1, "a DNS grant for an instance that is not granted is dropped");
+  assert.equal(normalDns({ zones: ["Z1"], names: [] }), null, "no names: no statement");
+  assert.deepEqual(withDns(dns, "i-0f0000000000e0002", { zones: ["Z2"], names: ["b.example.com"] }), { [idA]: { zones: ["Z0000000EXAMPLE1"], names: ["api.example.com", "app.example.com"] }, "i-0f0000000000e0002": { zones: ["Z2"], names: ["b.example.com"] } });
+  assert.deepEqual(withDns(dns, idA, null), {}, "switching off removes the instance's DNS grant");
   // about a hundred instances fit; more is refused with a message, before AWS refuses it
   const many = (n: number) => Array.from({ length: n }, (_, i) => instanceArn("us-east-1", "123456789012", `i-0f${String(i).padStart(15, "0")}`));
   assert.equal(sizeProblem(grantDocument(many(100)), 100), null);

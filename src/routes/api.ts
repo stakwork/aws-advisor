@@ -388,15 +388,19 @@ api.post("/inventory/ec2/:id/consent", async (req, res) => {
 // Whether the actuator role may stop and start this instance (src/autopark_grant.ts), as IAM simulates every policy on it.
 api.get("/inventory/ec2/:id/autopark-grant", async (req, res) => {
   const { checkGrant, instanceArn, accountOfArn } = await import("../autopark_grant.js");
+  const { dnsGrantFor } = await import("../actions/schedule_hours.js");
   const { actuatorRoleFor } = await import("../accounts.js");
   const { executorCreds } = await import("../executor.js");
-  const row = db.prepare("select account_id, region from inventory_ec2 where instance_id = ?").get(String(req.params.id)) as { account_id: string | null; region: string | null } | undefined;
+  const id = String(req.params.id);
+  const row = db.prepare("select account_id, region, public_ip, private_ip from inventory_ec2 where instance_id = ?").get(id) as { account_id: string | null; region: string | null; public_ip: string | null; private_ip: string | null } | undefined;
   if (!row) return res.status(404).json({ error: "not in the inventory" });
   const creds = executorCreds();
   const role = actuatorRoleFor(row.account_id);
   if (!role) return res.json({ granted: null, detail: "no actuator role configured for this account", role_arn: null });
-  const arn = instanceArn(row.region || creds.region, accountOfArn(role), String(req.params.id));
-  res.json({ ...(await checkGrant(creds.forAccount(row.account_id || null).read, role, arn)), role_arn: role, instance_arn: arn });
+  const arn = instanceArn(row.region || creds.region, accountOfArn(role), id);
+  // the A records that lead to the box now: the grant must name them, or a start cannot re-point them
+  const dns = dnsGrantFor(id, row.public_ip, row.private_ip);
+  res.json({ ...(await checkGrant(creds.forAccount(row.account_id || null).read, role, arn, dns)), role_arn: role, instance_arn: arn, dns });
 });
 // Hibernation on the Auto-park row (src/hibernation.ts): ready or not and why, and the owner's choice as advisor:hibernate.
 api.get("/inventory/ec2/:id/hibernation", async (req, res) => {

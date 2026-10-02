@@ -2258,8 +2258,9 @@ a `TOUCHED_IN` edge from each row it applied, read back or reverted.
 read credentials for the change itself and for nothing else; the read role never gains a write action. The page
 shows the permissions policy to put on it (`actuatorPolicy` in `src/permissions.ts`: `rds:ModifyDBCluster`,
 `ec2:ModifySnapshotTier`, `ec2:RestoreSnapshotTier`, the describes those need, `ec2:CreateTags`/`DeleteTags` for the
-`advisor:schedule` key alone, `route53:ChangeResourceRecordSets` for UPSERTs of A records alone, and a **Deny on anything tagged
-`advisor:hands-off`**) and the trust policy naming the advisor's read identity. Without a role the executor is
+`advisor:schedule` key alone, and a **Deny on anything tagged `advisor:hands-off`**) and the trust policy naming the
+advisor's read identity. It carries no Route 53 write: the right to re-point an instance's A records after a start is
+part of that instance's Auto-park grant (below). Without a role the executor is
 dry-run only and "acts as" on the page says so. Every plan also skips a hands-off tag itself, and a change
 that failed three times in a day is refused until the next day.
 
@@ -2526,7 +2527,13 @@ The actuator role may stop and start an EC2 instance only when a person granted 
 (`src/autopark_grant.ts`). Switching **Auto-park** on is done with your own credentials (**Run as me** on the row the
 switch proposes): it writes `AdvisorAutoPark=ON` and adds the instance to a customer-managed policy attached to the
 actuator role, `/aws-advisor/AdvisorAutoParkInstances` (created and attached on the first grant): `ec2:StartInstances`
-and `ec2:StopInstances` on exactly those instances, one ARN each with the region as `*`. A managed policy, because a
+and `ec2:StopInstances` on exactly those instances, one ARN each with the region as `*`, and per instance a
+`route53:ChangeResourceRecordSets` statement on the hosted zones of the A records that lead to it (the records naming
+its public and private addresses, and those the Route 53 inventory links to it), limited by condition to UPSERT of A
+records with exactly those names: what a start without an Elastic IP re-points, and what the hibernation relaunch
+moves. The row's reason lists the names; the grant check on the row reads as "not granted" when the records changed
+since, and **Grant it** writes the grant again. A box with A records and no Auto-park grant is not relaunched for
+hibernation (the skip reason says so). A managed policy, because a
 role's inline policies share 10,240 characters and the actuator policy, pasted inline, uses about 9,000 of them; the
 managed one has 6,144 of its own, about 100 instances, and a grant that would not fit is refused with a message. Each
 change is a new default version (AWS keeps five; the oldest is deleted first). Switching it off removes the
