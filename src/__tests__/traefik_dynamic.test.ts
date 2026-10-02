@@ -7,7 +7,7 @@ test("traefik routes: one router per DNS-flip profile domain and open port, to t
     { instance_id: "i-0f0000000000a0001", front_door: "dns", domains: ["app.example.com", "*.example.com"], ports: [{ port: 443, proto: "tcp", behaviour: "page" }, { port: 8000, proto: "tcp", behaviour: "hold" }, { port: 80, proto: "tcp", behaviour: "redirect" }, { port: 22, proto: "tcp", behaviour: "ignore" }, { port: 500, proto: "udp", behaviour: "ignore" }] },
     { instance_id: "i-0f0000000000a0002", front_door: "eip", domains: ["eip.example.com"], ports: [{ port: 443, proto: "tcp", behaviour: "page" }] },
   ];
-  const d = traefikDynamicConfig(profiles, "http://advisor.sphinx:9035");
+  const d = traefikDynamicConfig(profiles, "http://advisor.sphinx:9035", "myresolver");
   const keys = Object.keys(d.http.routers).sort();
   assert.deepEqual(keys, ["doorman-i-0f0000000000a0001-0-443", "doorman-i-0f0000000000a0001-0-80", "doorman-i-0f0000000000a0001-0-8000", "doorman-i-0f0000000000a0001-1-443", "doorman-i-0f0000000000a0001-1-80", "doorman-i-0f0000000000a0001-1-8000"], "ignored and UDP ports left out, the EIP profile left out");
   const r: any = d.http.routers["doorman-i-0f0000000000a0001-0-8000"];
@@ -17,6 +17,9 @@ test("traefik routes: one router per DNS-flip profile domain and open port, to t
   assert.equal(w.rule, "HostRegexp(`{sub:[a-z0-9-]+}.example.com`)"); assert.deepEqual(w.tls.domains, [{ main: "example.com", sans: ["*.example.com"] }]);
   assert.deepEqual(d.http.services, { "advisor-doorman": { loadBalancer: { servers: [{ url: "http://advisor.sphinx:9035" }], passHostHeader: true } } });
   assert.deepEqual(traefikDynamicConfig([profiles[1]], "http://x").http, { routers: {}, services: {} }, "nothing to route: an empty document");
+  // no resolver (the production swarm: a wildcard from the file provider): TLS on, no resolver named
+  const store: any = traefikDynamicConfig([profiles[0]], "http://advisor.sphinx:9035").http.routers["doorman-i-0f0000000000a0001-1-443"];
+  assert.deepEqual(store.tls, {});
   assert.equal(entrypointFor(443), "websecure"); assert.equal(entrypointFor(80), "web"); assert.equal(entrypointFor(3000), "port3000");
   assert.equal(ruleFor("a.b.example.com"), "Host(`a.b.example.com`)");
 });

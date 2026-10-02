@@ -70,7 +70,7 @@ app.get("/traefik/dynamic.json", async (req, res) => {
   if (!isPrivateAddress(req.socket.remoteAddress) || req.headers["x-forwarded-for"]) return res.status(403).json({ error: "for the private network only" });
   const { listProfiles } = await import("./wake_profiles.js");
   const { traefikDynamicConfig, doormanUrl } = await import("./traefik_dynamic.js");
-  res.set("cache-control", "no-store").json(traefikDynamicConfig(listProfiles(), doormanUrl()));
+  res.set("cache-control", "no-store").json(traefikDynamicConfig(listProfiles(), doormanUrl(), config.traefikCertResolver));
 });
 
 // Built UI (ui/dist). The app shell is public (static JS, no data); every /api route stays gated. A request that

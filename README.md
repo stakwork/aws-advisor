@@ -2575,9 +2575,11 @@ and Traefik polls them (`src/traefik_dynamic.ts`): add to the swarm's Traefik co
 ```
 
 The document carries one HTTP router per wake-profile domain and port the profile does not ignore, on the
-swarm's entrypoint for that port (`web`, `websecure`, `port<N>`), TLS from its certificate resolver (`myresolver`;
-the Route 53 DNS challenge issues for the name before any traffic arrives), all to the doorman service at
-`DOORMAN_URL` (Settings > Auto-actions; empty = the advisor container's host name and `DOORMAN_PORT`). It is served
+swarm's entrypoint for that port (`web`, `websecure`, `port<N>`), TLS on: with the certificates Traefik's file
+provider loads (the production swarm's wildcard for the zone), or from the ACME resolver named in
+`TRAEFIK_CERT_RESOLVER` (Settings > Auto-actions; a Route 53 DNS challenge issues for the name before any traffic
+arrives), all to the doorman service at `DOORMAN_URL` (same page; empty = the advisor container's host name and
+`DOORMAN_PORT`). It is served
 to private addresses only, without a token, and holds nothing but names and ports. Profiles whose front door is not
 the DNS flip are left out. An entrypoint Traefik does not have is logged by Traefik and the router ignored: the ports
 in the profile should be ones the swarm host listens on.
