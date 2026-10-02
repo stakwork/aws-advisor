@@ -402,7 +402,8 @@ api.get("/inventory/ec2/:id/autopark-grant", async (req, res) => {
 api.get("/inventory/ec2/:id/hibernation", async (req, res) => {
   const { hibernationStatus } = await import("../hibernation.js");
   try { const st = await hibernationStatus(String(req.params.id), { fresh: req.query.fresh === "1" }); if (!st) return res.status(404).json({ error: "not found" }); res.json(st); }
-  catch (e: any) { res.status(502).json({ error: String(e?.message || e).slice(0, 300) }); }
+  // 500, not 502: the UI retries a 502 for minutes as "the advisor is unreachable"; an AWS error is final and the note shows it with Retry
+  catch (e: any) { res.status(500).json({ error: describeError(e, `hibernation of ${req.params.id} (ec2:DescribeInstances, ec2:DescribeInstanceTypes)`) }); }
 });
 api.post("/inventory/ec2/:id/hibernation", async (req, res) => {
   const { requestHibernateChoice } = await import("../consent.js");

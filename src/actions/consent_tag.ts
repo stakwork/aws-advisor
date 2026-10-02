@@ -9,6 +9,7 @@ import { DescribeEnvironmentsCommand, DescribeEventsCommand, ElasticBeanstalkCli
 import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { checkGrant, setGrant } from "../autopark_grant.js";
+import { patchEc2Tag } from "../inventory.js";
 
 /** Beanstalk applies a tag change as an environment update; the list shows it only once that is through. A read-back younger than this is inconclusive, not a failure. */
 export const BEANSTALK_TAG_SETTLE_MS = 10 * 60_000;
@@ -32,9 +33,11 @@ async function writeTag(p: Proposal, creds: Creds, value: string | null): Promis
   }
   const ec2 = new EC2Client({ region: p.region, credentials: creds.act() });
   try {
-    if (value == null) { await ec2.send(new DeleteTagsCommand({ Resources: [p.resource], Tags: [{ Key: tag }] })); return `DeleteTags: ${tag} removed`; }
-    await ec2.send(new CreateTagsCommand({ Resources: [p.resource], Tags: [{ Key: tag, Value: value }] }));
-    return `CreateTags: ${tag}=${value}`;
+    if (value == null) await ec2.send(new DeleteTagsCommand({ Resources: [p.resource], Tags: [{ Key: tag }] }));
+    else await ec2.send(new CreateTagsCommand({ Resources: [p.resource], Tags: [{ Key: tag, Value: value }] }));
+    // the page reads tags from the stored snapshot: keep it true now, not at the next collection
+    patchEc2Tag(p.resource, tag, value);
+    return value == null ? `DeleteTags: ${tag} removed` : `CreateTags: ${tag}=${value}`;
   } finally { ec2.destroy(); }
 }
 

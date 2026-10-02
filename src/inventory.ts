@@ -481,6 +481,23 @@ export function ec2Detail(instanceId: string) {
   return { ...row, findings_count: row.findings, snapshot: safeJson(row.snapshot), findings_run_id: latest?.id ?? null, findings, recommendations, probes, volume_usage };
 }
 
+/**
+ * Mirrors a tag the advisor just wrote on an instance (src/actions/consent_tag.ts: AdvisorAutoPark, advisor:hibernate)
+ * into the stored snapshot, so the page reads it back at once instead of after the next collection, which reads the
+ * live tags from EC2 anyway. null removes the tag. False when the instance is not in the inventory.
+ */
+export function patchEc2Tag(instanceId: string, key: string, value: string | null): boolean {
+  const row = db.prepare("select snapshot from inventory_ec2 where instance_id = ?").get(instanceId) as { snapshot: string } | undefined;
+  if (!row) return false;
+  let snapshot: Record<string, unknown>;
+  try { snapshot = JSON.parse(row.snapshot); } catch { return false; }
+  if (!snapshot || typeof snapshot !== "object") return false;
+  const tags: Record<string, string> = { ...((snapshot.tags as Record<string, string>) || {}) };
+  if (value == null) delete tags[key]; else tags[key] = value;
+  db.prepare("update inventory_ec2 set snapshot = ? where instance_id = ?").run(JSON.stringify({ ...snapshot, tags }), instanceId);
+  return true;
+}
+
 export interface SimpleFilter { q?: string; sort?: string; gone?: boolean }
 
 export function listRds(f: SimpleFilter = {}) {

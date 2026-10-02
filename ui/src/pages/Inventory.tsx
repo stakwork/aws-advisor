@@ -962,9 +962,13 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
   const [rules, setRules] = useState<any[]>([]);
   const [tab, setTab] = useState<Ec2Tab>("overview");
   const [usage, setUsage] = useState<any>(null);
+  // AdvisorAutoPark as the switch last wrote it, until the detail is read again (the stored snapshot carries it from then on)
+  const [autoParkTag, setAutoParkTag] = useState<string | null | undefined>(undefined);
   const loadRules = () => api("/signal-rules").then((r) => setRules(r.rules)).catch(() => setRules([]));
   useEffect(() => { loadRules(); setTab("overview"); setUsage(null); api(`/instances/${encodeURIComponent(d.instance_id)}/usage`).then(setUsage).catch(() => setUsage(null)); }, [d.instance_id]);
+  useEffect(() => { setAutoParkTag(undefined); }, [d]);
   const s = d.snapshot || {};
+  const autoPark = /^(on|true|yes|1)$/i.test(String((autoParkTag === undefined ? s.tags?.AdvisorAutoPark : autoParkTag) ?? ""));
   const id = s.identity || {}; const net = s.network || {}; const st = s.storage || {}; const ssm = s.ssm; const ut = s.utilisation || {}; const price = s.price;
   const latest = d.probes?.[0];
   const canProbe = d.state === "running" && d.ssm_status === "Online" && (!ssm?.platform_type || ssm.platform_type === "Linux");
@@ -982,7 +986,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         </div>
         <div className="flex flex-wrap items-center gap-2"><WatchToggle kind="ec2" id={d.instance_id} /></div>
       </div>
-      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} />
+      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} onValue={setAutoParkTag} />
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Glance label="At list" value={price?.monthly != null ? `${usd(price.monthly)} / mo` : "—"} hint={price ? `${usd(price.hourly, 4)} / h · ${price.operating_system}` : `no price for ${d.instance_type}`} />
@@ -1072,7 +1076,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
 
       {tab === "ports" && <PortsPanel instanceId={d.instance_id} probedAt={latest?.collected_at ?? null} groups={Array.isArray(net.security_groups) ? net.security_groups.filter((g: any) => g?.GroupId) : []} />}
 
-      {tab === "ondemand" && <WakeProfilePanel instanceId={d.instance_id} autoPark={/^(on|true|yes|1)$/i.test(String(s.tags?.AdvisorAutoPark ?? ""))} />}
+      {tab === "ondemand" && <WakeProfilePanel instanceId={d.instance_id} autoPark={autoPark} />}
 
       {tab === "running" && (
         <>

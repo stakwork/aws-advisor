@@ -92,8 +92,10 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
   );
 }
 
-export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null }) {
+export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValue }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null; onValue?: (value: string | null) => void }) {
   const [value, setValue] = useState<string | null>(tags?.AdvisorAutoPark ?? null);
+  /** The tag as just written: the switch, and through onValue the rest of the page (the On-demand tab), follow it before the detail is read again. */
+  const setTag = (v: string | null) => { setValue(v); onValue?.(v); };
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
   const [grant, setGrant] = useState<{ granted: boolean | null; detail: string; role_arn: string | null } | null>(null);
@@ -106,7 +108,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/consent`, { method: "POST", body: JSON.stringify({ value: want ? "ON" : "OFF" }) })
       .then((a) => {
-        if (a.status === "applied" || a.status === "verified") { setValue(want ? "ON" : "OFF"); setMsg(rowMsg(a)); loadGrant(); return; }
+        if (a.status === "applied" || a.status === "verified") { setTag(want ? "ON" : "OFF"); setMsg(rowMsg(a)); loadGrant(); return; }
         setMsg({ ...rowMsg(a), err: false, text: want ? "Needs your own AWS credentials: Run as me tags the box and lets the actuator stop and start this instance only." : "Needs your own AWS credentials: Run as me sets the tag to OFF and removes this instance from the actuator's grant." });
       })
       .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
@@ -137,8 +139,8 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind }: { in
           {grant.granted === true ? <>Granted: {grant.detail}.</> : grant.granted === false ? <>Tagged ON but not granted: {grant.detail}. <button className="text-sky-300 hover:underline" disabled={busy} onClick={() => flip(true)}>Grant it</button></> : <>Grant not checked: {grant.detail}.</>}
         </div>
       )}
-      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setValue(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
-      {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} />}
+      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setTag(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
+      {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} autoPark={on} />}
     </div>
   );
 }
@@ -150,20 +152,23 @@ type Hibernation = { status: "ready" | "chosen_stop" | "can_migrate" | "cannot" 
  * start with the migration offered, never forced: "Keep stop/start" is a first-class answer and hides the suggestion.
  * Each choice is the advisor:hibernate tag, written as a ledgered consent row (Revert puts it back).
  */
-function HibernationNote({ instanceId, handsOff }: { instanceId: string; handsOff: boolean }) {
+function HibernationNote({ instanceId, handsOff, autoPark }: { instanceId: string; handsOff: boolean; autoPark: boolean }) {
   const [h, setH] = useState<Hibernation | null | undefined>(undefined);
+  const [readErr, setReadErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
-  const load = (fresh = false) => api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation${fresh ? "?fresh=1" : ""}`).then(setH).catch(() => setH(null));
+  const load = (fresh = false) => { setReadErr(""); return api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation${fresh ? "?fresh=1" : ""}`).then(setH).catch((e) => { setH(null); setReadErr(e.message); }); };
   useEffect(() => { setH(undefined); setMsg(null); load(); }, [instanceId]);
+  // the switch just moved: a read that failed before gets another go, so the note does not stay missing until a reload
+  useEffect(() => { if (h === null) load(); }, [autoPark]);
   const choose = (value: "stop" | "live" | "no" | null) => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation`, { method: "POST", body: JSON.stringify({ value }) })
       .then((a) => { setMsg(a.status === "proposed" ? { ...rowMsg(a), err: false, text: "Needs your own AWS credentials: Run as me writes the advisor:hibernate tag." } : rowMsg(a)); return load(true); })
       .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
   };
-  if (h === undefined) return <div className="mt-1.5 text-zinc-600">Checking hibernation…</div>;
-  if (h === null) return null;
+  if (h === undefined) return <div className="mt-1.5 text-zinc-500">Checking hibernation…</div>;
+  if (h === null) return readErr && !/^not found$/i.test(readErr) ? <div className="mt-1.5 text-amber-300/90">Hibernation not checked: {readErr} <button className="text-sky-300 hover:underline" onClick={() => load(true)}>Retry</button></div> : null;
   const chip = (tone: string, text: string) => <span className={`rounded border px-1.5 py-px ${tone}`}>{text}</span>;
   const btn = (label: string, value: "stop" | "live" | "no" | null, title: string) => (
     <button key={label} className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={busy || handsOff} onClick={() => choose(value)} title={title}>{label}</button>
