@@ -63,6 +63,16 @@ app.get("/readme", authMiddleware, (_req, res) => {
   res.type("text/plain; charset=utf-8").send(fs.readFileSync(readme, "utf8"));
 });
 
+// The doorman's routes for the swarm's Traefik (src/traefik_dynamic.ts), polled by its HTTP provider. No token (Traefik
+// v2 sends none): private addresses only, and it carries nothing but domain names and ports.
+app.get("/traefik/dynamic.json", async (req, res) => {
+  const { isPrivateAddress } = await import("./doorman.js");
+  if (!isPrivateAddress(req.socket.remoteAddress) || req.headers["x-forwarded-for"]) return res.status(403).json({ error: "for the private network only" });
+  const { listProfiles } = await import("./wake_profiles.js");
+  const { traefikDynamicConfig, doormanUrl } = await import("./traefik_dynamic.js");
+  res.set("cache-control", "no-store").json(traefikDynamicConfig(listProfiles(), doormanUrl()));
+});
+
 // Built UI (ui/dist). The app shell is public (static JS, no data); every /api route stays gated. A request that
 // arrives signed in (/?token=<API_TOKEN>, or a valid session) gets a 30-day session token injected, which the
 // browser keeps; anyone else gets the shell with a sign-in box.

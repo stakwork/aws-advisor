@@ -2565,6 +2565,23 @@ box with an Elastic IP, no wake profile or another front door is left alone, and
 needs a certificate for the domain (Traefik's resolver, DNS-01 or a wildcard), since the record arrives there only
 once the box sleeps.
 
+**Traefik routes to the doorman.** After the flip the domain resolves to the swarm host, and its Traefik has to send
+it to the doorman. Traefik's docker provider reads labels fixed at container start, so the advisor serves the routes
+and Traefik polls them (`src/traefik_dynamic.ts`): add to the swarm's Traefik command
+
+```
+--providers.http.endpoint=http://<advisor container>:9034/traefik/dynamic.json
+--providers.http.pollInterval=10s
+```
+
+The document carries one HTTP router per wake-profile domain and port the profile does not ignore, on the
+swarm's entrypoint for that port (`web`, `websecure`, `port<N>`), TLS from its certificate resolver (`myresolver`;
+the Route 53 DNS challenge issues for the name before any traffic arrives), all to the doorman service at
+`DOORMAN_URL` (Settings > Auto-actions; empty = the advisor container's host name and `DOORMAN_PORT`). It is served
+to private addresses only, without a token, and holds nothing but names and ports. Profiles whose front door is not
+the DNS flip are left out. An entrypoint Traefik does not have is logged by Traefik and the router ignored: the ports
+in the profile should be ones the swarm host listens on.
+
 A parked instance can be woken by its own traffic. Its **wake profile** (`src/wake_profiles.ts`, the instance's
 **On-demand** tab, `GET/PUT/DELETE /api/wake-profiles/:id`) names the domains it answers for, what happens on each
 port while it sleeps (`page`: the waiting page for browsers and a hold for API and WebSocket calls; `hold`;
