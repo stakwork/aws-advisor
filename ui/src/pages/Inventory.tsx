@@ -964,9 +964,10 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
   const [usage, setUsage] = useState<any>(null);
   // AdvisorAutoPark as the switch last wrote it, until the detail is read again (the stored snapshot carries it from then on)
   const [autoParkTag, setAutoParkTag] = useState<string | null | undefined>(undefined);
+  const [liveState, setLiveState] = useState<string | null>(null);
   const loadRules = () => api("/signal-rules").then((r) => setRules(r.rules)).catch(() => setRules([]));
   useEffect(() => { loadRules(); setTab("overview"); setUsage(null); api(`/instances/${encodeURIComponent(d.instance_id)}/usage`).then(setUsage).catch(() => setUsage(null)); }, [d.instance_id]);
-  useEffect(() => { setAutoParkTag(undefined); }, [d]);
+  useEffect(() => { setAutoParkTag(undefined); setLiveState(null); }, [d]);
   const s = d.snapshot || {};
   const autoPark = /^(on|true|yes|1)$/i.test(String((autoParkTag === undefined ? s.tags?.AdvisorAutoPark : autoParkTag) ?? ""));
   const id = s.identity || {}; const net = s.network || {}; const st = s.storage || {}; const ssm = s.ssm; const ut = s.utilisation || {}; const price = s.price;
@@ -981,12 +982,12 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1">
         <div>
           <h2 className="text-base font-medium text-zinc-100">{d.name || d.instance_id}</h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{d.state}</Badge><SsmBadge status={d.ssm_status} platform={d.ssm_platform} />{s.pool ? <PoolBadge kind={s.pool.kind} name={s.pool.name} /> : null}{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.instance_id}</Mono><span className="text-zinc-500">{id.instance_type} · {id.region}{id.az ? ` / ${id.az}` : ""}{id.launch_time ? ` · launched ${day(id.launch_time)}` : ""}</span></div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{liveState ?? d.state}</Badge><SsmBadge status={d.ssm_status} platform={d.ssm_platform} />{s.pool ? <PoolBadge kind={s.pool.kind} name={s.pool.name} /> : null}{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.instance_id}</Mono><span className="text-zinc-500">{id.instance_type} · {id.region}{id.az ? ` / ${id.az}` : ""}{id.launch_time ? ` · launched ${day(id.launch_time)}` : ""}</span></div>
           <div className="mt-1 text-xs text-zinc-500">first seen {when(d.first_seen)} · last seen {when(d.last_seen)}{d.role?.role ? <> · <RoleLine role={d.role} /></> : null}</div>
         </div>
         <div className="flex flex-wrap items-center gap-2"><WatchToggle kind="ec2" id={d.instance_id} /></div>
       </div>
-      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} onValue={setAutoParkTag} />
+      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} onValue={setAutoParkTag} onState={setLiveState} />
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Glance label="At list" value={price?.monthly != null ? `${usd(price.monthly)} / mo` : "—"} hint={price ? `${usd(price.hourly, 4)} / h · ${price.operating_system}` : `no price for ${d.instance_type}`} />

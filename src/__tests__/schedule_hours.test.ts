@@ -75,6 +75,19 @@ test("decision: running outside → stop, stopped inside → start, otherwise le
   assert.equal(stop.target.toISOString(), "2026-09-28T20:00:00.000Z");
 });
 
+test("dns flip on sleep: only with a profile asking for it, no Elastic IP, records naming the box and a doorman address", async () => {
+  const { dnsParkPlan } = await import("../actions/schedule_hours.js");
+  const rec = { zone_id: "Z0000000EXAMPLE1", name: "app.example.com", ttl: 300, values: ["203.0.113.10"], routing: null, old_ip: "203.0.113.10" };
+  const dns = { front_door: "dns" as const }, eip = { front_door: "eip" as const };
+  assert.deepEqual(dnsParkPlan({ profile: null, elasticIp: false, records: [rec], doormanIp: "198.51.100.5" }), { skip: "no wake profile" });
+  assert.match((dnsParkPlan({ profile: eip, elasticIp: false, records: [rec], doormanIp: "198.51.100.5" }) as any).skip, /front door is eip/);
+  assert.match((dnsParkPlan({ profile: dns, elasticIp: true, records: [rec], doormanIp: "198.51.100.5" }) as any).skip, /Elastic IP/);
+  assert.match((dnsParkPlan({ profile: dns, elasticIp: false, records: [], doormanIp: "198.51.100.5" }) as any).skip, /no A record/);
+  assert.match((dnsParkPlan({ profile: dns, elasticIp: false, records: [rec], doormanIp: "" }) as any).skip, /no doorman public address/);
+  assert.match((dnsParkPlan({ profile: dns, elasticIp: false, records: [{ ...rec, old_ip: "198.51.100.5" }], doormanIp: "198.51.100.5" }) as any).skip, /already point/);
+  assert.deepEqual(dnsParkPlan({ profile: dns, elasticIp: false, records: [rec], doormanIp: "198.51.100.5" }), { to: "198.51.100.5", records: [rec] });
+});
+
 test("off hours: what a stop saves per week", () => {
   assert.equal(offHoursPerWeek(sched("weekdays 08-20")), 168 - 60);
   assert.equal(offHoursPerWeek(sched("daily 00-24")), 0);

@@ -24,6 +24,9 @@ import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53
 import { db } from "../db.js";
 import { stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { normalDns, type DnsGrant } from "../autopark_grant.js";
+import { config } from "../config.js";
+import { getProfile, type WakeProfile } from "../wake_profiles.js";
+import { patchEc2State } from "../inventory.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
 import { stopOrHibernate } from "../hibernation.js";
 import { explainRefusal } from "../autopark_grant.js";
@@ -69,6 +72,51 @@ export function dnsGrantFor(instanceId: string, publicIp: string | null | undefi
   const recs = [...recordsNamingIp(publicIp), ...recordsNamingIp(privateIp), ...recordsLinkedTo(instanceId)];
   return normalDns({ zones: recs.map((r) => r.zone_id), names: recs.map((r) => r.name) });
 }
+/**
+ * Whether a stop should point the box's A records at the doorman, and which (the wake-on-traffic plan's DNS flip):
+ * the wake profile asks for it, the box has no Elastic IP, records name it, and the doorman's public address is set.
+ * Pure.
+ */
+export function dnsParkPlan(opts: { profile: Pick<WakeProfile, "front_door"> | null; elasticIp: boolean; records: DnsRecord[]; doormanIp: string }): { to: string; records: DnsRecord[] } | { skip: string } {
+  if (!opts.profile) return { skip: "no wake profile" };
+  if (opts.profile.front_door !== "dns") return { skip: `front door is ${opts.profile.front_door}, not a DNS flip` };
+  if (opts.elasticIp) return { skip: "an Elastic IP keeps the address" };
+  if (!opts.records.length) return { skip: "no A record names the box" };
+  if (!opts.doormanIp) return { skip: "no doorman public address set (Settings > Auto-actions)" };
+  const records = opts.records.filter((r) => r.old_ip !== opts.doormanIp);
+  if (!records.length) return { skip: "the records already point at the doorman" };
+  return { to: opts.doormanIp, records };
+}
+
+/**
+ * After a stop: points the recorded A records at the doorman, so visitors get the waiting page and a visit can wake
+ * the box, when its wake profile asks for the DNS flip. What was done goes into the row's facts (dns_parked); the
+ * start's UPSERT puts the records back on the box. A refused zone is reported, never thrown: the stop itself is done.
+ * Null when the box has no wake profile (nothing to say).
+ */
+export async function parkDns(p: Proposal, creds: Creds): Promise<string | null> {
+  const profile = getProfile(p.resource);
+  if (!profile) return null;
+  const records = Array.isArray(p.facts.dns_records) ? (p.facts.dns_records as DnsRecord[]) : [];
+  const plan = dnsParkPlan({ profile, elasticIp: p.facts.elastic_ip !== false, records, doormanIp: config.doormanPublicIp });
+  if ("skip" in plan) return `DNS left on the box's old address (${plan.skip})`;
+  const r53 = new Route53Client({ region: "us-east-1", credentials: creds.act() });
+  const done: string[] = []; const failed: string[] = [];
+  try {
+    const byZone = new Map<string, DnsRecord[]>();
+    for (const r of plan.records) byZone.set(r.zone_id, [...(byZone.get(r.zone_id) || []), r]);
+    for (const [zone, recs] of byZone) {
+      try {
+        await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: zone, ChangeBatch: { Comment: `aws-advisor: ${p.resource} parked, ${recs[0].old_ip} → doorman ${plan.to}`, Changes: recs.map((r) => upsertChange(r, plan.to)) } }));
+        done.push(...recs.map((r) => r.name));
+      } catch (e: any) { failed.push(`${recs.map((r) => r.name).join(", ")}: ${String(e?.message || e).slice(0, 120)}`); }
+    }
+  } finally { r53.destroy(); }
+  const names = [...new Set(done)];
+  p.facts.dns_parked = { to: plan.to, names, at: new Date().toISOString(), failed: failed.length ? failed : null };
+  return [names.length ? `DNS parked at the doorman ${plan.to}: ${names.join(", ")} (the start points them back)` : "", failed.length ? `DNS NOT parked (${failed.join("; ")}): visitors see nothing until the box is started` : ""].filter(Boolean).join("; ");
+}
+
 /** The record set an UPSERT sends: the old address swapped for the new one, the routing kept. Pure. */
 export function upsertChange(r: DnsRecord, newIp: string): Change & { ResourceRecordSet: ResourceRecordSet } {
   const routing = (r.routing || {}) as Record<string, any>;
@@ -356,6 +404,7 @@ export const scheduleHoursAction: ActionModule = {
     const kind = String(p.facts.kind) as ResourceKind;
     const state = await currentState(kind, p.resource, p.region, creds);
     if (state == null) return { ok: false, note: "not found on read-back" };
+    if (kind === "ec2") patchEc2State(p.resource, state);
     if (state === want) {
       if (kind === "ec2" && want === "running" && Array.isArray(p.facts.dns_records) && p.facts.dns_records.length) return { ok: true, note: `read back: running; ${await dnsReadBack(p, creds)}` };
       return { ok: true, note: `read back: ${state}` };
@@ -440,7 +489,10 @@ async function transition(p: Proposal, creds: Creds, action: "stop" | "start"): 
       if (action === "stop") {
         // hibernated when the box was launched for it (src/hibernation.ts), stopped otherwise
         const reader = new EC2Client({ region: p.region, credentials: creds.read });
-        try { return (await stopOrHibernate(ec2, p.resource, reader)).line; } finally { reader.destroy(); }
+        let line: string;
+        try { line = (await stopOrHibernate(ec2, p.resource, reader)).line; } finally { reader.destroy(); }
+        const parked = await parkDns(p, creds);
+        return parked ? `${line}; ${parked}` : line;
       }
       let r;
       try { r = await ec2.send(new StartInstancesCommand({ InstanceIds: [p.resource] })); } catch (e) { throw explainRefusal(e, p.resource); }

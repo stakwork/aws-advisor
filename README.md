@@ -2553,6 +2553,15 @@ on RDS keep their `advisor:schedule` condition. The hibernation choice (`advisor
 
 #### Wake profiles and the doorman
 
+**The DNS flip on sleep.** With `DOORMAN_PUBLIC_IP` set (Settings > Auto-actions: the swarm host's public address,
+where its Traefik forwards the sleeping domains to the doorman) every stop of a box whose wake profile says *DNS
+flip* (idle parking, office hours, the Stop button) UPSERTs the A records that named its public address to that
+address, under the instance's Auto-park grant, and records it on the row (`dns_parked`). Visitors then get the
+waiting page and a visit can wake the box; the start's UPSERT points the records back at the box's new address. A
+box with an Elastic IP, no wake profile or another front door is left alone, and the row says why. The swarm host
+needs a certificate for the domain (Traefik's resolver, DNS-01 or a wildcard), since the record arrives there only
+once the box sleeps.
+
 A parked instance can be woken by its own traffic. Its **wake profile** (`src/wake_profiles.ts`, the instance's
 **On-demand** tab, `GET/PUT/DELETE /api/wake-profiles/:id`) names the domains it answers for, what happens on each
 port while it sleeps (`page`: the waiting page for browsers and a hold for API and WebSocket calls; `hold`;

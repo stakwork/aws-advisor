@@ -92,8 +92,30 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
   );
 }
 
-export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValue }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null; onValue?: (value: string | null) => void }) {
+/** EC2 states on the way somewhere: the row keeps polling while one of these shows. */
+const TRANSIENT = /^(pending|stopping|shutting-down)$/;
+const WATCH_MS = 4 * 60_000;
+
+export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValue, onState }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null; onValue?: (value: string | null) => void; onState?: (state: string) => void }) {
   const [value, setValue] = useState<string | null>(tags?.AdvisorAutoPark ?? null);
+  // the state as EC2 reports it now (the inventory row is as old as its last collection); polled after Stop and Start until it lands
+  const [live, setLive] = useState<string | null>(null);
+  const [watch, setWatch] = useState<{ from: string; until: number } | null>(null);
+  const readState = () => api(`/inventory/ec2/${encodeURIComponent(instanceId)}/state`).then((s) => { setLive(s.state); onState?.(s.state); return s.state as string; }).catch(() => null);
+  useEffect(() => { setLive(null); setWatch(null); readState(); }, [instanceId]);
+  useEffect(() => {
+    if (!watch) return;
+    let stop = false; let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      const s = await readState();
+      if (stop) return;
+      if ((s && s !== watch.from && !TRANSIENT.test(s)) || Date.now() > watch.until) { setWatch(null); return; }
+      timer = setTimeout(tick, 4000);
+    };
+    timer = setTimeout(tick, 2500);
+    return () => { stop = true; if (timer) clearTimeout(timer); };
+  }, [watch]);
+  const cur = live ?? state;
   /** The tag as just written: the switch, and through onValue the rest of the page (the On-demand tab), follow it before the detail is read again. */
   const setTag = (v: string | null) => { setValue(v); onValue?.(v); };
   const [busy, setBusy] = useState(false);
@@ -116,7 +138,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
   const power = (action: "stop" | "start") => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/power`, { method: "POST", body: JSON.stringify({ action }) })
-      .then((a) => setMsg(rowMsg(a)))
+      .then((a) => { setMsg(rowMsg(a)); if (a.status === "applied" || a.status === "verified") setWatch({ from: cur, until: Date.now() + WATCH_MS }); })
       .catch((e) => setMsg({ text: e.message, err: true })).finally(() => setBusy(false));
   };
   const handsOff = tags?.["advisor:hands-off"] != null;
@@ -128,8 +150,9 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
         <span className="text-zinc-500">{handsOff ? "tagged advisor:hands-off" : poolKind ? `member of a ${poolKind} pool: its controller decides` : on ? "the executor may stop it when idle or in its confident quiet hours, and start it before it is needed (DNS re-pointed when there is no Elastic IP)" : value ? `AdvisorAutoPark=${value}: never stopped or started by the executor` : "no AdvisorAutoPark tag: never stopped or started by the executor"}</span>
         {on && !handsOff && (
           <span className="ml-auto flex gap-1">
-            <button className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={busy || state !== "running"} onClick={() => power("stop")} title={state === "running" ? `stop ${name || instanceId} now` : `state ${state}`}>Stop</button>
-            <button className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={busy || state !== "stopped"} onClick={() => power("start")} title={state === "stopped" ? `start ${name || instanceId} now` : `state ${state}`}>Start</button>
+            <button className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={busy || Boolean(watch) || cur !== "running"} onClick={() => power("stop")} title={cur === "running" ? `stop ${name || instanceId} now` : `state ${cur}`}>Stop</button>
+            <button className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={busy || Boolean(watch) || cur !== "stopped"} onClick={() => power("start")} title={cur === "stopped" ? `start ${name || instanceId} now` : `state ${cur}`}>Start</button>
+            {watch && <span className="self-center text-zinc-500">{cur}…</span>}
           </span>
         )}
       </div>
@@ -139,7 +162,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
           {grant.granted === true ? <>Granted: {grant.detail}.</> : grant.granted === false ? <>Tagged ON but not granted: {grant.detail}. <button className="text-sky-300 hover:underline" disabled={busy} onClick={() => flip(true)}>Grant it</button></> : <>Grant not checked: {grant.detail}.</>}
         </div>
       )}
-      {msg?.actionId && msg.status !== "verified" ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setTag(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
+      {msg?.actionId && (msg.status === "proposed" || msg.status === "failed") ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setTag(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
       {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} autoPark={on} />}
     </div>
   );

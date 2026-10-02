@@ -21,7 +21,8 @@ import { db } from "../db.js";
 import { config } from "../config.js";
 import { approvedRecs, stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { AUTO_PARK_TAG, isOff, isOn } from "../consent.js";
-import { reattachDns, recordsNamingIp, type DnsRecord } from "./schedule_hours.js";
+import { parkDns, reattachDns, recordsNamingIp, type DnsRecord } from "./schedule_hours.js";
+import { patchEc2State } from "../inventory.js";
 import { stopOrHibernate } from "../hibernation.js";
 import { explainRefusal } from "../autopark_grant.js";
 
@@ -162,7 +163,9 @@ export const swarmParkAction: ActionModule = {
       let marker = "";
       try { await ec2.send(new CreateTagsCommand({ Resources: [p.resource], Tags: [{ Key: PARKED_TAG, Value: new Date().toISOString() }] })); marker = `, tagged ${PARKED_TAG}`; }
       catch (e: any) { marker = `, tag ${PARKED_TAG} not written (${String(e?.message || e).slice(0, 80)})`; }
-      return `${stop.line}${marker}`;
+      // the wake-on-traffic DNS flip: the A records go to the doorman while the box sleeps (the start puts them back)
+      const parked = await parkDns(p, creds);
+      return `${stop.line}${marker}${parked ? `; ${parked}` : ""}`;
     } finally { ec2.destroy(); reader.destroy(); }
   },
 
@@ -172,6 +175,7 @@ export const swarmParkAction: ActionModule = {
       const inst = (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [p.resource] }))).Reservations?.[0]?.Instances?.[0];
       const state = inst?.State?.Name;
       if (!inst) return { ok: false, note: "instance not found on read-back" };
+      patchEc2State(p.resource, state || "unknown", inst.PublicIpAddress ?? null, inst.PrivateIpAddress ?? null);
       if (state === "stopped") return { ok: true, note: "read back: stopped" };
       if (state === "stopping") return { ok: null, note: "still stopping" };
       if (stillLanding(p, state)) return { ok: null, note: `still ${state}: the call was accepted and the state has not moved yet; the next pass reads it again` };

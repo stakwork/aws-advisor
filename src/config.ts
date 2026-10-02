@@ -64,6 +64,7 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "notifyLinkUrl", env: "NOTIFY_LINK_URL", kind: "url", def: "", group: "Notifications (Sphinx)", label: "Link base for messages", help: "The address people open the advisor at, used only for the links in chat messages, e.g. http://10.0.1.23:9034 when the app is reached over the VPN by private IP. Empty = PUBLIC_URL (which is also what repo2graph calls back to, so leave that one alone)." },
   { key: "notifyRecommendations", env: "NOTIFY_RECOMMENDATIONS", kind: "enum", def: "on", options: ["on", "off"], group: "Notifications (Sphinx)", label: "Recommendation events", help: "on = approvals, rejections, items marked done and measured savings are posted (quiet hours defer them to the next dispatch); off = alerts only. \"Send to Sphinx\" on a recommendation always works." },
   { key: "notifyQuietHours", env: "NOTIFY_QUIET_HOURS", kind: "string", def: "", group: "Notifications (Sphinx)", label: "Quiet hours", help: "HH-HH in the server's local time, e.g. 22-07: warnings wait until the morning's next dispatch, alarms still go. Empty = none." },
+  { key: "doormanPublicIp", env: "DOORMAN_PUBLIC_IP", kind: "string", def: "", group: "Auto-actions", label: "Doorman public address", help: "The swarm host's public IPv4 address, where its Traefik forwards the sleeping domains to the doorman (DOORMAN_PORT). When set, every stop of a box whose wake profile says DNS flip points its A records here, so visitors get the waiting page and a visit can wake it; the start points them back at the box. Empty = records are left on the old address." },
   { key: "actMode", env: "ACT_MODE", kind: "enum", def: "dry_run", options: ["off", "dry_run", "apply"], group: "Auto-actions", label: "Mode", help: "off = the executor never runs; dry_run = every pass records what it would change and touches nothing; apply = changes are made under the actuator role. Applying one row by hand from the Auto-actions page works in dry_run too." },
   { key: "actRoleArn", env: "ACT_ROLE_ARN", kind: "string", def: "", group: "Auto-actions", label: "Actuator role ARN", help: "The only identity that ever changes AWS: a role with the actuator policy (Auto-actions page), assumed from the advisor's read credentials. Empty = nothing can be applied." },
   { key: "actCron", env: "ACT_CRON", kind: "cron", def: "45 * * * *", group: "Auto-actions", label: "Executor pass", help: "Hourly by default, fifteen minutes before the hour, so a capacity change is in place before the hour it is for. off = disabled." },
@@ -134,6 +135,7 @@ export function validateRuntime(key: string, value: string): string {
     default:
       if (key === "notifyQuietHours" && v && !/^([01]?\d|2[0-3])-([01]?\d|2[0-3])$/.test(v)) throw new Error('HH-HH, e.g. "22-07", or empty');
       if (key === "actRoleArn" && v && (!ROLE_ARN_RE.test(v) || /\s/.test(v))) throw new Error("arn:aws:iam::<12 digits>:role/<name>, or empty");
+      if (key === "doormanPublicIp" && v && !/^(\d{1,3}\.){3}\d{1,3}$/.test(v)) throw new Error("an IPv4 address, or empty");
       if (key === "probeSignals") return serialiseSignals(parseSignals(v));
       if (v.length > 500) throw new Error("too long"); return v;
   }
@@ -220,6 +222,7 @@ export const config = {
   get lambdaErrorPct(): number { return rtNum("lambdaErrorPct"); },
   get commitmentMinUtilPct(): number { return rtNum("commitmentMinUtilPct"); },
   get actMode(): "off" | "dry_run" | "apply" { return rtEnum("actMode"); },
+  get doormanPublicIp(): string { return rt("doormanPublicIp").trim(); },
   get actRoleArn(): string { return rt("actRoleArn"); },
   get actCron(): string { return rt("actCron"); },
   get actPressureCron(): string { return rt("actPressureCron"); },

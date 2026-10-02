@@ -498,6 +498,20 @@ export function patchEc2Tag(instanceId: string, key: string, value: string | nul
   return true;
 }
 
+/** Mirrors an instance's state, and its addresses when known, as just read from EC2 into the stored row and snapshot: the page follows a stop or a start at once. */
+export function patchEc2State(instanceId: string, state: string, publicIp?: string | null, privateIp?: string | null): boolean {
+  const row = db.prepare("select snapshot from inventory_ec2 where instance_id = ?").get(instanceId) as { snapshot: string } | undefined;
+  if (!row) return false;
+  let snapshot: Record<string, any>;
+  try { snapshot = JSON.parse(row.snapshot); } catch { return false; }
+  if (!snapshot || typeof snapshot !== "object") return false;
+  const identity = { ...(snapshot.identity || {}), state };
+  const network = { ...(snapshot.network || {}), ...(publicIp ? { public_ip: publicIp } : {}), ...(privateIp ? { private_ip: privateIp } : {}) };
+  db.prepare("update inventory_ec2 set state = ?, public_ip = coalesce(?, public_ip), private_ip = coalesce(?, private_ip), snapshot = ? where instance_id = ?")
+    .run(state, publicIp || null, privateIp || null, JSON.stringify({ ...snapshot, identity, network }), instanceId);
+  return true;
+}
+
 export interface SimpleFilter { q?: string; sort?: string; gone?: boolean }
 
 export function listRds(f: SimpleFilter = {}) {

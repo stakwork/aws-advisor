@@ -402,6 +402,26 @@ api.get("/inventory/ec2/:id/autopark-grant", async (req, res) => {
   const dns = dnsGrantFor(id, row.public_ip, row.private_ip);
   res.json({ ...(await checkGrant(creds.forAccount(row.account_id || null).read, role, arn, dns)), role_arn: role, instance_arn: arn, dns });
 });
+// The instance's state as EC2 reports it now, mirrored into the inventory: the Auto-park row polls it after Stop and Start.
+api.get("/inventory/ec2/:id/state", async (req, res) => {
+  const { DescribeInstancesCommand, EC2Client } = await import("@aws-sdk/client-ec2");
+  const { executorCreds } = await import("../executor.js");
+  const { patchEc2State } = await import("../inventory.js");
+  const id = String(req.params.id);
+  const row = db.prepare("select account_id, region from inventory_ec2 where instance_id = ?").get(id) as { account_id: string | null; region: string | null } | undefined;
+  if (!row) return res.status(404).json({ error: "not in the inventory" });
+  const creds = executorCreds();
+  const acct = creds.forAccount(row.account_id || null);
+  const ec2 = new EC2Client({ region: row.region || acct.region || creds.region, credentials: acct.read });
+  try {
+    const inst = (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [id] }))).Reservations?.[0]?.Instances?.[0];
+    if (!inst) return res.status(404).json({ error: "not found by DescribeInstances" });
+    const state = inst.State?.Name || "unknown";
+    patchEc2State(id, state, inst.PublicIpAddress ?? null, inst.PrivateIpAddress ?? null);
+    res.json({ instance_id: id, state, public_ip: inst.PublicIpAddress ?? null, private_ip: inst.PrivateIpAddress ?? null, checked_at: new Date().toISOString() });
+  } catch (e: any) { res.status(500).json({ error: describeError(e, `state of ${id} (ec2:DescribeInstances)`) }); }
+  finally { ec2.destroy(); }
+});
 // Hibernation on the Auto-park row (src/hibernation.ts): ready or not and why, and the owner's choice as advisor:hibernate.
 api.get("/inventory/ec2/:id/hibernation", async (req, res) => {
   const { hibernationStatus } = await import("../hibernation.js");

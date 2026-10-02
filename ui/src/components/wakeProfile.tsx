@@ -91,7 +91,7 @@ export function WakeProfilePanel({ instanceId, autoPark }: { instanceId: string;
         <Row title="Domains" hint="the host names the doorman answers for">
           <input id="wake-domains" className={field} value={(form.domains || []).join(", ")} onChange={(e) => set({ domains: e.target.value.split(/[\s,]+/).filter(Boolean) })} placeholder="app.example.com, *.example.com" />
         </Row>
-        <Row title="Front door" hint="how traffic reaches the doorman while it sleeps">
+        <Row title="Front door" hint="how traffic reaches the doorman while it sleeps: with the DNS flip, every stop points the A records at the doorman's public address (Settings > Auto-actions) and the start points them back">
           <select id="wake-front" className={field} value={form.front_door} onChange={(e) => set({ front_door: e.target.value })}>
             <option value="dns">DNS flip: the A record points at the swarm host while asleep (works without an Elastic IP)</option>
             <option value="eip">Elastic IP moves to the doorman (instant, needs an EIP)</option>
