@@ -2151,12 +2151,18 @@ is pure and tested in `src/forecast_math.ts`.
   of on-demand compute per hour; only compute above that is paid on demand. Reservations are the lower of two
   estimates: what the month's own billed share says is left to pay (this catches reservations the list misses)
   and the reservation list against the inventory (this catches ones bought late in the month). *Run rate*: the
-  usage-based lines (transfer, NAT, CloudWatch, requests, snapshots, spot) at their month-to-date daily average.
-  *Fixed*: the Savings Plan fee, the reservations' amortized cost and support. AWS posts support on the 1st as a
+  usage-based lines (transfer, NAT, CloudWatch, requests, snapshots, spot) at their month-to-date daily average;
+  for the first week of a month that average is blended with the newest reconciled month's daily rate (which
+  weighs seven days minus the days elapsed), because Cost Explorer's first days are incomplete and carry what AWS
+  posts on the 1st. *Fixed*: the Savings Plan fee, the reservations' monthly fees (the `HeavyUsage` lines, posted
+  once on the 1st for the whole month, never multiplied by the days left) and support. Where last month's price
+  check found the bill's on-demand value for EC2, RDS or ElastiCache off our list price, the inventory leg is
+  scaled by that ratio before the Savings Plan's cover is taken off it. AWS posts support on the 1st as a
   placeholder and trues it up at month end, so the forecast asks the Support API which plan the account is on
   (`src/support_plan.ts`, `support:DescribeSeverityLevels`: Basic fails with a subscription error, the severity
   codes tell Developer, Business and Enterprise apart) and applies that plan's formula to the forecast charges;
-  a cancelled plan adds nothing beyond what was posted. The plan is cached as the account fact
+  a cancelled plan adds nothing beyond what was posted, and while the plan is unknown last month's support charge
+  is the floor. The plan is cached as the account fact
   `fact:support_plan`, refreshed with every forecast, and the agent sees it in the `forecast` MCP tool.
 - **On track for** is the sum, against last month's bill, with the services that moved by more than 20 USD and
   the resources that launched or disappeared this month (with their list price), so a moved forecast has names

@@ -6,7 +6,14 @@
  *   - inventory: compute, databases, cache nodes, volumes, buckets and functions from the inventory as it is
  *     right now, at our prices, with the Savings Plan and the reservations applied;
  *   - run rate: usage-based lines (transfer, NAT, CloudWatch, requests) at their month-to-date daily average;
- *   - fixed: the Savings Plan fee, reservations and support, known in advance.
+ *   - fixed: the Savings Plan fee, the reservations' monthly fees and support, known in advance.
+ *
+ * Two lessons from the bill are folded in. The first days of a month are not a run rate: Cost Explorer's data for
+ * them is still incomplete and carries what AWS posts on the 1st (the reservations' monthly fees, hosted zones,
+ * placeholders), so for the first week the usage-based lines and tax lean on the newest reconciled month's daily
+ * rates, and the reservation fees (HeavyUsage lines) are a fixed leg, never multiplied by the days left. And where
+ * last month's price check found our list price off the bill's on-demand value for a leg, the fleet's on-demand
+ * value is scaled by that ratio before the Savings Plan's cover is taken off it.
  */
 import type { PricedLine, RecordTotals } from "./reconcile.js";
 import { supportCharge } from "./pricebook.js";
@@ -34,9 +41,10 @@ export interface ForecastInput {
   support_plan: "basic" | "developer" | "business" | "enterprise" | "unknown";
   /** last full month's billed net per service and in total, for the comparison */
   last_month: { total: number; services: Record<string, number> } | null;
-  /** the newest reconciled month, standing in where this month has nothing yet: the billed share of a leg with no lines,
-   *  and on day 0 the usage, reservation and tax run rates */
-  prior?: { month: string; days: number; lines: PricedLine[]; ri_amortized: number; tax: number } | null;
+  /** the newest reconciled month, standing in where this month has little yet: the billed share of a leg with no lines,
+   *  the usage and tax run rates for the first week, the reservation fees before they post, support while the plan is
+   *  unknown, and the price calibration of the inventory legs */
+  prior?: { month: string; days: number; lines: PricedLine[]; support: number; tax: number } | null;
 }
 export interface ForecastService { service: string; mtd: number; per_day: number; remaining: number; forecast: number; basis: Basis; last_month: number | null; delta: number | null }
 export interface ForecastCategory { key: string; label: string; basis: Basis; mtd: number; mtd_per_day: number; per_day: number; remaining: number; detail: string }
@@ -52,6 +60,8 @@ export interface Forecast {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+/** days of the newest reconciled month's daily rate weighed against the month's own, fading out as the month fills in */
+export const PRIOR_DAYS = 7;
 const SP_FEE_SERVICE = /^Savings Plans for /;
 const SUPPORT_SERVICE = /Support/;
 const TAX_SERVICE = /^Tax$/;
@@ -64,6 +74,8 @@ const LEG_SERVICE: Record<string, string> = {
 /** Which inventory-priced bucket a usage line belongs to, or null for a usage-based line. */
 export function categoryOf(l: { service: string; usage_type: string; rule: string | null }): string | null {
   const u = l.usage_type.replace(/^[A-Z]{2,4}\d-/, "");
+  // a reservation's recurring fee (RIFee record): posted for the whole month on the 1st, prorated at purchase
+  if (/^Heavy(Multi-?AZ)?Usage/.test(u)) return "reservations";
   if (/Elastic Compute Cloud/.test(l.service) && /^(BoxUsage|DedicatedUsage)/.test(u)) return "ec2_compute";
   if (/^EBS:Volume/.test(u)) return "ebs";
   if (/Simple Storage/.test(l.service) && /^TimedStorage/.test(u)) return "s3_storage";
@@ -79,8 +91,24 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   const remaining = Math.max(0, input.days_in_month - elapsed);
   const r = input.records;
   const prior = input.prior && input.prior.days > 0 ? input.prior : null;
-  const fresh = elapsed === 0 && prior != null;
   const sum = (ls: PricedLine[]) => ls.reduce((s, l) => s + l.net, 0);
+  // the first week leans on the newest reconciled month: a day or two of Cost Explorer data is incomplete and carries
+  // the charges AWS posts on the 1st, so a daily rate taken from it alone is noise either way
+  const priorWeight = prior ? Math.max(0, PRIOR_DAYS - elapsed) : 0;
+  const perDayOf = (mtd: number, priorTotal: number | null) =>
+    priorWeight > 0 && priorTotal != null ? (mtd + (priorTotal / prior!.days) * priorWeight) / (elapsed + priorWeight) : mtd / mtdDays;
+  const leaning = priorWeight > 0 ? `; ${elapsed} day${elapsed === 1 ? "" : "s"} in, ${prior!.month}'s daily average weighs ${priorWeight} days against them` : "";
+  /** how the bill's on-demand value sat against our price for a leg last month (0.94 = billed 6 % under list), from the reconciled lines; 1 when unknown */
+  const calibration = (key: string): number => {
+    const ls = prior ? prior.lines.filter((l) => categoryOf(l) === key && l.modelled != null && l.modelled > 0 && l.actual_od > 0) : [];
+    const od = ls.reduce((s, l) => s + l.actual_od, 0), mod = ls.reduce((s, l) => s + (l.modelled ?? 0), 0);
+    return od >= 100 && mod >= 100 ? Math.min(1.25, Math.max(0.75, od / mod)) : 1;
+  };
+  const calibNote = (c: number) => (c === 1 ? "" : ` (${Math.abs(Math.round((1 - c) * 1000) / 10)} % ${c < 1 ? "under" : "over"} list, as the bill ran in ${prior!.month})`);
+  const ec2Calib = calibration("ec2_compute"), rdsCalib = calibration("rds_instances"), cacheCalib = calibration("cache_nodes");
+  const ec2OdHourly = input.now.ec2_od_hourly * ec2Calib;
+  const rdsOdHourly = input.now.rds_od_hourly * rdsCalib, rdsReserved = input.now.rds_reserved_hourly != null ? input.now.rds_reserved_hourly * rdsCalib : null;
+  const cacheOdHourly = input.now.cache_od_hourly * cacheCalib, cacheReserved = input.now.cache_reserved_hourly != null ? input.now.cache_reserved_hourly * cacheCalib : null;
   const billedShare = (ls: PricedLine[]): number | null => { const od = ls.reduce((s, l) => s + l.actual_od, 0); return od > 1 ? Math.min(1, Math.max(0, sum(ls) / od)) : null; };
   // a leg with no lines yet takes the billed share of the newest reconciled month, else full on demand
   const ratio = (key: string) => billedShare(get(key)) ?? (prior ? billedShare(prior.lines.filter((l) => (categoryOf(l) ?? "usage") === key)) : null) ?? 1;
@@ -91,14 +119,14 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   const rate = input.sp_discount_rate > 0 && input.sp_discount_rate < 1 ? input.sp_discount_rate : 0;
   const spHourly = input.sp_hourly ?? (elapsed > 0 ? r.sp_fee / (elapsed * 24) : 0);
   const coveredCapHourly = spHourly > 0 && rate > 0 ? spHourly / (1 - rate) : 0;
-  const ec2NetHourly = Math.max(0, input.now.ec2_od_hourly - coveredCapHourly);
+  const ec2NetHourly = Math.max(0, ec2OdHourly - coveredCapHourly);
   const categories: ForecastCategory[] = [];
   const cat = (key: string, label: string, basis: Basis, perDay: number, detail: string) => {
     const ls = get(key); const mtd = sum(ls);
     categories.push({ key, label, basis, mtd: round2(mtd), mtd_per_day: round2(mtd / mtdDays), per_day: round2(perDay), remaining: round2(perDay * remaining), detail });
   };
   cat("ec2_compute", "EC2 instances", "inventory", ec2NetHourly * 24,
-    `${input.now.ec2_running} running at ${round2(input.now.ec2_od_hourly)} USD/h on demand${coveredCapHourly > 0 ? `; the Savings Plan covers ${round2(coveredCapHourly)} USD/h of it` : ""}`);
+    `${input.now.ec2_running} running at ${round2(ec2OdHourly)} USD/h on demand${calibNote(ec2Calib)}${coveredCapHourly > 0 ? `; the Savings Plan covers ${round2(coveredCapHourly)} USD/h of it` : ""}`);
   cat("ebs", "EBS volumes", "inventory", input.now.ebs_month / input.days_in_month, `volumes as they are now, ${round2(input.now.ebs_month)} USD a month at list`);
   cat("s3_storage", "S3 storage", "inventory", input.now.s3_month / input.days_in_month, `buckets as they are now, ${round2(input.now.s3_month)} USD a month at list`);
   const rdsRatio = ratio("rds_instances"); const cacheRatio = ratio("cache_nodes"); const lambdaRatio = ratio("lambda");
@@ -108,34 +136,42 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
     const billed = od * billedRatio; const listed = reserved != null ? Math.max(0, od - reserved) : null;
     return listed != null && listed < billed ? { hourly: listed, how: `reservations cover ${round2(reserved!)} USD/h of it` } : { hourly: billed, how: `reservations leave ${Math.round(billedRatio * 100)} % of it to pay, as billed so far` };
   };
-  const rdsPay = toPay(input.now.rds_od_hourly, input.now.rds_reserved_hourly, rdsRatio);
-  const cachePay = toPay(input.now.cache_od_hourly, input.now.cache_reserved_hourly, cacheRatio);
-  cat("rds_instances", "RDS instances", "inventory", rdsPay.hourly * 24, `${round2(input.now.rds_od_hourly)} USD/h on demand, ${rdsPay.how}`);
-  cat("cache_nodes", "ElastiCache nodes", "inventory", cachePay.hourly * 24, `${round2(input.now.cache_od_hourly)} USD/h on demand, ${cachePay.how}`);
+  const rdsPay = toPay(rdsOdHourly, rdsReserved, rdsRatio);
+  const cachePay = toPay(cacheOdHourly, cacheReserved, cacheRatio);
+  cat("rds_instances", "RDS instances", "inventory", rdsPay.hourly * 24, `${round2(rdsOdHourly)} USD/h on demand${calibNote(rdsCalib)}, ${rdsPay.how}`);
+  cat("cache_nodes", "ElastiCache nodes", "inventory", cachePay.hourly * 24, `${round2(cacheOdHourly)} USD/h on demand${calibNote(cacheCalib)}, ${cachePay.how}`);
   cat("lambda", "Lambda", "inventory", (input.now.lambda_month / 30) * lambdaRatio, `30-day rate of the functions, ${round2(input.now.lambda_month)} USD a month at list, ${Math.round(lambdaRatio * 100)} % of it to pay`);
   const usageLines = get("usage");
   const priorUsage = prior ? prior.lines.filter((l) => categoryOf(l) == null) : [];
-  if (fresh) cat("usage", "Usage-based lines", "run_rate", sum(priorUsage) / prior!.days, `nothing billed yet; ${priorUsage.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at ${prior!.month}'s daily average`);
-  else cat("usage", "Usage-based lines", "run_rate", sum(usageLines) / mtdDays, `${usageLines.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at their month-to-date daily average`);
-  // fixed legs from the record totals
+  if (elapsed === 0 && prior) cat("usage", "Usage-based lines", "run_rate", sum(priorUsage) / prior.days, `nothing billed yet; ${priorUsage.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at ${prior.month}'s daily average`);
+  else cat("usage", "Usage-based lines", "run_rate", perDayOf(sum(usageLines), prior ? sum(priorUsage) : null), `${usageLines.length} lines (transfer, NAT, CloudWatch, requests, snapshots) at their month-to-date daily average${leaning}`);
+  // fixed legs: the Savings Plan fee from the commitment, the reservations' monthly fees as posted (the record's amortized
+  // cost is not what the month pays: upfront money is sunk and the recurring fees are already lines)
   const spFeeRemaining = spHourly * 24 * remaining;
-  const riPerDay = fresh ? prior!.ri_amortized / prior!.days : r.ri_amortized / mtdDays;
   categories.push({ key: "sp_fee", label: "Savings Plan fee", basis: "fixed", mtd: round2(r.sp_fee), mtd_per_day: round2(r.sp_fee / mtdDays), per_day: round2(spHourly * 24), remaining: round2(spFeeRemaining), detail: `${round2(spHourly)} USD/h committed` });
-  categories.push({ key: "reservations", label: "Reservations", basis: "fixed", mtd: round2(r.ri_amortized), mtd_per_day: round2(r.ri_amortized / mtdDays), per_day: round2(riPerDay), remaining: round2(riPerDay * remaining), detail: fresh ? `amortized, at ${prior!.month}'s daily rate` : "amortized, at the month-to-date rate" });
+  const riLines = get("reservations"); const riMtd = sum(riLines);
+  const priorRi = prior ? sum(prior.lines.filter((l) => categoryOf(l) === "reservations")) : 0;
+  const riRemaining = Math.max(0, priorRi - riMtd);
+  const riDetail = riMtd > 0 ? `monthly fees of ${riLines.length} reservation line${riLines.length === 1 ? "" : "s"}, posted on the 1st for the whole month${riRemaining > 0 ? `; ${prior!.month} posted ${round2(priorRi)} USD, the difference is still expected` : ""}`
+    : priorRi > 0 ? `nothing posted yet; ${prior!.month}'s monthly fees (${round2(priorRi)} USD) are expected on the 1st`
+    : "no recurring fees (no reservations, or paid upfront); the hours they cover cost nothing more";
+  categories.push({ key: "reservations", label: "Reservations", basis: "fixed", mtd: round2(riMtd), mtd_per_day: round2(riMtd / mtdDays), per_day: round2(riRemaining / Math.max(1, remaining)), remaining: round2(riRemaining), detail: riDetail });
   // charges before support and tax
-  const usageRemaining = categories.filter((c) => c.key !== "sp_fee" && c.key !== "reservations").reduce((s, c) => s + c.remaining, 0);
+  const usageRemaining = categories.filter((c) => c.key !== "sp_fee").reduce((s, c) => s + c.remaining, 0);
   const chargesMtd = input.lines.reduce((s, l) => s + l.net, 0) + r.sp_fee;
   const chargesForecast = chargesMtd + usageRemaining + spFeeRemaining;
-  // support is posted on the 1st as a placeholder and trued up at month end from the final charges, so the plan decides it
+  // support is posted on the 1st as a placeholder and trued up at month end from the final charges, so the plan decides it;
+  // while the plan is unknown, last month's charge is the floor (the placeholder, or nothing, is not the month's support)
   const planCharge = supportCharge(input.support_plan, chargesForecast);
-  const supportForecast = round2(Math.max(planCharge ?? 0, r.support));
+  const carried = input.support_plan === "unknown" && prior ? prior.support : 0;
+  const supportForecast = round2(Math.max(planCharge ?? 0, r.support, carried));
   const supportRemaining = Math.max(0, supportForecast - r.support);
   const supportDetail = input.support_plan === "basic" ? (r.support > 0 ? "Basic plan: no more support charges; what was posted stays (a cancelled plan is billed to the day)" : "Basic plan: no support charge")
-    : input.support_plan === "unknown" ? "plan unknown (grant support:DescribeSeverityLevels), taken as billed so far"
+    : input.support_plan === "unknown" ? `plan unknown (grant support:DescribeSeverityLevels), ${carried > r.support ? `${prior!.month}'s charge carried` : "taken as billed so far"}`
     : `${input.support_plan[0].toUpperCase()}${input.support_plan.slice(1)} Support on the month's charges`;
   categories.push({ key: "support", label: "Support", basis: "fixed", mtd: round2(r.support), mtd_per_day: round2(r.support / mtdDays), per_day: round2(supportRemaining / Math.max(1, remaining)), remaining: round2(supportRemaining), detail: supportDetail });
-  const taxPerDay = fresh ? prior!.tax / prior!.days : r.tax / mtdDays;
-  categories.push({ key: "tax", label: "Tax", basis: "run_rate", mtd: round2(r.tax), mtd_per_day: round2(r.tax / mtdDays), per_day: round2(taxPerDay), remaining: round2(taxPerDay * remaining), detail: fresh ? `${prior!.month}'s daily rate` : "as billed so far, pro rata" });
+  const taxPerDay = perDayOf(r.tax, prior ? prior.tax : null);
+  categories.push({ key: "tax", label: "Tax", basis: "run_rate", mtd: round2(r.tax), mtd_per_day: round2(r.tax / mtdDays), per_day: round2(taxPerDay), remaining: round2(taxPerDay * remaining), detail: elapsed === 0 && prior ? `${prior.month}'s daily rate` : `as billed so far, pro rata${leaning}` });
   const remainingNet = categories.reduce((s, c) => s + c.remaining, 0);
   const mtdNet = r.net_total;
   const forecastNet = round2(mtdNet + remainingNet);
@@ -143,7 +179,7 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   const services = new Map<string, { mtd: number; remaining: number; bases: Set<Basis> }>();
   const add = (service: string, mtd: number, rem: number, basis: Basis) => { const e = services.get(service) ?? { mtd: 0, remaining: 0, bases: new Set() }; e.mtd += mtd; e.remaining += rem; e.bases.add(basis); services.set(service, e); };
   for (const c of categories) {
-    if (["sp_fee", "reservations", "support", "tax"].includes(c.key)) continue;
+    if (["sp_fee", "support", "tax"].includes(c.key)) continue;
     const ls = get(c.key); const catMtd = sum(ls);
     // split a category's remaining across its services in proportion to their month-to-date net (one service almost always);
     // a leg with no lines yet splits by the newest reconciled month's, else goes to the service that bills it
@@ -174,7 +210,7 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
   // services billed last month that have nothing this month yet
   if (input.last_month) for (const [k, v] of Object.entries(lastServices)) if (v >= 1 && !serviceRows.some((s) => lastKey(s.service) === k)) serviceRows.push({ service: k, mtd: 0, per_day: 0, remaining: 0, forecast: 0, basis: "run_rate", last_month: round2(v), delta: round2(-v) });
   const movers = serviceRows.filter((s) => s.delta != null && Math.abs(s.delta) >= 20).sort((a, b) => Math.abs(b.delta!) - Math.abs(a.delta!)).slice(0, 8).map((s) => ({ service: s.service, delta: s.delta!, forecast: s.forecast, last_month: s.last_month! }));
-  const lockedIn = round2(spHourly * 24 * input.days_in_month + riPerDay * input.days_in_month + supportForecast);
+  const lockedIn = round2(spHourly * 24 * input.days_in_month + riMtd + riRemaining + supportForecast);
   const byBasis = (b: Basis) => categories.filter((c) => c.basis === b).reduce((s, c) => s + c.remaining, 0);
   const share = (b: Basis) => (remainingNet > 0 ? round2((byBasis(b) / remainingNet) * 100) : 0);
   const lastTotal = input.last_month?.total ?? null;
@@ -186,9 +222,12 @@ export function computeForecast(input: ForecastInput, now = new Date()): Forecas
     last_month_total: lastTotal != null ? round2(lastTotal) : null, delta_pct: lastTotal ? round2(((forecastNet - lastTotal) / lastTotal) * 100) : null,
     services: serviceRows, categories, movers,
     assumptions: [
-      ...(fresh ? [`Nothing is billed for the month yet, so the usage-based lines, reservations and tax run at ${prior!.month}'s daily rates, and RDS, ElastiCache and Lambda take ${prior!.month}'s billed share until this month has lines.`] : []),
+      ...(priorWeight > 0 ? [elapsed === 0
+        ? `Nothing is billed for the month yet, so the usage-based lines and tax run at ${prior!.month}'s daily rates, the reservation fees are ${prior!.month}'s until they post, and RDS, ElastiCache and Lambda take ${prior!.month}'s billed share until this month has lines.`
+        : `Only ${elapsed} day${elapsed === 1 ? " is" : "s are"} billed, and Cost Explorer's first days are incomplete and carry what AWS posts on the 1st, so the usage-based lines and tax lean on ${prior!.month}'s daily rates (${prior!.month} weighs ${priorWeight} days against this month's ${elapsed}) until the month is a week in.`] : []),
       `Month to date is what Cost Explorer has for ${elapsed} complete day${elapsed === 1 ? "" : "s"}; the remaining ${remaining} are priced from the inventory as it is now (instances, databases, cache nodes, volumes, buckets, functions), usage-based lines at their month-to-date daily average, and the commitments and support as fixed.`,
-      `The Savings Plan fee is fixed (${round2(spHourly)} USD/h); at its ${Math.round(rate * 100)} % discount it covers ${round2(coveredCapHourly)} USD/h of on-demand compute, and only compute above that is paid on demand. Reservations are taken at their month-to-date amortized rate and the instances and nodes they cover cost nothing more; what is left is priced on demand.`,
+      `The Savings Plan fee is fixed (${round2(spHourly)} USD/h); at its ${Math.round(rate * 100)} % discount it covers ${round2(coveredCapHourly)} USD/h of on-demand compute, and only compute above that is paid on demand. Reservations are paid as monthly fees that AWS posts on the 1st (the HeavyUsage lines), a fixed leg; the instances and nodes they cover cost nothing more, and what is left is priced on demand.`,
+      ...([["EC2", ec2Calib], ["RDS", rdsCalib], ["ElastiCache", cacheCalib]] as [string, number][]).filter(([, c]) => c !== 1).map(([leg, c]) => `${prior!.month}'s price check found the bill's on-demand value for ${leg} ${Math.abs(Math.round((1 - c) * 1000) / 10)} % ${c < 1 ? "under" : "over"} our list price, so the inventory's ${leg} value is scaled by that before the commitments are taken off it.`),
       "Spot instances are billed at market price and stay in the usage-based leg; Batch workers count while they run, so the compute leg moves with the queue.",
       `Support: the account is on the ${input.support_plan === "unknown" ? "unknown" : input.support_plan[0].toUpperCase() + input.support_plan.slice(1)} plan (Support API); AWS posts support on the 1st as a placeholder and trues it up at month end, so the plan's formula on the forecast charges is used${input.support_plan === "basic" ? ", which is nothing" : ""}. Tax is pro rata of what was billed so far.`,
     ],

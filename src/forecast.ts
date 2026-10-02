@@ -108,7 +108,7 @@ export async function runForecast(onLog: (s: string) => void = () => {}, today =
   } : null;
   const plan = (await refreshSupportPlan(onLog)).plan;
   const f = computeForecast({ month, elapsed_days: elapsedDays(month, today), days_in_month: daysInMonth(`${month}-01`), lines: priced.lines, records: input.records, sp_hourly: input.sp_hourly, sp_discount_rate: rate, now: inventoryNow(), support_plan: plan, last_month: last,
-    prior: prior ? { month: prior.month, days: daysInMonth(`${prior.month}-01`), lines: prior.lines, ri_amortized: prior.totals.ri_amortized, tax: prior.totals.tax_actual } : null });
+    prior: prior ? { month: prior.month, days: daysInMonth(`${prior.month}-01`), lines: prior.lines, support: prior.totals.support_actual, tax: prior.totals.tax_actual } : null });
   const stored: StoredForecast = { ...f, ...resourceChanges(month), support_plan: plan };
   db.prepare("insert into forecasts(day, month, computed_at, json) values (?, ?, ?, ?) on conflict(day) do update set month = excluded.month, computed_at = excluded.computed_at, json = excluded.json").run(today, month, f.computed_at, JSON.stringify(stored));
   onLog(`${month}: ${f.mtd_net} so far over ${f.elapsed_days} days, on track for ${f.forecast_net}${f.last_month_total != null ? ` (last month ${f.last_month_total}, ${f.delta_pct! >= 0 ? "+" : ""}${f.delta_pct} %)` : ""}`);
