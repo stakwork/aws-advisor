@@ -134,14 +134,14 @@ const NETWORK_CYPHER = `
 UNWIND $rows AS row
 MERGE (n:AdvisorNetwork {id: row.id})
 ON CREATE SET n.first_seen = $now
-SET n += {cidr_blocks: row.cidr_blocks, ipv6_blocks: row.ipv6_blocks, default: row.default, flat: false, name: row.name, region: row.region, provider: $provider, account_id: $account, native_type: 'vpc', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
-WITH n MATCH (a:AdvisorAccount {id: $account}) MERGE (n)-[:IN_ACCOUNT]->(a)`;
+SET n += {cidr_blocks: row.cidr_blocks, ipv6_blocks: row.ipv6_blocks, default: row.default, flat: false, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'vpc', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+WITH n MATCH (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) MERGE (n)-[:IN_ACCOUNT]->(a)`;
 
 const SEGMENT_CYPHER = `
 UNWIND $rows AS row
 MERGE (s:AdvisorSegment {id: row.id})
 ON CREATE SET s.first_seen = $now
-SET s += {cidr: row.cidr, ipv6_cidr: row.ipv6_cidr, zone: row.zone, public: row.public, auto_public_ip: row.auto_public_ip, available_ips: row.available_ips, default: row.default, name: row.name, region: row.region, provider: $provider, account_id: $account, native_type: 'subnet', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET s += {cidr: row.cidr, ipv6_cidr: row.ipv6_cidr, zone: row.zone, public: row.public, auto_public_ip: row.auto_public_ip, available_ips: row.available_ips, default: row.default, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'subnet', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH s, row
 OPTIONAL MATCH (s)-[o1:IN_NETWORK]->() DELETE o1
 WITH DISTINCT s, row
@@ -157,7 +157,7 @@ const ROUTE_TABLE_CYPHER = `
 UNWIND $rows AS row
 MERGE (t:AdvisorRouteTable {id: row.id})
 ON CREATE SET t.first_seen = $now
-SET t += {main: row.main, routes: row.route_count, name: row.name, region: row.region, provider: $provider, account_id: $account, native_type: 'route_table', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET t += {main: row.main, routes: row.route_count, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'route_table', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH t, row
 OPTIONAL MATCH (t)-[o:ROUTES]->() DELETE o
 WITH DISTINCT t, row
@@ -165,7 +165,7 @@ OPTIONAL MATCH (t)-[o2:IN_NETWORK]->() DELETE o2
 WITH DISTINCT t, row
 FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (t)-[:IN_NETWORK]->(n))
 FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorGateway'] |
-  MERGE (g:AdvisorGateway {id: r.id}) ON CREATE SET g.kind = r.kind, g.provider = $provider, g.account_id = $account, g.native_type = r.kind, g.native_id = r.id, g.first_seen = $now, g.updated_at = $now
+  MERGE (g:AdvisorGateway {id: r.id}) ON CREATE SET g.kind = r.kind, g.provider = $provider, g.account_id = coalesce(row.account_id, $account), g.native_type = r.kind, g.native_id = r.id, g.first_seen = $now, g.updated_at = $now
   MERGE (t)-[e:ROUTES {destination: r.destination}]->(g) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)
 FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorInterface'] |
   MERGE (i:AdvisorInterface {id: r.id}) MERGE (t)-[e:ROUTES {destination: r.destination}]->(i) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)
@@ -176,7 +176,7 @@ const GATEWAY_CYPHER = `
 UNWIND $rows AS row
 MERGE (g:AdvisorGateway {id: row.id})
 ON CREATE SET g.first_seen = $now
-SET g += {kind: row.kind, state: row.state, public_ip: row.public_ip, public_ips: row.public_ips, private_ip: row.private_ip, service: row.service, endpoint_type: row.endpoint_type, peer_network_id: row.peer_vpc_id, peer_account_id: row.peer_account_id, name: row.name, region: row.region, provider: $provider, account_id: $account, native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET g += {kind: row.kind, state: row.state, public_ip: row.public_ip, public_ips: row.public_ips, private_ip: row.private_ip, service: row.service, endpoint_type: row.endpoint_type, peer_network_id: row.peer_vpc_id, peer_account_id: row.peer_account_id, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH g, row
 OPTIONAL MATCH (g)-[o:IN_NETWORK]->() DELETE o
 WITH DISTINCT g, row
@@ -193,7 +193,7 @@ const INTERFACE_CYPHER = `
 UNWIND $rows AS row
 MERGE (i:AdvisorInterface {id: row.id})
 ON CREATE SET i.first_seen = $now
-SET i += {private_ips: row.private_ips, public_ip: row.public_ip, ipv6: row.ipv6, mac: row.mac, interface_type: row.interface_type, owner_kind: row.owner_kind, description: row.description, status: row.status, source_dest_check: row.source_dest_check, primary: row.primary, region: row.region, provider: $provider, account_id: $account, native_type: 'network_interface', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET i += {private_ips: row.private_ips, public_ip: row.public_ip, ipv6: row.ipv6, mac: row.mac, interface_type: row.interface_type, owner_kind: row.owner_kind, description: row.description, status: row.status, source_dest_check: row.source_dest_check, primary: row.primary, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'network_interface', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH i, row
 OPTIONAL MATCH (i)-[o:ATTACHED_TO|IN_SEGMENT|IN_NETWORK|WEARS]->() DELETE o
 WITH DISTINCT i, row
@@ -207,7 +207,7 @@ const PUBLIC_IP_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorPublicIp {id: row.id})
 ON CREATE SET p.first_seen = $now
-SET p += {ip: row.ip, kind: 'static', associated: row.associated, allocation_id: row.allocation_id, region: row.region, provider: $provider, account_id: $account, native_type: 'elastic_ip', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET p += {ip: row.ip, kind: 'static', associated: row.associated, allocation_id: row.allocation_id, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'elastic_ip', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH p, row
 OPTIONAL MATCH (p)-[o:ASSIGNED]->() DELETE o
 WITH DISTINCT p, row
@@ -218,7 +218,7 @@ const FILTER_CYPHER = `
 UNWIND $rows AS row
 MERGE (f:AdvisorFilter {id: row.id})
 ON CREATE SET f.first_seen = $now
-SET f += {kind: row.kind, stateful: row.stateful, default_action: 'deny', default: row.default, name: row.name, description: row.description, rules: row.rules, attached: row.attached, region: row.region, provider: $provider, account_id: $account, native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET f += {kind: row.kind, stateful: row.stateful, default_action: 'deny', default: row.default, name: row.name, description: row.description, rules: row.rules, attached: row.attached, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH f, row
 OPTIONAL MATCH (f)-[o:IN_NETWORK]->() DELETE o
 WITH DISTINCT f, row
@@ -228,7 +228,7 @@ const RULE_CYPHER = `
 UNWIND $rows AS row
 MERGE (r:AdvisorFilterRule {id: row.id})
 ON CREATE SET r.first_seen = $now
-SET r += {direction: row.direction, action: row.action, protocol: row.protocol, from_port: row.from_port, to_port: row.to_port, priority: row.priority, source_kind: row.source_kind, source: row.source, description: row.description, dormant: row.dormant, filter_id: row.filter_id, provider: $provider, account_id: $account, native_type: row.native_type, native_id: coalesce(row.native_id, row.id), gone: false, last_seen: $now, updated_at: $now}
+SET r += {direction: row.direction, action: row.action, protocol: row.protocol, from_port: row.from_port, to_port: row.to_port, priority: row.priority, source_kind: row.source_kind, source: row.source, description: row.description, dormant: row.dormant, filter_id: row.filter_id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: coalesce(row.native_id, row.id), gone: false, last_seen: $now, updated_at: $now}
 WITH r, row
 MERGE (f:AdvisorFilter {id: row.filter_id})
 MERGE (f)-[:HAS_RULE]->(r)
@@ -290,29 +290,35 @@ export async function mirrorNetwork(): Promise<NetworkCounts | null> {
   const w = (cypher: string, batch: any[]) => writeCypher(cypher, { rows: batch, account, provider: PROVIDER, now: stamp });
   for (const l of NETWORK_LABELS) await writeCypher(`CREATE CONSTRAINT ${l.toLowerCase()}_id IF NOT EXISTS FOR (n:${l}) REQUIRE n.id IS UNIQUE`);
 
-  const vpcs = rows("select vpc_id, region, cidr_block, is_default, ipv6_blocks from inventory_vpc");
+  const vpcs = rows("select vpc_id, region, account_id, cidr_block, is_default, ipv6_blocks from inventory_vpc");
+  // Member accounts (src/accounts.ts): every node carries the account its VPC lives in (the inventories stamp VPCs, subnets and
+  // groups from Steampipe's own column; route tables, interfaces, addresses and ACLs follow their VPC, an address its interface or box).
+  const vpcAccountMap = new Map(vpcs.map((v) => [String(v.vpc_id), v.account_id ? String(v.account_id) : null]));
+  const vpcAccount = (vpcId: string | null | undefined): string | null => (vpcId ? vpcAccountMap.get(vpcId) ?? null : null);
+  const instanceAccountMap = new Map(rows("select instance_id, account_id from inventory_ec2 where account_id is not null and account_id <> ''").map((r) => [String(r.instance_id), String(r.account_id)]));
   const subnets = listSubnets(); const tables = listRouteTables(); const gateways = listGateways(); const enis = listEnis(); const eips = listEips();
   const nacls = rows("select acl_id, vpc_id, region, is_default, subnets, entries from nacls").map((n) => ({ ...n, subnets: safeJson(n.subnets) || [], entries: (safeJson(n.entries) || []) as NaclEntry[] }));
-  const sgs = rows("select group_id, group_name, description, vpc_id, region from inventory_sg");
+  const sgs = rows("select group_id, group_name, description, vpc_id, region, account_id from inventory_sg");
+  const sgAccount = new Map(sgs.map((g) => [String(g.group_id), g.account_id ? String(g.account_id) : vpcAccount(str(g.vpc_id))]));
   const ingress = rows("select group_id, ip_protocol, from_port, to_port, cidr_ipv4, cidr_ipv6, referenced_group_id, prefix_list_id, rule_id, description from sg_ingress") as IngressRule[];
   const egress = allEgressRules();
 
   // networks
   const subnetsByVpc = new Map<string, string[]>();
   for (const s of subnets) if (s.vpc_id) subnetsByVpc.set(s.vpc_id, [...(subnetsByVpc.get(s.vpc_id) || []), s.subnet_id]);
-  const vpcRows = vpcs.map((v) => ({ id: String(v.vpc_id), cidr_blocks: v.cidr_block ? [String(v.cidr_block)] : [], ipv6_blocks: Number(v.ipv6_blocks || 0), default: Boolean(v.is_default), name: null, region: str(v.region) }));
+  const vpcRows = vpcs.map((v) => ({ id: String(v.vpc_id), account_id: v.account_id ? String(v.account_id) : null, cidr_blocks: v.cidr_block ? [String(v.cidr_block)] : [], ipv6_blocks: Number(v.ipv6_blocks || 0), default: Boolean(v.is_default), name: null, region: str(v.region) }));
   for (const b of chunks(vpcRows)) await w(NETWORK_CYPHER, b);
 
   // segments: public from the route table, guarded by the subnet's ACL (or the VPC's default)
   const naclFor = (subnetId: string, vpcId: string | null) => nacls.find((n) => (n.subnets as string[]).includes(subnetId))?.acl_id ?? nacls.find((n) => n.is_default && n.vpc_id === vpcId)?.acl_id ?? null;
-  const segRows = subnets.map((s: SubnetRow) => { const t = routeTableOf(s.subnet_id, s.vpc_id, tables); return { id: s.subnet_id, vpc_id: s.vpc_id, cidr: s.cidr_block, ipv6_cidr: s.ipv6_cidrs[0] ?? null, zone: s.az, public: isPublicSubnet(t), auto_public_ip: s.map_public_ip, available_ips: s.available_ips, default: s.default_for_az, name: s.name, region: s.region, route_table_id: t?.route_table_id ?? null, nacl_id: naclFor(s.subnet_id, s.vpc_id) }; });
+  const segRows = subnets.map((s: SubnetRow) => { const t = routeTableOf(s.subnet_id, s.vpc_id, tables); return { id: s.subnet_id, account_id: s.account_id ?? vpcAccount(s.vpc_id), vpc_id: s.vpc_id, cidr: s.cidr_block, ipv6_cidr: s.ipv6_cidrs[0] ?? null, zone: s.az, public: isPublicSubnet(t), auto_public_ip: s.map_public_ip, available_ips: s.available_ips, default: s.default_for_az, name: s.name, region: s.region, route_table_id: t?.route_table_id ?? null, nacl_id: naclFor(s.subnet_id, s.vpc_id) }; });
   for (const b of chunks(segRows)) await w(SEGMENT_CYPHER, b);
 
   // gateways (known ones), then route tables whose routes may name gateways the inventory does not list (transit, VPN): those are created bare
-  const gwRows = gateways.map((g: GatewayRow) => ({ id: g.gateway_id, kind: g.kind, state: g.state, public_ip: g.public_ips[0] ?? null, public_ips: g.public_ips, private_ip: g.private_ip, service: g.service, endpoint_type: g.endpoint_type, peer_vpc_id: g.peer_vpc_id, peer_account_id: g.peer_account_id, cidrs: g.cidrs, peer_cidrs: g.peer_cidrs, groups: g.groups, name: g.name, region: g.region, vpc_id: g.vpc_id, subnet_id: g.subnet_id, native_type: g.kind === "internet" ? "internet_gateway" : g.kind === "nat" ? "nat_gateway" : g.kind === "egress_only" ? "egress_only_internet_gateway" : g.kind === "peering" ? "vpc_peering_connection" : "vpc_endpoint" }));
+  const gwRows = gateways.map((g: GatewayRow) => ({ id: g.gateway_id, account_id: (g as any).account_id ? String((g as any).account_id) : vpcAccount(g.vpc_id), kind: g.kind, state: g.state, public_ip: g.public_ips[0] ?? null, public_ips: g.public_ips, private_ip: g.private_ip, service: g.service, endpoint_type: g.endpoint_type, peer_vpc_id: g.peer_vpc_id, peer_account_id: g.peer_account_id, cidrs: g.cidrs, peer_cidrs: g.peer_cidrs, groups: g.groups, name: g.name, region: g.region, vpc_id: g.vpc_id, subnet_id: g.subnet_id, native_type: g.kind === "internet" ? "internet_gateway" : g.kind === "nat" ? "nat_gateway" : g.kind === "egress_only" ? "egress_only_internet_gateway" : g.kind === "peering" ? "vpc_peering_connection" : "vpc_endpoint" }));
   for (const b of chunks(gwRows)) await w(GATEWAY_CYPHER, b);
   const GW_KIND: Record<string, string> = { internet_gateway: "internet", nat_gateway: "nat", egress_only_gateway: "egress_only", transit_gateway: "transit", peering: "peering", vpc_endpoint: "endpoint", virtual_private_gateway: "vpn", local_gateway: "local_gateway", carrier_gateway: "carrier" };
-  const rtRows = tables.map((t: RouteTableRow) => ({ id: t.route_table_id, vpc_id: t.vpc_id, main: t.main, name: t.name, region: t.region, route_count: t.routes.length,
+  const rtRows = tables.map((t: RouteTableRow) => ({ id: t.route_table_id, account_id: vpcAccount(t.vpc_id), vpc_id: t.vpc_id, main: t.main, name: t.name, region: t.region, route_count: t.routes.length,
     routes: t.routes.map((r) => { const x = routeTarget(r); return { ...x, label: x.kind === "interface" ? "AdvisorInterface" : x.kind === "instance" ? "AdvisorResource" : x.kind === "local" || x.kind === "unknown" || !x.id ? null : "AdvisorGateway", kind: GW_KIND[x.kind] ?? x.kind, state: r.State ?? "active", origin: r.Origin ?? null }; }).filter((r) => r.label && r.destination) }));
   for (const b of chunks(rtRows)) await w(ROUTE_TABLE_CYPHER, b);
 
@@ -320,20 +326,21 @@ export async function mirrorNetwork(): Promise<NetworkCounts | null> {
   const lbByName = new Map(rows("select arn, name from inventory_elb").map((r) => [String(r.name), String(r.arn)]));
   const fnByName = new Map(rows("select name, arn, region from inventory_lambda").map((r) => [String(r.name), r.arn ? String(r.arn) : `arn:aws:lambda:${r.region}:${account}:function:${r.name}`]));
   const eniRows = enis.map((e: EniRow) => { const o = eniOwner(e); const resource = o.kind === "instance" ? o.name : o.kind === "load_balancer" && o.name ? lbByName.get(o.name) ?? null : o.kind === "function" && o.name ? fnByName.get(o.name) ?? null : null; const gateway = (o.kind === "nat_gateway" || o.kind === "vpc_endpoint") ? o.name : null;
-    return { id: e.eni_id, vpc_id: e.vpc_id, subnet_id: e.subnet_id, region: e.region, private_ips: e.private_ips, public_ip: e.public_ip, ipv6: e.ipv6, mac: e.mac, interface_type: e.interface_type, owner_kind: o.kind, description: e.description, status: e.status, source_dest_check: e.source_dest_check, primary: e.interface_type === "interface" && Boolean(e.instance_id), groups: e.groups, resource_id: resource, gateway_id: gateway }; });
+    return { id: e.eni_id, account_id: vpcAccount(e.vpc_id) ?? (e.instance_id ? instanceAccountMap.get(e.instance_id) ?? null : null), vpc_id: e.vpc_id, subnet_id: e.subnet_id, region: e.region, private_ips: e.private_ips, public_ip: e.public_ip, ipv6: e.ipv6, mac: e.mac, interface_type: e.interface_type, owner_kind: o.kind, description: e.description, status: e.status, source_dest_check: e.source_dest_check, primary: e.interface_type === "interface" && Boolean(e.instance_id), groups: e.groups, resource_id: resource, gateway_id: gateway }; });
   for (const b of chunks(eniRows)) await w(INTERFACE_CYPHER, b);
 
   // public addresses: EIPs on interfaces, NAT addresses on gateways
   const natByIp = new Map<string, string>(); for (const g of gateways) for (const ip of g.public_ips) natByIp.set(ip, g.gateway_id);
-  const ipRows = eips.map((e) => ({ id: e.id, ip: e.public_ip, allocation_id: e.allocation_id, associated: Boolean(e.network_interface_id || e.instance_id), eni_id: e.network_interface_id, gateway_id: natByIp.get(e.public_ip) ?? null, region: e.region }));
+  const eniAccount = new Map(enis.map((e: EniRow) => [e.eni_id, vpcAccount(e.vpc_id)]));
+  const ipRows = eips.map((e) => ({ id: e.id, account_id: (e.network_interface_id ? eniAccount.get(e.network_interface_id) : null) ?? (e.instance_id ? instanceAccountMap.get(e.instance_id) : null) ?? null, ip: e.public_ip, allocation_id: e.allocation_id, associated: Boolean(e.network_interface_id || e.instance_id), eni_id: e.network_interface_id, gateway_id: natByIp.get(e.public_ip) ?? null, region: e.region }));
   for (const b of chunks(ipRows)) await w(PUBLIC_IP_CYPHER, b);
 
   // filters: security groups and ACLs, with their rules
   const wearers = new Map<string, number>(); for (const e of enis) for (const g of e.groups) wearers.set(g, (wearers.get(g) || 0) + 1);
   const ruleCount = new Map<string, number>(); for (const r of [...ingress, ...egress]) ruleCount.set(r.group_id, (ruleCount.get(r.group_id) || 0) + 1);
   const filterRows = [
-    ...sgs.map((g) => ({ id: String(g.group_id), kind: "security_group", stateful: true, default: g.group_name === "default", name: str(g.group_name), description: str(g.description), rules: ruleCount.get(String(g.group_id)) || 0, attached: wearers.get(String(g.group_id)) || 0, region: str(g.region), vpc_id: str(g.vpc_id), native_type: "security_group" })),
-    ...nacls.map((n) => ({ id: String(n.acl_id), kind: "network_acl", stateful: false, default: Boolean(n.is_default), name: null, description: null, rules: n.entries.length, attached: (n.subnets as string[]).length, region: str(n.region), vpc_id: str(n.vpc_id), native_type: "network_acl" })),
+    ...sgs.map((g) => ({ id: String(g.group_id), account_id: sgAccount.get(String(g.group_id)) ?? null, kind: "security_group", stateful: true, default: g.group_name === "default", name: str(g.group_name), description: str(g.description), rules: ruleCount.get(String(g.group_id)) || 0, attached: wearers.get(String(g.group_id)) || 0, region: str(g.region), vpc_id: str(g.vpc_id), native_type: "security_group" })),
+    ...nacls.map((n) => ({ id: String(n.acl_id), account_id: vpcAccount(str(n.vpc_id)), kind: "network_acl", stateful: false, default: Boolean(n.is_default), name: null, description: null, rules: n.entries.length, attached: (n.subnets as string[]).length, region: str(n.region), vpc_id: str(n.vpc_id), native_type: "network_acl" })),
   ];
   for (const b of chunks(filterRows)) await w(FILTER_CYPHER, b);
   const vpcOfGroup = new Map(sgs.map((g) => [String(g.group_id), str(g.vpc_id)]));
@@ -341,7 +348,7 @@ export async function mirrorNetwork(): Promise<NetworkCounts | null> {
     ...ingress.map((r) => sgRuleNode(r, "ingress", vpcHasIpv6(vpcOfGroup.get(r.group_id)))),
     ...egress.map((r) => sgRuleNode(r, "egress", vpcHasIpv6(vpcOfGroup.get(r.group_id)))),
     ...nacls.flatMap((n) => (n.entries as NaclEntry[]).filter((e) => e.RuleNumber !== 32767).map((e) => naclRuleNode(String(n.acl_id), e))),
-  ].map((r) => ({ ...r, native_type: r.priority == null ? "security_group_rule" : "network_acl_entry", source_label: r.source_node?.label ?? null, source_id: r.source_node?.id ?? null }));
+  ].map((r) => ({ ...r, account_id: r.priority == null ? sgAccount.get(r.filter_id) ?? null : vpcAccount(str(nacls.find((n) => String(n.acl_id) === r.filter_id)?.vpc_id)), native_type: r.priority == null ? "security_group_rule" : "network_acl_entry", source_label: r.source_node?.label ?? null, source_id: r.source_node?.id ?? null }));
   for (const b of chunks(ruleRows)) await w(RULE_CYPHER, b);
 
   // resources that wear groups directly: databases, caches, balancers; compute joins through its interfaces but also gets the direct edge for one-hop reads
@@ -424,7 +431,7 @@ import { readQuery } from "./graph_mirror.js";
 
 /** The network layer at a glance: every network with what sits in it, the exposed endpoints, the filters, the blocks. */
 export async function networkOverview(account: string = accountId()) {
-  const networks = await readQuery(`MATCH (n:AdvisorNetwork {account_id: $account})
+  const networks = await readQuery(`MATCH (n:AdvisorNetwork {account_id: coalesce(row.account_id, $account)})
     OPTIONAL MATCH (s:AdvisorSegment)-[:IN_NETWORK]->(n)
     WITH n, count(s) AS segments, sum(CASE WHEN s.public THEN 1 ELSE 0 END) AS public_segments
     OPTIONAL MATCH (g:AdvisorGateway)-[:IN_NETWORK]->(n)
@@ -452,7 +459,7 @@ export async function networkOverview(account: string = accountId()) {
     OPTIONAL MATCH (a:AdvisorApp)-[:SERVES]->(e)
     RETURN r.id AS resource_id, r.name AS resource_name, e.id AS endpoint_id, e.protocol AS protocol, e.port AS port, coalesce(a.name, e.process) AS program, e.exposure AS exposure, b.source AS source, b.reason AS reason, labels(x)[0] AS by_label, x.id AS by_id, x.name AS by_name
     ORDER BY e.port, r.name`, { account }, { rowCap: 3000, timeoutMs: 30_000 });
-  const filters = await readQuery(`MATCH (f:AdvisorFilter {account_id: $account})
+  const filters = await readQuery(`MATCH (f:AdvisorFilter {account_id: coalesce(row.account_id, $account)})
     OPTIONAL MATCH (f)-[:HAS_RULE]->(rule:AdvisorFilterRule)-[:FROM]->(src:AdvisorSource {id: 'internet'}) WHERE rule.direction = 'ingress'
     WITH f, count(rule) AS internet_rules, collect(DISTINCT CASE WHEN rule.from_port IS NULL THEN 'all' WHEN rule.from_port = rule.to_port THEN toString(rule.from_port) ELSE toString(rule.from_port) + '-' + toString(rule.to_port) END)[..8] AS internet_ports
     OPTIONAL MATCH (f)<-[:GUARDED_BY]-(r:AdvisorResource) WHERE coalesce(r.gone, false) = false
@@ -462,9 +469,9 @@ export async function networkOverview(account: string = accountId()) {
     OPTIONAL MATCH (f)-[:IN_NETWORK]->(n:AdvisorNetwork)
     RETURN f.id AS id, f.kind AS kind, f.name AS name, f.description AS description, f.rules AS rules, f.default AS is_default, n.id AS network, internet_rules, internet_ports, guarded, interfaces
     ORDER BY internet_rules DESC, guarded DESC, f.kind, f.name`, { account }, { rowCap: 1000, timeoutMs: 30_000 });
-  const totals = await readQuery(`MATCH (e:AdvisorEndpoint {account_id: $account}) WHERE coalesce(e.gone, false) = false
+  const totals = await readQuery(`MATCH (e:AdvisorEndpoint {account_id: coalesce(row.account_id, $account)}) WHERE coalesce(e.gone, false) = false
     RETURN e.exposure AS exposure, count(*) AS n`, { account }, { rowCap: 20 });
-  const gateways = await readQuery(`MATCH (g:AdvisorGateway {account_id: $account}) RETURN g.kind AS kind, count(*) AS n ORDER BY n DESC`, { account }, { rowCap: 20 });
+  const gateways = await readQuery(`MATCH (g:AdvisorGateway {account_id: coalesce(row.account_id, $account)}) RETURN g.kind AS kind, count(*) AS n ORDER BY n DESC`, { account }, { rowCap: 20 });
   return { account_id: account, networks: networks.rows, exposed: exposed.rows.map((r) => ({ ...r, rules: (r.rules as any[]).filter(Boolean) })), blocked: blocked.rows, filters: filters.rows,
     exposure_totals: Object.fromEntries(totals.rows.map((r) => [String(r.exposure ?? "unjudged"), Number(r.n)])), gateway_totals: Object.fromEntries(gateways.rows.map((r) => [String(r.kind), Number(r.n)])) };
 }
@@ -519,7 +526,7 @@ export async function filterDetail(id: string) {
 
 /** Every segment across the account's networks, with routing, ACL and what sits in it (the Segments tab). */
 export async function listSegments(account: string = accountId()) {
-  const r = await readQuery(`MATCH (s:AdvisorSegment {account_id: $account})
+  const r = await readQuery(`MATCH (s:AdvisorSegment {account_id: coalesce(row.account_id, $account)})
     OPTIONAL MATCH (s)-[:IN_NETWORK]->(n:AdvisorNetwork)
     OPTIONAL MATCH (s)-[:USES_ROUTE_TABLE]->(t:AdvisorRouteTable)
     OPTIONAL MATCH (t)-[r:ROUTES]->(g:AdvisorGateway)
@@ -536,7 +543,7 @@ export async function listSegments(account: string = accountId()) {
 
 /** Every gateway node: internet, NAT, egress-only, peering, endpoint, and the bare transit or VPN ones routes name (the Gateways tab). */
 export async function listGatewayNodes(account: string = accountId()) {
-  const r = await readQuery(`MATCH (g:AdvisorGateway {account_id: $account})
+  const r = await readQuery(`MATCH (g:AdvisorGateway {account_id: coalesce(row.account_id, $account)})
     OPTIONAL MATCH (g)-[:IN_NETWORK]->(n:AdvisorNetwork)
     OPTIONAL MATCH (g)-[:IN_SEGMENT]->(s:AdvisorSegment)
     OPTIONAL MATCH (p:AdvisorPublicIp)-[:ASSIGNED]->(g)
@@ -552,7 +559,7 @@ export async function listGatewayNodes(account: string = accountId()) {
 
 /** Every network interface with whose it is, where it sits and what it wears (the Interfaces tab). */
 export async function listInterfaces(account: string = accountId()) {
-  const r = await readQuery(`MATCH (i:AdvisorInterface {account_id: $account})
+  const r = await readQuery(`MATCH (i:AdvisorInterface {account_id: coalesce(row.account_id, $account)})
     OPTIONAL MATCH (i)-[:ATTACHED_TO]->(x)
     OPTIONAL MATCH (i)-[:IN_SEGMENT]->(s:AdvisorSegment)
     OPTIONAL MATCH (i)-[:IN_NETWORK]->(n:AdvisorNetwork)
@@ -567,7 +574,7 @@ export async function listInterfaces(account: string = accountId()) {
 
 /** Every static public address and what it is assigned to (the Public IPs tab). */
 export async function listPublicIps() {
-  const r = await readQuery(`MATCH (p:AdvisorPublicIp {account_id: $account})
+  const r = await readQuery(`MATCH (p:AdvisorPublicIp {account_id: coalesce(row.account_id, $account)})
     OPTIONAL MATCH (p)-[:ASSIGNED]->(x)
     OPTIONAL MATCH (x)-[:ATTACHED_TO]->(owner)
     OPTIONAL MATCH (d:AdvisorDnsRecord)-[:POINTS_TO]->(y) WHERE y.id = x.id OR y.id = owner.id OR (y:AdvisorResourceRef AND y.id = p.ip)

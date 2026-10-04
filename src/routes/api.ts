@@ -722,8 +722,8 @@ api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await re
 api.get("/inventory/s3/:name/usage", (req, res) => { const u = latestS3Usage(String(req.params.name)); u ? res.json(u) : res.status(404).json({ error: "not analysed yet" }); });
 api.post("/inventory/s3/:name/usage/refresh", async (req, res) => { try { res.json(await refreshS3Usage(String(req.params.name), (l) => console.log(`[s3-usage] ${l}`))); } catch (e: any) { res.status(500).json({ error: describeError(e, `s3 usage ${req.params.name} (s3:ListBucket)`) }); } });
 api.post("/inventory/s3/usage/run", async (_req, res) => { try { res.json(await s3UsagePass((l) => console.log(`[s3-usage] ${l}`))); } catch (e: any) { res.status(500).json({ error: e.message }); } });
-api.get("/inventory/route53", (req, res) => res.json(listRoute53({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), zone: str(req.query.zone), link: str(req.query.link), type: str(req.query.type) })));
-api.get("/inventory/route53/zones", (req, res) => res.json(listRoute53Zones(flag(req.query.gone))));
+api.get("/inventory/route53", (req, res) => res.json(listRoute53({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), zone: str(req.query.zone), link: str(req.query.link), type: str(req.query.type) })));
+api.get("/inventory/route53/zones", (req, res) => res.json(listRoute53Zones(flag(req.query.gone), accountScope(req.query as any))));
 api.get("/inventory/route53/resource/:kind/:id", (req, res) => res.json(domainsFor(String(req.params.kind), String(req.params.id))));
 
 // Everything recorded about one resource, newest first (src/timeline.ts): seen, findings, recommendations and

@@ -815,7 +815,7 @@ const PORT_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorEndpoint {id: row.id})
 SET p += {kind: 'port', resource_id: row.instance_id, protocol: row.proto, port: row.port, bind: row.bind, scope: row.scope, exposure: row.exposure, process: row.process, container: row.container, container_port: row.container_port,
-  first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, provider: $provider, account_id: $account, native_type: 'instance_port', native_id: row.id, updated_at: $now}
+  first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'instance_port', native_id: row.id, updated_at: $now}
 WITH p, row
 MATCH (r:AdvisorResource {id: row.instance_id})
 MERGE (r)-[l:EXPOSES]->(p) SET l.gone = row.gone, l.updated_at = $now
@@ -830,7 +830,9 @@ export async function mirrorPorts(instanceIds?: string[]): Promise<{ ports: numb
   let raw: any[] = [];
   try { raw = instanceIds ? db.prepare(`select * from instance_ports where instance_id in (${instanceIds.map(() => "?").join(",")})`).all(...instanceIds) : db.prepare("select * from instance_ports").all(); }
   catch { return { ports: 0 }; }
-  const rows = raw.map((r) => ({ id: `${r.instance_id}:${r.proto}:${r.port}`, instance_id: String(r.instance_id), proto: String(r.proto), port: num(r.port), bind: str(r.bind), scope: str(r.scope), exposure: str(r.exposure), process: r.process == null ? null : String(r.process), container: r.container == null ? null : String(r.container), container_port: r.container_port == null ? null : num(r.container_port),
+  // the port's account is its instance's (src/accounts.ts): a member's box exposes a member's endpoint
+  const instanceAccount = new Map((db.prepare("select instance_id, account_id from inventory_ec2 where account_id is not null and account_id <> ''").all() as { instance_id: string; account_id: string }[]).map((r) => [r.instance_id, r.account_id]));
+  const rows = raw.map((r) => ({ id: `${r.instance_id}:${r.proto}:${r.port}`, instance_id: String(r.instance_id), account_id: instanceAccount.get(String(r.instance_id)) ?? null, proto: String(r.proto), port: num(r.port), bind: str(r.bind), scope: str(r.scope), exposure: str(r.exposure), process: r.process == null ? null : String(r.process), container: r.container == null ? null : String(r.container), container_port: r.container_port == null ? null : num(r.container_port),
     app_name: r.app_name == null ? null : String(r.app_name), first_seen: str(r.first_seen), last_seen: str(r.last_seen), probes: num(r.probes), gone: Boolean(r.gone) }));
   const stamp = now();
   for (const batch of chunks(rows)) await write(PORT_CYPHER, { rows: batch, account: accountId(), provider: PROVIDER, now: stamp });

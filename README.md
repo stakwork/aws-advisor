@@ -3033,8 +3033,8 @@ Concepts in repo2graph's graph are never deleted. Each wipe shows what goes firs
 account id or WIPE, and is refused while a run is collecting (`GET /api/settings/data/preview`,
 `POST /api/settings/data/wipe`). For a production install that collected before accounts were scoped, wipe
 everything with the Concepts kept and start a run. The inventory summary the tabs count from is scoped the same way as the lists
-(`scopedStmt` in `src/scope.ts` adds the account clause to each summary query; a table without an account column,
-the Route 53 rows, stays unscoped), so the parent's tabs count the parent's resources only. The other pages scope the same way: Findings and Security
+(`scopedStmt` in `src/scope.ts` adds the account clause to each summary query; the Route 53 rows carry their zone's
+account too), so the parent's tabs count the parent's resources only. The other pages scope the same way: Findings and Security
 by the rows' account id (the Security header says the account's share of the scan's findings; a scan spans the
 organisation), Recommendations and Alerts by an `account_id` each row gets once, from the resource it names
 through the inventories, from the details a platform pass wrote, or from the run that proposed it (what cannot be
@@ -3070,6 +3070,13 @@ now runs `steampipe service restart` when the service is local (`STEAMPIPE_RELOA
 points at localhost; `on` forces it, `off` never), a few seconds during which queries wait, and reports the outcome as
 `steampipe_reload`; the connection test that follows retries through the restart. With a remote service, the response
 says to restart it yourself.
+
+**The Domains tab and the network layer scope like the rest.** Route 53 zones and records carry the account of the zone
+(Steampipe's column), so Inventory › Domains narrows to the scope; the links to resources are unchanged. Every node of the
+graph's network layer (`src/graph_network.ts`) carries the account its VPC lives in: VPCs, subnets and security groups from
+their own inventory column, route tables, interfaces, ACLs and their rules through their VPC, an address through its
+interface or box, an instance port through its instance. Network and Knowledge therefore show one account's layer under
+its scope instead of everything stamped with the primary account.
 
 **Which account the credentials resolve to is read from the parent's connection only.** The connection test and the
 credential gate select `account_id` from `aws_account`; over the aggregator that is one row per account in no fixed

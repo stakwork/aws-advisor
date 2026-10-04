@@ -9,8 +9,8 @@
  * records pointing outside AWS, and what the zones cost at list (0.50 USD per zone per month, queries at
  * 0.40 USD per million from the DNSQueries metric).
  */
-import { db, getSetting, setSetting } from "./db.js";
-import { scopedStmt, type AccountScope } from "./scope.js";
+import { addColumn, db, getSetting, setSetting } from "./db.js";
+import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 
@@ -31,6 +31,9 @@ create table if not exists inventory_route53_link (
   primary key (record_id, resource_kind, resource_id)
 );
 create index if not exists inventory_route53_link_resource on inventory_route53_link(resource_kind, resource_id)`);
+// Member accounts (src/accounts.ts): the account a zone and its records live in, so the Domains tab scopes like every other inventory.
+addColumn("inventory_route53_zone", "account_id", "text");
+addColumn("inventory_route53_record", "account_id", "text");
 
 // ---- pure: the resolver ---------------------------------------------------------------------------------
 
@@ -390,7 +393,7 @@ export async function refreshRoute53Inventory(onLog: (s: string) => void = () =>
   const t0 = Date.now();
   const out: Route53RefreshResult = { zones: 0, records: 0, linked: 0, external: 0, unmatched: 0, errors: [], took_ms: 0 };
   let zones: any[];
-  try { zones = await query<any>(`select id, name, private_zone, comment, resource_record_set_count from ${S}.aws_route53_zone`); }
+  try { zones = await query<any>(`select id, name, private_zone, comment, resource_record_set_count, account_id from ${S}.aws_route53_zone`); }
   catch (e) { out.errors.push(describeError(e, "route53 zones (aws_route53_zone)")); out.took_ms = Date.now() - t0; return out; }
   let records: any[] = [];
   if (zones.length) {
@@ -417,7 +420,7 @@ export async function refreshRoute53Inventory(onLog: (s: string) => void = () =>
 }
 
 /** Steampipe's aws_route53_zone and aws_route53_record rows, as far as the store reads them. */
-export interface ZoneRow { id: string; name: string; private_zone?: boolean | null; comment?: string | null; resource_record_set_count?: number | null }
+export interface ZoneRow { id: string; name: string; private_zone?: boolean | null; comment?: string | null; resource_record_set_count?: number | null; /** the member account the zone lives in (Steampipe's column); null = unknown, read as the primary account's */ account_id?: string | null }
 export interface RecordRow { name: string; zone_id: string; type: string; ttl?: number | null; records?: unknown; alias_target?: unknown; set_identifier?: string | null; weight?: number | null; failover?: string | null; region?: string | null; geo_location?: unknown; latency_region?: string | null; multi_value_answer?: boolean | null; health_check_id?: string | null }
 
 /**
@@ -427,17 +430,18 @@ export interface RecordRow { name: string; zone_id: string; type: string; ttl?: 
 export function storeRoute53(zones: ZoneRow[], records: RecordRow[], resolve: (rec: RecordIn) => Resolution, queries: Map<string, number>, recordsFailed = false): { zones: number; records: number; linked: number; external: number; unmatched: number } {
   const out = { zones: 0, records: 0, linked: 0, external: 0, unmatched: 0 };
   const now = new Date().toISOString();
-  const upZone = db.prepare(`insert into inventory_route53_zone(zone_id, name, private, comment, records, linked, external, unmatched, queries_30d, monthly_usd, first_seen, last_seen, gone)
-    values (@zone_id, @name, @private, @comment, @records, @linked, @external, @unmatched, @queries_30d, @monthly_usd, @now, @now, 0)
+  const upZone = db.prepare(`insert into inventory_route53_zone(zone_id, name, private, comment, records, linked, external, unmatched, queries_30d, monthly_usd, account_id, first_seen, last_seen, gone)
+    values (@zone_id, @name, @private, @comment, @records, @linked, @external, @unmatched, @queries_30d, @monthly_usd, @account_id, @now, @now, 0)
     on conflict(zone_id) do update set name = excluded.name, private = excluded.private, comment = excluded.comment, records = excluded.records, linked = excluded.linked, external = excluded.external, unmatched = excluded.unmatched,
-      queries_30d = excluded.queries_30d, monthly_usd = excluded.monthly_usd, last_seen = excluded.last_seen, gone = 0`);
-  const upRec = db.prepare(`insert into inventory_route53_record(id, zone_id, zone_name, name, type, ttl, alias, "values", alias_target, routing, health_check_id, link_state, target, summary, links, first_seen, last_seen, gone)
-    values (@id, @zone_id, @zone_name, @name, @type, @ttl, @alias, @values, @alias_target, @routing, @health_check_id, @link_state, @target, @summary, @links, @now, @now, 0)
+      queries_30d = excluded.queries_30d, monthly_usd = excluded.monthly_usd, account_id = coalesce(excluded.account_id, inventory_route53_zone.account_id), last_seen = excluded.last_seen, gone = 0`);
+  const upRec = db.prepare(`insert into inventory_route53_record(id, zone_id, zone_name, name, type, ttl, alias, "values", alias_target, routing, health_check_id, link_state, target, summary, links, account_id, first_seen, last_seen, gone)
+    values (@id, @zone_id, @zone_name, @name, @type, @ttl, @alias, @values, @alias_target, @routing, @health_check_id, @link_state, @target, @summary, @links, @account_id, @now, @now, 0)
     on conflict(id) do update set zone_name = excluded.zone_name, ttl = excluded.ttl, alias = excluded.alias, "values" = excluded."values", alias_target = excluded.alias_target, routing = excluded.routing, health_check_id = excluded.health_check_id,
-      link_state = excluded.link_state, target = excluded.target, summary = excluded.summary, links = excluded.links, last_seen = excluded.last_seen, gone = 0`);
+      link_state = excluded.link_state, target = excluded.target, summary = excluded.summary, links = excluded.links, account_id = coalesce(excluded.account_id, inventory_route53_record.account_id), last_seen = excluded.last_seen, gone = 0`);
   const delLinks = db.prepare("delete from inventory_route53_link where record_id = ?");
   const insLink = db.prepare("insert or ignore into inventory_route53_link(record_id, resource_kind, resource_id, hop) values (?, ?, ?, ?)");
   const zoneNames = new Map<string, string>(zones.map((z) => [zoneId(z.id), host(z.name)]));
+  const zoneAccounts = new Map<string, string | null>(zones.map((z) => [zoneId(z.id), z.account_id ? String(z.account_id) : null]));
   const counts = new Map<string, { records: number; linked: number; external: number; unmatched: number }>();
 
   db.transaction(() => {
@@ -451,7 +455,7 @@ export function storeRoute53(zones: ZoneRow[], records: RecordRow[], resolve: (r
       const id = `${zid}|${host(r.name)}|${r.type}|${r.set_identifier ?? ""}`;
       upRec.run({ id, zone_id: zid, zone_name: zname, name: host(r.name), type: r.type, ttl: r.ttl != null ? Number(r.ttl) : null, alias: rec.alias_target?.DNSName ? 1 : 0,
         values: JSON.stringify(rec.values), alias_target: rec.alias_target?.DNSName ? host(rec.alias_target.DNSName) : null, routing: Object.keys(routing).length ? JSON.stringify(routing) : null,
-        health_check_id: r.health_check_id ?? null, link_state: res.link_state, target: res.target, summary: res.summary, links: JSON.stringify(res.links), now });
+        health_check_id: r.health_check_id ?? null, link_state: res.link_state, target: res.target, summary: res.summary, links: JSON.stringify(res.links), account_id: zoneAccounts.get(zid) ?? null, now });
       delLinks.run(id);
       for (const l of res.links) insLink.run(id, l.kind, l.id, l.hop);
       const c = counts.get(zid) ?? { records: 0, linked: 0, external: 0, unmatched: 0 }; counts.set(zid, c);
@@ -462,7 +466,7 @@ export function storeRoute53(zones: ZoneRow[], records: RecordRow[], resolve: (r
     sorted.forEach((z, i) => {
       const zid = zoneId(z.id); const c = counts.get(zid) ?? { records: Number(z.resource_record_set_count ?? 0), linked: 0, external: 0, unmatched: 0 };
       const q = queries.get(zid) ?? null;
-      upZone.run({ zone_id: zid, name: host(z.name), private: z.private_zone ? 1 : 0, comment: z.comment ?? null, ...c, queries_30d: q, monthly_usd: zoneMonthlyCost(i, q), now });
+      upZone.run({ zone_id: zid, name: host(z.name), private: z.private_zone ? 1 : 0, comment: z.comment ?? null, ...c, queries_30d: q, monthly_usd: zoneMonthlyCost(i, q), account_id: z.account_id ? String(z.account_id) : null, now });
       out.zones++;
     });
     db.prepare("update inventory_route53_zone set gone = 1 where last_seen <> ?").run(now);
@@ -479,9 +483,10 @@ export function storeRoute53(zones: ZoneRow[], records: RecordRow[], resolve: (r
 const parse = (r: any) => ({ ...r, values: arr(r.values), links: arr(r.links), routing: obj(r.routing) });
 const SORTS = ["name", "type", "zone_name", "ttl", "link_state", "target", "summary"];
 
-export function listRoute53(f: { q?: string; sort?: string; gone?: boolean; zone?: string; link?: string; type?: string; limit?: number } = {}) {
+export function listRoute53(f: { q?: string; sort?: string; gone?: boolean; zone?: string; link?: string; type?: string; limit?: number; scope?: AccountScope | null } = {}) {
   const where: string[] = []; const params: unknown[] = [];
   if (!f.gone) where.push("gone = 0");
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (f.zone) { where.push("(zone_id = ? or zone_name = ?)"); params.push(f.zone, host(f.zone)); }
   if (f.link && ["linked", "external", "unmatched", "none"].includes(f.link)) { where.push("link_state = ?"); params.push(f.link); }
   if (f.type) { where.push("type = ?"); params.push(f.type.toUpperCase()); }
@@ -491,8 +496,9 @@ export function listRoute53(f: { q?: string; sort?: string; gone?: boolean; zone
   return (db.prepare(`select * from inventory_route53_record ${where.length ? `where ${where.join(" and ")}` : ""} ${order} limit ${Math.min(5000, Math.max(1, f.limit ?? 3000))}`).all(...params) as any[]).map(parse);
 }
 
-export function listRoute53Zones(gone = false) {
-  return db.prepare(`select * from inventory_route53_zone ${gone ? "" : "where gone = 0"} order by name`).all() as any[];
+export function listRoute53Zones(gone = false, scope: AccountScope | null = null) {
+  const a = accountWhere(scope);
+  return db.prepare(`select * from inventory_route53_zone where ${gone ? "1=1" : "gone = 0"} and ${a.sql} order by name`).all(...a.params) as any[];
 }
 
 /** Records that lead to one resource (an instance, a database, a bucket...), directly or through a load balancer or distribution. */
