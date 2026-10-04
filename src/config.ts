@@ -178,6 +178,9 @@ export const config = {
   awsSharedCredentialsFile: process.env.AWS_SHARED_CREDENTIALS_FILE || path.join(os.homedir(), ".aws", "credentials"),
   modDir: process.env.POWERPIPE_MOD_DIR || path.resolve("mod"),
   powerpipeBin: process.env.POWERPIPE_BIN || "powerpipe",
+  steampipeBin: process.env.STEAMPIPE_BIN || "steampipe",
+  /** Whether a credential save restarts the Steampipe service so it reads the new files: auto (when the database URL is local), on, off. */
+  steampipeReload: (["auto", "on", "off"].includes(process.env.STEAMPIPE_RELOAD || "") ? process.env.STEAMPIPE_RELOAD : "auto") as "auto" | "on" | "off",
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, ""),
   /** Interface to listen on. Unset = every interface (containers reach the host that way); 127.0.0.1 for a laptop with no swarm. */
   bindAddr: (process.env.BIND_ADDR || "").trim(),

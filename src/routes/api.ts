@@ -7,7 +7,7 @@ import { config } from "../config.js";
 import { db, getJsonSetting, setSetting } from "../db.js";
 import { isBusy, runEvents, startRun } from "../collector.js";
 import { ALL_BENCHMARKS, DEFAULT_BENCHMARKS } from "../powerpipe.js";
-import { clearConnection, credentialsMeta, hasConnectionFile, sdkIdentity, testConnection, updateCredentialsMeta, writeConnection } from "../steampipe.js";
+import { clearConnection, credentialsMeta, hasConnectionFile, reloadSteampipeService, sdkIdentity, testConnection, updateCredentialsMeta, writeConnection } from "../steampipe.js";
 import { CREDENTIAL_SOURCES, DEFAULT_CREDENTIAL_SOURCE, PROFILE_NAME_RE, ROLE_ARN_RE, validateSettings } from "../aws_config.js";
 import { listAccounts, memberConnections } from "../accounts.js";
 import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } from "../agent.js";
@@ -165,11 +165,13 @@ api.put("/settings/aws", async (req, res) => {
   catch (e: any) { return res.status(400).json({ error: e.message }); }
   const previous = credentialsMeta()?.accountId ?? null;
   const meta = writeConnection(settings, memberConnections());
+  // the plugin keeps the session it opened under the previous files: restart the service (when it is local) before testing
+  const reload = await reloadSteampipeService("credentials saved");
   const [test, sdk] = await Promise.all([testConnection(45_000), sdkIdentity(20_000)]);
   if (test.ok) updateCredentialsMeta({ accountId: test.accountId });
   else if (sdk.ok && sdk.accountId) updateCredentialsMeta({ accountId: sdk.accountId });
   const account_change = noteAccountChange(previous, test.ok ? test.accountId : sdk.ok ? sdk.accountId : null);
-  res.json({ saved: meta, test, sdk, account_change });
+  res.json({ saved: meta, test, sdk, account_change, steampipe_reload: reload });
 });
 
 // Tests the saved credentials both ways: the Steampipe schema (aws_account) and the advisor's own SDK provider (sts:GetCallerIdentity).

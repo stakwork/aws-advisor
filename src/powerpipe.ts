@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
+import { billingSchema } from "./steampipe.js";
 
 export const ALL_BENCHMARKS = [
   "apigateway", "cloudfront", "cloudtrail", "cloudwatch", "cost_explorer", "dynamodb", "ebs", "ec2", "ecr", "ecs",
@@ -42,10 +43,13 @@ export function runBenchmark(name: string, onLog: (line: string) => void): Promi
   return new Promise((resolve, reject) => {
     const qualified = name.includes(".") ? name : `aws_thrifty.benchmark.${name}`;
     const out = path.join(os.tmpdir(), `advisor-${name.replace(/[^a-z0-9_]/gi, "_")}-${Date.now()}.json`);
+    // The Cost Explorer benchmark reads the payer's organisation-wide bill: through the aggregator every member connection
+    // would answer with its own view of the same spend and the sums double, so it runs on the parent's connection alone.
+    const prefix = /cost_explorer/.test(name) ? billingSchema() : config.schema;
     const args = [
       "benchmark", "run", qualified,
       "--output", "none", "--export", out, "--progress=false",
-      "--search-path-prefix", config.schema,
+      "--search-path-prefix", prefix,
       "--mod-location", config.modDir,
     ];
     const env: NodeJS.ProcessEnv = { ...process.env, POWERPIPE_UPDATE_CHECK: "false" };

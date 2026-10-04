@@ -31,3 +31,19 @@ test("the vercel connection is readable, qualified like aws_* tables, minus the 
   bad("select name, env from vercel_project");
   bad("select * from vercel.vercel_secret");
 });
+
+test("Cost Explorer tables are routed to the parent's connection once members exist; everything else stays on the aggregator", async () => {
+  const { routeBillingTables } = await import("../steampipe.js");
+  const sql = "select sum(unblended_cost_amount) from advisor.aws_cost_by_account_monthly c join advisor.aws_ec2_instance i on true where exists (select 1 from advisor.aws_cost_usage)";
+  // no members: the billing schema is the schema itself and nothing changes
+  assert.equal(routeBillingTables(sql, "advisor", "advisor"), sql);
+  // members: every aws_cost_* reference moves to the parent's own connection, the inventory table does not
+  const routed = routeBillingTables(sql, "advisor", "advisor_p");
+  assert.match(routed, /from advisor_p\.aws_cost_by_account_monthly c/);
+  assert.match(routed, /from advisor_p\.aws_cost_usage\)/);
+  assert.match(routed, /join advisor\.aws_ec2_instance i/);
+  // reservations and savings plans are owned per account: not routed
+  assert.equal(routeBillingTables("select 1 from advisor.aws_savingsplans_savings_plan", "advisor", "advisor_p"), "select 1 from advisor.aws_savingsplans_savings_plan");
+  // another schema's cost table is not ours to touch
+  assert.equal(routeBillingTables("select 1 from other.aws_cost_usage", "advisor", "advisor_p"), "select 1 from other.aws_cost_usage");
+});

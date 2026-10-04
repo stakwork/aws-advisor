@@ -3063,6 +3063,21 @@ all). Settings › Permissions has an account picker: a child is checked through
 (`<schema>_<account id>`) and its read role, the parent through `<schema>_p`, and each account keeps its own last
 result (`POST /api/permissions/check` with `account_id`, `GET /api/permissions?account=`). Every executor action
 plans per account; the SSM probes and the RDS load profiles run under the account the instance or database lives in.
+**A credential save restarts the Steampipe service.** The connection watcher reloads a changed `.spc`, but the AWS
+config file next to it (the managed profile with the role to assume) is not watched and the plugin keeps the session it
+opened, so a new role kept answering as the old identity until the container was restarted. `PUT /api/settings/aws`
+now runs `steampipe service restart` when the service is local (`STEAMPIPE_RELOAD=auto`, the default: the database URL
+points at localhost; `on` forces it, `off` never), a few seconds during which queries wait, and reports the outcome as
+`steampipe_reload`; the connection test that follows retries through the restart. With a remote service, the response
+says to restart it yourself.
+
+**Cost Explorer is read from the parent's connection only.** The aggregator runs every query once per connection,
+and a member's role sees its own spend through Cost Explorer too, so a sum over `aws_cost_*` through the aggregator
+counts every member twice (the parent's organisation view already has a row per linked account). The query layer
+therefore routes every `aws_cost_*` table to the parent's own connection (`<schema>_p`) whenever members are
+registered (`routeBillingTables` in `src/steampipe.ts`, applied to the app's SQL and to the agent's `steampipe_query`),
+and the Thrifty `cost_explorer` benchmark runs with that connection as its search path. Savings Plans and reserved
+instances stay on the aggregator: they are owned per account and each connection lists only its own.
 Buckets stay keyed on the name alone (bucket names are global). Two name-keyed side tables are deliberately shared
 across accounts: the log group ingest history and baselines (keyed by group name) and Jev's log-group attribution
 cache; a colliding group name shares those with its namesake.

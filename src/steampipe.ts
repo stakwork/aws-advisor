@@ -7,11 +7,59 @@ import { getSetting, setSetting } from "./db.js";
 import { describeError, hasOpenIssues, noteSuccessForTables, tablesIn } from "./permissions.js";
 import {
   CredentialMode, CredentialPaths, CredentialSettings, CredentialSource, DEFAULT_CREDENTIAL_SOURCE, MemberConnection, NoSdkCredentials, ProviderKind, SdkCredentials,
-  credentialRemedy, describeSettings, readStaticKeys, removeCredentialFiles, sdkCredentialsFor, writeCredentialFiles,
+  credentialRemedy, describeSettings, parentConnectionName, readStaticKeys, removeCredentialFiles, sdkCredentialsFor, writeCredentialFiles,
 } from "./aws_config.js";
 
 /** Schema (= Steampipe connection name) every query is qualified with. */
 export const S = config.schema;
+
+/** The enabled member accounts (src/accounts.ts), read from the setting here so this module stays import-free of accounts.ts. */
+const memberIds = (): string[] => {
+  try { return (JSON.parse(getSetting("accounts") || "[]") as { account_id?: unknown; enabled?: boolean }[]).filter((m) => m && m.enabled !== false && /^\d{12}$/.test(String(m.account_id))).map((m) => String(m.account_id)); }
+  catch { return []; }
+};
+
+/**
+ * The connection Cost Explorer is read through: the parent's own (`<schema>_p`) once members are registered, the schema
+ * itself otherwise. The aggregator runs a query once per connection, and a member's role sees its own spend through Cost
+ * Explorer too, so a sum over `aws_cost_*` through the aggregator counts every member twice (the parent's organisation
+ * view already carries a row per linked account). Savings Plans and reservations are not routed: each account owns its own.
+ */
+export const billingSchema = (): string => (memberIds().length ? parentConnectionName(S) : S);
+
+/** Rewrites `<schema>.aws_cost_*` references to the billing connection. Pure given the two schemas; a no-op when they are the same. */
+export function routeBillingTables(sql: string, schema = S, billing = billingSchema()): string {
+  if (billing === schema) return sql;
+  return sql.replace(new RegExp(`\\b${schema.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.(aws_cost_[a-z0-9_]+)\\b`, "g"), `${billing}.$1`);
+}
+
+/**
+ * Makes the Steampipe service pick up new credential files. The connection watcher reloads a changed .spc, but the AWS
+ * config file next to it (the managed profile with the role to assume) is not watched and the plugin keeps the session
+ * it already opened, so a saved role change kept answering as the old identity until the container was restarted. A
+ * credential save therefore restarts the service when it runs next to the app (`STEAMPIPE_RELOAD=auto`: the database
+ * URL points at localhost and the `steampipe` binary is on the path; `on` forces it, `off` never). Takes a few seconds;
+ * the connection test that follows retries through it. Never throws: the outcome is returned and logged.
+ */
+export async function reloadSteampipeService(why: string): Promise<{ restarted: boolean; note: string }> {
+  const mode = config.steampipeReload;
+  const local = /@(127\.0\.0\.1|localhost|\[::1\])(:|\/)/.test(config.steampipeUrl);
+  if (mode === "off" || (mode === "auto" && !local)) return { restarted: false, note: mode === "off" ? "STEAMPIPE_RELOAD=off" : `the Steampipe service is not local (${config.steampipeUrl.replace(/\/\/.*@/, "//")}): restart it yourself so it reads the new credentials` };
+  const { execFile } = await import("node:child_process");
+  const t0 = Date.now();
+  return new Promise((resolve) => {
+    execFile(config.steampipeBin, ["service", "restart"], { timeout: 120_000, env: { ...process.env, STEAMPIPE_UPDATE_CHECK: "false" } }, (err, stdout, stderr) => {
+      if (err) {
+        const note = `steampipe service restart failed after ${Date.now() - t0} ms: ${String(stderr || err.message).trim().slice(0, 300)}`;
+        console.error(`[steampipe] ${why}: ${note}`);
+        return resolve({ restarted: false, note });
+      }
+      const note = `Steampipe service restarted in ${Math.round((Date.now() - t0) / 1000)} s so it reads the new credentials`;
+      console.log(`[steampipe] ${why}: ${note}${stdout ? ` (${String(stdout).trim().split("\n").pop()})` : ""}`);
+      resolve({ restarted: true, note });
+    });
+  });
+}
 
 const pool = new pg.Pool({ connectionString: config.steampipeUrl, max: 4, statement_timeout: 600_000 });
 // An idle connection the Steampipe service drops (a plugin panic, a restart) surfaces here; without a listener
@@ -19,7 +67,7 @@ const pool = new pg.Pool({ connectionString: config.steampipeUrl, max: 4, statem
 pool.on("error", (e) => console.error(`[steampipe] connection dropped: ${e.message}`));
 
 export async function query<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
-  const res = await pool.query(sql, params);
+  const res = await pool.query(routeBillingTables(sql), params);
   if (hasOpenIssues()) noteSuccessForTables(tablesIn(sql), "query");
     return res.rows as T[];
 }
@@ -39,7 +87,7 @@ export async function queryReadOnly<T = any>(sql: string, opts: { timeoutMs: num
     // the transaction sees only this app's connection: an unqualified aws_* name can never resolve to another one
     await client.query(`set local search_path = "${S}", pg_catalog`);
     await client.query(`set local statement_timeout = ${Math.max(1000, Math.floor(opts.timeoutMs))}`);
-    const res = await client.query(sql);
+    const res = await client.query(routeBillingTables(sql));
     await client.query("rollback");
     if (hasOpenIssues()) noteSuccessForTables(tablesIn(sql), "query");
     return { rows: res.rows as T[], columns: res.fields.map((f) => f.name) };
