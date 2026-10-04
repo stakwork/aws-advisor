@@ -216,7 +216,7 @@ export async function refreshS3Usage(bucket: string, onLog: (l: string) => void 
   const proposal = proposeLifecycle(u);
   onLog(`${bucket}: ${u.sample.objects} objects sampled${u.sample.truncated ? " (truncated)" : ""}, ${gb(u.standard_by_age["365+"].bytes)} GB Standard older than a year, ${u.multipart.uploads} multipart, ${u.requests ? `${u.requests.get_per_day} GET/day` : "no request metrics"}: ${proposal.rules.length} rule(s), ≈ ${proposal.est_usd_month} USD/month`);
   if (proposal.rules.length) {
-    const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+    const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const rec: RecInput = {
       rule: "review_s3_lifecycle", title: `Lifecycle rules for ${bucket}: ${proposal.rules.map((r) => r.id.replace(/^aws-advisor-/, "")).join(", ")}`, resource: bucket, resourceName: bucket, actionType: "other",
       estMonthlySaving: proposal.est_usd_month, tier: "approve", confidence: u.requests ? 0.8 : 0.6,

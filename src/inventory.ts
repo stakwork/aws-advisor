@@ -1,14 +1,17 @@
 import { db, getSetting, setSetting } from "./db.js";
-import { S, query } from "./steampipe.js";
+import { clusterSummary } from "./cluster_inventory.js";
+import { S, credentialsMeta, query } from "./steampipe.js";
 import { ProbeSummary, instanceMetrics, latestProbeSummaries, summarizeProbe } from "./ssm.js";
 import { PriceWant, ec2OperatingSystem, elasticachePricingEngine, ensurePrices, priceKey, rdsPricingEngine } from "./prices.js";
 import { describeError, tablesIn } from "./permissions.js";
 import { poolOf } from "./pools.js";
 import { lambdaSummary, refreshLambdaInventory } from "./lambda_inventory.js";
+import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 import { ebsSummary, refreshEbsInventory } from "./ebs_inventory.js";
 import { s3Summary } from "./s3_inventory.js";
 import { refreshRoute53Inventory, route53Summary } from "./route53_inventory.js";
 import { elbSummary, refreshElbInventory } from "./elb_inventory.js";
+import { refreshIamInventory } from "./iam_inventory.js";
 
 /**
  * Inventory: a snapshot of EC2 instances (with their SSM status, EBS, CPU, latest probe and list price),
@@ -23,6 +26,7 @@ export interface RefreshResult {
   ec2: number;
   rds: number;
   elasticache: number; lambda: number; ebs: number; elb: number; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
+  clusters?: { total: number; eks: number; ecs: number; readable: number; nodes: number; workloads: number };
   prices_fetched: number;
   errors: string[];
   took_ms: number;
@@ -93,7 +97,7 @@ const RDS_SQL = `
   select db_instance_identifier, account_id, arn, class, engine, engine_version, multi_az, storage_type, allocated_storage, max_allocated_storage,
          iops, storage_throughput, status, region, availability_zone, create_time, db_cluster_identifier, license_model,
          endpoint_address, endpoint_port, publicly_accessible, storage_encrypted, backup_retention_period, deletion_protection,
-         performance_insights_enabled, vpc_id, read_replica_source_db_instance_identifier, tags
+         performance_insights_enabled, vpc_id, read_replica_source_db_instance_identifier, vpc_security_groups, tags
   from ${S}.aws_rds_db_instance`;
 
 // RDS connections and I/O per day (30 days), from the daily metric tables; freeable memory through the generic
@@ -124,7 +128,7 @@ const RDS_CPU_SQL = `
 const ELASTICACHE_SQL = `
   select cache_cluster_id, account_id, arn, cache_node_type, engine, engine_version, num_cache_nodes, cache_cluster_status, replication_group_id,
          preferred_availability_zone, region, cache_cluster_create_time, cache_subnet_group_name, transit_encryption_enabled,
-         at_rest_encryption_enabled, auto_minor_version_upgrade, snapshot_retention_limit, tags
+         at_rest_encryption_enabled, auto_minor_version_upgrade, snapshot_retention_limit, security_groups, tags
   from ${S}.aws_elasticache_cluster`;
 
 // ---- SQLite statements ------------------------------------------------------------------------------
@@ -140,7 +144,24 @@ const upsertEc2 = db.prepare(`
     cpu_days = excluded.cpu_days, probe_mem_pct = excluded.probe_mem_pct, probe_at = excluded.probe_at, monthly_usd = excluded.monthly_usd,
     open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0, snapshot = excluded.snapshot,
     pool_kind = excluded.pool_kind, pool = excluded.pool`);
-const goneEc2 = db.prepare("update inventory_ec2 set gone = 1 where last_seen <> ?");
+/**
+ * Marks the rows this refresh did not return as gone, but only in the accounts it returned rows for. An account that
+ * answered with nothing is one the credentials could not see (a parent switch, a member not registered yet, a role
+ * that stopped resolving), not an emptied account: its rows keep their state. Rows without an account id are the
+ * primary's and follow it. Exported for the tests.
+ */
+export function markGone(table: "inventory_ec2" | "inventory_rds" | "inventory_elasticache", now: string, rows: { account_id?: unknown }[], onLog: (l: string) => void = () => {}, primary: string | null = primaryAccountIdOf()): number {
+  const accounts = new Set(rows.map((r) => (r.account_id ? String(r.account_id) : "")));
+  if (primary && accounts.has(primary)) accounts.add("");
+  const list = [...accounts];
+  const kept = list.length
+    ? (db.prepare(`select count(*) as n from ${table} where gone = 0 and last_seen <> ? and coalesce(account_id, '') not in (${list.map(() => "?").join(",")})`).get(now, ...list) as { n: number }).n
+    : (db.prepare(`select count(*) as n from ${table} where gone = 0 and last_seen <> ?`).get(now) as { n: number }).n;
+  if (kept) onLog(`${table}: ${kept} row${kept === 1 ? "" : "s"} in accounts this refresh could not see, kept as they were`);
+  if (!list.length) return 0;
+  return db.prepare(`update ${table} set gone = 1 where last_seen <> ? and coalesce(account_id, '') in (${list.map(() => "?").join(",")})`).run(now, ...list).changes;
+}
+const primaryAccountIdOf = (): string | null => { try { return credentialsMeta()?.accountId ?? null; } catch { return null; } };
 // Member accounts (src/accounts.ts): which account a row came from, written next to the upsert so the prepared statements above stay as they are.
 const setAccount = { ec2: db.prepare("update inventory_ec2 set account_id = ? where instance_id = ?"), rds: db.prepare("update inventory_rds set account_id = ? where db_instance_identifier = ?"), elasticache: db.prepare("update inventory_elasticache set account_id = ? where cache_cluster_id = ?") };
 
@@ -153,7 +174,6 @@ const upsertRds = db.prepare(`
     multi_az = excluded.multi_az, storage_type = excluded.storage_type, storage_gb = excluded.storage_gb, status = excluded.status, region = excluded.region,
     created = excluded.created, cluster = excluded.cluster, cpu_30d = excluded.cpu_30d, cpu_days = excluded.cpu_days, monthly_usd = excluded.monthly_usd,
     open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0, snapshot = excluded.snapshot`);
-const goneRds = db.prepare("update inventory_rds set gone = 1 where last_seen <> ?");
 
 const upsertElasticache = db.prepare(`
   insert into inventory_elasticache(cache_cluster_id, node_type, engine, engine_version, num_nodes, status, region, created, replication_group,
@@ -163,11 +183,10 @@ const upsertElasticache = db.prepare(`
   on conflict(cache_cluster_id) do update set node_type = excluded.node_type, engine = excluded.engine, engine_version = excluded.engine_version,
     num_nodes = excluded.num_nodes, status = excluded.status, region = excluded.region, created = excluded.created, replication_group = excluded.replication_group,
     monthly_usd = excluded.monthly_usd, open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0, snapshot = excluded.snapshot`);
-const goneElasticache = db.prepare("update inventory_elasticache set gone = 1 where last_seen <> ?");
 
 /** Alarm findings of the latest completed run and open recommendations, counted per resource id (exact or contained, as the MCP tools match). */
 function resourceCounters() {
-  const latest = db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined;
+  const latest = db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined;
   const findings = latest ? (db.prepare("select resource from findings where run_id = ? and status = 'alarm' and resource is not null").all(latest.id) as { resource: string }[]).map((r) => r.resource) : [];
   const recs = (db.prepare("select resource from recommendations where status = 'open' and resource is not null").all() as { resource: string }[]).map((r) => r.resource);
   const count = (list: string[], id: string) => list.filter((r) => r === id || r.includes(id)).length;
@@ -226,6 +245,12 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
       if (sgRules && vpcRows && sgRows) syncSecurityGroupRecommendations();
     } catch (e: any) { errors.push(`security groups: ${String(e?.message || e).slice(0, 200)}`); }
   }
+  // the network objects behind reachability (src/network_inventory.ts): subnets, route tables, gateways, EIPs, interfaces, egress rules
+  try { const { refreshNetworkInventory } = await import("./network_inventory.js"); await refreshNetworkInventory(attempt); }
+  catch (e: any) { errors.push(`network inventory: ${String(e?.message || e).slice(0, 200)}`); }
+  // the clusters and the workloads inside them (src/cluster_inventory.ts): EKS through the cluster API, ECS through Steampipe
+  try { const { refreshClusters } = await import("./cluster_inventory.js"); const c = await refreshClusters(attempt); if (c.errors.length) errors.push(`clusters: ${c.errors.join("; ").slice(0, 300)}`); }
+  catch (e: any) { errors.push(`clusters: ${String(e?.message || e).slice(0, 200)}`); }
   // per-resource CloudWatch statistics the daily tables do not cover (a handful of resources, one call each)
   const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
   const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };
@@ -313,7 +338,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
         if (r.account_id) setAccount.ec2.run(String(r.account_id), r.instance_id);
         ec2++;
       }
-      goneEc2.run(now);
+      markGone("inventory_ec2", now, ec2Rows, (l) => console.log(`[inventory] ${l}`));
     }
     if (rdsRows) {
       for (const r of rdsRows) {
@@ -326,7 +351,8 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
             multi_az: r.multi_az, created: iso(r.create_time), cluster: r.db_cluster_identifier, license_model: r.license_model, read_replica_source: r.read_replica_source_db_instance_identifier,
             deletion_protection: r.deletion_protection, backup_retention_days: num(r.backup_retention_period), performance_insights: r.performance_insights_enabled },
           storage: { storage_type: r.storage_type, allocated_gb: num(r.allocated_storage), max_allocated_gb: num(r.max_allocated_storage), iops: num(r.iops), throughput: num(r.storage_throughput), encrypted: r.storage_encrypted },
-          network: { endpoint: r.endpoint_address, port: num(r.endpoint_port), publicly_accessible: r.publicly_accessible, vpc_id: r.vpc_id },
+          network: { endpoint: r.endpoint_address, port: num(r.endpoint_port), publicly_accessible: r.publicly_accessible, vpc_id: r.vpc_id,
+            security_groups: (Array.isArray(r.vpc_security_groups) ? r.vpc_security_groups : []).map((g: any) => String(g?.VpcSecurityGroupId ?? g?.vpc_security_group_id ?? g ?? "")).filter((g: string) => /^sg-/.test(g)) },
           tags: r.tags || {},
           utilisation: { cpu_30d_avg_max: num(cpu?.avg_max), cpu_30d_avg: num(cpu?.avg), cpu_days: num(cpu?.days) ?? 0,
             connections_avg: num(rdsConnById.get(id)?.avg), connections_max: num(rdsConnById.get(id)?.max),
@@ -343,7 +369,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
         if (r.account_id) setAccount.rds.run(String(r.account_id), id);
         rds++;
       }
-      goneRds.run(now);
+      markGone("inventory_rds", now, rdsRows, (l) => console.log(`[inventory] ${l}`));
     }
     if (cacheRows) {
       for (const r of cacheRows) {
@@ -359,6 +385,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
             replication_group: r.replication_group_id, region: r.region, availability_zone: r.preferred_availability_zone, created: iso(r.cache_cluster_create_time),
             subnet_group: r.cache_subnet_group_name, transit_encryption: r.transit_encryption_enabled, at_rest_encryption: r.at_rest_encryption_enabled,
             auto_minor_version_upgrade: r.auto_minor_version_upgrade, snapshot_retention_days: num(r.snapshot_retention_limit) },
+          network: { security_groups: (Array.isArray(r.security_groups) ? r.security_groups : []).map((g: any) => String(g?.SecurityGroupId ?? g?.security_group_id ?? g ?? "")).filter((g: string) => /^sg-/.test(g)) },
           tags: r.tags || {},
           price: price ? { hourly_per_node: price.hourly, monthly_per_node: price.monthly, monthly: monthly, pricing_engine: want!.engine, fetched_at: price.fetched_at } : null,
         };
@@ -370,7 +397,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
         if (r.account_id) setAccount.elasticache.run(String(r.account_id), id);
         elasticache++;
       }
-      goneElasticache.run(now);
+      markGone("inventory_elasticache", now, cacheRows, (l) => console.log(`[inventory] ${l}`));
       // memory pressure on a cache is an alert: at 90 % of DatabaseMemoryUsagePercentage keys start being evicted
       const openCache = db.prepare("select id from alerts where kind = 'cache_memory_high' and resource = ? and acknowledged = 0 limit 1");
       const insCache = db.prepare("insert into alerts(kind, resource, message, details) values ('cache_memory_high', ?, ?, ?)");
@@ -398,6 +425,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   const ebsVolumes = await refreshEbsInventory((m) => errors.push(m));
   // after EC2, so instance and IP targets resolve against the rows just written
   const elb = await refreshElbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
+  await refreshIamInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   // last, so the DNS links read the EC2, RDS, S3 and Lambda rows just written
   let route53: RefreshResult["route53"] = null;
   if (opts.dns) { const r53 = await refreshRoute53Inventory(); errors.push(...r53.errors); route53 = { zones: r53.zones, records: r53.records, linked: r53.linked, unmatched: r53.unmatched }; }
@@ -411,7 +439,7 @@ export const inventoryRefreshedAt = () => getSetting("inventory_refreshed_at");
 
 export type SsmFilter = "online" | "lost" | "unmanaged" | "managed";
 
-export interface Ec2Filter { state?: string; ssm?: string; q?: string; sort?: string; gone?: boolean; limit?: number }
+export interface Ec2Filter { state?: string; ssm?: string; q?: string; sort?: string; gone?: boolean; limit?: number; scope?: AccountScope | null }
 
 const EC2_SORTS = ["name", "instance_id", "instance_type", "state", "ssm_status", "pool_kind", "cpu_30d", "probe_mem_pct", "ebs_gb", "monthly_usd", "launch_time", "open_recs", "findings", "last_seen", "first_seen", "region"];
 const RDS_SORTS = ["db_instance_identifier", "class", "engine", "status", "storage_gb", "cpu_30d", "monthly_usd", "created", "open_recs", "findings", "last_seen"];
@@ -454,6 +482,7 @@ export function poolSummary() {
 
 export function listEc2(f: Ec2Filter = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("gone = 0");
   if (f.state) { where.push("state = ?"); params.push(f.state); }
   if (f.ssm && f.ssm in SSM_WHERE) where.push(SSM_WHERE[f.ssm as SsmFilter]);
@@ -469,7 +498,7 @@ const safeJson = (s: unknown) => { if (typeof s !== "string") return s; try { re
 export function ec2Detail(instanceId: string) {
   const row = db.prepare("select * from inventory_ec2 where instance_id = ?").get(instanceId) as Record<string, unknown> | undefined;
   if (!row) return null;
-  const latest = db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined;
+  const latest = db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined;
   const findings = latest
     ? db.prepare("select id, run_id, source, benchmark, control_id, control_title, status, resource, reason, region from findings where run_id = ? and (resource = ? or resource like ?) order by control_id").all(latest.id, instanceId, `%${instanceId}%`)
     : [];
@@ -512,10 +541,11 @@ export function patchEc2State(instanceId: string, state: string, publicIp?: stri
   return true;
 }
 
-export interface SimpleFilter { q?: string; sort?: string; gone?: boolean }
+export interface SimpleFilter { q?: string; sort?: string; gone?: boolean; scope?: AccountScope | null }
 
 export function listRds(f: SimpleFilter = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("gone = 0");
   if (f.q) { where.push("(db_instance_identifier like ? or class like ? or engine like ? or cluster like ?)"); params.push(...Array(4).fill(`%${f.q}%`)); }
   const order = orderBy(f.sort, RDS_SORTS, "db_instance_identifier", "db_instance_identifier");
@@ -525,6 +555,7 @@ export function listRds(f: SimpleFilter = {}) {
 
 export function listElasticache(f: SimpleFilter = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("gone = 0");
   if (f.q) { where.push("(cache_cluster_id like ? or node_type like ? or engine like ? or replication_group like ?)"); params.push(...Array(4).fill(`%${f.q}%`)); }
   const order = orderBy(f.sort, CACHE_SORTS, "cache_cluster_id", "cache_cluster_id");
@@ -533,8 +564,8 @@ export function listElasticache(f: SimpleFilter = {}) {
 }
 
 /** Counts for the tiles: running/stopped, SSM coverage of running instances, list price of what runs, EBS GB; RDS and ElastiCache alongside. */
-export function inventorySummary() {
-  const ec2 = db.prepare(`
+export function inventorySummary(scope?: AccountScope | null) {
+  const ec2 = scopedStmt(scope, `
     select count(*) as total,
            coalesce(sum(state = 'running'), 0) as running,
            coalesce(sum(state = 'stopped'), 0) as stopped,
@@ -547,18 +578,18 @@ export function inventorySummary() {
            coalesce(sum(open_recs), 0) as open_recs,
            coalesce(sum(findings), 0) as findings
     from inventory_ec2 where gone = 0`).get() as Record<string, number>;
-  const ec2Gone = (db.prepare("select count(*) as n from inventory_ec2 where gone = 1").get() as { n: number }).n;
-  const rds = db.prepare(`
+  const ec2Gone = (scopedStmt(scope, "select count(*) as n from inventory_ec2 where gone = 1").get() as { n: number }).n;
+  const rds = scopedStmt(scope, `
     select count(*) as total, coalesce(sum(status = 'available'), 0) as available, coalesce(sum(monthly_usd), 0) as monthly_usd,
            coalesce(sum(monthly_usd is null), 0) as unpriced, coalesce(sum(storage_gb), 0) as storage_gb,
            coalesce(sum(open_recs), 0) as open_recs, coalesce(sum(findings), 0) as findings
     from inventory_rds where gone = 0`).get() as Record<string, number>;
-  const rdsGone = (db.prepare("select count(*) as n from inventory_rds where gone = 1").get() as { n: number }).n;
-  const cache = db.prepare(`
+  const rdsGone = (scopedStmt(scope, "select count(*) as n from inventory_rds where gone = 1").get() as { n: number }).n;
+  const cache = scopedStmt(scope, `
     select count(*) as total, coalesce(sum(num_nodes), 0) as nodes, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(monthly_usd is null), 0) as unpriced,
            coalesce(sum(open_recs), 0) as open_recs, coalesce(sum(findings), 0) as findings
     from inventory_elasticache where gone = 0`).get() as Record<string, number>;
-  const cacheGone = (db.prepare("select count(*) as n from inventory_elasticache where gone = 1").get() as { n: number }).n;
+  const cacheGone = (scopedStmt(scope, "select count(*) as n from inventory_elasticache where gone = 1").get() as { n: number }).n;
   const r1 = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 100) / 100 : v]));
-  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(), ebs: ebsSummary(), elb: elbSummary(), s3: s3Summary(), route53: route53Summary() };
+  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(scope), ebs: ebsSummary(scope), elb: elbSummary(scope), s3: s3Summary(scope), route53: route53Summary(scope), clusters: (() => { try { return clusterSummary(scope); } catch { return undefined; } })() };
 }

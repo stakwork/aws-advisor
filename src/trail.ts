@@ -5,6 +5,10 @@
  * issue (Settings > Permissions) and the brief says so. The advisor's own SSM probes are filtered out.
  */
 import { db } from "./db.js";
+import { accountWhere, type AccountScope } from "./scope.js";
+import { credentialsMeta } from "./steampipe.js";
+import { accountCredentials, listMembers } from "./accounts.js";
+import { addColumn } from "./db.js";
 import { sdkCredentials } from "./steampipe.js";
 import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
 import { config } from "./config.js";
@@ -43,14 +47,19 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
   if (!gate.ok) { out.errors.push(gate.error || "credentials not working"); out.took_ms = Date.now() - t0; return out; }
   // The SDK, not Steampipe: aws_cloudtrail_lookup_event does not push the time window down to LookupEvents, so
   // even a one-hour query pages through the whole 90-day trail at the API's 2 requests per second.
-  let creds: ReturnType<typeof sdkCredentials>;
-  try { creds = sdkCredentials(); } catch (e: any) { out.errors.push(String(e?.message || e)); out.took_ms = Date.now() - t0; return out; }
-  const regions = (db.prepare("select distinct region from inventory_ec2 where gone = 0 and region is not null").all() as { region: string }[]).map((r) => r.region);
-  if (!regions.length) regions.push(creds.region || "us-east-1");
-  const up = db.prepare(`insert into trail_events(event_id, event_time, event_name, event_source, username, resource_name, resource_type, region, error_code, fetched_at, noise)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?) on conflict(event_id) do nothing`);
+  const up = db.prepare(`insert into trail_events(event_id, event_time, event_name, event_source, username, resource_name, resource_type, region, error_code, fetched_at, noise, account_id)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?) on conflict(event_id) do nothing`);
   const StartTime = new Date(Date.now() - Math.max(1, Math.min(168, hours)) * 3600_000);
   const own = config.advisorAwsProfile.replace(/-managed$/, "");
+  // every account the advisor reaches: the parent with its own credentials, each enabled member through its read role; the trail is per account
+  const targets: { account_id: string | null; creds: ReturnType<typeof sdkCredentials> }[] = [];
+  try { const base = sdkCredentials(); targets.push({ account_id: credentialsMeta()?.accountId ?? null, creds: base }); } catch (e: any) { out.errors.push(String(e?.message || e)); out.took_ms = Date.now() - t0; return out; }
+  for (const m of listMembers().filter((x) => x.enabled)) { try { const c = accountCredentials(m.account_id); targets.push({ account_id: m.account_id, creds: { provider: c.provider, region: c.region } as ReturnType<typeof sdkCredentials> }); } catch (e: any) { out.errors.push(`${m.account_id}: ${String(e?.message || e).slice(0, 120)}`); } }
+  for (const target of targets) {
+  const creds = target.creds;
+  const regions: string[] = [];
+  for (const r of db.prepare("select distinct region from inventory_ec2 where gone = 0 and region is not null and coalesce(account_id, '') in (?, '')").all(target.account_id ?? "") as { region: string }[]) regions.push(r.region);
+  if (!regions.length) regions.push(creds.region || "us-east-1");
   for (const region of regions) {
     const client = new CloudTrailClient({ region, credentials: creds.provider });
     try {
@@ -63,15 +72,16 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
           if (OWN_EVENTS.has(ev.EventName) && (!ev.Username || ev.Username.includes(own))) continue;
           let detail: any = {}; try { detail = ev.CloudTrailEvent ? JSON.parse(ev.CloudTrailEvent) : {}; } catch { /* keep going */ }
           const r0 = ev.Resources?.[0];
-          const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0);
+          const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0, target.account_id);
           if (res2.changes) out.stored++;
         }
         if (pages === 0) noteSuccess(["cloudtrail:LookupEvents"], `cloudtrail ${region}`);
         NextToken = res.NextToken; pages++;
         if (pages >= MAX_PAGES) { out.errors.push(`${region}: stopped after ${MAX_PAGES} pages (${out.events} events); narrow the window`); break; }
       } while (NextToken);
-    } catch (e) { out.errors.push(describeError(e, `cloudtrail changes ${region} (cloudtrail:LookupEvents)`)); }
+    } catch (e) { out.errors.push(describeError(e, `cloudtrail changes ${target.account_id ?? "parent"} ${region} (cloudtrail:LookupEvents)`)); }
     finally { client.destroy(); }
+  }
   }
   db.prepare("delete from trail_events where event_time < datetime('now', '-90 days')").run();
   out.took_ms = Date.now() - t0;
@@ -82,10 +92,12 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
 export interface TrailSummary { since: string; events: number; noise: number; by_action: { event_name: string; event_source: string; username: string | null; n: number; resources: string[]; errors: number }[]; by_user: { username: string | null; n: number }[]; last_fetch: string | null }
 
 /** The last `hours` of stored write events, grouped by action and user, with sample resources. */
-export function trailSummary(hours = 24): TrailSummary {
+addColumn("trail_events", "account_id", "text");
+export function trailSummary(hours = 24, scope?: AccountScope | null): TrailSummary {
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
-  const rows = db.prepare("select event_name, event_source, username, resource_name, error_code from trail_events where event_time >= ? and noise = 0 order by event_time desc").all(since) as any[];
-  const noise = (db.prepare("select count(*) as n from trail_events where event_time >= ? and noise = 1").get(since) as { n: number }).n;
+  const a = accountWhere(scope);
+  const rows = db.prepare(`select event_name, event_source, username, resource_name, error_code from trail_events where event_time >= ? and noise = 0 and ${a.sql} order by event_time desc`).all(since, ...a.params) as any[];
+  const noise = (db.prepare(`select count(*) as n from trail_events where event_time >= ? and noise = 1 and ${a.sql}`).get(since, ...a.params) as { n: number }).n;
   const groups = new Map<string, { event_name: string; event_source: string; username: string | null; n: number; resources: Set<string>; errors: number }>();
   for (const r of rows) {
     const k = `${r.event_source}|${r.event_name}|${r.username ?? ""}`;

@@ -99,7 +99,7 @@ export default function Actions() {
         </div>
         <div className="mt-2 text-xs text-zinc-500">
           {mode === "off" ? "Off: nothing is planned or applied. " : mode === "dry_run" ? "Dry run: every pass records what it would change; nothing is touched unless you press Apply on a row. " : "Apply: the pass makes the changes under the actuator role, up to the per-pass cap. "}
-          Settings for mode, role, floor and cap are under <NavLink to="/settings" className="text-sky-300">Settings › Auto-actions</NavLink>. The actuator role is the only identity that changes AWS; tag a resource <span className="font-mono">advisor:hands-off</span> to fence it off.
+          Settings for mode, role, floor and cap are under <NavLink to="/settings?tab=auto-actions" className="text-sky-300">Settings › Auto-actions</NavLink>. The actuator role is the only identity that changes AWS; tag a resource <span className="font-mono">advisor:hands-off</span> to fence it off.
           <button className="ml-2 text-sky-300" onClick={() => setShowPolicy((s) => !s)}>{showPolicy ? "hide" : "show"} the actuator policy</button>
         </div>
         {showPolicy && status && (

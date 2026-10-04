@@ -55,7 +55,7 @@ export function sampleFromProbe(collectedAt: string, d: any): HostSample {
 const openKinds = db.prepare("select id, kind from alerts where kind in ('memory_high', 'memory_full', 'swap_in_use', 'load_high') and resource = ? and acknowledged = 0");
 const insert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
 const ackKind = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where resource = ? and kind = ? and acknowledged = 0");
-const prevProbe = db.prepare("select collected_at, json from instance_metrics where instance_id = ? and id < ? order by id desc limit 1");
+const prevProbe = db.prepare("select collected_at, json from instance_metrics where instance_id = ? and id < ? and coalesce(kind, 'all') in ('host', 'all') order by id desc limit 1");
 
 /** Applies the verdicts for one probe (called right after it is stored). Returns the alerts raised. */
 export function checkHostLevels(instanceId: string, name: string | null, probeRowId: number, collectedAt: string, data: any): number {
@@ -74,7 +74,7 @@ export function checkHostLevels(instanceId: string, name: string | null, probeRo
 /** Judges the latest probe of every running instance against its previous one (startup, after a probe pass). */
 export function checkAllHostLevels(): { instances: number; raised: number } {
   const rows = db.prepare(`select m.id, m.instance_id, m.collected_at, m.json, i.name from instance_metrics m join inventory_ec2 i on i.instance_id = m.instance_id
-    where m.id in (select max(id) from instance_metrics group by instance_id) and i.gone = 0 and i.state = 'running'`).all() as { id: number; instance_id: string; collected_at: string; json: string; name: string | null }[];
+    where m.id in (select max(id) from instance_metrics where coalesce(kind, 'all') in ('host', 'all') group by instance_id) and i.gone = 0 and i.state = 'running'`).all() as { id: number; instance_id: string; collected_at: string; json: string; name: string | null }[];
   let raised = 0;
   for (const r of rows) { let d: any; try { d = JSON.parse(r.json); } catch { continue; } raised += checkHostLevels(r.instance_id, r.name, r.id, r.collected_at, d); }
   return { instances: rows.length, raised };

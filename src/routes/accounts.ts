@@ -7,6 +7,8 @@ import { listAccounts, removeAccount, saveAccount, testAccount, validateAccount 
 import { credentialsMeta, hasConnectionFile, sdkIdentity } from "../steampipe.js";
 import { actuatorTrustPolicy } from "../permissions.js";
 import { spendByAccount } from "../spend.js";
+import { allAccounts, providers } from "../adapters/index.js";
+import { accountsOverview , generalOverview } from "../accounts_overview.js";
 
 export const accounts = Router();
 
@@ -14,9 +16,35 @@ export const accounts = Router();
 accounts.get("/accounts", async (_req, res) => {
   const parent = credentialsMeta();
   const identity = hasConnectionFile() ? await sdkIdentity(10_000) : { ok: false as const, error: "no credentials configured" };
-  const readArn = identity.ok ? identity.arn : "<the parent's read role or user ARN>";
-  res.json({ accounts: listAccounts(), parent_identity: identity, parent_account_id: parent?.accountId || null, trust_policy: actuatorTrustPolicy(readArn) });
+  // what a child's trust policy must name: the IAM role (or user), never the STS session ARN the credentials show as
+  const readArn = identity.ok ? principalArnOf(identity.arn) : "<the parent's read role or user ARN>";
+  res.json({ accounts: listAccounts(), records: await allAccounts(), parent_identity: identity.ok ? { ...identity, principal_arn: readArn } : identity, parent_account_id: parent?.accountId || null, trust_policy: actuatorTrustPolicy(readArn) });
 });
+
+/** The IAM principal behind a caller ARN: an assumed-role session (arn:aws:sts::A:assumed-role/R/session) is the role arn:aws:iam::A:role/R; a user or role ARN is itself. */
+export function principalArnOf(arn: string): string {
+  const m = /^arn:aws:sts::(\d{12}):assumed-role\/([^/]+)\/.+$/.exec(arn);
+  return m ? `arn:aws:iam::${m[1]}:role/${m[2]}` : arn;
+}
+
+/** Every provider the advisor knows: the adapters (with whether one is configured, their sections and capabilities) and the stubs with what they will need. */
+accounts.get("/providers", (_req, res) => res.json({ providers: providers() }));
+
+/** The general view: every account with its resources, cost, findings, security, vulnerabilities, recommendations, alerts and probe coverage. */
+accounts.get("/accounts/overview", async (_req, res) => { try { res.json({ accounts: await accountsOverview() }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+/** The organisation's accounts as the parent sees them (organizations:ListAccounts, management account only), with whether each is the parent, a registered member, or neither. */
+accounts.get("/accounts/organization", async (_req, res) => {
+  const { S, query, credentialsMeta } = await import("../steampipe.js");
+  const parent = credentialsMeta()?.accountId ?? null; const members = new Set(listAccounts().filter((a) => !a.is_parent).map((a) => a.account_id));
+  try {
+    const rows = await query<any>(`select id, name, email, status, joined_timestamp, joined_method from ${S}.aws_organizations_account order by name`);
+    res.json({ ok: true, parent, accounts: rows.map((r) => ({ id: String(r.id), name: r.name ?? null, email_domain: typeof r.email === "string" && r.email.includes("@") ? r.email.split("@")[1] : null, status: r.status ?? null, joined_at: r.joined_timestamp ? String(r.joined_timestamp) : null, joined_method: r.joined_method ?? null, role: String(r.id) === parent ? "parent" : members.has(String(r.id)) ? "member" : "not registered" })) });
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    res.json({ ok: false, parent, accounts: [], error: /AccessDenied|not authorized/i.test(msg) ? "the parent's identity may not list the organisation (organizations:ListAccounts is in the recommended policy; rerun the parent's setup script, or the credentials are not the management account)" : msg.slice(0, 300) });
+  }
+});
+accounts.get("/accounts/general", async (_req, res) => { try { res.json(await generalOverview()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
 /** Body: { account_id, name?, role_arn, act_role_arn?, regions?, enabled? }. Saves, rewrites the connection files, tests the read role. */
 accounts.post("/accounts", async (req, res) => {

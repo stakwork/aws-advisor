@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useScopeInfo } from "../scope";
 import { api, usd, when } from "../api";
 import { Badge, Button, Card, Code, CopyButton, Empty, Pager, Td, Th } from "../components/ui";
 
@@ -13,7 +14,9 @@ type GraphInfo = { configured: boolean; uri: string | null; connected: boolean; 
 const CYPHER_EXAMPLES: { title: string; cypher: string }[] = [
   { title: "One resource with everything about it", cypher: "MATCH (r:AdvisorResource {id: 'i-0123456789abcdef0'})\nOPTIONAL MATCH (r)-[e]-(x)\nOPTIONAL MATCH (x)-[d:DECIDED_AS]->(c:Concept)\nRETURN r, e, x, d, c" },
   { title: "Every recommendation the team decided, with its Concept", cypher: "MATCH (rec:AdvisorRecommendation)-[:DECIDED_AS]->(c:Concept)\nOPTIONAL MATCH (rec)-[:TARGETS]->(res)\nRETURN rec.status AS status, rec.title AS title, res.id AS resource, c.name AS concept, c.description AS decision\nORDER BY rec.decided_at DESC" },
-  { title: "Resources by role, with their price", cypher: "MATCH (r:AdvisorResource)-[:HAS_ROLE]->(role:AdvisorRole)\nWHERE r.gone = false\nRETURN role.name AS role, count(r) AS resources, round(sum(coalesce(r.monthly_usd, 0))) AS monthly_usd, collect(r.name)[..5] AS examples\nORDER BY monthly_usd DESC" },
+  { title: "Resources by archetype, with their price", cypher: "MATCH (r:AdvisorResource)-[:HAS_ROLE]->(a:KnArchetype)\nWHERE r.gone = false\nRETURN a.name AS archetype, count(r) AS resources, round(sum(coalesce(r.monthly_usd, 0))) AS monthly_usd, collect(r.name)[..5] AS examples\nORDER BY monthly_usd DESC" },
+  { title: "Ports open to the internet and the program behind them", cypher: "MATCH (r:AdvisorCompute)-[:EXPOSES]->(e:AdvisorEndpoint {kind: 'port', exposure: 'internet'})\nWHERE e.gone = false\nOPTIONAL MATCH (app:AdvisorApp)-[:SERVES]->(e)\nRETURN r.name AS instance, e.port AS port, e.protocol AS protocol, app.name AS program, e.container AS container\nORDER BY e.port" },
+  { title: "Boxes the advisor cannot look inside", cypher: "MATCH (r:AdvisorCompute)\nWHERE r.gone = false AND r.state = 'running' AND NOT (r)-[:OBSERVED_BY]->(:AdvisorTelemetry {kind: 'probe'})\nRETURN r.id AS instance, r.name AS name, r.type AS type, r.monthly_usd AS monthly_usd\nORDER BY monthly_usd DESC" },
 ];
 
 /** The Neo4j mirror: reachable or not, what is in it, resync, and Cypher to copy. Shown even without repo2graph. */
@@ -137,6 +140,7 @@ function SystemsCard() {
   const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   return (
     <Card title={<span>Systems · the schematic <span className="font-normal text-zinc-500">· {rows.length} systems, their types at list price, what they move; click one</span></span>}>
+      {rows.length === 0 && <div className="mb-2 text-sm text-zinc-500">No systems for the account you are looking at: the schematic is built for AWS accounts today; a Vercel team's projects and stores are in the inventory and the graph.</div>}
       {rows.length === 0 ? <div className="text-sm text-zinc-500">Nothing yet: Resync now builds it from the inventory, the price cache, the baselines and the log groups.</div> : (<>
         <table className="w-full border-collapse text-sm">
           <thead><tr><Th>System</Th><Th>Kind</Th><Th>Archetype</Th><Th className="text-right">Members</Th><Th className="text-right">At list / mo</Th><Th className="text-right">Transfer / mo</Th><Th className="text-right">Logs / mo</Th></tr></thead>
@@ -173,19 +177,21 @@ function SystemsCard() {
 }
 
 /** Log groups and who writes them: the attribution as the graph holds it, the unattributed ones first so they can be named or tagged. */
+const rowsAll = (d: any): any[] => d?.groups || [];
 function LogGroupsCard() {
   const [d, setD] = useState<any>(null);
   const [showAll, setShowAll] = useState(false);
   const [page, setPage] = useState(1);
   useEffect(() => { api("/graph/logs").then(setD).catch((e) => setD({ error: e.message })); }, []);
   if (!d) return null;
-  if (d.error) return <Card title="Log groups · who writes them"><div className="text-sm text-zinc-500">{d.error}</div></Card>;
+  if (d.error) return <Card title="Logs · where they go, who writes them"><div className="text-sm text-zinc-500">{d.error}</div></Card>;
+  const drains = rowsAll(d).some((g: any) => g.native_type === "log_drain");
   const rows: any[] = showAll ? d.groups : d.unattributed_groups;
   const pageRows = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const rules = Object.entries(d.by_rule || {}).sort((a: any, b: any) => b[1] - a[1]);
   return (
-    <Card title={<span>Log groups · who writes them <span className="font-normal text-zinc-500">· {d.attributed} of {d.total} attributed, {d.observed} seen from an instance's agent config, {d.unattributed} unattributed ({usd(d.usd_month_unattributed)}/mo)</span></span>}>
-      {d.total === 0 ? <div className="text-sm text-zinc-500">Nothing yet: Resync now builds it from the log groups, their tags and the probes.</div> : (
+    <Card title={<span>Logs · where they go, who writes them <span className="font-normal text-zinc-500">· {drains ? `${d.total} log drains, ${d.attributed} with one project as owner, ${d.total - d.attributed} shared or team-wide` : `${d.attributed} of ${d.total} attributed, ${d.observed} seen from an instance's agent config, ${d.unattributed} unattributed (${usd(d.usd_month_unattributed)}/mo)`}</span></span>}>
+      {d.total === 0 ? <div className="text-sm text-zinc-500">Nothing yet: {drains ? "the team has no log drain; its function and edge logs stop at Vercel's retention." : "Resync now builds it from the log groups, their tags and the probes."}</div> : (
         <div className="space-y-2 text-sm">
           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
             <span>By rule:</span>{rules.map(([k, n]: any) => <Badge key={k}>{`${k} ${n}`}</Badge>)}
@@ -193,13 +199,13 @@ function LogGroupsCard() {
           </div>
           {rows.length === 0 ? <div className="text-zinc-500">Every group has an owner.</div> : (<>
             <table className="w-full border-collapse text-xs">
-              <thead><tr><Th>Group</Th><Th>Owner</Th><Th>How</Th><Th>Shipped from</Th><Th className="text-right">GB/day</Th><Th className="text-right">Cost / mo</Th></tr></thead>
+              <thead><tr><Th>{drains ? "Drain" : "Group"}</Th><Th>Owner</Th><Th>How</Th><Th>Shipped from</Th><Th className="text-right">GB/day</Th><Th className="text-right">Cost / mo</Th></tr></thead>
               <tbody>{pageRows.map((g: any) => (
                 <tr key={g.name} className="border-t border-zinc-800 align-top">
-                  <Td className="max-w-md break-all font-mono text-zinc-200">{g.name}{g.tags ? <div className="font-sans text-zinc-500">{Object.entries(g.tags).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(" · ")}</div> : null}</Td>
-                  <Td className="text-zinc-300">{g.owner_name || g.owner || <span className="text-amber-300/80">none</span>}</Td>
+                  <Td className="max-w-md break-all font-mono text-zinc-200">{g.name}{g.destination ? <div className="font-sans text-zinc-500">→ {g.destination}</div> : null}{g.tags ? <div className="font-sans text-zinc-500">{Object.entries(g.tags).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(" · ")}</div> : null}</Td>
+                  <Td className="text-zinc-300">{g.owner_name || g.owner || (g.writers?.length ? <span className="text-zinc-400">{g.writers.join(", ")}</span> : <span className="text-amber-300/80">none</span>)}</Td>
                   <Td className="text-zinc-400">{g.how || "—"}{!g.owner && g.candidates?.length ? <div className="text-zinc-500">closest: {g.candidates.join("; ")}</div> : null}{!g.owner && g.jev_choice ? <div className="text-zinc-500">Jev leaned {g.jev_choice === "none" ? "to none" : `to ${g.jev_choice}`} at {Math.round((g.jev_confidence || 0) * 100)}%, under the bar</div> : null}</Td>
-                  <Td className="text-zinc-400">{g.shippers?.length ? g.shippers.slice(0, 3).map((s: any) => <div key={s.instance_id}><Link to={`/inventory?tab=ec2&id=${s.instance_id}`} className="font-mono hover:underline">{s.instance_id}</Link> {s.name ? <span className="text-zinc-500">{s.name}</span> : null} <span className="text-zinc-600">{s.via}</span></div>) : <span className="text-zinc-600">—</span>}{g.shippers?.length > 3 ? <div className="text-zinc-600">and {g.shippers.length - 3} more</div> : null}</Td>
+                  <Td className="text-zinc-400">{g.shippers?.length ? g.shippers.slice(0, 3).map((s: any) => <div key={s.instance_id}><Link to={drains ? "/inventory?tab=deployments" : `/inventory?tab=ec2&id=${s.instance_id}`} className="font-mono hover:underline">{s.instance_id}</Link> {s.name ? <span className="text-zinc-500">{s.name}</span> : null} <span className="text-zinc-600">{s.via}</span></div>) : <span className="text-zinc-600">—</span>}{g.shippers?.length > 3 ? <div className="text-zinc-600">and {g.shippers.length - 3} more</div> : null}</Td>
                   <Td className="text-right text-zinc-400">{g.ingest_gb_day != null ? Number(g.ingest_gb_day).toFixed(2) : "—"}</Td>
                   <Td className="text-right text-zinc-400">{usd((g.ingest_usd_month || 0) + (g.storage_usd_month || 0))}</Td>
                 </tr>
@@ -207,7 +213,8 @@ function LogGroupsCard() {
             </table>
             <Pager page={page} pageSize={PAGE_SIZE} total={rows.length} onPage={setPage} className="mt-2" />
           </>)}
-          <div className="text-xs text-zinc-500">Evidence first: what the instance's own agent config says, the AWS naming conventions, the group's tags, then the name. What is left goes to Jev, which picks a system or none; only a confident pick counts. An unattributed group can be claimed by tagging it with a system's name (any tag key) or by the agent config on the instance that writes it. All of it takes effect at the next graph sync, which runs after every collection run.</div>
+          {drains && <div className="text-xs text-zinc-500">A drain names the projects it covers, so there is nothing to attribute: the owner is the one project it lists, or every project. Vercel meters log volume per team, so the GB/day is the team's split evenly across its enabled drains, priced at the team's own rate.</div>}
+          {!drains && <div className="text-xs text-zinc-500">Evidence first: what the instance's own agent config says, the AWS naming conventions, the group's tags, then the name. What is left goes to Jev, which picks a system or none; only a confident pick counts. An unattributed group can be claimed by tagging it with a system's name (any tag key) or by the agent config on the instance that writes it. All of it takes effect at the next graph sync, which runs after every collection run.</div>}
         </div>
       )}
     </Card>
@@ -226,9 +233,12 @@ export default function Knowledge() {
     api(`/knowledge/concept?id=${encodeURIComponent(openId)}`).then(setDoc).catch((e) => setDoc({ error: e.message }));
   }, [openId]);
 
+  const scopeInfo = useScopeInfo(); // the baselines are CloudWatch: not for a provider without metrics
   if (err) return <Empty>{err}</Empty>;
-  if (!d) return <Empty>Loading…</Empty>;
-  if (!d.configured) return (
+  // the graph cards render at once; the concepts (repo2graph, up to 10 s when it stalls) fill in when they arrive
+  const k: any = d ?? { configured: true, loading: true, namespace: "…", patterns: [], generic: [], internal: [], learnings: [], error: null };
+  const stale = k.loading ? <div className="text-sm text-zinc-500">Reading the concepts from repo2graph… (the rest of the page is already from the advisor's own data)</div> : k.error ? <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-sm text-amber-200">The concepts could not be read: {k.error}. The rest of the page is from the advisor's own data.</div> : null;
+  if (!k.configured) return (
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">Knowledge</h1>
@@ -279,33 +289,34 @@ export default function Knowledge() {
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">Knowledge</h1>
-        <div className="text-sm text-zinc-500">What the agent reads before it proposes anything: the concept graph under <code className="text-zinc-300">{d.namespace}</code> in repo2graph. Click a concept for the full record.</div>
+        <div className="text-sm text-zinc-500">What the agent reads before it proposes anything: the concept graph under <code className="text-zinc-300">{k.namespace}</code> in repo2graph. Click a concept for the full recork.</div>
       </div>
+      {stale}
       <SystemsCard />
       <LogGroupsCard />
-      <BaselinesCard />
-      <Card title={<span>Operational patterns · what every agent run is told ({(d.patterns || []).length})</span>}>
+      {scopeInfo.has("metrics") && <BaselinesCard />}
+      <Card title={<span>Operational patterns · what every agent run is told ({(k.patterns || []).length})</span>}>
         <div className="mb-2 text-xs text-zinc-500">Appended to every agent system prompt at dispatch. Edit a rule in repo2graph to change what the agents are told; delete it to retire the rule.</div>
-        <List items={d.patterns || []} empty="No operational patterns in the graph; the advisor seeds them on the next dispatch." />
+        <List items={k.patterns || []} empty="No operational patterns in the graph; the advisor seeds them on the next dispatch." />
       </Card>
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title={<span>Generic rules · apply to any account ({d.generic.length})</span>}>
-          <List items={d.generic} empty="No generic rules yet. Reject or approve a recommendation with scope “all resources of this kind” to create one." />
+        <Card title={<span>Generic rules · apply to any account ({k.generic.length})</span>}>
+          <List items={k.generic} empty="No generic rules yet. Reject or approve a recommendation with scope “all resources of this kind” to create one." />
         </Card>
-        <Card title={<span>Internal decisions · this account ({d.internal.length})</span>}>
-          <List items={d.internal} empty="No decisions recorded yet." />
+        <Card title={<span>Internal decisions · this account ({k.internal.length})</span>}>
+          <List items={k.internal} empty="No decisions recorded yet." />
         </Card>
       </div>
-      <Card title={<span>Learnings posted on rejections ({d.learnings.length})</span>}>
-        {d.learnings.length === 0 ? <Empty>None yet.</Empty> : (
+      <Card title={<span>Learnings posted on rejections ({k.learnings.length})</span>}>
+        {k.learnings.length === 0 ? <Empty>None yet.</Empty> : (
           <ul className="space-y-1 text-sm">
-            {d.learnings.map((l: any) => <li key={l.id} className="text-zinc-300"><span className="font-mono text-[11px] text-zinc-600">{l.id}</span> {l.rule}</li>)}
+            {k.learnings.map((l: any) => <li key={l.id} className="text-zinc-300"><span className="font-mono text-[11px] text-zinc-600">{l.id}</span> {l.rule}</li>)}
           </ul>
         )}
       </Card>
       <GraphMirrorCard />
       <div className="text-xs text-zinc-500">
-        Raw views: Neo4j Browser at <code>http://localhost:7474</code> (<code>MATCH (c:Concept) WHERE c.id STARTS WITH '{d.namespace}' RETURN c</code>), or repo2graph's UI at <code>http://localhost:3355/</code>.
+        Raw views: Neo4j Browser at <code>http://localhost:7474</code> (<code>MATCH (c:Concept) WHERE c.id STARTS WITH '{k.namespace}' RETURN c</code>), or repo2graph's UI at <code>http://localhost:3355/</code>.
       </div>
     </div>
   );

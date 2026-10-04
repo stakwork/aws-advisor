@@ -12,7 +12,7 @@ test("rubric paths fan out over arrays", () => {
 
 test("task files load, register the prompts and carry rubrics the grader understands", () => {
   const tasks = loadTasks();
-  assert.equal(tasks.length, 7);
+  assert.equal(tasks.length, 8);
   assert.ok(taskFor("chat").system.includes("resolution assistant"));
   const usage = taskFor("usage");
   assert.ok(usage.system.includes("usage investigator"));

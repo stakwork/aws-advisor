@@ -124,7 +124,7 @@ export const lambdaMemoryAction: ActionModule = {
 
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
-    const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+    const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     const cands = candidates(creds.region);
     if (!cands.length) { notes.push(`no Lambda function with ${config.actLambdaMinInvocations.toLocaleString()}+ invocations in ${WINDOW_DAYS} days above ${MIN_MEMORY_MB} MB`); return { proposals, notes }; }

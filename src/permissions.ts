@@ -69,7 +69,8 @@ export const policyProbeDocument = () => (usesCustomProbeDocument() ? config.pro
  * text it is sent, so granting SendCommand on it hands out root on every instance to whoever holds the key.
  * When the stock document is configured, the policy still names the custom one and the permission check warns.
  */
-export const probeDocumentArn = (accountId = "*") => `arn:aws:ssm:*:${accountId}:document/${policyProbeDocument()}`;
+/** One ARN pattern covers the per-kind documents (AwsAdvisorProbe-host, -docker, -apps, -software; src/probes.ts) and the pre-2.0 combined one. */
+export const probeDocumentArn = (accountId = "*") => `arn:aws:ssm:*:${accountId}:document/${policyProbeDocument()}*`;
 
 /** Steampipe table -> the IAM action its List/Describe call needs (only the tables this app and its benchmarks use). */
 export const TABLE_ACTIONS: Record<string, string> = {
@@ -383,7 +384,7 @@ export function policyForIssues(issues: { action: string; service?: string }[]):
  * The SSM statements follow PROBE_DOCUMENT: a custom document gets SendCommand scoped to it, the stock
  * AWS-RunShellScript is the zero-setup fallback.
  */
-export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
+export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-advisor-read"): IamPolicy => ({
   Version: "2012-10-17",
   Statement: [
     {
@@ -424,9 +425,17 @@ export const recommendedPolicy = (accountId = "*"): IamPolicy => ({
         "apigateway:GET",
         "tag:GetResources",
         "sts:GetCallerIdentity",
-        "iam:ListAccountAliases", "iam:SimulatePrincipalPolicy",
+        "iam:ListAccountAliases", "iam:SimulatePrincipalPolicy", "iam:ListUsers", "iam:GetUser", "iam:ListAccessKeys", "iam:GetAccessKeyLastUsed", "iam:ListGroupsForUser", "iam:ListAttachedUserPolicies", "iam:ListUserPolicies", "iam:GetUserPolicy", "iam:GetLoginProfile", "iam:ListMFADevices", "iam:ListUserTags",
+        "organizations:DescribeOrganization", "organizations:ListAccounts",
       ],
       Resource: "*",
+    },
+    {
+      // member accounts: the read role of each child carries this same name by default and trusts this identity; both sides are needed to assume it
+      Sid: "AdvisorAssumeMembers",
+      Effect: "Allow",
+      Action: ["sts:AssumeRole"],
+      Resource: [`arn:aws:iam::*:role/${memberReadRoleName}`],
     },
     {
       Sid: "AdvisorSsmProbe",

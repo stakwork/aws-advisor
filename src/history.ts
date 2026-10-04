@@ -128,14 +128,15 @@ const max = (xs: number[]) => (xs.length ? Math.max(...xs) : null);
  */
 export function rollupDaily(days = 31): { instance_days: number; container_days: number } {
   const since = `-${Math.max(1, days)} days`;
-  const rows = db.prepare(`select instance_id, substr(collected_at, 1, 10) as day, json from instance_metrics
-    where datetime(collected_at) >= datetime('now', ?) and substr(collected_at, 1, 10) <= date('now') order by instance_id, day`).all(since) as { instance_id: string; day: string; json: string }[];
+  const rows = db.prepare(`select instance_id, substr(collected_at, 1, 10) as day, json, coalesce(kind, 'all') as kind from instance_metrics
+    where datetime(collected_at) >= datetime('now', ?) and substr(collected_at, 1, 10) <= date('now') order by instance_id, day`).all(since) as { instance_id: string; day: string; json: string; kind: string }[];
   const groups = new Map<string, { instance_id: string; day: string; mem: number[]; disk: number[]; load: number[]; running: number[]; n: number }>();
   for (const r of rows) {
     const k = `${r.instance_id}|${r.day}`;
     const g = groups.get(k) || { instance_id: r.instance_id, day: r.day, mem: [], disk: [], load: [], running: [], n: 0 };
     const s = summarise(r.json);
-    g.n++;
+    // a sample is a host reading; docker and apps rows contribute their own sections (containers running) without counting as one
+    if (r.kind === "host" || r.kind === "all") g.n++;
     if (s.mem != null) g.mem.push(s.mem); if (s.disk != null) g.disk.push(s.disk); if (s.load != null) g.load.push(s.load); if (s.running != null) g.running.push(s.running);
     groups.set(k, g);
   }
@@ -210,7 +211,7 @@ export function instanceHistory(instanceId: string, days = 90) {
     from instance_daily where instance_id = ? and day >= date('now', ?) and (last_use_at is not null or external_connections_avg is not null)`).get(instanceId, `-${days} days`) as any;
   const containerDaily = db.prepare("select name, day, cpu_pct_avg, mem_bytes_avg, running_share from container_daily where instance_id = ? and day >= date('now', ?) order by day").all(instanceId, `-${days} days`);
   // today's containers straight from the latest probe, so the table is not empty before the first roll-up
-  const latest = db.prepare("select json from instance_metrics where instance_id = ? order by collected_at desc limit 1").get(instanceId) as { json: string } | undefined;
+  const latest = db.prepare("select json from instance_metrics where instance_id = ? and coalesce(kind, 'all') in ('docker', 'all') order by collected_at desc limit 1").get(instanceId) as { json: string } | undefined;
   let today: any[] = [];
   try { today = latest ? (JSON.parse(latest.json).containers || []) : []; } catch { today = []; }
   const latestActivity = (db.prepare("select * from instance_activity where instance_id = ? order by collected_at desc limit 1").get(instanceId) as Record<string, unknown> | undefined) ?? null;

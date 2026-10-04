@@ -24,6 +24,9 @@ import { mirrorRecommendationsInBackground } from "../graph_mirror.js";
  * through untouched.
  */
 export const browse = Router();
+import * as playbookGen from "../playbook_gen.js";
+import { accountScope, accountWhere, latestRunIdFor, resourceInScope, rowInScope, stampRowAccounts } from "../scope.js";
+const require_playbook_gen = () => playbookGen;
 const auth = authMiddleware;
 
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
@@ -61,7 +64,10 @@ browse.get("/alerts", auth, (req, res) => {
   if (day && !DAY_RE.test(day)) return res.status(400).json({ error: "day must be YYYY-MM-DD" });
   const kind = str(req.query.kind);
   if (kind && !KIND_RE.test(kind)) return res.status(400).json({ error: "kind must be a kind name (letters, digits, _)" });
-  const ordered = orderAlerts(listAlerts(status, 100_000));
+  const scope = accountScope(req.query as any);
+  if (scope) stampRowAccounts("alerts");
+  const inAccount = rowInScope(scope);
+  const ordered = orderAlerts(listAlerts(status, 100_000).filter((a: any) => inAccount(a)));
   const inScope = day ? ordered.filter((a) => a.day === day) : ordered;
   // `kinds` counts the scope before the kind filter, so the filter's options stay listed while one is picked.
   const rows = kind ? inScope.filter((a) => a.kind === kind) : inScope;
@@ -76,17 +82,19 @@ browse.get("/alerts", auth, (req, res) => {
 // ?run_id (default: last completed run), ?control_id, ?status, ?q, ?page, ?page_size (default 50, max 200).
 // One row per fingerprint and per (control, resource) within the run; the first by id is kept.
 browse.get("/findings", auth, (req, res) => {
-  const runId = req.query.run_id ? Number(req.query.run_id) : (db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  const runId = req.query.run_id ? Number(req.query.run_id) : latestRunIdFor(accountScope(req.query as any));
   const p = pageParams(req.query as Record<string, unknown>, { size: 50, max: 200 });
   if (!runId) return res.json({ total: 0, page: p.page, page_size: p.page_size, run_id: null, controls: [], findings: [] });
   const where: string[] = ["run_id = ?"]; const params: unknown[] = [runId];
   if (req.query.control_id) { where.push("control_id = ?"); params.push(req.query.control_id); }
   if (req.query.status) { where.push("status = ?"); params.push(req.query.status); }
   if (req.query.q) { where.push("(resource like ? or reason like ?)"); params.push(`%${req.query.q}%`, `%${req.query.q}%`); }
+  { const a = accountWhere(accountScope(req.query as any)); if (a.params.length) { where.push(a.sql); params.push(...a.params); } }
   const rows = dedupeFindings(db.prepare(`select id, source, benchmark, control_id, control_title, status, resource, reason, account_id, region, dimensions, fingerprint from findings where ${where.join(" and ")} order by id`).all(...params) as any[])
     .sort((a, b) => String(a.control_id).localeCompare(String(b.control_id)) || String(a.resource ?? "").localeCompare(String(b.resource ?? "")) || a.id - b.id);
   // Control counts over the whole run, deduplicated the same way, so the dropdown numbers match the list.
-  const all = dedupeFindings(db.prepare("select id, control_id, control_title, status, resource, fingerprint from findings where run_id = ? order by id").all(runId) as any[]);
+  const scopeA = accountWhere(accountScope(req.query as any));
+  const all = dedupeFindings(db.prepare(`select id, control_id, control_title, status, resource, fingerprint from findings where run_id = ? and ${scopeA.sql} order by id`).all(runId, ...scopeA.params) as any[]);
   const byControl = new Map<string, { control_id: string; control_title: string | null; status: string; n: number }>();
   for (const f of all) {
     const k = `${f.control_id}|${f.status}`;
@@ -102,14 +110,43 @@ browse.get("/findings", auth, (req, res) => {
 // ---- playbooks --------------------------------------------------------------------------------------------
 // Every playbook, with how many alarms of the run (?run_id, default the last completed one) each control raised.
 browse.get("/playbooks", auth, (req, res) => {
-  const runId = req.query.run_id ? Number(req.query.run_id) : (db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  const runId = req.query.run_id ? Number(req.query.run_id) : latestRunIdFor(accountScope(req.query as any));
   const counts = new Map<string, number>();
   if (runId) {
-    const all = dedupeFindings(db.prepare("select id, control_id, status, resource, fingerprint from findings where run_id = ? and status = 'alarm' order by id").all(runId) as any[]);
+    const scopeA = accountWhere(accountScope(req.query as any));
+    const all = dedupeFindings(db.prepare(`select id, control_id, status, resource, fingerprint from findings where run_id = ? and status = 'alarm' and ${scopeA.sql} order by id`).all(runId, ...scopeA.params) as any[]);
     for (const f of all) counts.set(f.control_id, (counts.get(f.control_id) || 0) + 1);
   }
   const playbooks = listPlaybooks().map((p) => ({ ...p, findings: counts.get(p.control_id) || 0 })).sort((a, b) => b.findings - a.findings || a.title.localeCompare(b.title));
   res.json({ run_id: runId ?? null, count: playbooks.length, playbooks });
+});
+
+// Generation (src/playbook_gen.ts): what is due, the jobs, a generation on demand, a person's review, and the sources of one control.
+browse.get("/playbooks/due", auth, (_req, res) => { const { controlsDue } = require_playbook_gen(); res.json({ due: controlsDue(), configured: Boolean(config.repo2graphUrl) }); });
+browse.get("/playbooks/jobs", auth, (_req, res) => { const { listPlaybookJobs, playbookJobBusy } = require_playbook_gen(); res.json({ busy: playbookJobBusy(), jobs: listPlaybookJobs(20) }); });
+// Body: { control_ids?: string[] } (default: everything due, capped), ?limit (default 12 controls, three agent runs).
+browse.post("/playbooks/generate", auth, async (req, res) => {
+  const { controlsDue, generatePlaybooks } = require_playbook_gen();
+  const limit = Math.max(1, Math.min(40, Number(req.query.limit) || 12));
+  const ids: string[] = Array.isArray(req.body?.control_ids) && req.body.control_ids.length ? req.body.control_ids.map(String) : controlsDue({ limit }).map((d) => d.control_id);
+  if (!ids.length) return res.json({ jobs: [], skipped: [], note: "nothing is due" });
+  try { res.status(202).json(await generatePlaybooks(ids, { trigger: "manual" })); } catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+// Judges the held generations again (Jev was unreachable, or the bar moved) and publishes what passes; no agent run.
+browse.post("/playbooks/rejudge", auth, async (_req, res) => { const { rejudgeHeld } = require_playbook_gen(); try { res.json(await rejudgeHeld()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+browse.put("/playbooks/:controlId/review", auth, (req, res) => {
+  const { reviewPlaybook } = require_playbook_gen();
+  const status = String(req.body?.status || "");
+  if (!["reviewed", "disputed", "generated"].includes(status)) return res.status(400).json({ error: "status must be reviewed, disputed or generated" });
+  if (!reviewPlaybook(String(req.params.controlId), status as any)) return res.status(404).json({ error: "no generated playbook for that control" });
+  res.json({ ok: true, playbook: playbookFor(String(req.params.controlId)) });
+});
+browse.get("/playbooks/:controlId/sources", auth, async (req, res) => {
+  const { sourcesFor } = await import("../sources.js");
+  const id = String(req.params.controlId);
+  const { referencesFor } = await import("../playbook_gen.js");
+  const r = await sourcesFor(id, referencesFor(id));
+  res.json({ control_id: id, sources: r.sources.map((x) => ({ id: x.id, kind: x.kind, origin: x.origin, title: x.title, url: x.url, chars: x.text.length, hash: x.hash, fetched_at: x.fetched_at, changed_at: x.changed_at, error: x.error, excerpt: x.text.slice(0, 600) })), unread: r.unread });
 });
 
 browse.get("/playbooks/:controlId", auth, (req, res) => {
@@ -137,7 +174,9 @@ browse.get("/recommendations", auth, (req, res) => {
   const rows = (status === "all" || q.id != null
     ? db.prepare("select * from recommendations order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all()
     : db.prepare("select * from recommendations where status = ? order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all(status)) as any[];
-  const shown = q.text ? rows.filter((r) => recMatches(r, q) && (status === "all" || r.status === status || r.id === q.id)) : rows;
+  stampRowAccounts("recommendations");
+  const inScope = rowInScope(accountScope(req.query as any));
+  const shown = (q.text ? rows.filter((r) => recMatches(r, q) && (status === "all" || r.status === status || r.id === q.id)) : rows).filter((r) => inScope(r));
   // Members of a pool, an RDS cluster or a cache group are one entry per (system, action): the decision is about the system.
   const systems = systemMap();
   const merged = mergeRecommendations(shown, (rid) => systems.get(rid));

@@ -14,11 +14,23 @@
     "recommendation_history",
     "findings_for_resource",
     "graph_system",
-    "learn_concept"
+    "learn_concept",
+    "graph_systems",
+    "graph_query",
+    "vercel_projects",
+    "vercel_stores",
+    "vercel_bill"
   ],
   "max_turns": 25,
   "rubric": [
-    { "check": "required", "path": "reply", "label": "a reply is given" }
+    {
+      "check": "required",
+      "path": "reply",
+      "label": "a reply is given"
+    }
   ],
-  "retry": { "on_score_below": 0, "max": 0 }
+  "retry": {
+    "on_score_below": 0,
+    "max": 0
+  }
 }

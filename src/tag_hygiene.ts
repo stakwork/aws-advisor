@@ -191,7 +191,7 @@ export async function refreshTagHygiene(onLog: (l: string) => void = () => {}): 
 function fileRecommendations(rows: { resource: string; kind: string; name: string | null; missing: string[]; suggested: Record<string, string> }[], required: string[], seenKinds: string[]): void {
   const byKind = new Map<string, typeof rows>();
   for (const r of rows) { if (!byKind.has(r.kind)) byKind.set(r.kind, []); byKind.get(r.kind)!.push(r); }
-  const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+  const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
   const recs: RecInput[] = [];
   for (const [kind, list] of byKind) {
     const label = KIND_LABEL[kind] ?? kind;

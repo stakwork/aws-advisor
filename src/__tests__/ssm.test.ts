@@ -4,7 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { PROBE_SCRIPT, PROBE_VERSION, ProbeError, parseProbeOutput, summarizeProbe, useSummary } from "../ssm.js";
+import { PROBE_VERSION, ProbeError, parseProbeOutput, summarizeProbe, useSummary, mergeProbes } from "../ssm.js";
+import { PROBE_KINDS, probeScript } from "../probes.js";
+const PROBE_SCRIPT = PROBE_KINDS.map((k) => probeScript(k, "x=y")).join("\n");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = fs.readFileSync(path.join(here, "probe.fixture.txt"), "utf8");
@@ -62,10 +64,34 @@ test("parseProbeOutput rejects output that is not the probe's", () => {
   assert.throws(() => parseProbeOutput("{not json}"), (e: unknown) => e instanceof ProbeError && e.code === "bad_output");
 });
 
-test("the probe script is a single read-only shell script", () => {
-  assert.match(PROBE_SCRIPT, /^# aws-advisor probe v1/);
-  assert.match(PROBE_SCRIPT, /"probe":"aws-advisor\/1"/);
-  for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(PROBE_SCRIPT, forbidden);
+test("every probe script is a read-only shell script that prints its kind", () => {
+  for (const kind of PROBE_KINDS) {
+    const script = probeScript(kind, "x=y");
+    assert.match(script, new RegExp(`^# aws-advisor probe ${kind} `));
+    assert.ok(script.includes(`"probe":"aws-advisor/${kind}/`) && script.includes(`"kind":"${kind}"`), `${kind} prints its probe id and kind`);
+    for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(script, forbidden);
+  }
+});
+
+test("mergeProbes: each section comes from its kind's newest row; a pre-2.0 combined row covers every section", () => {
+  const base = { id: 1, instance_id: "i-1", kind: "all" as const, collected_at: "2026-10-01T10:00:00Z", data: { ...parseProbeOutput(fixture), collected_at: "2026-10-01T10:00:00Z", processes: [{ name: "nginx", user: "root", count: 1, cpu_pct: 0, rss_bytes: 1, oldest_seconds: 1, command: "nginx" }], containers: [{ name: "old", image: "x", state: "running", running_for: "", cpu_pct: 0, mem_bytes: 0, mem_pct: 0, net_rx_bytes: null, net_tx_bytes: null }] } };
+  const host = { id: 2, instance_id: "i-1", kind: "host" as const, collected_at: "2026-10-01T12:00:00Z", data: parseProbeOutput('{"probe":"aws-advisor/host/2","kind":"host","hostname":"h","collected_at":"2026-10-01T12:00:00Z","cpus":8,"uptime_seconds":5,"memory":{"total_bytes":100,"used_bytes":50,"available_bytes":50,"swap_total_bytes":0,"swap_used_bytes":0},"load":{"1m":1,"5m":1,"15m":1},"disks":[],"top_cpu":[],"top_mem":[]}') };
+  const docker = { id: 3, instance_id: "i-1", kind: "docker" as const, collected_at: "2026-10-01T11:00:00Z", data: parseProbeOutput('{"probe":"aws-advisor/docker/2","kind":"docker","hostname":"h","collected_at":"2026-10-01T11:00:00Z","docker":{"available":true,"running":2,"total":3},"containers":[{"name":"new","image":"y","state":"running","running_for":"1h","cpu_pct":1,"mem_bytes":10,"mem_pct":1}]}') };
+  const software = { id: 4, instance_id: "i-1", kind: "software" as const, collected_at: "2026-10-01T09:00:00Z", data: parseProbeOutput('{"probe":"aws-advisor/software/1","kind":"software","hostname":"h","collected_at":"2026-10-01T09:00:00Z","os":{"id":"ubuntu","version":"24.04","name":"Ubuntu 24.04"},"kernel":"6.8.0","arch":"x86_64","package_manager":"deb","packages":[{"n":"openssh-server","v":"1:9.6p1-3ubuntu13.5","a":"amd64"}],"binaries":[{"name":"sshd","version":"OpenSSH_9.6p1","path":"/usr/sbin/sshd"}],"images":[]}') };
+  const m = mergeProbes([base, host, docker, software])!;
+  assert.equal(m.data.cpus, 8, "host section from the newer host row");
+  assert.equal(m.data.containers?.[0].name, "new", "docker section from the docker row");
+  assert.equal(m.data.docker?.running, 2);
+  assert.equal(m.data.processes?.[0].name, "nginx", "apps section from the combined row, the only one that has it");
+  assert.equal(m.data.packages?.[0].n, "openssh-server", "software from its own row");
+  assert.equal(m.data.os?.id, "ubuntu");
+  assert.equal(m.data.collected_at, "2026-10-01T12:00:00Z");
+  assert.deepEqual(m.data.probes_at, { host: "2026-10-01T12:00:00Z", docker: "2026-10-01T11:00:00Z", apps: "2026-10-01T10:00:00Z", software: "2026-10-01T09:00:00Z" });
+  assert.equal(m.kind, "all");
+  assert.equal(mergeProbes([]), null);
+  // a docker-only row alone still reads as a probe (host fields zero), so a box probed for containers first is not invisible
+  const alone = mergeProbes([docker])!;
+  assert.equal(alone.data.docker?.running, 2); assert.equal(alone.data.cpus, 0);
 });
 
 
@@ -91,8 +117,8 @@ test("probe 1.2: docker and container fields parse and summarise; older probes w
   const old = summarizeProbe(parseProbeOutput(fixture));
   assert.equal(old.containers_running, null);
   assert.equal(old.top_container, null);
-  assert.match(PROBE_SCRIPT, /docker stats --no-stream/);
-  assert.match(PROBE_SCRIPT, /"docker":%s,"containers":%s/);
+  assert.match(probeScript("docker", "x=y"), /docker stats --no-stream/);
+  assert.match(probeScript("docker", "x=y"), /"docker":%s,"containers":%s/);
 });
 
 test("history: container samples are recorded per probe and daily roll-ups aggregate them", async () => {
@@ -144,9 +170,12 @@ test("probe pass: an ISO-timestamped probe from earlier today does not hide the 
   db.prepare(`insert into inventory_ec2(${use.join(",")}) values (${use.map(() => "?").join(",")})`).run(...use.map((k) => row[k]));
   const iso = (minsAgo: number) => new Date(Date.now() - minsAgo * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
   db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, '{}')").run(iid, iso(3 * 60));
-  assert.ok(probeTargets(1000).some((t) => t.instance_id === iid), "probed three hours ago: due again");
+  assert.ok(probeTargets("host", 1000).some((t) => t.instance_id === iid), "probed three hours ago: due again");
   db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, '{}')").run(iid, iso(10));
-  assert.ok(!probeTargets(1000).some((t) => t.instance_id === iid), "probed ten minutes ago: skipped");
+  assert.ok(!probeTargets("host", 1000).some((t) => t.instance_id === iid), "probed ten minutes ago: skipped");
+  assert.ok(probeTargets("software", 1000).some((t) => t.instance_id === iid), "a combined row never counts as a software probe: the software pass is still due");
+  db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, '{}', 'software')").run(iid, iso(10));
+  assert.ok(!probeTargets("software", 1000).some((t) => t.instance_id === iid), "probed for software ten minutes ago: skipped");
   for (const t of ["inventory_ec2", "instance_metrics"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
 });
 
@@ -177,7 +206,7 @@ const probe14 = () => JSON.stringify({
 
 test("probe 1.4: the activity section parses, is tolerant, and the use summary picks the newest real-use signal", () => {
   const p = parseProbeOutput(`noise\n${probe14()}`);
-  assert.equal(PROBE_VERSION, "aws-advisor/1.8");
+  assert.equal(PROBE_VERSION, "aws-advisor/2.0");
   assert.equal(p.containers?.[0].net_rx_bytes, 5000);
   assert.equal(p.containers?.[1].net_rx_bytes, null, "a container without NetIO reports null, not zero");
   const a = p.activity!;
@@ -289,4 +318,9 @@ test("probe summary: the probe's own SSM worker and shell tools are never the bu
   assert.deepEqual(realProcesses(top).map((p) => p.command), ["node"]);
   assert.equal(realProcesses(undefined).length, 0);
   assert.ok(PROBE_MACHINERY.test("ssm-document-worker")); assert.ok(!PROBE_MACHINERY.test("postgres")); assert.ok(!PROBE_MACHINERY.test("sshd"));
+});
+
+test("parseProbeOutput keeps a package's source (s) from probe software/2 and leaves it null when absent", () => {
+  const p = parseProbeOutput('{"probe":"aws-advisor/software/2","kind":"software","hostname":"h","collected_at":"2026-10-03T09:00:00Z","os":{"id":"amzn","version":"2023","name":"Amazon Linux 2023"},"kernel":"6.1","arch":"x86_64","package_manager":"rpm","packages":[{"n":"vim-filesystem","v":"2:9.1.785-1.amzn2023.0.1","a":"noarch","s":"vim"},{"n":"pam","v":"1.5.1-8.amzn2023.0.4","a":"x86_64"}],"binaries":[],"images":[]}')!;
+  assert.deepEqual(p.packages?.map((x) => [x.n, x.s ?? null]), [["vim-filesystem", "vim"], ["pam", null]]);
 });

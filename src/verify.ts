@@ -204,10 +204,11 @@ export function impactFor(recommendationId: number) {
  * the same action on the same resource were one decision (the list merges them and Approve covers all of them),
  * so they are one row here too, with the primary's estimate; the others are listed under `merged`.
  */
-export function verificationSummary() {
-  const all = db.prepare(`select r.id, r.title, r.status, r.source, r.rule, r.action_type, r.resource, r.resource_name, r.est_monthly_saving, r.confidence, r.updated_at, r.decided_at, v.verdict, v.realised_usd_month, v.before_usd_day, v.after_usd_day, v.ratio, v.applied, v.days_after, v.note, v.checked_at, v.scope_note
+/** The decisions and auto-actions with what the bill did after each; `within` narrows them to one account's rows (by their account id, else the resource they name). */
+export function verificationSummary(within: (row: { account_id?: string | null; resource?: string | null }) => boolean = () => true) {
+  const all = (db.prepare(`select r.id, r.title, r.status, r.source, r.rule, r.action_type, r.resource, r.resource_name, r.account_id, r.est_monthly_saving, r.confidence, r.updated_at, r.decided_at, v.verdict, v.realised_usd_month, v.before_usd_day, v.after_usd_day, v.ratio, v.applied, v.days_after, v.note, v.checked_at, v.scope_note
     from recommendations r left join verifications v on v.id = (select max(id) from verifications where recommendation_id = r.id)
-    where r.status in ('approved', 'done') order by r.decided_at desc`).all() as any[];
+    where r.status in ('approved', 'done') order by r.decided_at desc`).all() as any[]).filter(within);
   const VERDICT_FIELDS = ["verdict", "realised_usd_month", "before_usd_day", "after_usd_day", "ratio", "applied", "days_after", "note", "checked_at", "scope_note"] as const;
   const byId = new Map(all.map((r) => [r.id, r]));
   // The members share one cost scope, so any member's verdict is the decision's verdict; prefer the primary's when it has one.
@@ -217,7 +218,7 @@ export function verificationSummary() {
     return checked ? { ...r, ...Object.fromEntries(VERDICT_FIELDS.map((f) => [f, checked[f]])), verified_id: checked.id } : r;
   }).sort((a, b) => String(b.decided_at).localeCompare(String(a.decided_at)));
   const decisions = rows.map((r) => ({ ...r, origin: "decision" as const }));
-  const auto = autoImpactRows(new Set(decisions.filter((r: any) => r.status === "approved" || r.status === "done").map((r: any) => r.id)));
+  const auto = autoImpactRows(new Set(decisions.filter((r: any) => r.status === "approved" || r.status === "done").map((r: any) => r.id))).filter((r) => within({ resource: r.resource }));
   const all2 = [...decisions, ...auto].sort((a: any, b: any) => String(b.decided_at).localeCompare(String(a.decided_at)));
   const measured = (r: any) => ["realised", "partial", "none", "increase"].includes(r.verdict);
   const live = (r: any) => r.origin === "decision" || r.status !== "reverted";

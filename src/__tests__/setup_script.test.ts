@@ -6,9 +6,9 @@ import path from "node:path";
 import { test } from "node:test";
 import { PROFILE_NAME_RE } from "../aws_config.js";
 import { recommendedPolicy } from "../permissions.js";
-import { probeDocument } from "../ssm.js";
+import { probeDocument } from "../probes.js";
 import {
-  SETUP_DEFAULTS, SETUP_NAME_RE, SetupOptions, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions,
+  SETUP_DEFAULTS, SETUP_NAME_RE, SetupOptions, renderSetupPlan, renderSetupScript, setupCommands, setupQuery, validateSetupOptions,
 } from "../setup_script.js";
 
 const CTX = { managedProfile: "aws-advisor-managed", advisorUrl: "http://localhost:9034" };
@@ -29,6 +29,7 @@ case "$a" in
   "configure get "*) if [ "$FAKE_MODE" = exists ]; then echo AKIAEXISTING000000001; exit 0; else exit 1; fi ;;
   "configure set "*) exit 0 ;;
   "iam create-access-key "*) printf 'AKIAFAKE000000000001\\tSECRETFAKEwJalrXUtnFEMIK7MDENG\\n'; exit 0 ;;
+  "iam create-role "*) if [ -n "\${FAKE_PRINCIPAL_LAG:-}" ] && [ ! -f "$FAKE_LOG.lag" ]; then touch "$FAKE_LOG.lag"; echo "An error occurred (MalformedPolicyDocument) when calling the CreateRole operation: Invalid principal in policy" >&2; exit 254; fi; exit 0 ;;
 esac
 if [ "$FAKE_MODE" = fresh ]; then
   case "$a" in
@@ -59,12 +60,13 @@ echo "curl $*" >> "$FAKE_LOG"
 case "$*" in
   *"/health"*) exit 0 ;;
   *"/api/settings/aws"*) printf '%s\\n200' '{"saved":{},"test":{"ok":true,"accountId":"123456789012"},"sdk":{"ok":true,"arn":"arn:aws:sts::123456789012:assumed-role/aws-advisor-read/aws-advisor"}}'; exit 0 ;;
+  *"/api/accounts"*) printf '%s\n200' '{"saved":{"account_id":"123456789012","name":"staging"},"test":{"ok":true,"arn":"arn:aws:sts::123456789012:assumed-role/aws-advisor-read/advisor"},"accounts":[]}'; exit 0 ;;
   *"/api/permissions/check"*) printf '%s\\n200' '{"account_id":"123456789012","region":"us-east-1","results":[{"id":"a","label":"A","status":"ok"},{"id":"b","label":"B","status":"skipped","message":"x"}],"missing":[],"took_ms":12}'; exit 0 ;;
 esac
 exit 1
 `;
 
-function runWithFakes(script: string, mode: "exists" | "fresh", args: string[] = []) {
+function runWithFakes(script: string, mode: "exists" | "fresh", args: string[] = [], env: Record<string, string> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-setup-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -74,7 +76,7 @@ function runWithFakes(script: string, mode: "exists" | "fresh", args: string[] =
   fs.writeFileSync(log, "");
   const file = path.join(dir, "setup.sh");
   fs.writeFileSync(file, script);
-  const r = spawnSync("bash", [file, ...args], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_MODE: mode, TMPDIR: dir } });
+  const r = spawnSync("bash", [file, ...args], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_MODE: mode, TMPDIR: dir, ...env } });
   const calls = fs.readFileSync(log, "utf8").split("\n").filter(Boolean);
   fs.rmSync(dir, { recursive: true, force: true });
   return { ...r, out: `${r.stdout}\n${r.stderr}`, calls };
@@ -91,7 +93,7 @@ test("laptop-key: the script passes bash -n and embeds the account detection, th
   assert.match(s, /^set -euo pipefail$/m);
   assert.ok(s.includes("aws_admin sts get-caller-identity --output text --query '[Account,Arn]'"));
   assert.ok(s.includes(JSON.stringify(recommendedPolicy("<ACCOUNT_ID>"), null, 2)), "the recommended policy JSON is embedded verbatim");
-  assert.ok(s.includes(JSON.stringify(probeDocument(), null, 2)), "the SSM probe document is embedded verbatim");
+  for (const kind of ["host", "docker", "apps", "software"] as const) assert.ok(s.includes(JSON.stringify(probeDocument(kind), null, 2)), `the ${kind} probe document is embedded verbatim`);
   assert.ok(s.includes('"AWS": "arn:aws:iam::<ACCOUNT_ID>:user/aws-advisor"'), "the trust policy names the user");
   assert.ok(!s.includes("role/aws-advisor-host"), "the laptop path does not mention the instance role");
   assert.ok(s.includes('sed "s/<ACCOUNT_ID>/$ACCOUNT_ID/g"'), "the placeholder is substituted at run time");
@@ -139,7 +141,7 @@ test("dry run: every command is printed with a + prefix, nothing is called and n
   assert.ok(r.out.includes("    + aws --profile admin iam create-access-key --user-name aws-advisor"));
   assert.ok(r.out.includes("    + aws configure set --profile aws-advisor-user aws_secret_access_key <SecretAccessKey>"));
   assert.ok(r.out.includes("    + aws configure set --profile aws-advisor role_arn arn:aws:iam::123456789012:role/aws-advisor-read"));
-  assert.ok(r.out.includes("    + aws --profile admin ssm create-document --name AwsAdvisorProbe"));
+  for (const k of ["host", "docker", "apps", "software"]) assert.ok(r.out.includes(`    + aws --profile admin ssm create-document --name AwsAdvisorProbe-${k}`), `dry run prints the ${k} document creation`);
   assert.ok(r.out.includes("    + curl -fsS -X PUT 'http://localhost:9034/api/settings/aws'"));
   assert.ok(r.out.includes("Dry run complete: nothing was changed"));
   assert.deepEqual(r.calls, [], "a dry run makes no aws or curl call at all");
@@ -162,7 +164,7 @@ test("real run, everything already exists: every step is skipped or refreshed, n
   assert.ok(r.out.includes("aws-advisor already has 1 access key(s): none created"));
   assert.ok(r.out.includes("[aws-advisor-user] on this machine already holds a key: kept"));
   assert.ok(r.out.includes("ok: arn:aws:sts::123456789012:assumed-role/aws-advisor-read/botocore-session-1"));
-  assert.ok(r.out.includes("already up to date (aws-advisor/1.8): arn:aws:ssm:us-east-1:123456789012:document/AwsAdvisorProbe"));
+  for (const k of ["host", "docker", "apps", "software"]) assert.ok(r.out.includes(`already up to date (aws-advisor/2.0 ${k}): arn:aws:ssm:us-east-1:123456789012:document/AwsAdvisorProbe-${k}`), `${k} document already up to date`);
   if (hasPython) {
     assert.ok(r.out.includes("Steampipe: connected to account 123456789012"));
     assert.ok(r.out.includes("1 ok, 0 missing, 0 error, 1 skipped"));
@@ -187,7 +189,7 @@ test("real run from scratch: creates everything, writes the key with aws configu
   assert.ok(r.calls.includes("configure set --profile aws-advisor role_arn arn:aws:iam::123456789012:role/aws-advisor-read"));
   assert.ok(r.calls.includes("configure set --profile aws-advisor source_profile aws-advisor-user"));
   assert.ok(r.calls.includes("configure set --profile aws-advisor region us-east-1"));
-  assert.ok(r.calls.some((c) => c.startsWith("ssm create-document --name AwsAdvisorProbe --document-type Command --document-format JSON --content file://")));
+  for (const k of ["host", "docker", "apps", "software"]) assert.ok(r.calls.some((c) => c.startsWith(`ssm create-document --name AwsAdvisorProbe-${k} --document-type Command --document-format JSON --content file://`)), `${k} document created`);
   assert.ok(!r.out.includes("SECRETFAKE"), "the secret never reaches the terminal");
   assert.ok(r.out.includes("created key AKIAFAKE000000000001 and wrote it to [aws-advisor-user]"));
   assert.ok(r.calls.some((c) => c.startsWith("curl") && c.includes("x-api-token: tok123")), "--api-token is sent to the advisor");
@@ -233,7 +235,7 @@ test("the plan has the expected steps per path and names the probe document", ()
     "Create an access key for aws-advisor and store it under [aws-advisor-user]",
     "Write the [profile aws-advisor] that assumes the role",
     "Verify that the profile answers as aws-advisor-read",
-    "Create the read-only SSM probe document AwsAdvisorProbe in us-east-1",
+    "Create the read-only SSM probe documents (AwsAdvisorProbe-host, AwsAdvisorProbe-docker, AwsAdvisorProbe-apps, AwsAdvisorProbe-software) in us-east-1",
     "Point the advisor (http://localhost:9034) at profile aws-advisor and test it",
     "Run the advisor's permission check",
   ]);
@@ -243,7 +245,7 @@ test("the plan has the expected steps per path and names the probe document", ()
   assert.equal(ep.length, 11);
   assert.ok(ep.some((s) => s.title === "Associate the instance profile with i-0123456789abcdef0"));
   assert.ok(ep.some((s) => s.title.startsWith("IMDS hop limit 2 on i-0123456789abcdef0")));
-  assert.ok(ep.some((s) => s.title === "Create the read-only SSM probe document AwsAdvisorProbe in us-east-1"));
+  assert.ok(ep.some((s) => s.title.startsWith("Create the read-only SSM probe documents (AwsAdvisorProbe-host")));
   assert.ok(ep.some((s) => s.title === "Create the read-only role aws-advisor-read trusted by instance role aws-advisor-host"));
   // the script prints the same numbering
   const s = renderSetupScript(ec2({ instanceId: "i-0123456789abcdef0" }));
@@ -287,4 +289,87 @@ test("the one-liners: download-read-run, the piped variant, and the token when t
   assert.equal(full.scriptUrl, "http://localhost:9034/api/setup/script?path=ec2-role&region=eu-west-1&instanceRole=swarm-host&instanceId=i-0123456789abcdef0&adminProfile=admin&dryRun=1&token=jwt.token");
   assert.ok(full.command.endsWith("&& ADVISOR_API_TOKEN='jwt.token' bash aws-advisor-setup.sh"));
   assert.ok(full.piped.endsWith("| ADVISOR_API_TOKEN='jwt.token' bash"));
+});
+
+
+test("member-role: the child's read role trusts the parent's identity, the policy is applied, the documents created and the child registered; rerun merges the trust and creates nothing", () => {
+  assert.throws(() => validateSetupOptions({ path: "member-role" }, CTX), /trustArn/);
+  assert.throws(() => validateSetupOptions({ path: "member-role", trustArn: "not-an-arn" }, CTX), /trustArn must be/);
+  const o = validateSetupOptions({ path: "member-role", trustArn: "arn:aws:iam::210987654321:role/aws-advisor-read", memberName: "staging" }, CTX);
+  assert.deepEqual(renderSetupPlan(o).map((s) => s.title.split(" ").slice(0, 4).join(" ")), ["Detect the AWS account", "Create the read-only role", "Put the read-only policy", "Create the read-only SSM", "Register this account with"]);
+  assert.ok(setupQuery(o).includes("trustArn=arn%3Aaws%3Aiam%3A%3A210987654321%3Arole%2Faws-advisor-read") && setupQuery(o).includes("memberName=staging"));
+  const script = renderSetupScript(o);
+  assert.ok(script.includes('"AWS": "arn:aws:iam::210987654321:role/aws-advisor-read"'), "the trust document names the parent's identity");
+  assert.ok(script.includes("PRINCIPAL_SID='AdvisorParent'") && !script.includes("create-user"), "no user, no key: the parent assumes the role");
+  const fresh = runWithFakes(script, "fresh");
+  assert.equal(fresh.status, 0, fresh.out);
+  assert.ok(fresh.calls.some((c) => c.includes("iam create-role --role-name aws-advisor-read")), fresh.calls.join("\n"));
+  assert.ok(fresh.calls.some((c) => c.includes("iam put-role-policy --role-name aws-advisor-read")));
+  assert.ok(fresh.out.includes("saved as member 123456789012") && fresh.out.includes("role assumed from the parent: ok"), fresh.out);
+  const again = runWithFakes(script, "exists");
+  assert.equal(again.status, 0, again.out);
+  assert.ok(again.out.includes("role aws-advisor-read exists") && again.out.includes("added arn:aws:iam::210987654321:role/aws-advisor-read to the trust policy of aws-advisor-read (existing principals kept)"), again.out);
+  assert.ok(again.calls.some((c) => c.includes("iam update-assume-role-policy --role-name aws-advisor-read")), "the merged trust policy is written");
+  assert.ok(!again.calls.some((c) => c.includes("create-role")), "nothing created on a rerun");
+});
+
+test("the parent's read policy lets its identity assume the members' read roles (both sides of a cross-account assumption)", () => {
+  const st = (recommendedPolicy("123456789012") as any).Statement.find((x: any) => x.Sid === "AdvisorAssumeMembers");
+  assert.deepEqual(st, { Sid: "AdvisorAssumeMembers", Effect: "Allow", Action: ["sts:AssumeRole"], Resource: ["arn:aws:iam::*:role/aws-advisor-read"] });
+  assert.deepEqual((recommendedPolicy("123456789012", "advisor-ro") as any).Statement.find((x: any) => x.Sid === "AdvisorAssumeMembers").Resource, ["arn:aws:iam::*:role/advisor-ro"]);
+});
+
+test("a principal created seconds ago is retried until IAM resolves it: the first create-role answers Invalid principal, the second succeeds", () => {
+  const script = renderSetupScript(laptop()).replace("sleep 5; continue", "continue");
+  const r = runWithFakes(script, "fresh", [], { FAKE_PRINCIPAL_LAG: "1" });
+  assert.equal(r.status, 0, r.out);
+  assert.ok(r.out.includes("not visible to IAM yet"), r.out);
+  assert.equal(r.calls.filter((c) => c.includes("iam create-role --role-name aws-advisor-read")).length, 2, "one failed attempt, one that created it");
+  assert.ok(r.out.includes("created arn:aws:iam::123456789012:role/aws-advisor-read"));
+});
+
+test("principalArnOf: an STS assumed-role session is its IAM role; users and roles are themselves", async () => {
+  const { principalArnOf } = await import("../routes/accounts.js");
+  assert.equal(principalArnOf("arn:aws:sts::210987654321:assumed-role/aws-advisor-read/aws-sdk-js-1234"), "arn:aws:iam::210987654321:role/aws-advisor-read");
+  assert.equal(principalArnOf("arn:aws:iam::210987654321:user/aws-advisor"), "arn:aws:iam::210987654321:user/aws-advisor");
+  assert.equal(principalArnOf("arn:aws:iam::210987654321:role/x"), "arn:aws:iam::210987654321:role/x");
+});
+
+test("member-role refuses to run in the parent: credentials that resolve to the trusted identity's account stop at step 1 with nothing changed", () => {
+  // the fake toolchain's caller is account 123456789012; a trust ARN in that same account means the terminal is the parent's
+  const o = validateSetupOptions({ path: "member-role", trustArn: "arn:aws:iam::123456789012:role/aws-advisor-read" }, CTX);
+  const r = runWithFakes(renderSetupScript(o), "fresh");
+  assert.notEqual(r.status, 0);
+  assert.ok(r.out.includes("which is the PARENT"), r.out);
+  assert.ok(!r.calls.some((c) => c.includes("create-role") || c.includes("put-role-policy")), "nothing was created");
+});
+
+test("an EC2 host in a member account: ec2-host makes the instance role assume the parent's read role; ec2-role with hostRoleArn makes the parent's read role trust that instance role and creates nothing for the host", () => {
+  const host = validateSetupOptions({ path: "ec2-host", assumeArn: "arn:aws:iam::210987654321:role/aws-advisor-read" }, CTX);
+  assert.deepEqual(renderSetupPlan(host).map((s) => s.title.split(" ").slice(0, 3).join(" ")), ["Detect the AWS", "Instance role aws-advisor-host", "Attach AmazonSSMManagedInstanceCore to", "Let aws-advisor-host assume"]);
+  const hs = renderSetupScript(host);
+  assert.ok(hs.includes('"Resource": "arn:aws:iam::210987654321:role/aws-advisor-read"'), "the assume policy names the parent's read role");
+  assert.ok(!hs.includes("POLICY_JSON=$(cat") || !renderSetupPlan(host).some((s) => /read-only policy/.test(s.title)), "no read role here");
+  const hr = runWithFakes(hs, "fresh");
+  assert.equal(hr.status, 0, hr.out);
+  assert.ok(hr.calls.some((c) => c.includes("iam create-role --role-name aws-advisor-host")) && hr.calls.some((c) => c.includes("put-role-policy --role-name aws-advisor-host --policy-name aws-advisor-assume")));
+  assert.ok(!hr.calls.some((c) => c.includes("create-role --role-name aws-advisor-read")), "the read role is the parent's business");
+  assert.ok(hr.out.includes("may assume the parent's read role arn:aws:iam::210987654321:role/aws-advisor-read"), hr.out);
+  assert.throws(() => validateSetupOptions({ path: "ec2-host" }, CTX), /assumeArn/);
+
+  const parent = validateSetupOptions({ path: "ec2-role", hostRoleArn: "arn:aws:iam::123456789012:role/aws-advisor-host" }, CTX);
+  assert.deepEqual(renderSetupPlan(parent).map((s) => s.title.split(" ").slice(0, 3).join(" ")), ["Detect the AWS", "Create the read-only", "Put the read-only", "Create the read-only", "Advisor settings: Instance", "Run the advisor's"]);
+  const ps = renderSetupScript(parent);
+  assert.ok(ps.includes('"AWS": "arn:aws:iam::123456789012:role/aws-advisor-host"'), "the trust names the host's instance role, in its own account");
+  const pr = runWithFakes(ps, "fresh");
+  assert.equal(pr.status, 0, pr.out);
+  assert.ok(!pr.calls.some((c) => c.includes("create-role --role-name aws-advisor-host")) && !pr.calls.some((c) => c.includes("create-instance-profile")), "nothing is made for the host in the parent");
+  assert.ok(setupQuery(parent).includes("hostRoleArn=") && setupQuery(host).includes("assumeArn="));
+  assert.throws(() => validateSetupOptions({ path: "laptop-key", hostRoleArn: "arn:aws:iam::123456789012:role/x" }, CTX), /goes with path ec2-role/);
+});
+
+test("the member path's closing text is the member's, not the EC2 host's", () => {
+  const o = validateSetupOptions({ path: "member-role", trustArn: "arn:aws:iam::210987654321:role/aws-advisor-read" }, CTX);
+  const r = runWithFakes(renderSetupScript(o), "fresh");
+  assert.ok(r.out.includes("is a member: its read role") && !r.out.includes("trusts instance role"), r.out);
 });

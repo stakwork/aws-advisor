@@ -117,7 +117,7 @@ export const kmsKeyRetireAction: ActionModule = {
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const now = Date.now();
-    const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+    const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     let lookups = 0, seen = 0, filed = 0, unread = false;
     for (const acct of creds.accounts) for (const region of regions(acct.region)) {

@@ -126,7 +126,7 @@ export interface AgentRequest {
   retryOf?: string;
   maxTurns?: number;
   /** Which advisor flow owns the answer; the callback routes on it. */
-  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string } | { kind: "usage"; subject: string } | { kind: "chat"; recommendationId: number | null } | { kind: "pass_report"; reportId: number };
+  link: { kind: "findings"; runId: number } | { kind: "incident"; alertId: number } | { kind: "resolution"; recommendationId: number } | { kind: "observe"; day: string } | { kind: "usage"; subject: string } | { kind: "playbook"; jobId: number } | { kind: "chat"; recommendationId: number | null } | { kind: "pass_report"; reportId: number };
 }
 
 export interface AgentAccepted { requestId: string; sessionId: string; eventsToken: string }
@@ -215,7 +215,7 @@ export async function openAgentEvents(requestId: string): Promise<Response> {
   return res;
 }
 
-export interface AgentRunRow { id: number; kind: "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report" | "usage"; run_id: number | null; alert_id: number | null; recommendation_id?: number | null; request_id: string }
+export interface AgentRunRow { id: number; kind: "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report" | "usage" | "playbook"; run_id: number | null; alert_id: number | null; recommendation_id?: number | null; request_id: string }
 
 /**
  * Handles the terminal webhook from repo2graph (also usable with a polled /progress record). Routes on the
@@ -236,6 +236,7 @@ export async function handleAgentResult(requestId: string, payload: { status: st
     if (run.kind === "chat") completeChat(run, payload);
     if (run.kind === "pass_report") completePassReport(run, payload);
     if (run.kind === "usage") completeUsageInvestigation(run, payload);
+    if (run.kind === "playbook") await (await import("./playbook_gen.js")).completePlaybooks(run, payload);
     return { kind: run.kind, imported: 0 };
   }
   db.prepare("update agent_runs set status = 'completed', result = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.result), run.id);
@@ -246,6 +247,7 @@ export async function handleAgentResult(requestId: string, payload: { status: st
   if (run.kind === "chat") { completeChat(run, payload); return { kind: run.kind, imported: 0 }; }
   if (run.kind === "pass_report") { completePassReport(run, payload); return { kind: run.kind, imported: 0 }; }
   if (run.kind === "usage") { completeUsageInvestigation(run, payload); return { kind: run.kind, imported: 0 }; }
+  if (run.kind === "playbook") { const r = await (await import("./playbook_gen.js")).completePlaybooks(run, payload); return { kind: run.kind, imported: r.stored }; }
   return { kind: run.kind, imported: await importFindingsResult(run, payload.result) };
 }
 
@@ -279,7 +281,7 @@ export async function gradeAndMaybeRetry(run: AgentRunRow & { status?: string },
       sessionId: `aws-advisor-${run.kind}-retry-${Date.now().toString(36)}`,
       agentName: `aws-${run.kind}-retry`,
       metadata: { retry_of: run.request_id },
-      link: run.kind === "findings" ? { kind: "findings", runId: run.run_id ?? 0 } : run.kind === "incident" ? { kind: "incident", alertId: run.alert_id ?? 0 } : run.kind === "resolution" ? { kind: "resolution", recommendationId: run.recommendation_id ?? 0 } : run.kind === "chat" ? { kind: "chat", recommendationId: run.recommendation_id ?? null } : run.kind === "pass_report" ? { kind: "pass_report", reportId: Number((db.prepare("select id from pass_reports where request_id = ?").get(run.request_id) as { id: number } | undefined)?.id ?? 0) } : { kind: "observe", day: new Date().toISOString().slice(0, 10) },
+      link: run.kind === "findings" ? { kind: "findings", runId: run.run_id ?? 0 } : run.kind === "incident" ? { kind: "incident", alertId: run.alert_id ?? 0 } : run.kind === "resolution" ? { kind: "resolution", recommendationId: run.recommendation_id ?? 0 } : run.kind === "chat" ? { kind: "chat", recommendationId: run.recommendation_id ?? null } : run.kind === "pass_report" ? { kind: "pass_report", reportId: Number((db.prepare("select id from pass_reports where request_id = ?").get(run.request_id) as { id: number } | undefined)?.id ?? 0) } : run.kind === "playbook" ? { kind: "playbook", jobId: Number((db.prepare("select id from playbook_jobs where request_id = ?").get(run.request_id) as { id: number } | undefined)?.id ?? 0) } : { kind: "observe", day: new Date().toISOString().slice(0, 10) },
       retryOf: run.request_id,
     });
     db.prepare("update agent_runs set retried_by = ? where id = ?").run(requestId, run.id);
@@ -287,6 +289,7 @@ export async function gradeAndMaybeRetry(run: AgentRunRow & { status?: string },
     db.prepare("update observations set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
     db.prepare("update incidents set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
     db.prepare("update resolutions set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
+    db.prepare("update playbook_jobs set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
     db.prepare("update pass_reports set request_id = ?, status = 'pending' where request_id = ?").run(requestId, run.request_id);
     console.log(`[agent] ${run.kind} ${run.request_id}: scored ${Math.round(grade.score * 100)} %, retried once as ${requestId} with the critique`);
   } catch (e: any) { console.warn(`[agent] retry of ${run.request_id} not sent: ${e?.message || e}`); }

@@ -25,6 +25,8 @@ import { Progress, outcomesText, parseProgress } from "./progress.js";
 import { ResolutionPlan, RecRow, resourceFacts } from "./resolve.js";
 import { spendSummary } from "./spend.js";
 import { credentialsMeta } from "./steampipe.js";
+import { vercelTeam } from "./adapters/vercel/inventory.js";
+import { vercelOverview } from "./adapters/vercel/index.js";
 import { actionModules, getAction, type ActionRow } from "./executor.js";
 
 db.exec(`create table if not exists chat_threads (
@@ -169,24 +171,37 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["tag_hygiene", "resources missing owner/env tags with suggested values, and the instances that could opt into parking or office hours"],
   ["pause_auto_actions", "the kill switch: the executor plans and applies nothing until someone resumes; say why, optionally for how many hours"],
   ["resume_auto_actions", "lift the pause; the next pass runs on schedule"],
-  ["graph_systems", "our systems from the knowledge graph"],
+  ["graph_systems", "our systems from the knowledge graph, any account (AWS by default; pass the Vercel team id)"],
   ["graph_system", "one system and everything linked to it"],
   ["graph_bill", "the bill as the graph explains it, per system"],
-  ["graph_query", "Cypher over the advisor's graph mirror"],
-  ["steampipe_query", "SQL over the live AWS account through Steampipe, for anything the tools above do not cover"],
+  ["graph_log_groups", "where logs go and which system owns each group or drain"],
+  ["graph_query", "Cypher over the advisor's graph mirror: every provider in one model (AdvisorDeployment, AdvisorEndpoint, KnSystem, KnSystemType)"],
+  ["vercel_projects", "the Vercel team's projects: URLs and who may open them, deployments, stores, usage, cost at the team's rates; a name gives the full detail"],
+  ["vercel_stores", "the Vercel team's databases, caches and blob stores with plan, usage (Neon compute hours, blob size) and cost at plan"],
+  ["vercel_bill", "the Vercel team's subscription, usage this period, invoices and rates"],
+  ["steampipe_query", "SQL over the live AWS account (and the Vercel team's vercel.* tables) through Steampipe, for anything the tools above do not cover"],
 ];
 
-export interface AccountHeader { account: string | null; latest_run: string | null; spend_7d: number | null; month_to_date: number | null; projected: number | null; open_alerts: number; open_recs: number; open_saving: number }
+export interface VercelHeader { team: string; name: string | null; plan: string | null; projects: number; production_failed: number; urls_open: number; last_invoice_usd: number | null; estimated_period_usd: number | null; attention: number; read_at: string | null }
+export interface AccountHeader { account: string | null; latest_run: string | null; spend_7d: number | null; month_to_date: number | null; projected: number | null; open_alerts: number; open_recs: number; open_saving: number; vercel?: VercelHeader | null }
 
 /** The header of a general brief: a few numbers the agent should not have to fetch. */
 export function accountHeader(): AccountHeader {
   const h: AccountHeader = { account: null, latest_run: null, spend_7d: null, month_to_date: null, projected: null, open_alerts: 0, open_recs: 0, open_saving: 0 };
   try { h.account = credentialsMeta()?.accountId ?? null; } catch { /* no credentials yet */ }
-  try { const r = db.prepare("select finished_at from runs where status = 'completed' order by id desc limit 1").get() as { finished_at: string } | undefined; h.latest_run = r?.finished_at ?? null; } catch { /* no runs table rows */ }
+  try { const r = db.prepare("select finished_at from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { finished_at: string } | undefined; h.latest_run = r?.finished_at ?? null; } catch { /* no runs table rows */ }
   try { const s = spendSummary(); h.spend_7d = s.last_7_days.usd ?? null; h.month_to_date = s.month_to_date.usd ?? null; h.projected = s.month_to_date.projected_month_end ?? null; } catch { /* no spend yet */ }
   try { h.open_alerts = (db.prepare("select count(*) as n from alerts where acknowledged = 0 and datetime(created_at) > datetime('now', '-7 days')").get() as { n: number }).n; } catch { /* */ }
   try { const r = db.prepare("select count(*) as n, coalesce(sum(est_monthly_saving), 0) as saving from recommendations where status in ('open', 'pending', 'approved')").get() as { n: number; saving: number }; h.open_recs = r.n; h.open_saving = r.saving; } catch { /* */ }
+  try { h.vercel = vercelHeader(); } catch { h.vercel = null; }
   return h;
+}
+
+/** The Vercel team in a few numbers, when a token is saved: the brief names it so the agent knows there is a second account to ask about. */
+export function vercelHeader(): VercelHeader | null {
+  const t = vercelTeam(); if (!t) return null;
+  const o = vercelOverview();
+  return { team: t.id, name: t.name ?? t.slug, plan: t.plan, projects: o.projects.total, production_failed: o.projects.production_failed, urls_open: o.exposure.open, last_invoice_usd: o.billing?.last_invoice?.total ?? null, estimated_period_usd: o.billing?.estimated_period_usd ?? null, attention: o.attention.length, read_at: o.read_at };
 }
 
 /**
@@ -197,12 +212,18 @@ export function accountHeader(): AccountHeader {
 export function buildAccountPrompt(header: AccountHeader, tools: [string, string][], thread: Pick<Message, "role" | "author" | "content" | "status">[], message: string, threadTitle?: string | null, resumed = false): string {
   if (resumed) return ["## The new message to answer (the thread so far is in front of you; the account numbers may have moved since, fetch them if they matter)", message, "", "Answer with the JSON object described by the schema: reply (step_fixes and suggest_replan stay empty here; there is no plan)."].join("\n");
   const usd = (n: number | null) => (n == null ? "unknown" : `${Math.round(n)} USD`);
-  const lines: string[] = [`# Thread with the team about the AWS account${threadTitle ? `: ${threadTitle}` : ""}`, "",
-    "## The account in a few numbers (fetch anything else with the tools)",
+  const lines: string[] = [`# Thread with the team about the ${header.vercel ? "accounts" : "AWS account"}${threadTitle ? `: ${threadTitle}` : ""}`, "",
+    `## The ${header.vercel ? "AWS account" : "account"} in a few numbers (fetch anything else with the tools)`,
     `- account ${header.account ?? "unknown"}; latest collection run ${header.latest_run ?? "none yet"}`,
     `- spend: last 7 complete days ${usd(header.spend_7d)}; month to date ${usd(header.month_to_date)}, projected ${usd(header.projected)}`,
-    `- ${header.open_alerts} unacknowledged alert${header.open_alerts === 1 ? "" : "s"} in the last 7 days; ${header.open_recs} open/pending/approved recommendation${header.open_recs === 1 ? "" : "s"} claiming ≈ ${usd(header.open_saving)}/month`,
-    "", "## What you can look up (tools arrive as aws_<name>); pull what the question needs, say what you fetched"];
+    `- ${header.open_alerts} unacknowledged alert${header.open_alerts === 1 ? "" : "s"} in the last 7 days; ${header.open_recs} open/pending/approved recommendation${header.open_recs === 1 ? "" : "s"} claiming ≈ ${usd(header.open_saving)}/month`];
+  if (header.vercel) {
+    const v = header.vercel;
+    lines.push("", "## The Vercel team in a few numbers (vercel_projects, vercel_stores, vercel_bill, and the graph with account_id = the team id)",
+      `- team ${v.name ?? v.team} (${v.team}), ${v.plan ?? "unknown"} plan; ${v.projects} projects${v.production_failed ? `, ${v.production_failed} with the latest production deployment failed` : ""}; ${v.urls_open} URL${v.urls_open === 1 ? "" : "s"} open to anyone; read ${v.read_at ?? "never"}`,
+      `- last invoice ${usd(v.last_invoice_usd)}; this period estimated ${usd(v.estimated_period_usd)}; ${v.attention} item${v.attention === 1 ? "" : "s"} in the attention list`);
+  }
+  lines.push("", "## What you can look up (tools arrive as aws_<name>); pull what the question needs, say what you fetched");
   for (const [n, w] of tools) lines.push(`- ${n}: ${w}`);
   lines.push("", "## The conversation so far");
   const past = thread.filter((m) => m.status === "completed" && m.content).slice(-THREAD_CONTEXT);

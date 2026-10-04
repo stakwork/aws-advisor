@@ -26,6 +26,7 @@ export function s3MonthlyCost(sizesGb: Record<string, number>): number { return 
 
 import { CloudWatchClient, ListMetricsCommand, GetMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { sdkCredentials } from "./steampipe.js";
+import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 
 /** One ListMetrics per region finds which (bucket, storage class) pairs exist, then GetMetricData fetches them
  *  500 at a time: 56 buckets cost 2 or 3 CloudWatch calls instead of 15 Steampipe queries each. */
@@ -113,15 +114,16 @@ export async function refreshS3Inventory(onLog: (s: string) => void = () => {}):
 }
 
 const SORTS = ["name", "region", "total_gb", "objects", "standard_gb", "monthly_usd", "lifecycle_rules", "created"];
-export function listS3(f: { q?: string; sort?: string; gone?: boolean } = {}) {
+export function listS3(f: { q?: string; sort?: string; gone?: boolean; scope?: AccountScope | null } = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("gone = 0");
   if (f.q) { where.push("(name like ? or region like ?)"); params.push(`%${f.q}%`, `%${f.q}%`); }
   const desc = f.sort?.startsWith("-"); const col = (f.sort || "").replace(/^-/, "");
   const order = SORTS.includes(col) ? `order by ${col} ${desc ? "desc" : "asc"} nulls last` : "order by monthly_usd desc, total_gb desc";
   return (db.prepare(`select * from inventory_s3 ${where.length ? `where ${where.join(" and ")}` : ""} ${order} limit 1000`).all(...params) as any[]).map((r) => ({ ...r, sizes: (() => { try { return JSON.parse(r.sizes || "{}"); } catch { return {}; } })() }));
 }
-export function s3Summary() {
-  const r = db.prepare("select count(*) as total, coalesce(sum(total_gb), 0) as gb, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(lifecycle_rules = 0 and total_gb > 5), 0) as big_no_lifecycle, coalesce(sum(public), 0) as public, coalesce(sum(public is null), 0) as public_unknown, coalesce(sum(standard_gb), 0) as standard_gb from inventory_s3 where gone = 0").get() as any;
-  return { ...r, gone: (db.prepare("select count(*) as n from inventory_s3 where gone = 1").get() as any).n };
+export function s3Summary(scope?: AccountScope | null) {
+  const r = scopedStmt(scope, "select count(*) as total, coalesce(sum(total_gb), 0) as gb, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(lifecycle_rules = 0 and total_gb > 5), 0) as big_no_lifecycle, coalesce(sum(public), 0) as public, coalesce(sum(public is null), 0) as public_unknown, coalesce(sum(standard_gb), 0) as standard_gb from inventory_s3 where gone = 0").get() as any;
+  return { ...r, gone: (scopedStmt(scope, "select count(*) as n from inventory_s3 where gone = 1").get() as any).n };
 }

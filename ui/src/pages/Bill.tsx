@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useState } from "react";
 import { api, usd, when } from "../api";
 import { Badge, Button, Card, Empty, Td, Th } from "../components/ui";
+import { useScopeInfo } from "../scope";
+import { VercelBill } from "../components/vercelBill";
 
 type Line = { service: string; usage_type: string; quantity: number; unit: string | null; region: string; rule: string | null; unit_price: number | null; modelled: number | null; actual_od: number; net: number; residual: number | null; note?: string };
 type Service = { service: string; actual_net: number; actual_od: number; modelled: number; unpriced_actual: number; lines: number; priced_lines: number; gap_pct: number | null; status: "pass" | "named" | "fail" };
@@ -32,7 +34,13 @@ const delta = (v: number | null | undefined) => (v == null ? "—" : `${v > 0 ? 
 
 /** This month's bill: spent so far, and what the rest of the month costs from what is running now. */
 export default function ThisMonth() {
-  const [d, setD] = useState<{ forecast: Forecast | null; history: { day: string; forecast_net: number; mtd_net: number }[]; price_check: { month: string; reconciliation: Recon | null } } | null>(null);
+  const scopeInfo = useScopeInfo();
+  if (scopeInfo.provider && scopeInfo.provider !== "aws") return scopeInfo.provider === "vercel" ? <VercelBill /> : <Empty>No bill for {scopeInfo.label} yet.</Empty>;
+  return <AwsThisMonth />;
+}
+
+function AwsThisMonth() {
+  const [d, setD] = useState<{ forecast: Forecast | null; history: { day: string; forecast_net: number; mtd_net: number }[]; price_check: { month: string; reconciliation: Recon | null }; scope?: { account: string; spend: { month: string; usd: number }[] | null } | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [tab, setTab] = useState<"services" | "legs">("services");
@@ -47,6 +55,7 @@ export default function ThisMonth() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">This month</h1>
+          {d?.scope && <div className="text-sm text-zinc-500">Looking at account {d.scope.account}: the forecast below is the payer's whole bill (Cost Explorer and the inventory are organisation-wide); this account's own months from Cost Explorer's per-account view: {d.scope.spend?.length ? d.scope.spend.map((m: any) => `${m.month} ${usd(m.usd)}`).join(" · ") : "none read yet (the spend refresh fills them)"}.</div>}
           <div className="text-sm text-zinc-500">{f ? <>{f.month} · {f.elapsed_days} of {f.days_in_month} days billed · computed {when(f.computed_at)}</> : "Not computed yet"}</div>
         </div>
         <Button onClick={run} disabled={busy}>{busy ? "Pricing the month…" : "Recompute"}</Button>

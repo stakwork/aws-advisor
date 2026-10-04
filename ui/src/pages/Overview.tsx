@@ -6,6 +6,9 @@ import { IncidentView, InvestigateButton, incidentOfAlertRow } from "../componen
 import { TriageLine, triageOfAlertRow } from "../components/jev";
 import { alertLevel } from "../alertLevel";
 import { ImpactList } from "../components/impact";
+import { AccountsOverview, GeneralOverview } from "../components/accounts";
+import { useScopeInfo } from "../scope";
+import { VercelOverview } from "../components/vercelOverview";
 
 const PREVIEW = 5;
 const PAGE = 10;
@@ -150,7 +153,7 @@ function ReviewSummary() {
   for (const f of r.findings) counts[f.kind] = (counts[f.kind] || 0) + 1;
   return (
     <div className="space-y-1 text-sm">
-      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{r.day ? `${r.day} · ${r.findings.length} observation${r.findings.length === 1 ? "" : "s"}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Reviewing…" : "Run now"}</Button></div>
+      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{r.day ? `${r.day} · ${r.findings.length} observation${r.findings.length === 1 ? "" : "s"}${r.scope && r.scope.total !== r.findings.length ? ` for this account (${r.scope.total} across accounts)` : ""}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Reviewing…" : "Run now"}</Button></div>
       {r.day && r.findings.length === 0 && <div className="text-zinc-500">Nothing stands out in the statistics.</div>}
       <div className="flex flex-wrap gap-2 text-xs">{Object.entries(counts).map(([k, n]) => <Badge key={k}>{`${n} ${REVIEW_LABEL[k] || k}`}</Badge>)}</div>
       <ul className="space-y-0.5">{r.findings.slice(0, 6).map((f: any) => (
@@ -182,6 +185,24 @@ export default function Overview() {
   const loadAlerts = () => api(`/alerts?status=open&page=${expanded ? alertPage : 1}&page_size=${expanded ? PAGE : PREVIEW}`).then(setAlerts).catch(() => {});
   useEffect(() => { load(); loadSpend(); const t = setInterval(() => { load(); loadSpend(); }, 10000); return () => clearInterval(t); }, []);
   useEffect(() => { loadAlerts(); const t = setInterval(loadAlerts, 10000); return () => clearInterval(t); }, [expanded, alertPage]);
+  const scopeInfo = useScopeInfo();
+  // one account: its own overview, never another provider's cards; every account: the table across them
+  if (scopeInfo.provider && scopeInfo.provider !== "aws") {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between"><h1 className="text-xl font-semibold text-zinc-100">Overview</h1><span className="text-sm text-zinc-500">Looking at {scopeInfo.label}</span></div>
+        {scopeInfo.provider === "vercel" ? <VercelOverview /> : <Empty>No overview for {scopeInfo.label} yet.</Empty>}
+      </div>
+    );
+  }
+  if (scopeInfo.ready && scopeInfo.scope === "all" && scopeInfo.providers.filter((p) => p.configured).length > 1) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between"><h1 className="text-xl font-semibold text-zinc-100">Overview</h1><span className="text-sm text-zinc-500">All accounts · pick one under "Looking at" for its own overview</span></div>
+        <GeneralOverview />
+        </div>
+    );
+  }
   if (err) return <Empty>{err}</Empty>;
   if (!d) return <Empty>Loading…</Empty>;
 
@@ -213,14 +234,16 @@ export default function Overview() {
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">Overview</h1>
           <div className="text-sm text-zinc-500">
-            {d.latestRun ? <>Last completed run #{d.latestRun.id} at {when(d.latestRun.finished_at)} on account {d.latestRun.account_id}</> : "No completed run yet"}
+            {d.scope && <>Looking at account {d.scope.account}{d.scope.consolidated ? " · recommendations, alerts and the inventory are this account's; billing is the payer's consolidated bill" : ""}. </>}
+            {d.latestRun ? <>Last completed run #{d.latestRun.id} at {when(d.latestRun.finished_at)}{d.scope ? "" : <> on account {d.latestRun.account_id}</>}</> : "No completed run yet"}
             {d.running && <> · run #{d.running.id} in progress</>}
           </div>
         </div>
         <Button onClick={startRun} disabled={d.busy || !d.awsConfigured}>{d.busy ? "Running…" : "Run now"}</Button>
       </div>
+      <AccountsOverview />
 
-      {!d.latestRun && <Empty>{d.awsConfigured ? <>Start a run to collect findings.</> : <>Add AWS credentials in <Link className="underline" to="/settings">Settings</Link>, then start a run.</>}</Empty>}
+      {!d.latestRun && <Empty>{d.awsConfigured ? <>Start a run to collect findings.</> : <>Add AWS credentials in <Link className="underline" to="/settings?tab=accounts">Settings</Link>, then start a run.</>}</Empty>}
 
       {/* Alerts: what is open now, then the agent's morning note and yesterday's statistical review. */}
       <section className="space-y-4">
@@ -261,7 +284,7 @@ export default function Overview() {
           </Card>
         ) : alerts && <div className="text-sm text-zinc-500">No open alerts.</div>}
         <div className="grid gap-4 lg:grid-cols-2">
-          <Card title={<span className="flex items-center justify-between">Morning observation <span className="text-xs font-normal text-zinc-500">the agent's read of the day</span></span>}>
+          <Card title={<span className="flex items-center justify-between">Morning observation <span className="text-xs font-normal text-zinc-500">{d.scope ? "the agent's read of the day, across every account" : "the agent's read of the day"}</span></span>}>
             <ObservationCard />
           </Card>
           <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
@@ -276,7 +299,7 @@ export default function Overview() {
           <SectionHeading title="Recommendations" to="/recommendations" />
           <div className="grid grid-cols-2 gap-4">
             <Stat label="Open recommendations" value={recs.open?.n || 0} hint={<>≈ {usd(d.open_saving?.distinct ?? recs.open?.saving)} / month if all applied{d.open_saving?.overlap > 0 ? <span title="Several actions claim the same resource; only the largest claim per resource is counted"> ({usd(d.open_saving.overlap)} more is claimed twice)</span> : null}{recs.pending?.n ? <> · <Link className="underline" to="/recommendations?status=pending">{recs.pending.n} in progress</Link></> : null}</>} />
-            <Stat label="Findings in last run" value={d.latestRun.findings_count} hint={<Link className="underline" to="/findings">browse</Link>} />
+            <Stat label={d.scope ? "Findings in last run (this account)" : "Findings in last run"} value={d.scope ? d.scope.findings ?? "—" : d.latestRun.findings_count} hint={<Link className="underline" to="/findings">browse</Link>} />
           </div>
           <div className="grid gap-4 lg:grid-cols-2">
             <Card title={<span className="flex items-center justify-between">Top recommendations by saving <RealisedLine /></span>}>
@@ -301,6 +324,16 @@ export default function Overview() {
       {/* Billing: daily spend (Cost Explorer, at most every 6 h), the last full month, list prices of what runs, and commitments. This month's forecast lives on its own page. */}
       <section className="space-y-4">
         <SectionHeading title="Billing" to="/bill" label="this month →" />
+        {d.scope?.consolidated && (
+          <div className="space-y-2">
+            <div className="text-xs text-zinc-500">This account's own months, from Cost Explorer's per-account view (refreshed with the daily spend). Everything below it is the payer's consolidated bill: Cost Explorer reports the organisation as one.</div>
+            {d.scope.spend?.length > 0 ? (
+              <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+                {d.scope.spend.slice(0, 4).map((m: any, i: number) => <Stat key={m.month} label={i === 0 ? `${m.month} (this account, to date)` : `${m.month} (this account)`} value={usd(m.usd)} hint={i === 0 ? "month to date · unblended" : "unblended"} />)}
+              </div>
+            ) : <div className="text-sm text-zinc-500">No per-account spend yet: it arrives with the next spend refresh.</div>}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Stat label={spend?.today?.usd != null ? "Spend today" : "Latest day"} value={spend?.today?.usd != null ? usd(spend.today.usd, 2) : spend?.latest ? usd(spend.latest.usd, 2) : "—"}
             hint={spend?.today?.usd != null ? `${spend.today.day} · partial day, Cost Explorer is still adding to it` : spend?.latest ? `${spend.latest.day}${spend.latest.partial ? " · still filling in; today is not in Cost Explorer yet" : ""}` : "no spend data yet"} />
@@ -322,7 +355,7 @@ export default function Overview() {
         {(d.latestRun || d.inventory?.refreshed_at) && (
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             {d.latestRun && <>
-              <Stat label="Last full month invoice" value={usd(invoice)} hint="net unblended" />
+              <Stat label="Last full month invoice" value={usd(invoice)} hint={d.scope?.consolidated ? "net unblended · whole organisation" : "net unblended"} />
               <Stat label="On-demand usage" value={usd(rt.Usage?.value)} hint={`Savings Plan covered ${usd(rt.SavingsPlanCoveredUsage?.value)} · reserved ${usd(rt.DiscountedUsage?.value)}`} />
             </>}
             {d.inventory?.refreshed_at && <>
@@ -334,7 +367,7 @@ export default function Overview() {
 
         {d.latestRun && (
           <div className="grid gap-4 lg:grid-cols-2">
-            <Card title="On-demand spend by service (last full month)">
+            <Card title={`On-demand spend by service (last full month${d.scope?.consolidated ? ", whole organisation" : ""})`}>
               {metric("on_demand_by_service").length === 0 ? <Empty>No cost data yet.</Empty> : (
                 <ul className="space-y-1">
                   {metric("on_demand_by_service").slice(0, 10).map((m) => {
@@ -352,7 +385,7 @@ export default function Overview() {
             <Card title="Commitments">
               <CommitmentsList fallback={d.commitments} />
             </Card>
-            <Card title="Inside EC2 - Other (last full month)">
+            <Card title={`Inside EC2 - Other (last full month${d.scope?.consolidated ? ", whole organisation" : ""})`}>
               {metric("ec2_other_usage").length === 0 ? <Empty>No data.</Empty> : (
                 <ul className="space-y-1 text-sm">
                   {metric("ec2_other_usage").map((m) => <li key={m.label} className="flex justify-between"><span className="text-zinc-300">{m.label}</span><span>{usd(m.value)}</span></li>)}

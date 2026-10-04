@@ -35,7 +35,7 @@ test("probe pass: Batch workers and instances younger than fifteen minutes are n
   mk(ids[0], { pool_kind: "batch", pool: "production" });
   mk(ids[1], { launch_time: new Date(Date.now() - 5 * 60000).toISOString() });
   mk(ids[2], { pool_kind: "asg", pool: "web-asg" });
-  const targets = probeTargets(1000).map((t) => t.instance_id);
+  const targets = probeTargets("host", 1000).map((t) => t.instance_id);
   assert.ok(!targets.includes(ids[0]), "batch worker skipped");
   assert.ok(!targets.includes(ids[1]), "five-minute-old instance skipped");
   assert.ok(targets.includes(ids[2]), "asg member probed like any other");

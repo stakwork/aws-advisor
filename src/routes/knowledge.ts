@@ -1,8 +1,9 @@
 import { Router } from "express";
+import { accountScope, resourceInScope, rowInScope, stampRowAccounts } from "../scope.js";
 import { authMiddleware } from "../auth.js";
 import { config } from "../config.js";
 import { db } from "../db.js";
-import { CONCEPT_NAMESPACE, listDecisionConcepts } from "../concepts.js";
+import { CONCEPT_NAMESPACE, lastConceptsError, listDecisionConcepts } from "../concepts.js";
 import { S, query } from "../steampipe.js";
 import { credentialGate } from "../gate.js";
 import { instanceHistory, rollupDaily } from "../history.js";
@@ -26,7 +27,17 @@ const headers = () => ({ "x-api-token": config.repo2graphToken });
 
 knowledge.get("/knowledge", async (_req, res) => {
   if (!config.repo2graphUrl) return res.json({ configured: false, namespace: CONCEPT_NAMESPACE, patterns: [], generic: [], internal: [], learnings: [] });
-  const concepts = await listDecisionConcepts(500);
+  // the concepts and the learnings are two repo2graph calls, each capped at 10 s; they run together so a stalled repo2graph costs one wait, not two
+  const learningsPromise = (async () => {
+    try {
+      const r = await fetch(`${config.repo2graphUrl}/learnings/all`, { headers: headers(), signal: AbortSignal.timeout(10_000) });
+      if (r.ok) { const data: any = await r.json(); return (Array.isArray(data) ? data : data.learnings || []).filter((l: any) => String(l.id || "").startsWith("aws-advisor:")); }
+    } catch { /* optional */ }
+    return [] as any[];
+  })();
+  let concepts: Awaited<ReturnType<typeof listDecisionConcepts>> = []; let conceptsError: string | null = null;
+  try { concepts = await listDecisionConcepts(500); } catch (e: any) { conceptsError = `repo2graph did not answer: ${String(e?.message || e).slice(0, 120)}`; }
+  if (!concepts.length && lastConceptsError) conceptsError = conceptsError ?? lastConceptsError;
   const local = new Map((db.prepare("select concept_id, fingerprint, status, scope, synced_at, error from concepts").all() as any[]).map((r) => [r.concept_id, r]));
   const recs = new Map((db.prepare("select fingerprint, id, title, resource, resource_name, action_type, status, decided_by, decided_at, decision_reason, est_monthly_saving from recommendations").all() as any[]).map((r) => [r.fingerprint, r]));
   const enrich = (c: any) => {
@@ -34,13 +45,10 @@ knowledge.get("/knowledge", async (_req, res) => {
     const rec = l ? recs.get(l.fingerprint) : undefined;
     return { ...c, synced_at: l?.synced_at ?? null, sync_error: l?.error ?? null, recommendation: rec ? { id: rec.id, title: rec.title, resource: rec.resource, resource_name: rec.resource_name, action_type: rec.action_type, status: rec.status, decided_by: rec.decided_by, decided_at: rec.decided_at, decision_reason: rec.decision_reason, est_monthly_saving: rec.est_monthly_saving } : null };
   };
-  let learnings: any[] = [];
-  try {
-    const r = await fetch(`${config.repo2graphUrl}/learnings/all`, { headers: headers() });
-    if (r.ok) { const data: any = await r.json(); learnings = (Array.isArray(data) ? data : data.learnings || []).filter((l: any) => String(l.id || "").startsWith("aws-advisor:")); }
-  } catch { /* optional */ }
+  const learnings = await learningsPromise;
   res.json({
     configured: true,
+    error: conceptsError,
     namespace: CONCEPT_NAMESPACE,
     patterns: concepts.filter((c) => c.scope === "pattern").map(enrich),
     generic: concepts.filter((c) => c.scope === "generic").map(enrich),
@@ -140,9 +148,12 @@ knowledge.post("/bill/reconcile", async (req, res) => {
 });
 
 // ---- this month, forecast from what is running now -------------------------------------------------------------
-knowledge.get("/forecast", (_req, res) => {
+knowledge.get("/forecast", (req, res) => {
   const f = latestForecast();
-  res.json({ forecast: f, history: f ? forecastHistory(f.month) : [], price_check: { month: lastFullMonth(), reconciliation: getReconciliation(lastFullMonth()) } });
+  // the forecast is built from the payer's Cost Explorer and the whole inventory: organisation-wide. Under one account's scope, that account's own months from Cost Explorer's per-account view ride along.
+  const scope = accountScope(req.query as any);
+  const account_spend = scope ? (db.prepare("select month, usd from spend_by_account_monthly where account_id = ? order by month desc limit 6").all(scope.id) as { month: string; usd: number }[]) : null;
+  res.json({ forecast: f, history: f ? forecastHistory(f.month) : [], price_check: { month: lastFullMonth(), reconciliation: getReconciliation(lastFullMonth()) }, scope: scope ? { account: scope.id, spend: account_spend } : null });
 });
 knowledge.post("/forecast/run", async (_req, res) => {
   const log: string[] = [];
@@ -162,7 +173,13 @@ knowledge.post("/baselines/refresh", async (_req, res) => {
 });
 
 // ---- the daily review of the collected statistics ---------------------------------------------------------------
-knowledge.get("/review", (_req, res) => res.json(latestReview()));
+// the daily review names resources: under one account only its own rows (the day and its history stay as reviewed)
+knowledge.get("/review", (req, res) => {
+  const scope = accountScope(req.query as any); const r = latestReview();
+  if (!scope) return res.json(r);
+  const inScope = resourceInScope(scope);
+  res.json({ ...r, findings: r.findings.filter((f: any) => inScope(f.resource)), scope: { account: scope.id, total: r.findings.length } });
+});
 knowledge.post("/review/run", async (_req, res) => {
   const log: string[] = [];
   try { res.json({ ...(await runReview((l) => log.push(l))), log }); } catch (e: any) { res.status(500).json({ error: e.message, log }); }
@@ -176,13 +193,17 @@ knowledge.post("/observe/run", async (req, res) => {
 });
 
 // ---- CloudWatch Logs as a cost source, CloudTrail as the change feed ------------------------------------------
-knowledge.get("/logs", (req, res) => res.json(topLogGroups(Math.max(5, Math.min(200, Number(req.query.limit || 25))))));
+knowledge.get("/logs", (req, res) => res.json(topLogGroups(Math.max(5, Math.min(200, Number(req.query.limit || 25))), accountScope(req.query as any))));
 knowledge.post("/logs/refresh", async (_req, res) => { try { const r = await refreshLogs(); mirrorKnowledgeInBackground("logs refresh (manual)"); res.json(r); } catch (e: any) { res.status(500).json({ error: e.message }); } });
-knowledge.get("/trail", (req, res) => res.json(trailSummary(Math.max(1, Math.min(168, Number(req.query.hours || 24))))));
+knowledge.get("/trail", (req, res) => res.json(trailSummary(Math.max(1, Math.min(168, Number(req.query.hours || 24))), accountScope(req.query as any))));
 knowledge.post("/trail/refresh", async (req, res) => { try { res.json(await refreshTrail(Math.max(1, Math.min(168, Number(req.query.hours || 26))))); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
 // ---- realised savings: approved recommendations checked against the bill ---------------------------------------
-knowledge.get("/verifications", (_req, res) => res.json(verificationSummary()));
+knowledge.get("/verifications", (req, res) => {
+  const scope = accountScope(req.query as any);
+  if (scope) stampRowAccounts("recommendations");
+  res.json({ ...verificationSummary(rowInScope(scope)), scope: scope ? { account: scope.id } : null });
+});
 knowledge.get("/verifications/:id", (req, res) => res.json({ verification: latestVerification(Number(req.params.id)) }));
 // The bill around the decision: the scope's daily cost before and after, the medians, and the account total for context.
 knowledge.get("/verifications/:id/impact", (req, res) => { const i = impactFor(Number(req.params.id)); if (!i) return res.status(404).json({ error: "not found" }); res.json(i); });

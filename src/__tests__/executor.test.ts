@@ -201,7 +201,8 @@ test("s3 usage: the tally by age, class and prefix, and the rules that fall out 
 
 test("use-signal patterns: the setting is validated and the probe document takes them as a parameter", async () => {
   const { parseSignals, serialiseSignals, DEFAULT_SIGNALS_STRING } = await import("../signals.js");
-  const { probeDocument, probeScript, PROBE_SCRIPT, parseClfDate } = await import("../ssm.js");
+  const { parseClfDate } = await import("../ssm.js");
+  const { probeDocument, probeScript, defaultProbeScript } = await import("../probes.js");
   assert.equal(serialiseSignals(parseSignals(DEFAULT_SIGNALS_STRING)), DEFAULT_SIGNALS_STRING);
   assert.equal(parseSignals("login=log(ged)? ?in;;deploy=deploy(ed|ing)? ").length, 2);
   assert.equal(parseSignals("deploy=deploying")[0].description, "custom pattern /deploying/i");
@@ -212,12 +213,13 @@ test("use-signal patterns: the setting is validated and the probe document takes
   assert.equal(validateRuntime("probeSignals", "  login=log(ged)? ?in;; auth=authoriz"), "login=log(ged)? ?in;;auth=authoriz");
   assert.equal(parseSignals("w=\"POST ")[0].regex, "\"POST ", "a trailing space in a pattern is kept");
   assert.throws(() => validateRuntime("probeSignals", ""), /at least one/);
-  const doc = probeDocument() as any;
+  const doc = probeDocument("docker") as any;
   assert.equal(doc.parameters.signals.default, DEFAULT_SIGNALS_STRING);
   assert.ok(doc.mainSteps[0].inputs.runCommand.some((l: string) => l.includes("'{{ signals }}'")), "the document line takes the parameter, single-quoted");
   assert.ok(!doc.mainSteps[0].inputs.runCommand.some((l: string) => l.includes("__SIGNALS__")));
-  assert.match(PROBE_SCRIPT, /__SIGNALS__/);
-  assert.ok(probeScript("a=b;;c=d").includes("'a=b;;c=d'"), "the stock path inlines the current list");
+  assert.match(defaultProbeScript("docker"), /__SIGNALS__/);
+  assert.ok(probeScript("docker", "a=b;;c=d").includes("'a=b;;c=d'"), "the inline path puts the current list in");
+  assert.ok(!defaultProbeScript("host").includes("__SIGNALS__") && Object.keys((probeDocument("host") as any).parameters).length === 0, "only the docker probe takes the signals parameter");
   assert.equal(parseClfDate("25/Sep/2026:10:00:00 +0000"), "2026-09-25T10:00:00.000Z");
   assert.equal(parseClfDate("25/Sep/2026:12:30:00 +0200"), "2026-09-25T10:30:00.000Z");
   assert.equal(parseClfDate("nonsense"), null);

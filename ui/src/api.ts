@@ -80,7 +80,29 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   }
 }
 
+// ---- the account scope: which account the pages look at ("all" = every account); reads carry it as ?account= -------
+
+const SCOPE_KEY = "advisor_scope";
+const scopeListeners = new Set<(id: string) => void>();
+export function currentScope(): string { try { return localStorage.getItem(SCOPE_KEY) || "all"; } catch { return "all"; } }
+/** The scope's provider is kept next to it, so a page knows which kinds to show on its first paint (no flash of another provider's tabs). */
+export function currentScopeProvider(): string | null { try { return localStorage.getItem(`${SCOPE_KEY}_provider`) || null; } catch { return null; } }
+export function setScope(id: string, provider: string | null = null): void {
+  try { if (id === "all") { localStorage.removeItem(SCOPE_KEY); localStorage.removeItem(`${SCOPE_KEY}_provider`); } else { localStorage.setItem(SCOPE_KEY, id); if (provider) localStorage.setItem(`${SCOPE_KEY}_provider`, provider); else localStorage.removeItem(`${SCOPE_KEY}_provider`); } } catch { /* storage unavailable */ }
+  for (const l of scopeListeners) l(id);
+}
+/** The configured providers as last seen, for the same reason; refreshed whenever /providers is read through rememberProviders. */
+export function cachedProviders(): string[] | null { try { const v = localStorage.getItem("advisor_providers"); return v ? JSON.parse(v) : null; } catch { return null; } }
+export function rememberProviders(ids: string[]): void { try { localStorage.setItem("advisor_providers", JSON.stringify(ids)); } catch { /* ignore */ } }
+export function onScopeChange(cb: (id: string) => void): () => void { scopeListeners.add(cb); return () => { scopeListeners.delete(cb); }; }
+const withScope = (path: string, method: string): string => {
+  if (method !== "GET") return path;
+  const scope = currentScope(); if (scope === "all" || /[?&]account=/.test(path)) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}account=${encodeURIComponent(scope)}`;
+};
+
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  path = withScope(path, String(init.method || "GET").toUpperCase());
   const headers: Record<string, string> = { ...(init.headers as Record<string, string> || {}) };
   if (init.body && !headers["content-type"]) headers["content-type"] = "application/json";
   const t = token();

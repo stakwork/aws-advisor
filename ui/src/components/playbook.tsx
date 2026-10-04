@@ -16,12 +16,21 @@ export interface Playbook {
   effort: "low" | "medium" | "high";
   references?: string[];
   findings?: number;
+  /** per step, the source id the step cites */
+  citations?: (string | null)[];
+  provenance?: {
+    origin: "generated" | "seed";
+    generated_at?: string | null; generated_by?: string | null; stale_after?: string | null; review_status?: string | null; published?: boolean; reason?: string | null; confidence?: number | null;
+    sources?: { id: string; hash: string; title: string | null; origin: string }[]; gaps?: string[];
+    judged?: { tier: string; effort: string; irreversible: number | null; service_impact: number | null; covers: number | null; judged: boolean } | null;
+    held?: { review_status: string; reason: string | null; generated_at: string | null } | null;
+  };
 }
 
 const cache = new Map<string, Promise<Playbook | null>>();
 
 /** Loads a playbook by control id once per page life; null when the control has none. */
-export function usePlaybook(controlId: string | null | undefined): Playbook | null | undefined {
+export function usePlaybook(controlId: string | null | undefined, version = 0): Playbook | null | undefined {
   const [pb, setPb] = useState<Playbook | null | undefined>(undefined);
   useEffect(() => {
     if (!controlId) { setPb(null); return; }
@@ -29,7 +38,7 @@ export function usePlaybook(controlId: string | null | undefined): Playbook | nu
     let live = true;
     cache.get(controlId)!.then((p) => { if (live) setPb(p); });
     return () => { live = false; };
-  }, [controlId]);
+  }, [controlId, version]);
   return pb;
 }
 
@@ -105,6 +114,51 @@ export function Step({ i, checks, children }: { i: number; checks?: StepChecks; 
   );
 }
 
+/** The source a generated step cites: the mod's control definition, or a provider page. */
+function Cite({ id }: { id: string }) {
+  const isUrl = /^https?:/.test(id);
+  const label = isUrl ? id.replace(/^https?:\/\//, "").split("/")[0] : "mod";
+  const title = isUrl ? id : `the control's definition and documentation as the benchmark mod ships it (${id.replace(/^mod:/, "")})`;
+  return isUrl ? <a className="ml-1 align-super text-[10px] text-sky-300/80 hover:underline" href={id} target="_blank" rel="noreferrer" title={title}>[{label}]</a> : <span className="ml-1 align-super text-[10px] text-zinc-500" title={title}>[{label}]</span>;
+}
+
+/** Where the playbook came from and the controls on it: provenance line, Rebuild, Reviewed / Disputed. */
+export function Provenance({ pb, onChange }: { pb: Playbook; onChange?: () => void }) {
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+  const pv = pb.provenance; if (!pv) return null;
+  const when = (x: string | null | undefined) => (x ? String(x).slice(0, 10) : "—");
+  const rebuild = async () => { setBusy("rebuild"); setMsg(""); try { const r = await api("/playbooks/generate", { method: "POST", body: JSON.stringify({ control_ids: [pb.control_id] }) }); setMsg(r.jobs?.length ? "sent to the agent; the panel updates when it answers (a minute or two)" : r.skipped?.[0]?.reason || r.note || "nothing sent"); } catch (e: any) { setMsg(e.message); } finally { setBusy(""); } };
+  const review = async (status: "reviewed" | "disputed" | "generated") => { setBusy(status); setMsg(""); try { await api(`/playbooks/${encodeURIComponent(pb.control_id)}/review`, { method: "PUT", body: JSON.stringify({ status }) }); onChange?.(); } catch (e: any) { setMsg(e.message); } finally { setBusy(""); } };
+  const btn = "rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50";
+  return (
+    <div className="mt-2 rounded border border-zinc-800 bg-zinc-950/40 p-2 text-[11px] text-zinc-400">
+      {pv.origin === "generated" ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span>Generated {when(pv.generated_at)} from {pv.sources?.length ?? 0} source{pv.sources?.length === 1 ? "" : "s"}{pv.generated_by ? <span className="text-zinc-600"> · {pv.generated_by}</span> : null}</span>
+          <span>· tier and effort judged by Jev{pv.judged?.covers != null ? `, covers ${Math.round(pv.judged.covers * 100)}% of the seed` : ""}</span>
+          <span>· review: <span className={pv.review_status === "reviewed" ? "text-emerald-300" : pv.review_status === "disputed" ? "text-red-300" : "text-zinc-300"}>{pv.review_status}</span></span>
+          {pv.stale_after && <span className="text-zinc-600">· due again {when(pv.stale_after)}</span>}
+          <span className="grow" />
+          <button type="button" className={btn} disabled={Boolean(busy)} onClick={rebuild}>{busy === "rebuild" ? "Sending…" : "Rebuild"}</button>
+          {pv.review_status !== "reviewed" && <button type="button" className={btn} disabled={Boolean(busy)} onClick={() => review("reviewed")} title="Pins this playbook until its sources change">Mark reviewed</button>}
+          <button type="button" className={btn} disabled={Boolean(busy)} onClick={() => review("disputed")} title="Unpublishes it: nothing is served until it is rebuilt">Dispute</button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span>No playbook in force: nothing is hand-written.{pv.held ? <> A generated playbook from {when(pv.held.generated_at)} is held: {pv.held.reason || pv.held.review_status}.</> : " Not generated from sources yet."}</span>
+          <span className="grow" />
+          <button type="button" className={btn} disabled={Boolean(busy)} onClick={rebuild}>{busy === "rebuild" ? "Sending…" : pv.held ? "Rebuild" : "Generate from sources"}</button>
+          {pv.held && <button type="button" className={btn} disabled={Boolean(busy)} onClick={() => review("reviewed")} title="Publish the held generation as reviewed">Publish held one</button>}
+        </div>
+      )}
+      {pv.sources?.length ? <details className="mt-1"><summary className="cursor-pointer text-zinc-500">Sources</summary><ul className="mt-0.5 space-y-0.5">{pv.sources.map((s) => <li key={s.id} className="truncate">{/^https?:/.test(s.id) ? <a className="text-sky-300/80 hover:underline" href={s.id} target="_blank" rel="noreferrer">{s.title || s.id}</a> : <span>{s.title || s.id} <span className="text-zinc-600">(benchmark mod)</span></span>}</li>)}</ul></details> : null}
+      {pv.gaps?.length ? <div className="mt-1 text-zinc-500">Gaps the sources leave: {pv.gaps.join("; ")}</div> : null}
+      {msg && <div className="mt-1 text-zinc-300">{msg}</div>}
+    </div>
+  );
+}
+
 /** The playbook's body: meaning, act / ignore, numbered steps (with checkboxes when `checks` is given), saving formula, references. */
 export function PlaybookBody({ pb, compact = false, checks }: { pb: Playbook; compact?: boolean; checks?: StepChecks }) {
   const cls = compact ? "text-xs" : "text-sm";
@@ -117,7 +171,7 @@ export function PlaybookBody({ pb, compact = false, checks }: { pb: Playbook; co
       </div>
       <div>
         <div className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">Steps</div>
-        <ol className="list-decimal space-y-1 pl-5">{pb.steps.map((s, i) => <Step key={i} i={i} checks={checks}><Prose text={s} /></Step>)}</ol>
+        <ol className="list-decimal space-y-1 pl-5">{pb.steps.map((s, i) => <Step key={i} i={i} checks={checks}><Prose text={s} />{pb.citations?.[i] && <Cite id={pb.citations[i]!} />}</Step>)}</ol>
       </div>
       <div><span className="text-[11px] uppercase tracking-wide text-zinc-500">Saving</span> <span className="text-zinc-400"><Prose text={pb.saving} /></span></div>
       {pb.references?.length ? <div className="text-xs text-zinc-500">{pb.references.map((r) => <a key={r} href={r} target="_blank" rel="noreferrer" className="mr-2 underline">{r.replace(/^https?:\/\//, "")}</a>)}</div> : null}
@@ -127,7 +181,8 @@ export function PlaybookBody({ pb, compact = false, checks }: { pb: Playbook; co
 
 /** The "How to act" panel. Findings renders it inline, full width, under the row that opened it. */
 export function PlaybookPanel({ controlId, onClose, findings }: { controlId: string; onClose: () => void; findings?: number }) {
-  const pb = usePlaybook(controlId);
+  const [version, setVersion] = useState(0);
+  const pb = usePlaybook(controlId, version);
   const ref = useRef<HTMLDivElement>(null);
   // Bring the panel into view when it opens or switches control: "nearest" leaves the
   // page alone if it is already visible, and only scrolls the minimum otherwise.
@@ -146,6 +201,7 @@ export function PlaybookPanel({ controlId, onClose, findings }: { controlId: str
           <h2 className="text-base font-medium text-zinc-100">{pb.title}</h2>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{pb.tier}</Badge><EffortBadge effort={pb.effort} />{findings != null && <span className="text-zinc-500">{findings} finding{findings === 1 ? "" : "s"} in this run</span>}<span className="font-mono text-[11px] text-zinc-600">{pb.control_id}</span></div>
           <div className="mt-3"><PlaybookBody pb={pb} /></div>
+          <Provenance pb={pb} onChange={() => { cache.delete(controlId); setVersion((v) => v + 1); }} />
         </>
       )}
     </Card>

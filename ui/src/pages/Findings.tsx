@@ -11,6 +11,10 @@ export default function Findings() {
   const [params, setParams] = useSearchParams();
   const [data, setData] = useState<any>(null);
   const [playbooks, setPlaybooks] = useState<{ run_id: number | null; count: number; playbooks: Playbook[] } | null>(null);
+  const [due, setDue] = useState<{ due: { control_id: string; why: string }[]; configured: boolean } | null>(null);
+  const [genMsg, setGenMsg] = useState("");
+  const loadDue = () => api("/playbooks/due").then(setDue).catch(() => setDue(null));
+  const generate = async () => { setGenMsg("sending…"); try { const r = await api("/playbooks/generate", { method: "POST", body: "{}" }); setGenMsg(r.jobs?.length ? `${r.jobs.length} agent run(s) for ${r.jobs.reduce((n: number, j: any) => n + j.control_ids.length, 0)} controls; the list updates as they answer (a few minutes)` : r.note || "nothing sent"); } catch (e: any) { setGenMsg(e.message); } };
   const [q, setQ] = useState(params.get("q") || "");
   const control = params.get("control_id") || "";
   const runId = params.get("run_id") || "";
@@ -30,7 +34,7 @@ export default function Findings() {
     qs.set("page_size", String(PAGE_SIZE));
     api(`/findings?${qs}`).then(setData).catch(() => setData({ findings: [], controls: [], total: 0, page: 1, page_size: PAGE_SIZE }));
   }, [runId, control, params.get("q"), page]);
-  useEffect(() => { api(`/playbooks${runId ? `?run_id=${runId}` : ""}`).then(setPlaybooks).catch(() => setPlaybooks(null)); }, [runId]);
+  useEffect(() => { api(`/playbooks${runId ? `?run_id=${runId}` : ""}`).then(setPlaybooks).catch(() => setPlaybooks(null)); loadDue(); }, [runId]);
 
   // A filter change starts again from page 1; only "page" and "howto" keep the rest.
   const set = (k: string, v: string) => { const p = new URLSearchParams(params); v ? p.set(k, v) : p.delete(k); if (k !== "page" && k !== "howto") p.delete("page"); setParams(p); };
@@ -81,7 +85,7 @@ export default function Findings() {
                           <button type="button" className="block max-w-full truncate text-left hover:underline" title={`${f.control_id}\nclick: how to act`} onClick={() => toggleHowto(f.control_id, row)}>{f.control_title || f.control_id}</button>
                           <div className="flex items-center gap-2 text-xs text-zinc-500">{f.source}{f.benchmark ? ` · ${f.benchmark}` : ""}{pb && <HowTo id={f.control_id} row={row} label={`${pb.tier} · ${pb.effort}`} />}</div>
                         </Td>
-                        <Td className="max-w-72 break-all font-mono text-xs">{f.resource}</Td>
+                        <Td className="max-w-72 break-all font-mono text-xs">{f.resource}{(() => { try { const n = f.dimensions ? JSON.parse(f.dimensions).resource_name : null; return n && n !== f.resource ? <div className="font-sans text-zinc-400">{n}</div> : null; } catch { return null; } })()}</Td>
                         <Td>{f.reason}</Td>
                         <Td className="text-zinc-500">{f.region || "—"}</Td>
                       </tr>
@@ -98,7 +102,13 @@ export default function Findings() {
       </div>
 
       <div id="playbooks" />
-      <Card title={<span>Playbooks {playbooks && <span className="font-normal text-zinc-500">· {playbooks.count} controls, counts from run #{playbooks.run_id ?? "—"}</span>}</span>}>
+      <Card title={<span>Playbooks {playbooks && <span className="font-normal text-zinc-500">· {playbooks.count} controls, counts from run #{playbooks.run_id ?? "—"} · written by the agent from the benchmark mods' documentation and the provider pages they cite; the hand-written seed serves until a generated one is published</span>}</span>}>
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+          {due ? <span>{due.due.length ? `${due.due.length} due: ${due.due.slice(0, 3).map((d) => `${d.control_id.replace(/^aws_\w+\.control\./, "")} (${d.why})`).join("; ")}${due.due.length > 3 ? "; …" : ""}` : "every playbook is current"}</span> : <span>…</span>}
+          <span className="grow" />
+          <button type="button" className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" disabled={!due?.configured || !due?.due.length} onClick={generate} title={due?.configured ? "Sends the due controls to the agent, four per run, under the agent quota" : "Needs the repo2graph URL (Settings › Agent)"}>Generate now</button>
+          {genMsg && <span className="text-zinc-300">{genMsg}</span>}
+        </div>
         {!playbooks ? <div className="text-sm text-zinc-500">Loading…</div> : (
           <table className="w-full border-collapse">
             <thead><tr><Th>Playbook</Th><Th>Tier</Th><Th>Effort</Th><Th className="text-right">Findings</Th></tr></thead>
@@ -111,7 +121,7 @@ export default function Findings() {
                   <tr className={`border-t border-zinc-800 hover:bg-zinc-900/60 ${open ? "bg-zinc-900/40" : ""}`}>
                     <Td>
                       <button type="button" className="text-left hover:underline" onClick={() => toggleHowto(p.control_id, row)}>{p.title}</button>
-                      <div className="font-mono text-[11px] text-zinc-600">{p.control_id}</div>
+                      <div className="font-mono text-[11px] text-zinc-600">{p.control_id}{p.provenance?.origin === "generated" ? <span className="ml-2 font-sans text-emerald-300/80" title={`generated ${String(p.provenance.generated_at || "").slice(0, 10)} from ${p.provenance.sources?.length ?? 0} sources · ${p.provenance.review_status}`}>generated</span> : p.provenance?.held ? <span className="ml-2 font-sans text-amber-300/80" title={p.provenance.held.reason || ""}>seed · generation held</span> : <span className="ml-2 font-sans text-zinc-600">seed</span>}</div>
                     </Td>
                     <Td><Badge>{p.tier}</Badge></Td>
                     <Td><EffortBadge effort={p.effort} /></Td>

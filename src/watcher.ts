@@ -31,6 +31,17 @@ const STATE_CODE: Record<string, number> = { pending: 0, running: 1, "shutting-d
 const insertSample = db.prepare("insert into watch_samples(sample_id, collected_at, key, label, value, dims) values (?, ?, ?, ?, ?, ?)");
 const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
 
+/**
+ * Whether an instance missing from this pass may be called gone: only when the pass saw instances at all and, when
+ * its previous sample named an account, that account answered with at least one instance. Otherwise the advisor
+ * could not see the account, and "we know nothing" must not become "it is gone".
+ */
+export function canCallGone(prevDims: { account?: string | null } | null | undefined, accountsSeen: Set<string>, anySeen: boolean): boolean {
+  if (!anySeen) return false;
+  const a = prevDims?.account; if (!a) return true;
+  return accountsSeen.has(a);
+}
+
 async function collect(errors: string[]): Promise<{ samples: Sample[]; instancesOk: boolean }> {
   const out: Sample[] = [];
   const failed = new Set<string>();
@@ -41,15 +52,15 @@ async function collect(errors: string[]): Promise<{ samples: Sample[]; instances
   await attempt("instances", "aws_ec2_instance", async () => {
     // `pool` marks autoscaled nodes (Karpenter, EKS node groups, ASGs): their comings and goings are
     // expected and are summarised per pool per day instead of alerting one by one.
-    const rows = await query<{ instance_id: string; instance_state: string; instance_type: string; name: string | null; region: string; pool: string | null; cluster: string | null }>(
-      `select instance_id, instance_state, instance_type, tags ->> 'Name' as name, region,
+    const rows = await query<{ instance_id: string; instance_state: string; instance_type: string; name: string | null; region: string; pool: string | null; cluster: string | null; account_id: string | null }>(
+      `select instance_id, instance_state, instance_type, tags ->> 'Name' as name, region, account_id,
               coalesce(tags ->> 'karpenter.sh/nodepool', tags ->> 'eks:nodegroup-name', tags ->> 'aws:autoscaling:groupName') as pool,
               tags ->> 'eks:cluster-name' as cluster
        from ${S}.aws_ec2_instance`);
     const byType = new Map<string, number>();
     for (const r of rows) {
       if (r.instance_state === "running") byType.set(r.instance_type, (byType.get(r.instance_type) || 0) + 1);
-      out.push({ key: "instance_state", label: r.instance_id, value: STATE_CODE[r.instance_state] ?? -1, dims: { state: r.instance_state, name: r.name, type: r.instance_type, region: r.region, pool: r.pool, cluster: r.cluster } });
+      out.push({ key: "instance_state", label: r.instance_id, value: STATE_CODE[r.instance_state] ?? -1, dims: { state: r.instance_state, name: r.name, type: r.instance_type, region: r.region, pool: r.pool, cluster: r.cluster, account: r.account_id ? String(r.account_id) : null } });
     }
     for (const [type, n] of byType) out.push({ key: "running_by_type", label: type, value: n });
     out.push({ key: "running_total", label: "running", value: [...byType.values()].reduce((s, n) => s + n, 0) });
@@ -135,14 +146,24 @@ export async function watchOnce(): Promise<WatchResult> {
         alerts++;
       }
     }
+    // An account that returned no instance at all this pass is one the credentials could not see (a parent switch,
+    // a member not yet registered, a role that stopped resolving), not an emptied account: its instances are left as
+    // they were. Only accounts that answered with at least one instance can have one go missing.
+    const accountsSeen = new Set(curStates.map((s) => s.dims?.account).filter((a): a is string => Boolean(a)));
+    const notVisible = new Map<string, number>();
     for (const [id, prev] of prevStates) {
       if (seen.has(id)) continue;
       const d = prev.dims ? JSON.parse(prev.dims) : {};
+      if (!canCallGone(d, accountsSeen, curStates.length > 0)) { const k = d.account ?? "(unknown account)"; notVisible.set(k, (notVisible.get(k) ?? 0) + 1); continue; }
       const pool = poolOf(d);
       if (pool) { record(pool, { instance_id: id, type: d.type ?? null, from: d.state ?? null, to: null, at: nowIso }); continue; }
       stateAlerts.push(Number(insertAlert.run("instance_state", id, `${d.name ? `${d.name} (${id})` : id} is gone (was ${d.state})`, JSON.stringify({ ...d, from: d.state, to: null })).lastInsertRowid));
       alerts++;
     }
+
+    for (const [acct, n] of notVisible) errors.push(`instances: ${n} instance${n === 1 ? "" : "s"} of ${acct} not visible this pass (the account returned nothing); kept as they were, not marked gone`);
+    // an instance seen again closes the "is gone" alert it got: the earlier pass could not see it, it did not leave
+    if (seen.size) { const ids = [...seen]; db.prepare(`update alerts set acknowledged = 1, acknowledged_by = 'watcher (seen again)' where kind = 'instance_state' and acknowledged = 0 and message like '% is gone (was %' and resource in (${ids.map(() => "?").join(",")})`).run(...ids); }
 
     // Autoscaled nodes: one `node_churn` alert per pool per day, updated in place with the day's events.
     const openChurn = db.prepare("select id, details from alerts where kind = 'node_churn' and resource = ? and date(created_at) = date('now') limit 1");

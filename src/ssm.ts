@@ -11,212 +11,18 @@ import { checkDiskLevels } from "./disk_alerts.js";
 import { applyProbeDisks } from "./ebs_inventory.js";
 import { checkHostLevels } from "./host_alerts.js";
 import { effectiveSignals } from "./signal_rules.js";
-import { DEFAULT_SIGNALS_STRING, SIGNALS_ALLOWED_PATTERN, SIGNALS_MAX_CHARS } from "./signals.js";
 
 /**
- * Read-only host probe through AWS Systems Manager Run Command. The script below is fixed and versioned:
- * it only reads /proc, /sys, df and ps, and prints exactly one JSON object as its last line. Tested on
- * Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
+ * The probes through AWS Systems Manager Run Command: sending one kind's document to a box (src/probes.ts holds the
+ * scripts and documents), parsing the JSON it prints, storing the result with its kind, and reading an instance back
+ * as one merged view (each section from its kind's latest row; a pre-2.0 combined probe counts for every section).
+ * Tested on Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-export const PROBE_VERSION = "aws-advisor/1.8";
-/** GetCommandInvocation returns at most this many characters of stdout; the agent appends "---Output truncated---" past it. */
-export const SSM_OUTPUT_CAP = 24000;
-/** A probe whose JSON is large prints it gzip-compressed and base64-encoded on one line after this marker (probe 1.7). */
-export const GZ_MARKER = "aws-advisor-gz:";
-
-export const PROBE_SCRIPT = [
-  "# aws-advisor probe v1 (read-only). Prints exactly one JSON object on the last line.",
-  "set -u",
-  "LC_ALL=C; export LC_ALL",
-  "esc() { printf '%s' \"$1\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g'; }",
-  "mem_total=$(awk '/^MemTotal:/{printf \"%.0f\", $2*1024}' /proc/meminfo)",
-  "mem_avail=$(awk '/^MemAvailable:/{printf \"%.0f\", $2*1024}' /proc/meminfo)",
-  "[ -n \"$mem_avail\" ] || mem_avail=$(awk '/^MemFree:/{f=$2} /^Buffers:/{b=$2} /^Cached:/{c=$2} END{printf \"%.0f\", (f+b+c)*1024}' /proc/meminfo)",
-  "mem_used=$((mem_total - mem_avail))",
-  "swap_total=$(awk '/^SwapTotal:/{printf \"%.0f\", $2*1024}' /proc/meminfo)",
-  "swap_free=$(awk '/^SwapFree:/{printf \"%.0f\", $2*1024}' /proc/meminfo)",
-  "swap_used=$((swap_total - swap_free))",
-  "read l1 l5 l15 rest < /proc/loadavg",
-  "cpus=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo)",
-  "uptime_s=$(cut -d. -f1 /proc/uptime)",
-  "# Which disk a mounted filesystem sits on: the partition's parent (or a device-mapper volume's single slave), then",
-  "# the EBS volume id from the NVMe serial on Nitro (\"vol0123...\" -> \"vol-0123...\"); Xen disks have no serial, so",
-  "# only the device name (xvda) is reported and the advisor matches it to the attachment (/dev/sda1).",
-  "blk_of() { d=$(basename \"$(readlink -f \"$1\" 2>/dev/null || printf '%s' \"$1\")\"); [ -e \"/sys/class/block/$d\" ] || return 0",
-  "  [ -e \"/sys/class/block/$d/partition\" ] && d=$(basename \"$(dirname \"$(readlink -f \"/sys/class/block/$d\")\")\")",
-  "  if [ \"$(ls \"/sys/class/block/$d/slaves\" 2>/dev/null | wc -l | tr -d ' ')\" = 1 ]; then d=$(ls \"/sys/class/block/$d/slaves\"); [ -e \"/sys/class/block/$d/partition\" ] && d=$(basename \"$(dirname \"$(readlink -f \"/sys/class/block/$d\")\")\"); fi",
-  "  printf '%s' \"$d\"; }",
-  "vol_of() { s=$(tr -d ' ' < \"/sys/class/block/$1/device/serial\" 2>/dev/null); case \"$s\" in vol*) printf 'vol-%s' \"${s#vol}\";; esac; }",
-  "jstr() { if [ -n \"$1\" ]; then printf '\"%s\"' \"$(esc \"$1\")\"; else printf 'null'; fi; }",
-  "n=\"\"",
-  "disks=$(df -P -k 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|udev|overlay|squashfs|shm|none)$/ && $1 !~ /^\\/dev\\/loop/ && $2 > 0 {print $1 \"\\t\" $2 \"\\t\" $3 \"\\t\" $6}' | while IFS=\"$(printf '\\t')\" read -r f t u m; do",
-  "  b=$(blk_of \"$f\"); v=\"\"; [ -n \"$b\" ] && v=$(vol_of \"$b\")",
-  "  printf '%s{\"mount\":%s,\"filesystem\":%s,\"device\":%s,\"volume_id\":%s,\"total_bytes\":%.0f,\"used_bytes\":%.0f,\"used_pct\":%s}' \"$n\" \"$(jstr \"$m\")\" \"$(jstr \"$f\")\" \"$(jstr \"$b\")\" \"$(jstr \"$v\")\" \"$((t*1024))\" \"$((u*1024))\" \"$(awk -v u=\"$u\" -v t=\"$t\" 'BEGIN{printf \"%.1f\", u*100/t}')\"; n=\",\"",
-  "done)",
-  "pslist() { ps -eo pid,pcpu,pmem,rss,comm --sort=\"$1\" 2>/dev/null | awk 'NR>1 && NR<=6 {",
-  "  c=$5; for(i=6;i<=NF;i++) c=c\" \"$i; gsub(/\\\\/,\"\\\\\\\\\",c); gsub(/\"/,\"\\\\\\\"\",c);",
-  "  printf \"%s{\\\"pid\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"mem_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"command\\\":\\\"%s\\\"}\", (n++?\",\":\"\"), $1, $2, $3, $4*1024, c }'; }",
-  "top_cpu=$(pslist -pcpu)",
-  "top_mem=$(pslist -rss)",
-  "containers=\"[]\"; docker_json='{\"available\":false,\"running\":0,\"total\":0}'",
-  "if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then",
-  "  stats=$(docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}' 2>/dev/null || true)",
-  "  clist=$(docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.RunningFor}}' 2>/dev/null | head -40 | awk -F'\\t' -v stats=\"$stats\" 'BEGIN{ k=split(stats, L, \"\\n\"); for(i=1;i<=k;i++){ split(L[i],a,\"\\t\"); cpu[a[1]]=a[2]; mem[a[1]]=a[3]; memp[a[1]]=a[4]; net[a[1]]=a[5] } }",
-  "    function esc(x){ gsub(/\\\\/,\"\\\\\\\\\",x); gsub(/\"/,\"\\\\\\\"\",x); return x }",
-  "    function bytes(x,  v,u){ sub(/ \\/.*/,\"\",x); v=x+0; u=x; sub(/^[0-9.]+/,\"\",u); if(u==\"KiB\"||u==\"kB\"||u==\"KB\")v*=1024; else if(u==\"MiB\"||u==\"MB\")v*=1048576; else if(u==\"GiB\"||u==\"GB\")v*=1073741824; else if(u==\"TiB\"||u==\"TB\")v*=1099511627776; return v }",
-  "    function txb(x){ sub(/^.*\\/ */,\"\",x); return bytes(x) }",
-  "    { n++; c=cpu[$1]; sub(/%/,\"\",c); mp=memp[$1]; sub(/%/,\"\",mp);",
-  "      printf \"%s{\\\"name\\\":\\\"%s\\\",\\\"image\\\":\\\"%s\\\",\\\"state\\\":\\\"%s\\\",\\\"running_for\\\":\\\"%s\\\",\\\"cpu_pct\\\":%s,\\\"mem_bytes\\\":%.0f,\\\"mem_pct\\\":%s,\\\"net_rx_bytes\\\":%.0f,\\\"net_tx_bytes\\\":%.0f}\", (n>1?\",\":\"\"), esc($1), esc($2), esc($3), esc($4), (c==\"\"?\"null\":c), bytes(mem[$1]), (mp==\"\"?\"null\":mp), bytes(net[$1]), txb(net[$1]) }')",
-  "  containers=\"[$clist]\"",
-  "  running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' '); total=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')",
-  "  docker_json=\"{\\\"available\\\":true,\\\"running\\\":${running:-0},\\\"total\\\":${total:-0}}\"",
-  "fi",
-  "# ---- activity (probe 1.4): is anyone actually using this box? Counts and timestamps only; log text stays on the box,",
-  "# ---- except the last three lines of each container (capped, printable ASCII), shown in the UI and never sent to a model.",
-  "# the patterns come from the document parameter `signals` (Settings > Probe pass); the advisor passes the current list on every probe",
-  "SIGS=$(printf '%s' '__SIGNALS__' | sed 's/;;/\\n/g')",
-  "SIG_RE=$(printf '%s\\n' \"$SIGS\" | cut -d= -f2- | paste -sd'|' -)",
-  "HB_RE='(health|ping|pong|heartbeat|keepalive|/metrics|/status|readiness|liveness|ELB-HealthChecker|swarm-checker|UptimeRobot|kube-probe)'",
-  "ts_of() { printf '%s' \"$1\" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1; }",
-  "jts() { t=$(ts_of \"$1\"); if [ -n \"$t\" ]; then printf '\"%sZ\"' \"$t\"; else printf 'null'; fi; }",
-  "act_containers=\"\"; act_front='{\"source\":null,\"requests\":0,\"health\":0,\"last_request_at\":null,\"last_request_raw\":null,\"window\":null}'",
-  "if docker info >/dev/null 2>&1; then",
-  "  n=\"\"",
-  "  for c in $(docker ps --format '{{.Names}}' 2>/dev/null | head -20); do",
-  "    logs=$(docker logs --since 24h --tail 2000 --timestamps \"$c\" 2>&1 | tr -cd '\\12\\40-\\176')",
-  "    lines=$(printf '%s\\n' \"$logs\" | grep -c .)",
-  "    last_log=$(printf '%s\\n' \"$logs\" | grep . | tail -n 1)",
-  "    errs=$(printf '%s\\n' \"$logs\" | grep -ciE '\\b(error|err|fatal|panic|exception)\\b')",
-  "    warns=$(printf '%s\\n' \"$logs\" | grep -ciE '\\b(warn|warning)\\b')",
-  "    clean=$(printf '%s\\n' \"$logs\" | grep -viE \"$HB_RE\" | grep -viE '\\b(error|exception|traceback|panic|fatal)\\b|^[^ ]+ +(from |at )')",
-  "    sig=$(printf '%s\\n' \"$clean\" | grep -iE \"$SIG_RE\")",
-  "    kinds=$(printf '%s\\n' \"$SIGS\" | while IFS='=' read -r nm re; do [ -n \"$nm\" ] || continue; k=$(printf '%s\\n' \"$clean\" | grep -ciE \"$re\"); [ \"${k:-0}\" -gt 0 ] && printf ',\"%s\":%s' \"$nm\" \"$k\"; done)",
-  "    kinds=\"{${kinds#,}}\"",
-  "    samples=$(printf '%s\\n' \"$sig\" | grep . | tail -n 60 | awk '{ $1=\"\"; sub(/^ /,\"\"); if(!($0 in seen)){ seen[$0]=1; out[++n]=$0 } } END { for(i=(n>5?n-4:1); i<=n; i++) print out[i] }' | cut -c1-160 | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g' | awk '{ printf \"%s\\\"%s\\\"\", (NR>1?\",\":\"\"), $0 }')",
-  "    sigs=$(printf '%s\\n' \"$sig\" | grep -c .)",
-  "    last_sig=$(printf '%s\\n' \"$sig\" | grep . | tail -n 1)",
-  "    ins=$(docker inspect --format '{{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}}' \"$c\" 2>/dev/null)",
-  "    started=$(printf '%s' \"$ins\" | awk '{print $1}'); restarts=$(printf '%s' \"$ins\" | awk '{print $2}'); img=$(printf '%s' \"$ins\" | awk '{print $3}')",
-  "    tail3=$(printf '%s\\n' \"$logs\" | grep . | tail -n 3 | cut -c1-160 | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g' | awk '{ printf \"%s\\\"%s\\\"\", (NR>1?\",\":\"\"), $0 }')",
-  "    case \"$img\" in *nginx*|*caddy*|*traefik*|*haproxy*|*proxy*|*ingress*)",
-  "      if [ \"$act_front\" = '{\"source\":null,\"requests\":0,\"health\":0,\"last_request_at\":null,\"last_request_raw\":null,\"window\":null}' ]; then",
-  "        acc=$(printf '%s\\n' \"$logs\" | grep -E '\" [0-9]{3} |HTTP/[0-9.]+\" [0-9]{3}|\"status\":[0-9]{3}|status=[0-9]{3}')",
-  "        reqs=$(printf '%s\\n' \"$acc\" | grep -c .); hb=$(printf '%s\\n' \"$acc\" | grep -ciE \"$HB_RE\")",
-  "        lastreq=$(printf '%s\\n' \"$acc\" | grep -viE \"$HB_RE\" | grep . | tail -n 1)",
-  "        act_front=\"{\\\"source\\\":\\\"container:$(esc \"$c\")\\\",\\\"requests\\\":$((reqs - hb)),\\\"health\\\":${hb:-0},\\\"last_request_at\\\":$(jts \"$lastreq\"),\\\"last_request_raw\\\":null,\\\"window\\\":\\\"24h\\\"}\"",
-  "      fi;;",
-  "    esac",
-  "    act_containers=\"$act_containers$n{\\\"name\\\":\\\"$(esc \"$c\")\\\",\\\"started_at\\\":$(jts \"$started\"),\\\"restarts\\\":${restarts:-0},\\\"log_lines\\\":${lines:-0},\\\"last_log_at\\\":$(jts \"$last_log\"),\\\"errors\\\":${errs:-0},\\\"warns\\\":${warns:-0},\\\"signal_lines\\\":${sigs:-0},\\\"last_signal_at\\\":$(jts \"$last_sig\"),\\\"last_lines\\\":[$tail3],\\\"signal_kinds\\\":$kinds,\\\"signal_samples\\\":[$samples]}\"",
-  "    n=\",\"",
-  "  done",
-  "fi",
-  "if [ \"$act_front\" = '{\"source\":null,\"requests\":0,\"health\":0,\"last_request_at\":null,\"last_request_raw\":null,\"window\":null}' ]; then",
-  "  for f in /var/log/nginx/access.log /var/log/caddy/access.log /var/log/apache2/access.log /var/log/httpd/access_log; do",
-  "    if [ -r \"$f\" ]; then",
-  "      acc=$(tail -n 5000 \"$f\" 2>/dev/null | tr -cd '\\12\\40-\\176')",
-  "      reqs=$(printf '%s\\n' \"$acc\" | grep -c .); hb=$(printf '%s\\n' \"$acc\" | grep -ciE \"$HB_RE\")",
-  "      lastreq=$(printf '%s\\n' \"$acc\" | grep -viE \"$HB_RE\" | grep . | tail -n 1 | grep -oE '\\[[^]]+\\]' | head -n 1 | tr -d '[]')",
-  "      act_front=\"{\\\"source\\\":\\\"file:$(esc \"$f\")\\\",\\\"requests\\\":$((reqs - hb)),\\\"health\\\":${hb:-0},\\\"last_request_at\\\":null,\\\"last_request_raw\\\":$(jstr \"$lastreq\"),\\\"window\\\":\\\"last 5000 lines\\\"}\"",
-  "      break",
-  "    fi",
-  "  done",
-  "fi",
-  "# established TCP flows: conntrack sees the DNAT'd container traffic the host's own sockets do not; ss covers host services and ssh",
-  "conns=\"\"; src=\"none\"",
-  "if [ -r /proc/net/nf_conntrack ]; then conns=$(grep -E '^ipv[46] +[0-9]+ +tcp .*ESTABLISHED' /proc/net/nf_conntrack 2>/dev/null | awk '{ for(i=1;i<=NF;i++){ if($i ~ /^src=/ && s==\"\") s=substr($i,5); if($i ~ /^dport=/ && d==\"\") d=substr($i,7) } print s, d; s=\"\"; d=\"\" }'); src=\"conntrack\"",
-  "elif command -v conntrack >/dev/null 2>&1; then conns=$(conntrack -L -p tcp --state ESTABLISHED 2>/dev/null | awk '{ for(i=1;i<=NF;i++){ if($i ~ /^src=/ && s==\"\") s=substr($i,5); if($i ~ /^dport=/ && d==\"\") d=substr($i,7) } print s, d; s=\"\"; d=\"\" }'); src=\"conntrack\"",
-  "elif command -v ss >/dev/null 2>&1; then conns=$(ss -Htn state established 2>/dev/null | awk '{ l=$3; p=$4; sub(/.*:/,\"\",l); sub(/:[0-9]+$/,\"\",p); gsub(/[\\[\\]]/,\"\",p); sub(/^::ffff:/,\"\",p); print p, l }'); src=\"ss\"",
-  "fi",
-  "ssh_n=$(ss -Htn state established '( sport = :22 )' 2>/dev/null | grep -c .)",
-  "# which container answers on each published host port, so a flow to :443 can be named",
-  "port_map=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | awk -F'\t' '{ n=split($2, P, \", \"); for(i=1;i<=n;i++){ if(match(P[i], /:[0-9]+->/)){ hp=substr(P[i], RSTART+1, RLENGTH-3); if(!(hp in seen)){ seen[hp]=1; nm=$1; gsub(/[\"\\\\]/, \"\", nm); printf \"%s\\\"%s\\\":\\\"%s\\\"\", (c++?\",\":\"\"), hp, nm } } } }')",
-  "act_conns=$(printf '%s\\n' \"$conns\" | awk -v src=\"$src\" -v ssh=\"${ssh_n:-0}\" -v pmap=\"$port_map\" '",
-  "  function kind(ip){ if(ip==\"\" ) return \"x\"; if(ip ~ /^127\\./ || ip==\"::1\" || ip ~ /^169\\.254\\./ || ip ~ /^fe80/) return \"x\"; if(ip ~ /^172\\.(1[6-9]|2[0-9]|3[01])\\./) return \"x\"; if(ip ~ /^10\\./ || ip ~ /^192\\.168\\./) return \"internal\"; return \"external\" }",
-  "  NF==2 { k=kind($1); if(k==\"x\") next; total++; if(k==\"external\") ext++; else int_++; ports[$2]++; peers[$1]=1; pair[$1 \" \" $2]++; pk[$1 \" \" $2]=k }",
-  "  END { np=0; for(p in ports) np++; printf \"{\\\"source\\\":\\\"%s\\\",\\\"established\\\":%d,\\\"external\\\":%d,\\\"internal\\\":%d,\\\"peers\\\":%d,\\\"ssh\\\":%d,\\\"by_port\\\":{\", src, total, ext, int_, length(peers), ssh; first=1; for(p in ports){ if(p ~ /^[0-9]+$/){ printf \"%s\\\"%s\\\":%d\", (first?\"\":\",\"), p, ports[p]; first=0 } }",
-  "    printf \"},\\\"top_peers\\\":[\"; for(t=0;t<8;t++){ best=\"\"; bn=0; for(q in pair){ if(!(q in done) && pair[q]>bn){ best=q; bn=pair[q] } } if(best==\"\") break; done[best]=1; split(best, ab, \" \"); if(ab[2] !~ /^[0-9]+$/) continue; printf \"%s{\\\"ip\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"flows\\\":%d,\\\"kind\\\":\\\"%s\\\"}\", (t?\",\":\"\"), ab[1], ab[2], bn, pk[best] }",
-  "    printf \"],\\\"port_map\\\":{%s}}\", pmap }')",
-  "users_now=$(who 2>/dev/null | grep -c .)",
-  "lastl=$(last -n 8 --time-format iso 2>/dev/null | grep -vE '^(reboot|shutdown|wtmp|btmp|$)' | head -n 1)",
-  "last_user=$(printf '%s' \"$lastl\" | awk '{print $1}'); last_at=$(printf '%s' \"$lastl\" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:?[0-9]{2}' | head -n 1)",
-  "act_logins=\"{\\\"users_now\\\":${users_now:-0},\\\"last_login_user\\\":$(jstr \"$last_user\"),\\\"last_login_at\\\":$(jstr \"$last_at\")}\"",
-  "act_net=$(awk -F'[: ]+' 'NR>2 && $2 !~ /^(lo|docker|br-|veth|virbr)/ { rx+=$3; tx+=$11 } END { printf \"{\\\"rx_bytes\\\":%.0f,\\\"tx_bytes\\\":%.0f}\", rx, tx }' /proc/net/dev 2>/dev/null)",
-  "activity=\"{\\\"version\\\":1,\\\"containers\\\":[$act_containers],\\\"connections\\\":${act_conns:-null},\\\"front_door\\\":$act_front,\\\"logins\\\":$act_logins,\\\"net\\\":${act_net:-null}}\"",
-  "# ---- log shipping (probe 1.6): the CloudWatch log groups this box's agents are configured to write to, read from their config files",
-  "# ---- (CloudWatch agent, the old awslogs agent, Fluent Bit, Fluentd, the Docker daemon and each running container with the awslogs driver). Templated names are skipped.",
-  "# ---- Quoting note: the setup script embeds this document in a bash heredoc inside $( ), so single quotes must pair up on every line and never sit alone in a comment.",
-  "ship=\"\"; shipn=\"\"; shipseen=\"|\"",
-  "addship() { g=$(printf '%s' \"$1\" | tr -d '\"\\047,; ' | cut -c1-200); [ -n \"$g\" ] || return 0; case \"$g\" in *\\$*|*\\{*|*%*) return 0;; esac",
-  "  case \"$shipseen\" in *\"|$2=$g|\"*) return 0;; esac; shipseen=\"$shipseen$2=$g|\"",
-  "  ship=\"$ship$shipn{\\\"group\\\":\\\"$(esc \"$g\")\\\",\\\"via\\\":\\\"$(esc \"$2\")\\\",\\\"source\\\":\\\"$(esc \"$3\")\\\"}\"; shipn=\",\"; }",
-  "for f in /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/* /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.toml /etc/awslogs/awslogs.conf /var/awslogs/etc/awslogs.conf /etc/fluent-bit/*.conf /etc/fluent-bit/*.yaml /etc/fluent-bit/*.yml /etc/fluent-bit/conf.d/* /etc/td-agent-bit/*.conf /etc/td-agent/td-agent.conf /etc/fluent/fluent.conf /etc/fluentd/fluent.conf; do",
-  "  [ -r \"$f\" ] || continue",
-  "  case \"$f\" in *amazon-cloudwatch-agent*) via=cloudwatch-agent;; *awslogs*) via=awslogs;; *fluent-bit*|*td-agent-bit*) via=fluent-bit;; *) via=fluentd;; esac",
-  "  for g in $(grep -ioE 'log_group_name\"?[[:space:]]*[:=]?[[:space:]]*\"?[^\",[:space:]]+' \"$f\" 2>/dev/null | sed -E 's/^[^:=[:space:]]+[[:space:]]*[:=]?[[:space:]]*\"?//' | head -n 50); do addship \"$g\" \"$via\" \"$f\"; done",
-  "done",
-  "if [ -r /etc/docker/daemon.json ]; then for g in $(grep -oE '\"awslogs-group\"[[:space:]]*:[[:space:]]*\"[^\"]+\"' /etc/docker/daemon.json 2>/dev/null | sed -E 's/^.*:[[:space:]]*\"//; s/\"$//'); do addship \"$g\" docker-daemon /etc/docker/daemon.json; done; fi",
-  "if docker info >/dev/null 2>&1; then for c in $(docker ps --format '{{.Names}}' 2>/dev/null | head -40); do l=$(docker inspect --format '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config \"awslogs-group\"}}' \"$c\" 2>/dev/null); case \"$l\" in \"awslogs \"?*) addship \"${l#awslogs }\" \"docker:$c\" 'log driver';; esac; done; fi",
-  "# ---- processes (probe 1.6): every user-space process grouped by command and user, so the advisor knows what runs on the box. Kernel threads",
-  "# ---- are left out here; the advisor sets the OS daemons aside (src/instance_apps.ts). Names, counts, CPU, memory and age only: no arguments beyond the program and its first words.",
-  "procs=$(ps -eo pid,ppid,user,pcpu,rss,etimes,comm,args --no-headers 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '",
-  "  $1==2 || $2==2 { next }",
-  "  { w=\"\"; if($7 ~ /^(python[0-9.]*|node|nodejs|java|ruby|php[0-9.]*|perl|dotnet|bun|deno|uwsgi|gunicorn|celery|npm|yarn|pnpm)$/){ for(i=9;i<=NF && i<=14;i++) if($i !~ /^-/){ w=$i; sub(/.*\\//,\"\",w); break } }",
-  "    nm=(w==\"\"?$7:$7 \" \" w); k=$3 \"\\t\" nm; n[k]++; cpu[k]+=$4; rss[k]+=$5; if($6+0>old[k]) old[k]=$6+0; if(!(k in a)){ a[k]=$8; for(i=9;i<=NF && i<=12;i++) a[k]=a[k] \" \" $i } }",
-  "  END { for(k in n){ split(k, p, \"\\t\"); cmd=substr(a[k],1,120); gsub(/[\\\\\"]/,\"\",cmd); c=p[2]; gsub(/[\\\\\"]/,\"\",c); u=p[1]; gsub(/[\\\\\"]/,\"\",u);",
-  "    printf \"%012.0f\\t{\\\"name\\\":\\\"%s\\\",\\\"user\\\":\\\"%s\\\",\\\"count\\\":%d,\\\"cpu_pct\\\":%.1f,\\\"rss_bytes\\\":%.0f,\\\"oldest_seconds\\\":%d,\\\"command\\\":\\\"%s\\\"}\\n\", rss[k]*1024, c, u, n[k], cpu[k], rss[k]*1024, old[k], cmd } }' | sort -rn | head -n 80 | cut -f2- | paste -sd, -)",
-  "# ---- listeners (probe 1.8): every port the box answers on and which program owns it, from the listening sockets (ss) and the ports",
-  "# ---- containers publish (docker ps). scope: all = every interface, loopback = the box only, address = one interface. The advisor matches",
-  "# ---- each port to the app or container behind it and to the security group rules that let traffic in (src/instance_apps.ts).",
-  "lsn=\"\"; dports=\"\"",
-  "if command -v ss >/dev/null 2>&1; then lsn=$(ss -Hlntup 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '{ proto=$1; if(proto!=\"tcp\" && proto!=\"udp\") next; l=$5; p=l; sub(/.*:/,\"\",p); if(p !~ /^[0-9]+$/) next; a=l; sub(/:[0-9]+$/,\"\",a); gsub(/[\\[\\]]/,\"\",a); sub(/%.*/,\"\",a); if(a==\"*\"||a==\"0.0.0.0\"||a==\"::\"||a==\"\") s=\"all\"; else if(a ~ /^127\\./||a==\"::1\") s=\"loopback\"; else s=\"address\"; nm=\"\"; pid=\"\"; if(match($0,/users:\\(\\(\"[^\"]*\",pid=[0-9]+/)){ u=substr($0,RSTART,RLENGTH); nm=u; sub(/^users:\\(\\(\"/,\"\",nm); sub(/\",pid=.*/,\"\",nm); pid=u; sub(/.*pid=/,\"\",pid) } k=proto \":\" p \":\" a; if(k in seen) next; seen[k]=1; n++; if(n>80) exit; gsub(/[\\\\\"]/,\"\",nm); printf \"%s{\\\"proto\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"bind\\\":\\\"%s\\\",\\\"scope\\\":\\\"%s\\\",\\\"process\\\":%s,\\\"pid\\\":%s,\\\"container\\\":null,\\\"container_port\\\":null}\", (n>1?\",\":\"\"), proto, p, a, s, (nm==\"\"?\"null\":\"\\\"\" nm \"\\\"\"), (pid==\"\"?\"null\":pid) }'); fi",
-  "dports=$(docker ps --format '{{.Names}}\\t{{.Ports}}' 2>/dev/null | awk -F'\\t' '{ n=split($2, P, \", \"); for(i=1;i<=n;i++){ if(match(P[i], /:[0-9]+->[0-9]+\\/(tcp|udp)/)){ m=substr(P[i],RSTART+1,RLENGTH-1); hp=m; sub(/->.*/,\"\",hp); cp=m; sub(/.*->/,\"\",cp); pr=cp; sub(/.*\\//,\"\",pr); sub(/\\/.*/,\"\",cp); b=P[i]; sub(/:[0-9]+->.*/,\"\",b); gsub(/[\\[\\]]/,\"\",b); if(b==\"0.0.0.0\"||b==\"::\"||b==\"\") s=\"all\"; else if(b ~ /^127\\./) s=\"loopback\"; else s=\"address\"; nm=$1; gsub(/[\\\\\"]/,\"\",nm); k=pr \":\" hp; if(k in seen) continue; seen[k]=1; c++; if(c>80) exit; printf \"%s{\\\"proto\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"bind\\\":\\\"%s\\\",\\\"scope\\\":\\\"%s\\\",\\\"process\\\":null,\\\"pid\\\":null,\\\"container\\\":\\\"%s\\\",\\\"container_port\\\":%d}\", (c>1?\",\":\"\"), pr, hp, b, s, nm, cp } } }')",
-  "listeners=\"$lsn\"; if [ -n \"$lsn\" ] && [ -n \"$dports\" ]; then listeners=\"$lsn,$dports\"; elif [ -z \"$lsn\" ]; then listeners=\"$dports\"; fi",
-  "out=$(printf '{\"probe\":\"aws-advisor/1\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"cpus\":%s,\"uptime_seconds\":%s,\"memory\":{\"total_bytes\":%s,\"used_bytes\":%s,\"available_bytes\":%s,\"swap_total_bytes\":%s,\"swap_used_bytes\":%s},\"load\":{\"1m\":%s,\"5m\":%s,\"15m\":%s},\"disks\":[%s],\"top_cpu\":[%s],\"top_mem\":[%s],\"docker\":%s,\"containers\":%s,\"activity\":%s,\"log_shipping\":[%s],\"processes\":[%s],\"listeners\":[%s]}' \\",
-  "  \"$(esc \"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)\")\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${cpus:-0}\" \"${uptime_s:-0}\" \\",
-  "  \"${mem_total:-0}\" \"${mem_used:-0}\" \"${mem_avail:-0}\" \"${swap_total:-0}\" \"${swap_used:-0}\" \"$l1\" \"$l5\" \"$l15\" \"$disks\" \"$top_cpu\" \"$top_mem\" \"$docker_json\" \"$containers\" \"$activity\" \"$ship\" \"$procs\" \"$listeners\")",
-  "# ---- exactly one JSON object on the last line. GetCommandInvocation returns only the first 24,000 characters of stdout, so a big box (many processes,",
-  "# ---- many containers) prints the object gzip-compressed and base64-encoded on one marked line instead (probe 1.7); the advisor decodes it (parseProbeOutput).",
-  "if [ ${#out} -gt 16000 ] && command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then printf 'aws-advisor-gz:%s\\n' \"$(printf '%s' \"$out\" | gzip -c -9 | base64 | tr -d '\\n')\"; else printf '%s\\n' \"$out\"; fi"
-].join("\n");
-
-/** The script with the use-signal patterns inlined: what the stock AWS-RunShellScript path (tests, fallback) sends. */
-export const probeScript = (signals: string = config.probeSignals) => PROBE_SCRIPT.replace("__SIGNALS__", signals);
-
-/**
- * The SSM Command document that embeds the probe script, for `aws ssm create-document`. With
- * PROBE_DOCUMENT set to its name the advisor sends it instead of AWS-RunShellScript and passes no
- * commands, so IAM can grant ssm:SendCommand on this document only and the credentials can never run
- * anything else on the fleet. Served by GET /api/probe/document.
- */
-export function probeDocument() {
-  return {
-    schemaVersion: "2.2",
-    description: `aws-advisor read-only probe ${PROBE_VERSION}`,
-    parameters: {
-      signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: SIGNALS_ALLOWED_PATTERN, maxChars: SIGNALS_MAX_CHARS },
-    },
-    mainSteps: [
-      {
-        action: "aws:runShellScript",
-        name: "probe",
-        inputs: { timeoutSeconds: "60", runCommand: PROBE_SCRIPT.replace("__SIGNALS__", "{{ signals }}").split("\n") },
-      },
-    ],
-  };
-}
-
-/** Name and, when custom, the CLI commands that create and update the document from GET /api/probe/document. */
-export function probeDocumentInfo() {
-  const name = config.probeDocument;
-  const custom = usesCustomProbeDocument();
-  return {
-    name,
-    custom,
-    version: PROBE_VERSION,
-    create_command: `curl -s ${config.publicUrl}/api/probe/document > probe-document.json && aws ssm create-document --name ${custom ? name : "AwsAdvisorProbe"} --document-type Command --document-format JSON --content file://probe-document.json`,
-    update_command: `curl -s ${config.publicUrl}/api/probe/document > probe-document.json && aws ssm update-document --name ${custom ? name : "AwsAdvisorProbe"} --document-version '$LATEST' --document-format JSON --content file://probe-document.json && aws ssm update-document-default-version --name ${custom ? name : "AwsAdvisorProbe"} --document-version "$(aws ssm describe-document --name ${custom ? name : "AwsAdvisorProbe"} --query Document.LatestVersion --output text)"`,
-  };
-}
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyProbeDocumentName, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
+export { PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
+/** The host kind's document and info, for the places that still ask for "the" probe document. */
+export const probeDocument = (kind: ProbeKind = "host") => probeDocumentFor(kind);
+export const probeDocumentInfo = (kind: ProbeKind = "host") => probeDocumentInfoFor(kind);
 
 /** device is the whole disk in sysfs terms (nvme0n1, xvda); volume_id the EBS volume read from the NVMe serial, null on Xen and for anything that is not EBS. Both absent from probes before 1.3. */
 export interface ProbeDisk { mount: string; filesystem: string; device?: string | null; volume_id?: string | null; total_bytes: number; used_bytes: number; used_pct: number }
@@ -273,6 +79,17 @@ export interface ProbeResult {
   processes?: ProbeProcessGroup[];
   /** Present from probe 1.8: the listening ports, host sockets and published container ports alike. */
   listeners?: ProbeListener[];
+  /** Probe 2.0: which kind printed this row ("all" for the pre-2.0 combined probe); on a merged view, when each kind last ran. */
+  kind?: ProbeKind | "all";
+  probes_at?: Partial<Record<ProbeKind | "all", string>>;
+  /** The software probe: the OS, the kernel, every package, the versions of well-known programs, the container images. */
+  os?: { id: string | null; version: string | null; name: string | null };
+  kernel?: string | null;
+  arch?: string | null;
+  package_manager?: string | null;
+  packages?: { n: string; v: string; a: string | null; s?: string | null }[];
+  binaries?: { name: string; version: string; path: string | null }[];
+  images?: { image: string; id: string | null; digests: string | null; created: string | null; platform: string | null }[];
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -329,6 +146,10 @@ export function parseProbeOutput(stdout: string): ProbeResult {
   let raw: any;
   try { raw = JSON.parse(line); } catch (e: any) { throw new ProbeError("bad_output", `probe output is not valid JSON: ${e.message}`); }
   if (typeof raw?.probe !== "string" || !raw.probe.startsWith("aws-advisor/")) throw new ProbeError("bad_output", "probe output is not from the advisor probe");
+  const kind = probeKindOf(raw);
+  // a kind that does not own the host sections prints none; the merged view fills them from the host row
+  const hostOwned = kind === "all" || kind === "host";
+  const num = (v: unknown, what: string): number => { if (!hostOwned && v == null) return 0; const n = Number(v); if (!Number.isFinite(n)) throw new ProbeError("bad_output", `probe output has a bad ${what}`); return n; };
   const proc = (p: any): ProbeProcess => ({ pid: num(p.pid, "pid"), cpu_pct: num(p.cpu_pct, "cpu_pct"), mem_pct: num(p.mem_pct, "mem_pct"), rss_bytes: num(p.rss_bytes, "rss_bytes"), command: String(p.command ?? "") });
   const disk = (d: any): ProbeDisk => ({ mount: String(d.mount ?? ""), filesystem: String(d.filesystem ?? ""), device: d.device == null ? null : String(d.device), volume_id: d.volume_id == null ? null : String(d.volume_id), total_bytes: num(d.total_bytes, "total_bytes"), used_bytes: num(d.used_bytes, "used_bytes"), used_pct: num(d.used_pct, "used_pct") });
   const m = raw.memory || {};
@@ -363,6 +184,14 @@ export function parseProbeOutput(stdout: string): ProbeResult {
       proto: l.proto, port: Number(l.port), bind: String(l.bind ?? "").slice(0, 64), scope: l.scope === "loopback" || l.scope === "address" ? l.scope : "all",
       process: l.process == null ? null : String(l.process).slice(0, 64), pid: l.pid == null ? null : int(l.pid),
       container: l.container == null ? null : String(l.container).slice(0, 120), container_port: l.container_port == null ? null : int(l.container_port) })) : undefined,
+    kind,
+    os: raw.os && typeof raw.os === "object" ? { id: raw.os.id == null ? null : String(raw.os.id).slice(0, 40), version: raw.os.version == null ? null : String(raw.os.version).slice(0, 40), name: raw.os.name == null ? null : String(raw.os.name).slice(0, 120) } : undefined,
+    kernel: raw.kernel === undefined ? undefined : raw.kernel == null ? null : String(raw.kernel).slice(0, 80),
+    arch: raw.arch === undefined ? undefined : raw.arch == null ? null : String(raw.arch).slice(0, 20),
+    package_manager: raw.package_manager === undefined ? undefined : raw.package_manager == null ? null : String(raw.package_manager).slice(0, 20),
+    packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,
+    binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
+    images: Array.isArray(raw.images) ? raw.images.filter((i: any) => i && typeof i.image === "string" && i.image).slice(0, 200).map((i: any) => ({ image: String(i.image).slice(0, 300), id: i.id == null || i.id === "" ? null : String(i.id).slice(0, 100), digests: i.digests == null || i.digests === "" ? null : String(i.digests).slice(0, 600), created: i.created == null || i.created === "" ? null : String(i.created).slice(0, 40), platform: i.platform == null || i.platform === "" ? null : String(i.platform).slice(0, 40) })) : undefined,
   };
 }
 
@@ -471,56 +300,98 @@ export function summarizeProbe(p: ProbeResult): ProbeSummary {
   };
 }
 
-export interface StoredProbe { id: number; instance_id: string; collected_at: string; data: ProbeResult }
+export interface StoredProbe { id: number; instance_id: string; collected_at: string; data: ProbeResult; kind?: ProbeKind | "all" }
 
-type MetricsRow = { id: number; instance_id: string; collected_at: string; json: string };
-const rowToProbe = (r: MetricsRow): StoredProbe => ({ id: r.id, instance_id: r.instance_id, collected_at: r.collected_at, data: JSON.parse(r.json) as ProbeResult });
+type MetricsRow = { id: number; instance_id: string; collected_at: string; json: string; kind?: string | null };
+const rowToProbe = (r: MetricsRow): StoredProbe => ({ id: r.id, instance_id: r.instance_id, collected_at: r.collected_at, data: JSON.parse(r.json) as ProbeResult, kind: (r.kind as any) || "all" });
 
-export function latestProbe(instanceId: string): StoredProbe | null {
-  const row = db.prepare("select id, instance_id, collected_at, json from instance_metrics where instance_id = ? order by id desc limit 1").get(instanceId) as MetricsRow | undefined;
-  if (!row) return null;
-  try { return rowToProbe(row); } catch { return null; }
+/** The kinds a stored row speaks for: its own, or host, docker and apps for the pre-2.0 combined probe (it never carried software). */
+const LEGACY_KINDS: readonly ProbeKind[] = ["host", "docker", "apps"];
+const kindsOfRow = (kind: string | null | undefined): readonly ProbeKind[] => (!kind || kind === "all" ? LEGACY_KINDS : [kind as ProbeKind]);
+
+/**
+ * One instance as a single view: for each section, the newest row of a kind that owns it (a pre-2.0 combined row owns
+ * every section). `collected_at` is the newest of them; `probes_at` says when each kind last ran; `kind` is "all".
+ * Null when the instance was never probed.
+ */
+export function mergeProbes(rows: StoredProbe[]): StoredProbe | null {
+  if (!rows.length) return null;
+  const sorted = [...rows].sort((x, y) => x.collected_at.localeCompare(y.collected_at));
+  const newestFor = (kind: ProbeKind) => sorted.filter((r) => kindsOfRow(r.kind).includes(kind)).pop();
+  const latest = sorted[sorted.length - 1];
+  const host = newestFor("host") ?? latest;
+  const out: ProbeResult = { ...host.data, kind: "all", probes_at: {} };
+  for (const kind of PROBE_KINDS) {
+    const r = newestFor(kind);
+    if (!r) continue;
+    out.probes_at![kind] = r.collected_at;
+    for (const section of PROBE_DEFS[kind].sections) (out as any)[section] = (r.data as any)[section];
+  }
+  out.collected_at = latest.collected_at;
+  out.hostname = out.hostname || latest.data.hostname;
+  return { id: latest.id, instance_id: latest.instance_id, collected_at: latest.collected_at, data: out, kind: "all" };
 }
 
-/** Latest probe per instance, as summaries keyed by instance id (for the rules). */
-export function latestProbeSummaries(): Record<string, ProbeSummary> {
-  const rows = db.prepare("select id, instance_id, collected_at, json from instance_metrics where id in (select max(id) from instance_metrics group by instance_id)").all() as MetricsRow[];
-  const out: Record<string, ProbeSummary> = {};
-  for (const r of rows) {
-    try { out[r.instance_id] = summarizeProbe(rowToProbe(r).data); } catch { /* skip malformed */ }
-  }
+/** The newest stored row per kind (and the newest pre-2.0 row) of one instance. */
+export function latestProbeRows(instanceId: string): StoredProbe[] {
+  const rows = db.prepare("select id, instance_id, collected_at, json, kind from instance_metrics where instance_id = ? and id in (select max(id) from instance_metrics where instance_id = ? group by kind)").all(instanceId, instanceId) as MetricsRow[];
+  const out: StoredProbe[] = [];
+  for (const r of rows) { try { out.push(rowToProbe(r)); } catch { /* malformed */ } }
   return out;
 }
 
+/** The merged view of one instance (see mergeProbes), or null. */
+export function latestProbe(instanceId: string): StoredProbe | null {
+  return mergeProbes(latestProbeRows(instanceId));
+}
+
+/** Latest merged probe per instance, as summaries keyed by instance id (for the rules). */
+export function latestProbeSummaries(): Record<string, ProbeSummary> {
+  const rows = db.prepare("select id, instance_id, collected_at, json, kind from instance_metrics where id in (select max(id) from instance_metrics group by instance_id, kind)").all() as MetricsRow[];
+  const byInstance = new Map<string, StoredProbe[]>();
+  for (const r of rows) { try { byInstance.set(r.instance_id, [...(byInstance.get(r.instance_id) || []), rowToProbe(r)]); } catch { /* skip malformed */ } }
+  const out: Record<string, ProbeSummary> = {};
+  for (const [id, list] of byInstance) { const m = mergeProbes(list); if (m) out[id] = summarizeProbe(m.data); }
+  return out;
+}
+
+/** The host rows of an instance, newest first: the series behind the memory, load and disk charts. */
 export function instanceMetrics(instanceId: string, limit = 20): StoredProbe[] {
-  const rows = db.prepare("select id, instance_id, collected_at, json from instance_metrics where instance_id = ? order by id desc limit ?").all(instanceId, limit) as MetricsRow[];
+  const rows = db.prepare("select id, instance_id, collected_at, json, kind from instance_metrics where instance_id = ? and coalesce(kind, 'all') in ('host', 'all') order by id desc limit ?").all(instanceId, limit) as MetricsRow[];
   return rows.map(rowToProbe);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-let warnedOldDocument = false;
 const sqlLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
-function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" | "GetCommandInvocation"): ProbeError {
+function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" | "GetCommandInvocation", document = config.probeDocument): ProbeError {
   const name: string = e?.name || e?.Code || "";
   const msg: string = e?.message || String(e);
   // A denial names the action in its message; when it does not (UnauthorizedOperation, AccessDeniedException alone), the context does.
-  const issue = explainPermissionError(e, `ssm ${operation} ${instanceId} (ssm:${operation}, document ${config.probeDocument})`);
+  const issue = explainPermissionError(e, `ssm ${operation} ${instanceId} (ssm:${operation}, document ${document})`);
   if (issue) {
     recordPermissionIssue(issue);
-    return new ProbeError("permission", `The advisor's AWS credentials cannot run SSM commands (${name || "AccessDenied"}); ssm:SendCommand on document ${config.probeDocument} and instance ${instanceId}, plus ssm:GetCommandInvocation, are required. ${msg.replace(/[.\s]+$/, "")}. ${remedyFor(issue)}`, issue);
+    return new ProbeError("permission", `The advisor's AWS credentials cannot run SSM commands (${name || "AccessDenied"}); ssm:SendCommand on document ${document} and instance ${instanceId}, plus ssm:GetCommandInvocation, are required. ${msg.replace(/[.\s]+$/, "")}. ${remedyFor(issue)}`, issue);
   }
   if (/InvalidSignature|UnrecognizedClient|ExpiredToken|InvalidClientTokenId|SignatureDoesNotMatch|InvalidAccessKeyId|CredentialsProviderError|Could not load credentials|sso|Token is expired/i.test(`${name} ${msg}`)) {
     const meta = credentialsMeta();
     return new ProbeError("permission", `The advisor's AWS credentials were rejected by SSM (${name || "credential error"}); ${meta ? credentialRemedy(e, meta) : `save valid credentials in Settings. ${msg}`}`);
   }
   if (/InvalidInstanceId/i.test(name)) return new ProbeError("not_managed", `${instanceId} is not an SSM-managed instance or is not online (${msg})`);
-  if (/InvalidDocument\b/i.test(name)) return new ProbeError("failed", `SSM document ${config.probeDocument} does not exist in this region or account; create it with the command on Settings > Permissions (GET /api/probe/document) or run the setup script. ${msg}`);
+  if (/InvalidDocument\b/i.test(name)) return new ProbeError("failed", `SSM document ${document} does not exist in this region or account; create it with the command on Settings > Probes or run the setup script. ${msg}`);
   return new ProbeError("failed", `${name ? name + ": " : ""}${msg}`);
 }
 
-/** Sends the probe to one SSM-managed instance, waits for it, parses and stores the result. */
-export async function probeInstance(instanceId: string, opts: { timeoutMs?: number } = {}): Promise<StoredProbe> {
+export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind }
+
+/**
+ * Sends one kind's probe to one SSM-managed instance, waits for it, parses and stores the result, and runs the hooks
+ * that kind feeds (disk and host alerts for host; container samples for docker; apps, ports and their verdicts for
+ * apps; the software inventory for software). A missing per-kind document falls back to the pre-2.0 combined document
+ * once per process for host, docker and apps, so a fleet still on the old document keeps probing until it is updated.
+ */
+export async function probeInstance(instanceId: string, opts: ProbeOptions = {}): Promise<StoredProbe> {
+  const kind: ProbeKind = opts.kind ?? "host";
   if (!/^i-[0-9a-f]{8,17}$/.test(instanceId)) throw new ProbeError("not_managed", `"${instanceId}" is not an EC2 instance id`);
   checkProbeQuota(instanceId);
   // The same identity Steampipe uses (keys, profile or default chain, with the role when one is set), as an SDK provider.
@@ -536,31 +407,39 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
   if (m.platform_type && m.platform_type !== "Linux") throw new ProbeError("not_managed", `${instanceId} runs ${m.platform_type}; the probe is Linux-only`);
 
   const client = new SSMClient({ region: m.region || creds.region, credentials: creds.provider });
-  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const def = PROBE_DEFS[kind];
+  const timeoutMs = opts.timeoutMs ?? Math.max(90_000, def.timeout_seconds * 1000 + 30_000);
   try {
     let commandId = "";
+    let documentUsed = probeDocumentName(kind);
     try {
-      // A custom document embeds the script (see probeDocument()); only the stock document takes it as a parameter.
-      const send = (withSignals: boolean) => client.send(new SendCommandCommand({
-        DocumentName: config.probeDocument,
+      const send = (document: string, withSignals: boolean) => client.send(new SendCommandCommand({
+        DocumentName: document,
         InstanceIds: [instanceId],
-        ...(usesCustomProbeDocument() ? (withSignals ? { Parameters: { signals: [config.probeSignals] } } : {}) : { Parameters: { commands: [probeScript()], executionTimeout: ["60"] } }),
-        TimeoutSeconds: 60,
-        Comment: `aws-advisor probe ${PROBE_VERSION}`,
+        ...(withSignals ? { Parameters: { signals: [config.probeSignals] } } : {}),
+        TimeoutSeconds: def.timeout_seconds,
+        Comment: `aws-advisor probe ${kind} ${def.version}`,
       }));
       let sent;
-      try { sent = await send(true); }
+      try { sent = await send(documentUsed, def.takes_signals); }
       catch (e: any) {
-        // a document from before 1.5 has no `signals` parameter: send without it (its built-in patterns apply) and say so once
-        if (!/InvalidParameters/i.test(String(e?.name || e?.message)) || !usesCustomProbeDocument()) throw e;
-        if (!warnedOldDocument) { warnedOldDocument = true; console.warn(`[probe] SSM document ${config.probeDocument} predates probe 1.5 (no signals parameter): probing with its built-in patterns; update it (Settings > Permissions) to use the patterns from Settings`); }
-        sent = await send(false);
+        const name = String(e?.name || e?.Code || "");
+        // the per-kind document is not deployed yet: the combined pre-2.0 document covers host, docker and apps
+        if (/InvalidDocument\b/i.test(name) && kind !== "software" && legacyProbeDocumentName() !== documentUsed) {
+          if (!warnedLegacyDocument.has(kind)) { warnedLegacyDocument.add(kind); console.warn(`[probe] SSM document ${documentUsed} does not exist; probing ${kind} through the pre-2.0 combined document ${legacyProbeDocumentName()} until it is created (Settings > Probes)`); }
+          documentUsed = legacyProbeDocumentName();
+          try { sent = await send(documentUsed, true); }
+          catch (e2: any) {
+            if (!/InvalidParameters/i.test(String(e2?.name || e2?.message))) throw e2;
+            sent = await send(documentUsed, false); // a document from before 1.5 has no signals parameter
+          }
+        } else throw e;
       }
       commandId = sent.Command?.CommandId || "";
       if (!commandId) throw new ProbeError("failed", "SSM returned no command id");
     } catch (e: any) {
       if (e instanceof ProbeError) throw e;
-      throw classifyAwsError(e, instanceId, "SendCommand");
+      throw classifyAwsError(e, instanceId, "SendCommand", documentUsed);
     }
 
     const deadline = Date.now() + timeoutMs;
@@ -584,7 +463,7 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
       } catch (e: any) {
         if (e instanceof ProbeError) throw e;
         if (e?.name === "InvocationDoesNotExist") continue; // the invocation is not registered yet
-        throw classifyAwsError(e, instanceId, "GetCommandInvocation");
+        throw classifyAwsError(e, instanceId, "GetCommandInvocation", documentUsed);
       }
     }
 
@@ -599,23 +478,59 @@ export async function probeInstance(instanceId: string, opts: { timeoutMs?: numb
       const detail = [`${stdout.length} chars of stdout${truncated ? ` (SSM caps the command output at ${SSM_OUTPUT_CAP} characters, the probe's JSON line was cut off)` : ""}`, tail ? `tail: ${tail}` : "", stderr.trim() ? `stderr: ${stderr.trim().slice(0, 300)}` : ""].filter(Boolean).join("; ");
       throw new ProbeError("bad_output", `${e.message}: ${detail}`);
     }
+    const stored = (data.kind ?? "all") as ProbeKind | "all";
     const collectedAt = data.collected_at;
-    const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data)).lastInsertRowid);
-    try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }
-    try { applyProbeDisks(instanceId, data.disks, collectedAt); } catch (e: any) { console.error(`[probe] disk usage not credited to volumes for ${instanceId}: ${e?.message || e}`); }
-    const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null;
-    try { checkDiskLevels(instanceId, name, data.disks as any, collectedAt); checkHostLevels(instanceId, name, id, collectedAt, data); } catch (e: any) { console.error(`[probe] disk or host levels not checked for ${instanceId}: ${e?.message || e}`); }
-    // probe 1.6: what runs here goes to the apps table and the graph; what the box ships to is read from the probe when the knowledge graph refreshes
-    try {
-      const { recordApps } = await import("./instance_apps.js");
-      const r = recordApps(instanceId, collectedAt, data, name);
-      const { recordPorts } = await import("./instance_apps.js");
-      const pr = recordPorts(instanceId, collectedAt, data, name);
-      if (pr && (pr.opened.length || pr.closed.length)) console.log(`[probe] ${instanceId} ports: ${pr.ports} listening${pr.opened.length ? `, opened ${pr.opened.join(", ")}` : ""}${pr.closed.length ? `, closed ${pr.closed.join(", ")}` : ""}${pr.alerts ? `, ${pr.alerts} exposed` : ""}`);
-      if (r) { if (r.appeared.length || r.disappeared.length || r.returned.length) console.log(`[probe] ${instanceId} apps: ${r.apps} running${r.appeared.length ? `, appeared ${r.appeared.join(", ")}` : ""}${r.disappeared.length ? `, gone ${r.disappeared.join(", ")}` : ""}${r.returned.length ? `, back ${r.returned.join(", ")}` : ""}`); const { mirrorAppsInBackground } = await import("./graph_mirror.js"); mirrorAppsInBackground([instanceId]); }
-    } catch (e: any) { console.error(`[probe] apps not recorded for ${instanceId}: ${e?.message || e}`); }
-    return { id, instance_id: instanceId, collected_at: collectedAt, data };
+    const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data), stored).lastInsertRowid);
+    runProbeHooks(instanceId, id, collectedAt, data, kindsOfRow(stored));
+    return { id, instance_id: instanceId, collected_at: collectedAt, data, kind: stored };
   } finally {
     client.destroy();
   }
+}
+const warnedLegacyDocument = new Set<ProbeKind>();
+
+/** What each kind feeds once its row is stored; a combined row runs every hook. Failures are logged, never thrown. */
+function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, data: ProbeResult, kinds: readonly ProbeKind[]): void {
+  const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null;
+  if (kinds.includes("host")) {
+    try { applyProbeDisks(instanceId, data.disks, collectedAt); } catch (e: any) { console.error(`[probe] disk usage not credited to volumes for ${instanceId}: ${e?.message || e}`); }
+    try { checkDiskLevels(instanceId, name, data.disks as any, collectedAt); checkHostLevels(instanceId, name, rowId, collectedAt, data); } catch (e: any) { console.error(`[probe] disk or host levels not checked for ${instanceId}: ${e?.message || e}`); }
+  }
+  if (kinds.includes("docker")) {
+    try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }
+  }
+  if (kinds.includes("apps")) {
+    // probe 1.6 / 1.8: what runs here and what listens go to the apps and ports tables, then to the graph with their reachability verdicts
+    void (async () => {
+      try {
+        const { recordApps, recordPorts } = await import("./instance_apps.js");
+        const r = recordApps(instanceId, collectedAt, data, name);
+        const pr = recordPorts(instanceId, collectedAt, data, name);
+        if (pr && (pr.opened.length || pr.closed.length)) console.log(`[probe] ${instanceId} ports: ${pr.ports} listening${pr.opened.length ? `, opened ${pr.opened.join(", ")}` : ""}${pr.closed.length ? `, closed ${pr.closed.join(", ")}` : ""}${pr.alerts ? `, ${pr.alerts} alert(s)` : ""}`);
+        if (r && (r.appeared.length || r.disappeared.length || r.returned.length)) console.log(`[probe] ${instanceId} apps: ${r.apps} running${r.appeared.length ? `, appeared ${r.appeared.join(", ")}` : ""}${r.disappeared.length ? `, disappeared ${r.disappeared.join(", ")}` : ""}${r.returned.length ? `, returned ${r.returned.join(", ")}` : ""}`);
+        const { mirrorAppsInBackground } = await import("./graph_mirror.js");
+        mirrorAppsInBackground([instanceId]);
+      } catch (e: any) { console.error(`[probe] apps not recorded for ${instanceId}: ${e?.message || e}`); }
+    })();
+  }
+  if (kinds.includes("software")) {
+    void (async () => {
+      try {
+        const { recordSoftware } = await import("./software_inventory.js");
+        const r = recordSoftware(instanceId, collectedAt, data as any);
+        if (r) console.log(`[probe] ${instanceId} software: ${r.packages} packages${r.changed.length ? `, ${r.changed.length} changed (${r.changed.slice(0, 3).map((c) => `${c.name} ${c.from} -> ${c.to}`).join("; ")}${r.changed.length > 3 ? ", ..." : ""})` : ""}${r.added.length ? `, ${r.added.length} added` : ""}${r.removed.length ? `, ${r.removed.length} removed` : ""}, ${r.binaries} program versions, ${r.images} images`);
+        if (r) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
+      } catch (e: any) { console.error(`[probe] software not recorded for ${instanceId}: ${e?.message || e}`); }
+    })();
+  }
+}
+
+/** Every kind in turn (host, docker, apps, software unless `kinds` narrows it); the merged view afterwards, and which kinds failed. */
+export async function probeInstanceAll(instanceId: string, kinds: readonly ProbeKind[] = PROBE_KINDS): Promise<{ probe: StoredProbe | null; ran: ProbeKind[]; failed: { kind: ProbeKind; code: string; message: string }[] }> {
+  const ran: ProbeKind[] = []; const failed: { kind: ProbeKind; code: string; message: string }[] = [];
+  for (const kind of kinds) {
+    try { await probeInstance(instanceId, { kind }); ran.push(kind); }
+    catch (e: any) { failed.push({ kind, code: e instanceof ProbeError ? e.code : "failed", message: String(e?.message || e).slice(0, 300) }); if (e instanceof ProbeError && (e.code === "no_credentials" || e.code === "not_managed" || e.code === "permission")) break; }
+  }
+  return { probe: latestProbe(instanceId), ran, failed };
 }

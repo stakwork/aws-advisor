@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { resourceAccountIndex } from "./resource_index.js";
+import { awsAdapter } from "./adapters/aws/index.js";
 import { createHash } from "node:crypto";
 import { db, getJsonSetting } from "./db.js";
 import { config } from "./config.js";
@@ -269,8 +271,11 @@ async function auroraStats(onLog: (l: string) => void): Promise<AuroraStat[]> {
 export function upsertRecommendations(runId: number, recs: RecInput[], source: "rules" | "agent", agentRequestId?: string, opts: { reconcile?: boolean } = {}): number {
   const select = db.prepare("select id, status from recommendations where fingerprint = ?");
   const insert = db.prepare(`
-    insert into recommendations(fingerprint, run_id, source, rule, title, resource, resource_name, action_type, est_monthly_saving, tier, confidence, rationale, evidence, agent_request_id)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    insert into recommendations(fingerprint, run_id, source, rule, title, resource, resource_name, action_type, est_monthly_saving, tier, confidence, rationale, evidence, agent_request_id, account_id)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const runAccount = (db.prepare("select account_id, provider from runs where id = ?").get(runId) as { account_id: string | null; provider: string } | undefined);
+  const idx = resourceAccountIndex(awsAdapter.primaryAccountId());
+  const accountOf = (resource: string | null | undefined) => idx.of(resource) ?? (runAccount && runAccount.provider !== "aws" ? runAccount.account_id : null);
   const refresh = db.prepare(`
     update recommendations set run_id = ?, title = ?, est_monthly_saving = ?, tier = ?, confidence = ?, rationale = ?, evidence = ?, updated_at = datetime('now')
     where id = ?`);
@@ -283,7 +288,7 @@ export function upsertRecommendations(runId: number, recs: RecInput[], source: "
       const existing = select.get(fp) as { id: number; status: string } | undefined;
       if (!existing) {
         insert.run(fp, runId, source, r.rule, r.title, r.resource, r.resourceName || null, r.actionType, r.estMonthlySaving, r.tier,
-          r.confidence, r.rationale, JSON.stringify(r.evidence), agentRequestId || null);
+          r.confidence, r.rationale, JSON.stringify(r.evidence), agentRequestId || null, accountOf(r.resource));
       } else if (["open", "snoozed", "resolved"].includes(existing.status)) {
         // approved, pending, rejected and done rows are deliberately left alone: what a human decided (or is in
         // the middle of) must stay what it says (title, tier, saving), or a later agent answer could rewrite an
@@ -297,7 +302,7 @@ export function upsertRecommendations(runId: number, recs: RecInput[], source: "
       // the daily review's items (rule review_*) come from the statistics, not from this batch: it refreshes them itself,
       // nor does the security scan's (rule sec_*, src/compliance.ts), which reconciles its own, nor the security groups' (rule sg_*,
       // src/security_groups.ts), refreshed with the inventory
-      const stale = db.prepare("select id, fingerprint, decided_at from recommendations where status = 'open' and source = 'rules' and rule not like 'review_%' and rule not like 'sec\\_%' escape '\\' and rule not like 'sg\\_%' escape '\\'").all() as { id: number; fingerprint: string; decided_at: string | null }[];
+      const stale = db.prepare("select id, fingerprint, decided_at from recommendations where status = 'open' and source = 'rules' and rule not like 'review_%' and rule not like 'sec\\_%' escape '\\' and rule not like 'sg\\_%' escape '\\' and rule not like 'vercel\\_%' escape '\\'").all() as { id: number; fingerprint: string; decided_at: string | null }[];
       for (const s of stale) {
         if (seen.has(s.fingerprint)) continue;
         db.prepare("update recommendations set status = 'resolved', updated_at = datetime('now') where id = ?").run(s.id);

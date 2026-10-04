@@ -100,7 +100,7 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
     }
   }
   if (recs.length) {
-    const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+    const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     out.recommendations = recs.length;
     upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
   }

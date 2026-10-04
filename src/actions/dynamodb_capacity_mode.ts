@@ -167,7 +167,7 @@ export const dynamodbCapacityModeAction: ActionModule = {
 
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
-    const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+    const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     let scanned = 0, filed = 0;
     for (const acct of creds.accounts) for (const region of regions(acct.region)) {

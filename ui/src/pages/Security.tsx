@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Badge, Button, Card, Empty, Pager, Stat, Td, Th } from "../components/ui";
+import { VulnerabilitiesCard } from "../components/vulnerabilities";
 
 const PAGE_SIZE = 50;
 const SEVERITIES = ["critical", "high", "medium", "low"] as const;
@@ -84,8 +85,9 @@ export default function Security() {
   };
 
   const latest = summary?.latest;
-  const counts = latest?.counts || {};
-  const prev = summary?.previous?.counts || null;
+  // under one account's scope the cards count that account's findings of the latest scan; the scan's own counts are organisation-wide
+  const counts = summary?.scope?.counts ?? latest?.counts ?? {};
+  const prev = summary?.scope ? null : summary?.previous?.counts || null;
   const delta = (s: string) => {
     if (!prev) return null;
     const d = (counts[s] || 0) - (prev[s] || 0);
@@ -96,7 +98,7 @@ export default function Security() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold text-zinc-100">Security {latest && <span className="text-sm font-normal text-zinc-500">scan #{latest.id} · {when(latest.finished_at)} UTC · {latest.alarms} findings</span>}</h1>
+        <h1 className="text-xl font-semibold text-zinc-100">Security {latest && <span className="text-sm font-normal text-zinc-500">scan #{latest.id} · {when(latest.finished_at)} UTC · {summary?.scope ? <>{summary.scope.alarms} findings in account {summary.scope.account} ({summary.scope.critical} critical, {summary.scope.high} high) of {latest.alarms} across the organisation</> : <>{latest.alarms} findings</>}</span>}</h1>
         <div className="flex items-center gap-2">
           {summary?.benchmarks?.all.map((b: any) => (
             <label key={b.id} className="flex items-center gap-1 text-xs text-zinc-400" title={b.title}>
@@ -112,6 +114,8 @@ export default function Security() {
         resource is reachable: a security group on a running instance with a public address, an instance a domain resolves to. Security recommendations carry no saving and the executor never acts on them.
         A control the role may not read shows up as an error in the scan log and in Settings › Permissions, not as a finding.
       </p>
+
+      <VulnerabilitiesCard />
 
       {!summary ? <Empty>Loading…</Empty> : !latest ? (
         <Empty>{summary.busy ? "The first scan is running; it takes about a minute." : "No security scan yet. Press Scan now, or wait for the daily one (COMPLIANCE_CRON)."}</Empty>
