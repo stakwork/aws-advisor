@@ -19,7 +19,7 @@ const PATHS: { id: Path; label: string; hint: string }[] = [
   { id: "member-role", label: "Member account of the organisation", hint: "Run with the child's admin credentials: creates the child's read role trusting the parent's read identity, the probe documents, and registers the child under Member accounts. The parent must be set up first." },
 ];
 
-const NAME_RE = "^[A-Za-z0-9_.-]+$";
+const NAME_RE = "^[A-Za-z0-9_.\\-]+$"; // the pattern attribute compiles with the v flag: a literal - in a class is escaped
 const DEFAULTS = { user: "aws-advisor", role: "aws-advisor-read", profile: "aws-advisor", region: "us-east-1", instanceRole: "aws-advisor-host", instanceId: "", adminProfile: "", trustArn: "", memberName: "", hostRoleArn: "", assumeArn: "" };
 
 const Field = ({ label, hint, value, onChange, pattern, placeholder, required = true }: { label: string; hint?: string; value: string; onChange: (v: string) => void; pattern?: string; placeholder?: string; required?: boolean }) => (
@@ -206,19 +206,19 @@ export function SetupWizard({ aws, onSaved }: { aws: any; onSaved?: () => void }
               Member <span className="font-medium">{saved.member.name || saved.member.account_id}</span> ({saved.member.account_id}) registered; the parent {saved.ok ? "assumed its read role" : `could not assume its read role yet: ${saved.member.last_test?.error || "see Settings › Member accounts"}`}. {saved.ok ? "The next collection run includes it." : "Check the role's trust policy and the parent's AdvisorAssumeMembers statement (rerun the parent's setup script if it predates it), then Test under Member accounts."}
             </div>
           )}
-          {saved && !saved.member && saved.ok && (
+          {saved && !saved.member && !saved.host && saved.ok && (
             <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-300">
               Connected: account <span className="font-medium">{saved.meta.accountId}</span>, mode <span className="font-medium">{saved.meta.mode === "profile" ? `AWS profile ${saved.meta.profile}` : saved.meta.mode === "chain" ? `Instance / default chain${saved.meta.roleArn ? ` assuming ${saved.meta.roleArn}` : ""}` : saved.meta.label}</span>, saved {when(saved.meta.savedAt)}.
             </div>
           )}
-          {saved && !saved.member && !saved.ok && (
+          {saved && !saved.member && !saved.host && !saved.ok && (
             <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-amber-300">
               The script saved the settings ({saved.meta.label}) but the connection test did not pass yet. Look at the script's output; for the EC2 path that is expected when the advisor is not running on the instance. "Test again" in the credentials card below retries.
               <div className="mt-2"><Button type="button" variant="ghost" onClick={() => setSaved(null)}>Keep waiting</Button></div>
             </div>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" onClick={runCheck} disabled={checking || !saved?.ok}>{checking ? "Checking…" : "Check permissions"}</Button>
+            <Button type="button" onClick={runCheck} disabled={checking || !saved?.ok || Boolean(saved?.host)} title={saved?.host ? "the host path changes nothing on this advisor's credentials; check after the parent's path" : undefined}>{checking ? "Checking…" : "Check permissions"}</Button>
             <Button type="button" variant="ghost" onClick={() => setStep(3)}>Back to the command</Button>
             <Button type="button" variant="ghost" onClick={restart}>Start over</Button>
           </div>
