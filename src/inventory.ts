@@ -9,7 +9,7 @@ import { lambdaSummary, refreshLambdaInventory } from "./lambda_inventory.js";
 import { dynamodbSummary, refreshDynamodbInventory } from "./dynamodb_inventory.js";
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 import { ebsSummary, refreshEbsInventory } from "./ebs_inventory.js";
-import { s3Summary } from "./s3_inventory.js";
+import { refreshS3Inventory, s3Summary } from "./s3_inventory.js";
 import { refreshRoute53Inventory, route53Summary } from "./route53_inventory.js";
 import { elbSummary, refreshElbInventory } from "./elb_inventory.js";
 import { refreshIamInventory } from "./iam_inventory.js";
@@ -26,7 +26,7 @@ export interface RefreshResult {
   refreshed_at: string;
   ec2: number;
   rds: number;
-  elasticache: number; lambda: number; ebs: number; elb: number; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
+  elasticache: number; lambda: number; ebs: number; elb: number; s3?: number; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
   clusters?: { total: number; eks: number; ecs: number; readable: number; nodes: number; workloads: number };
   prices_fetched: number;
   errors: string[];
@@ -430,11 +430,15 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   // after EC2, so instance and IP targets resolve against the rows just written
   const elb = await refreshElbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   await refreshIamInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
+  // the buckets too (the storage metrics are a few CloudWatch calls per region and account), so an account registered
+  // today shows its buckets after this refresh rather than after the next nightly job
+  let s3 = 0;
+  try { const r = await refreshS3Inventory((l) => console.log(`[inventory] ${l}`)); s3 = r.buckets; errors.push(...r.errors); } catch (e: any) { errors.push(`S3 buckets: ${e?.message || e}`); }
   // last, so the DNS links read the EC2, RDS, S3 and Lambda rows just written
   let route53: RefreshResult["route53"] = null;
   if (opts.dns) { const r53 = await refreshRoute53Inventory(); errors.push(...r53.errors); route53 = { zones: r53.zones, records: r53.records, linked: r53.linked, unmatched: r53.unmatched }; }
   if (ec2Rows || rdsRows || cacheRows) setSetting("inventory_refreshed_at", now);
-  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, elb, route53, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
+  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, elb, s3, route53, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
 }
 
 export const inventoryRefreshedAt = () => getSetting("inventory_refreshed_at");

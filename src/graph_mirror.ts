@@ -839,7 +839,7 @@ SET p += {kind: 'port', resource_id: row.instance_id, protocol: row.proto, port:
   first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'instance_port', native_id: row.id, updated_at: $now}
 WITH p, row
 MATCH (r:AdvisorResource {id: row.instance_id})
-MERGE (r)-[l:EXPOSES]->(p) SET l.gone = row.gone, l.updated_at = $now
+MERGE (r)-[l:EXPOSES]->(p) SET l.gone = row.gone, l.updated_at = $now, p.account_id = coalesce(row.account_id, r.account_id, $account)
 WITH p, row WHERE row.app_name IS NOT NULL
 MATCH (a:AdvisorApp {id: row.app_name})
 MERGE (a)-[s:SERVES]->(p) SET s.gone = row.gone, s.updated_at = $now`;

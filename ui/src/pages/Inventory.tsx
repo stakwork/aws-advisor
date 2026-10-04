@@ -360,7 +360,11 @@ export default function Inventory() {
   const [q, setQ] = useState(params.get("q") || "");
   const [zones, setZones] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
-  const [rows, setRows] = useState<any[] | null>(null);
+  // The rows are kept with the tab they were fetched for: a tab switch renders "Loading…" until its own rows arrive,
+  // never the previous tab's rows under the new tab's row renderer (an EC2 row has no `groups` for the identities row).
+  const [rowsState, setRowsState] = useState<{ tab: Tab; list: any[] } | null>(null);
+  const rows = rowsState && rowsState.tab === tab ? rowsState.list : null;
+  const setRows = (list: any[] | null) => setRowsState(list ? { tab, list } : null);
   const [detail, setDetail] = useState<any>(null);
   const [err, setErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -728,8 +732,8 @@ export default function Inventory() {
                       <Td className="text-xs">{r.console_access ? <span className="text-zinc-200">yes</span> : <span className="text-zinc-500">no</span>}</Td>
                       <Td className="text-xs">{r.mfa_enabled ? <span className="text-emerald-300">on</span> : r.console_access ? <span className="text-orange-300">off</span> : <span className="text-zinc-500">—</span>}</Td>
                       <Td className="text-xs">{r.admin ? <span className="text-orange-300">admin</span> : <span className="text-zinc-500">—</span>}</Td>
-                      <Td className="max-w-xs text-xs text-zinc-400">{[...r.groups.map((g: string) => `group ${g}`), ...r.attached_policies, ...r.inline_policies.map((p: string) => `inline ${p}`)].join(" · ") || "—"}{r.permissions_boundary ? <div className="text-zinc-500">boundary {r.permissions_boundary}</div> : null}</Td>
-                      <Td className="text-xs">{r.access_keys.length ? r.access_keys.map((k: any) => <div key={k.id} className={k.status === "Active" && (k.age_days ?? 0) > 90 ? "text-orange-300" : "text-zinc-300"}><span className="font-mono">{k.id}</span> {k.status}{k.age_days != null ? ` · ${k.age_days} d` : ""}{k.last_used ? ` · used ${day(k.last_used)}${k.service ? ` (${k.service})` : ""}` : " · never used"}</div>) : <span className="text-zinc-500">none</span>}</Td>
+                      <Td className="max-w-xs text-xs text-zinc-400">{[...(r.groups || []).map((g: string) => `group ${g}`), ...(r.attached_policies || []), ...(r.inline_policies || []).map((p: string) => `inline ${p}`)].join(" · ") || "—"}{r.permissions_boundary ? <div className="text-zinc-500">boundary {r.permissions_boundary}</div> : null}</Td>
+                      <Td className="text-xs">{r.access_keys?.length ? r.access_keys.map((k: any) => <div key={k.id} className={k.status === "Active" && (k.age_days ?? 0) > 90 ? "text-orange-300" : "text-zinc-300"}><span className="font-mono">{k.id}</span> {k.status}{k.age_days != null ? ` · ${k.age_days} d` : ""}{k.last_used ? ` · used ${day(k.last_used)}${k.service ? ` (${k.service})` : ""}` : " · never used"}</div>) : <span className="text-zinc-500">none</span>}</Td>
                       <Td className="whitespace-nowrap text-xs text-zinc-400">{r.last_used ? day(r.last_used) : <span className="text-zinc-500">never</span>}</Td>
                       <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
                     </tr>

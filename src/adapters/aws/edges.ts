@@ -22,7 +22,11 @@ const write = (cypher: string, params: Record<string, unknown>) => writeCypher(c
 const tableExists = (name: string) => tableExistsIn(name);
 const inventoryIds = (account: string) => inventoryIdsOf(account);
 
-/** A balancer's listeners, and what each forwards to: old edges go, the current ones come back. */
+/**
+ * A balancer's listeners, and what each forwards to: old edges go, the current ones come back. A target port or
+ * function endpoint belongs to the account of the resource that exposes it (the balancer's when the graph does not
+ * know the target yet), set on every pass so a rebuild corrects what an earlier pass attributed to the default account.
+ */
 const ELB_CYPHER = `
 UNWIND $rows AS row
 MATCH (lb:AdvisorResource {id: row.id})
@@ -35,10 +39,10 @@ FOREACH (l IN row.listeners |
   MERGE (lb)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now)
 WITH lb, row
 FOREACH (e IN row.ec2_edges |
-  MERGE (t:AdvisorEndpoint {id: e.target + ':tcp:' + toString(coalesce(e.port, 0))})
-    ON CREATE SET t.kind = 'port', t.protocol = 'tcp', t.port = e.port, t.resource_id = e.target, t.account_id = coalesce(row.account_id, $account), t.provider = $provider, t.native_type = 'instance_port', t.native_id = t.id, t.first_seen = $now, t.gone = false
-  SET t.last_seen = $now, t.updated_at = $now
   MERGE (i:AdvisorResource {id: e.target})
+  MERGE (t:AdvisorEndpoint {id: e.target + ':tcp:' + toString(coalesce(e.port, 0))})
+    ON CREATE SET t.kind = 'port', t.protocol = 'tcp', t.port = e.port, t.resource_id = e.target, t.provider = $provider, t.native_type = 'instance_port', t.native_id = t.id, t.first_seen = $now, t.gone = false
+  SET t.last_seen = $now, t.updated_at = $now, t.account_id = coalesce(i.account_id, row.account_id, $account)
   MERGE (i)-[ix:EXPOSES]->(t) ON CREATE SET ix.gone = false
   FOREACH (lid IN CASE WHEN e.listener IS NULL THEN [] ELSE [e.listener] END |
     MERGE (l:AdvisorEndpoint {id: lid})
@@ -48,8 +52,8 @@ FOREACH (e IN row.ec2_edges |
 FOREACH (e IN row.ref_edges |
   MERGE (fn:AdvisorResource {id: e.target})
   MERGE (t:AdvisorEndpoint {id: e.target + ':invoke'})
-    ON CREATE SET t.kind = 'url', t.protocol = 'https', t.resource_id = e.target, t.account_id = coalesce(row.account_id, $account), t.provider = $provider, t.native_type = 'lambda_invoke', t.native_id = t.id, t.first_seen = $now, t.gone = false
-  SET t.last_seen = $now, t.updated_at = $now
+    ON CREATE SET t.kind = 'url', t.protocol = 'https', t.resource_id = e.target, t.provider = $provider, t.native_type = 'lambda_invoke', t.native_id = t.id, t.first_seen = $now, t.gone = false
+  SET t.last_seen = $now, t.updated_at = $now, t.account_id = coalesce(fn.account_id, row.account_id, $account)
   MERGE (fn)-[fx:EXPOSES]->(t) ON CREATE SET fx.gone = false
   FOREACH (lid IN CASE WHEN e.listener IS NULL THEN [] ELSE [e.listener] END |
     MERGE (l:AdvisorEndpoint {id: lid})

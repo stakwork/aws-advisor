@@ -26,13 +26,25 @@ export function s3MonthlyCost(sizesGb: Record<string, number>): number { return 
 
 import { CloudWatchClient, ListMetricsCommand, GetMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { sdkCredentials } from "./steampipe.js";
+import type { SdkCredentials } from "./aws_config.js";
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
+import { accountCredentials } from "./accounts.js";
+
+/**
+ * The buckets by the account they live in, each with the regions its buckets sit in: a member's storage metrics are in
+ * the member's CloudWatch, so each group is read with that account's credentials (the parent's for buckets with no
+ * account id, the rows of the single-account days).
+ */
+export function bucketsByAccount(buckets: Array<{ account_id?: unknown; region?: unknown }>): Map<string | null, string[]> {
+  const out = new Map<string | null, Set<string>>();
+  for (const b of buckets) { const k = b.account_id ? String(b.account_id) : null; if (!out.has(k)) out.set(k, new Set()); out.get(k)!.add(String(b.region || "us-east-1")); }
+  return new Map([...out].map(([k, v]) => [k, [...v]]));
+}
 
 /** One ListMetrics per region finds which (bucket, storage class) pairs exist, then GetMetricData fetches them
  *  500 at a time: 56 buckets cost 2 or 3 CloudWatch calls instead of 15 Steampipe queries each. */
-export async function s3StorageMetrics(regions: string[], onLog: (s: string) => void): Promise<Map<string, { sizes: Record<string, number>; objects: number | null }>> {
+export async function s3StorageMetrics(regions: string[], onLog: (s: string) => void, creds: { provider: SdkCredentials["provider"] } = sdkCredentials()): Promise<Map<string, { sizes: Record<string, number>; objects: number | null }>> {
   const out = new Map<string, { sizes: Record<string, number>; objects: number | null }>();
-  const creds = sdkCredentials();
   const end = new Date(); const start = new Date(end.getTime() - 3 * 86400e3);
   for (const region of regions) {
     const client = new CloudWatchClient({ region, credentials: creds.provider });
@@ -94,9 +106,12 @@ export async function refreshS3Inventory(onLog: (s: string) => void = () => {}):
     on conflict(name) do update set region = excluded.region, created = excluded.created, versioning = excluded.versioning, lifecycle_rules = excluded.lifecycle_rules, public = excluded.public,
       sizes = excluded.sizes, total_gb = excluded.total_gb, objects = excluded.objects, standard_gb = excluded.standard_gb, monthly_usd = excluded.monthly_usd, metric_day = excluded.metric_day, last_seen = excluded.last_seen, gone = 0`);
   // storage metrics are published once a day per bucket and class; the newest point of the last 3 days is the size
-  let metrics = new Map<string, { sizes: Record<string, number>; objects: number | null }>();
-  try { metrics = await s3StorageMetrics([...new Set(buckets.map((b) => b.region || "us-east-1"))], onLog); }
-  catch (e) { out.errors.push(describeError(e, "s3 storage metrics (cloudwatch:ListMetrics, cloudwatch:GetMetricData)")); }
+  // read per account: a member's bucket metrics live in the member's CloudWatch, reached through its read role
+  const metrics = new Map<string, { sizes: Record<string, number>; objects: number | null }>();
+  for (const [acct, regions] of bucketsByAccount(buckets)) {
+    try { for (const [k, v] of await s3StorageMetrics(regions, onLog, accountCredentials(acct))) metrics.set(k, v); }
+    catch (e) { out.errors.push(describeError(e, `s3 storage metrics${acct ? ` of account ${acct}` : ""} (cloudwatch:ListMetrics, cloudwatch:GetMetricData)`)); }
+  }
   const worker = (b: any) => {
     const region = b.region || "us-east-1";
     const m = metrics.get(b.name); const sizes = m?.sizes ?? {}; const objects = m?.objects ?? null;

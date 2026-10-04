@@ -446,8 +446,10 @@ export async function networkOverview(account: string = accountId()) {
     WHERE coalesce(e.gone, false) = false
     RETURN n.id AS id, n.name AS name, n.region AS region, n.cidr_blocks AS cidr_blocks, n.ipv6_blocks AS ipv6_blocks, n.default AS is_default, segments, public_segments, gateway_kinds, gateways, filters, resources, peers, count(DISTINCT e) AS internet_endpoints
     ORDER BY resources DESC, n.id`, { account }, { rowCap: 200, timeoutMs: 30_000 });
+  // an endpoint is its resource's: the account the inventory shows the box, balancer or database under, whatever an
+  // earlier mirror pass stamped on the endpoint itself (a target port a balancer edge created before its instance was known)
   const exposed = await readQuery(`MATCH (r:AdvisorResource)-[:EXPOSES]->(e:AdvisorEndpoint)-[v:REACHABLE_FROM]->(:AdvisorSource {id: 'internet'})
-    WHERE e.account_id = $account AND coalesce(e.gone, false) = false
+    WHERE coalesce(r.account_id, e.account_id) = $account AND coalesce(e.gone, false) = false
     OPTIONAL MATCH (a:AdvisorApp)-[:SERVES]->(e)
     OPTIONAL MATCH (e)-[:ALLOWED_BY]->(rule:AdvisorFilterRule)<-[:HAS_RULE]-(f:AdvisorFilter)
     RETURN r.id AS resource_id, r.name AS resource_name, [l IN labels(r) WHERE l <> 'AdvisorResource'][0] AS resource_label, e.id AS endpoint_id, e.kind AS kind, e.protocol AS protocol, e.port AS port, e.hostname AS hostname,
@@ -455,7 +457,7 @@ export async function networkOverview(account: string = accountId()) {
       collect(DISTINCT CASE WHEN rule IS NULL THEN null ELSE {rule: rule.id, filter: f.id, filter_name: f.name, description: rule.description, ports: CASE WHEN rule.from_port IS NULL THEN 'all' WHEN rule.from_port = rule.to_port THEN toString(rule.from_port) ELSE toString(rule.from_port) + '-' + toString(rule.to_port) END} END) AS rules
     ORDER BY e.port, r.name`, { account }, { rowCap: 3000, timeoutMs: 30_000 });
   const blocked = await readQuery(`MATCH (r:AdvisorResource)-[:EXPOSES]->(e:AdvisorEndpoint)-[b:BLOCKED_BY]->(x)
-    WHERE e.account_id = $account AND coalesce(e.gone, false) = false
+    WHERE coalesce(r.account_id, e.account_id) = $account AND coalesce(e.gone, false) = false
     OPTIONAL MATCH (a:AdvisorApp)-[:SERVES]->(e)
     RETURN r.id AS resource_id, r.name AS resource_name, e.id AS endpoint_id, e.protocol AS protocol, e.port AS port, coalesce(a.name, e.process) AS program, e.exposure AS exposure, b.source AS source, b.reason AS reason, labels(x)[0] AS by_label, x.id AS by_id, x.name AS by_name
     ORDER BY e.port, r.name`, { account }, { rowCap: 3000, timeoutMs: 30_000 });
@@ -469,8 +471,8 @@ export async function networkOverview(account: string = accountId()) {
     OPTIONAL MATCH (f)-[:IN_NETWORK]->(n:AdvisorNetwork)
     RETURN f.id AS id, f.kind AS kind, f.name AS name, f.description AS description, f.rules AS rules, f.default AS is_default, n.id AS network, internet_rules, internet_ports, guarded, interfaces
     ORDER BY internet_rules DESC, guarded DESC, f.kind, f.name`, { account }, { rowCap: 1000, timeoutMs: 30_000 });
-  const totals = await readQuery(`MATCH (e:AdvisorEndpoint {account_id: $account}) WHERE coalesce(e.gone, false) = false
-    RETURN e.exposure AS exposure, count(*) AS n`, { account }, { rowCap: 20 });
+  const totals = await readQuery(`MATCH (r:AdvisorResource)-[:EXPOSES]->(e:AdvisorEndpoint) WHERE coalesce(r.account_id, e.account_id) = $account AND coalesce(e.gone, false) = false
+    RETURN e.exposure AS exposure, count(DISTINCT e) AS n`, { account }, { rowCap: 20 });
   const gateways = await readQuery(`MATCH (g:AdvisorGateway {account_id: $account}) RETURN g.kind AS kind, count(*) AS n ORDER BY n DESC`, { account }, { rowCap: 20 });
   return { account_id: account, networks: networks.rows, exposed: exposed.rows.map((r) => ({ ...r, rules: (r.rules as any[]).filter(Boolean) })), blocked: blocked.rows, filters: filters.rows,
     exposure_totals: Object.fromEntries(totals.rows.map((r) => [String(r.exposure ?? "unjudged"), Number(r.n)])), gateway_totals: Object.fromEntries(gateways.rows.map((r) => [String(r.kind), Number(r.n)])) };
