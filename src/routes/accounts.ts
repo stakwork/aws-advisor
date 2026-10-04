@@ -6,7 +6,7 @@ import { Router } from "express";
 import { listAccounts, removeAccount, saveAccount, testAccount, validateAccount } from "../accounts.js";
 import { credentialsMeta, hasConnectionFile, sdkIdentity } from "../steampipe.js";
 import { actuatorTrustPolicy } from "../permissions.js";
-import { spendByAccount } from "../spend.js";
+import { servicesByAccount, spendByAccount } from "../spend.js";
 import { allAccounts, providers } from "../adapters/index.js";
 import { accountsOverview , generalOverview } from "../accounts_overview.js";
 
@@ -66,12 +66,17 @@ accounts.delete("/accounts/:id", (req, res) => {
   res.json({ ...r, accounts: listAccounts() });
 });
 
-/** The last six months per linked account (the payer's Cost Explorer), with the names the registry knows. */
+/**
+ * The last six months per linked account (the payer's Cost Explorer), with the names the registry knows, and what each
+ * account's last three months are made of: `services[account_id][month]` = [{ service, usd }], biggest first.
+ */
 accounts.get("/accounts/bill", (_req, res) => {
   const names = new Map(listAccounts().map((a) => [a.account_id, a.is_parent ? `${a.name} (parent)` : a.name]));
   const rows = spendByAccount(6).map((r) => ({ ...r, name: names.get(r.account_id) || null }));
   const months = [...new Set(rows.map((r) => r.month))].sort().reverse();
   const byAccount = new Map<string, { account_id: string; name: string | null; months: Record<string, number>; total: number }>();
   for (const r of rows) { const a = byAccount.get(r.account_id) || { account_id: r.account_id, name: r.name, months: {}, total: 0 }; a.months[r.month] = r.usd; a.total += r.usd; byAccount.set(r.account_id, a); }
-  res.json({ months, accounts: [...byAccount.values()].sort((x, y) => y.total - x.total) });
+  const services: Record<string, Record<string, { service: string; usd: number }[]>> = {};
+  for (const s of servicesByAccount(3)) { const a = (services[s.account_id] ??= {}); (a[s.month] ??= []).push({ service: s.service, usd: Math.round(s.usd * 100) / 100 }); }
+  res.json({ months, accounts: [...byAccount.values()].sort((x, y) => y.total - x.total), services });
 });

@@ -16,6 +16,34 @@ export { summarizeSpend } from "./spend_math.js";
 
 /** Member accounts (src/accounts.ts): the payer's Cost Explorer sees every linked account; kept per month here for the Bill page's "By account". */
 db.exec(`create table if not exists spend_by_account_monthly (month text not null, account_id text not null, usd real not null, fetched_at text not null, primary key (month, account_id))`);
+/** What each linked account's month is made of: unblended cost per service, the last three months (one more Cost Explorer call per refresh). */
+db.exec(`create table if not exists spend_by_account_service_monthly (month text not null, account_id text not null, service text not null, usd real not null, fetched_at text not null, primary key (month, account_id, service))`);
+
+export interface AccountServiceSpendRow { month: string; account_id: string; service: string; usd: number }
+/** The last `months` months per linked account and service, biggest first within a month. */
+export function servicesByAccount(months = 3): AccountServiceSpendRow[] {
+  return db.prepare("select month, account_id, service, usd from spend_by_account_service_monthly where month >= ? order by month desc, account_id, usd desc").all(monthsAgo(months)) as AccountServiceSpendRow[];
+}
+
+/** One Cost Explorer call: unblended cost per linked account per service per month, the last three months (aws_cost_usage, LINKED_ACCOUNT × SERVICE). Errors are returned, not thrown. */
+export async function refreshSpendByAccountService(log: (l: string) => void = () => {}): Promise<{ rows: number; error?: string }> {
+  const sql = `select dimension_1 as account_id, dimension_2 as service, to_char(period_start at time zone 'UTC', 'YYYY-MM') as month, sum(unblended_cost_amount) as usd
+    from ${S}.aws_cost_usage where granularity = 'MONTHLY' and dimension_type_1 = 'LINKED_ACCOUNT' and dimension_type_2 = 'SERVICE'
+      and period_start >= date_trunc('month', now() - interval '2 months') group by 1, 2, 3 order by 3, 1, 4 desc`;
+  let rows: { account_id: string | null; service: string | null; month: string; usd: string | null }[];
+  try { rows = await query(sql); } catch (e) { const error = describeError(e, "spend by account and service (aws_cost_usage)"); log(`by account and service failed: ${error}`); return { rows: 0, error }; }
+  const at = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const up = db.prepare("insert into spend_by_account_service_monthly(month, account_id, service, usd, fetched_at) values (?, ?, ?, ?, ?) on conflict(month, account_id, service) do update set usd = excluded.usd, fetched_at = excluded.fetched_at");
+  let n = 0;
+  db.transaction(() => {
+    // a service that dropped to nothing since the last fetch would otherwise keep its old figure: the months fetched are rewritten whole
+    const months = [...new Set(rows.map((r) => r.month))];
+    for (const m of months) db.prepare("delete from spend_by_account_service_monthly where month = ?").run(m);
+    for (const r of rows) { if (!r.account_id || !r.service) continue; const usd = Number(r.usd ?? 0); if (!usd) continue; up.run(r.month, String(r.account_id), String(r.service), usd, at); n++; }
+  })();
+  log(`${n} account × service rows stored for ${new Set(rows.map((r) => r.month)).size} month(s)`);
+  return { rows: n };
+}
 
 export interface AccountSpendRow { month: string; account_id: string; usd: number }
 /** The last `months` months per linked account, newest first. */
@@ -101,5 +129,6 @@ export async function refreshSpend(opts: { force?: boolean; onLog?: (line: strin
   })();
   log(`${rows.length} days stored (${rows[0]?.day ?? "—"} to ${rows[rows.length - 1]?.day ?? "—"})`);
   await refreshSpendByAccount(log);
+  await refreshSpendByAccountService(log);
   return { refreshed: true, days: rows.length, fetched_at: fetchedAt };
 }

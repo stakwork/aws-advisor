@@ -431,7 +431,7 @@ import { readQuery } from "./graph_mirror.js";
 
 /** The network layer at a glance: every network with what sits in it, the exposed endpoints, the filters, the blocks. */
 export async function networkOverview(account: string = accountId()) {
-  const networks = await readQuery(`MATCH (n:AdvisorNetwork {account_id: coalesce(row.account_id, $account)})
+  const networks = await readQuery(`MATCH (n:AdvisorNetwork {account_id: $account})
     OPTIONAL MATCH (s:AdvisorSegment)-[:IN_NETWORK]->(n)
     WITH n, count(s) AS segments, sum(CASE WHEN s.public THEN 1 ELSE 0 END) AS public_segments
     OPTIONAL MATCH (g:AdvisorGateway)-[:IN_NETWORK]->(n)
@@ -459,7 +459,7 @@ export async function networkOverview(account: string = accountId()) {
     OPTIONAL MATCH (a:AdvisorApp)-[:SERVES]->(e)
     RETURN r.id AS resource_id, r.name AS resource_name, e.id AS endpoint_id, e.protocol AS protocol, e.port AS port, coalesce(a.name, e.process) AS program, e.exposure AS exposure, b.source AS source, b.reason AS reason, labels(x)[0] AS by_label, x.id AS by_id, x.name AS by_name
     ORDER BY e.port, r.name`, { account }, { rowCap: 3000, timeoutMs: 30_000 });
-  const filters = await readQuery(`MATCH (f:AdvisorFilter {account_id: coalesce(row.account_id, $account)})
+  const filters = await readQuery(`MATCH (f:AdvisorFilter {account_id: $account})
     OPTIONAL MATCH (f)-[:HAS_RULE]->(rule:AdvisorFilterRule)-[:FROM]->(src:AdvisorSource {id: 'internet'}) WHERE rule.direction = 'ingress'
     WITH f, count(rule) AS internet_rules, collect(DISTINCT CASE WHEN rule.from_port IS NULL THEN 'all' WHEN rule.from_port = rule.to_port THEN toString(rule.from_port) ELSE toString(rule.from_port) + '-' + toString(rule.to_port) END)[..8] AS internet_ports
     OPTIONAL MATCH (f)<-[:GUARDED_BY]-(r:AdvisorResource) WHERE coalesce(r.gone, false) = false
@@ -469,9 +469,9 @@ export async function networkOverview(account: string = accountId()) {
     OPTIONAL MATCH (f)-[:IN_NETWORK]->(n:AdvisorNetwork)
     RETURN f.id AS id, f.kind AS kind, f.name AS name, f.description AS description, f.rules AS rules, f.default AS is_default, n.id AS network, internet_rules, internet_ports, guarded, interfaces
     ORDER BY internet_rules DESC, guarded DESC, f.kind, f.name`, { account }, { rowCap: 1000, timeoutMs: 30_000 });
-  const totals = await readQuery(`MATCH (e:AdvisorEndpoint {account_id: coalesce(row.account_id, $account)}) WHERE coalesce(e.gone, false) = false
+  const totals = await readQuery(`MATCH (e:AdvisorEndpoint {account_id: $account}) WHERE coalesce(e.gone, false) = false
     RETURN e.exposure AS exposure, count(*) AS n`, { account }, { rowCap: 20 });
-  const gateways = await readQuery(`MATCH (g:AdvisorGateway {account_id: coalesce(row.account_id, $account)}) RETURN g.kind AS kind, count(*) AS n ORDER BY n DESC`, { account }, { rowCap: 20 });
+  const gateways = await readQuery(`MATCH (g:AdvisorGateway {account_id: $account}) RETURN g.kind AS kind, count(*) AS n ORDER BY n DESC`, { account }, { rowCap: 20 });
   return { account_id: account, networks: networks.rows, exposed: exposed.rows.map((r) => ({ ...r, rules: (r.rules as any[]).filter(Boolean) })), blocked: blocked.rows, filters: filters.rows,
     exposure_totals: Object.fromEntries(totals.rows.map((r) => [String(r.exposure ?? "unjudged"), Number(r.n)])), gateway_totals: Object.fromEntries(gateways.rows.map((r) => [String(r.kind), Number(r.n)])) };
 }
@@ -526,7 +526,7 @@ export async function filterDetail(id: string) {
 
 /** Every segment across the account's networks, with routing, ACL and what sits in it (the Segments tab). */
 export async function listSegments(account: string = accountId()) {
-  const r = await readQuery(`MATCH (s:AdvisorSegment {account_id: coalesce(row.account_id, $account)})
+  const r = await readQuery(`MATCH (s:AdvisorSegment {account_id: $account})
     OPTIONAL MATCH (s)-[:IN_NETWORK]->(n:AdvisorNetwork)
     OPTIONAL MATCH (s)-[:USES_ROUTE_TABLE]->(t:AdvisorRouteTable)
     OPTIONAL MATCH (t)-[r:ROUTES]->(g:AdvisorGateway)
@@ -543,7 +543,7 @@ export async function listSegments(account: string = accountId()) {
 
 /** Every gateway node: internet, NAT, egress-only, peering, endpoint, and the bare transit or VPN ones routes name (the Gateways tab). */
 export async function listGatewayNodes(account: string = accountId()) {
-  const r = await readQuery(`MATCH (g:AdvisorGateway {account_id: coalesce(row.account_id, $account)})
+  const r = await readQuery(`MATCH (g:AdvisorGateway {account_id: $account})
     OPTIONAL MATCH (g)-[:IN_NETWORK]->(n:AdvisorNetwork)
     OPTIONAL MATCH (g)-[:IN_SEGMENT]->(s:AdvisorSegment)
     OPTIONAL MATCH (p:AdvisorPublicIp)-[:ASSIGNED]->(g)
@@ -559,7 +559,7 @@ export async function listGatewayNodes(account: string = accountId()) {
 
 /** Every network interface with whose it is, where it sits and what it wears (the Interfaces tab). */
 export async function listInterfaces(account: string = accountId()) {
-  const r = await readQuery(`MATCH (i:AdvisorInterface {account_id: coalesce(row.account_id, $account)})
+  const r = await readQuery(`MATCH (i:AdvisorInterface {account_id: $account})
     OPTIONAL MATCH (i)-[:ATTACHED_TO]->(x)
     OPTIONAL MATCH (i)-[:IN_SEGMENT]->(s:AdvisorSegment)
     OPTIONAL MATCH (i)-[:IN_NETWORK]->(n:AdvisorNetwork)
@@ -574,7 +574,7 @@ export async function listInterfaces(account: string = accountId()) {
 
 /** Every static public address and what it is assigned to (the Public IPs tab). */
 export async function listPublicIps() {
-  const r = await readQuery(`MATCH (p:AdvisorPublicIp {account_id: coalesce(row.account_id, $account)})
+  const r = await readQuery(`MATCH (p:AdvisorPublicIp {account_id: $account})
     OPTIONAL MATCH (p)-[:ASSIGNED]->(x)
     OPTIONAL MATCH (x)-[:ATTACHED_TO]->(owner)
     OPTIONAL MATCH (d:AdvisorDnsRecord)-[:POINTS_TO]->(y) WHERE y.id = x.id OR y.id = owner.id OR (y:AdvisorResourceRef AND y.id = p.ip)

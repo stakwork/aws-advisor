@@ -250,23 +250,45 @@ function PriceCheck() {
 }
 
 
-/** The payer's bill per linked account (member accounts, Settings): shown only when more than one account has cost. */
+/**
+ * The payer's bill per linked account (member accounts, Settings): shown only when more than one account has cost. A row
+ * opens into what the account's last three months are made of, per service.
+ */
 function ByAccount() {
-  const [d, setD] = useState<{ months: string[]; accounts: { account_id: string; name: string | null; months: Record<string, number>; total: number }[] } | null>(null);
+  const [d, setD] = useState<{ months: string[]; accounts: { account_id: string; name: string | null; months: Record<string, number>; total: number }[]; services?: Record<string, Record<string, { service: string; usd: number }[]>> } | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
   useEffect(() => { api("/accounts/bill").then(setD).catch(() => setD(null)); }, []);
   if (!d || d.accounts.length < 2) return null;
   const months = d.months.slice(0, 6);
+  const serviceMonths = months.slice(0, 3);
+  const servicesOf = (id: string) => {
+    const byMonth = d.services?.[id] || {};
+    const names = [...new Set(serviceMonths.flatMap((m) => (byMonth[m] || []).map((s) => s.service)))];
+    const amount = (name: string, m: string) => byMonth[m]?.find((s) => s.service === name)?.usd ?? null;
+    return names.map((name) => ({ name, amounts: serviceMonths.map((m) => amount(name, m)) })).sort((x, y) => (y.amounts[0] ?? y.amounts[1] ?? 0) - (x.amounts[0] ?? x.amounts[1] ?? 0));
+  };
   return (
-    <Card title={<span>By account <span className="font-normal text-zinc-500">· unblended, the payer's Cost Explorer per linked account</span></span>}>
+    <Card title={<span>By account <span className="font-normal text-zinc-500">· unblended, the payer's Cost Explorer per linked account; open a row for its services</span></span>}>
       <table className="w-full text-sm">
         <thead><tr><Th>Account</Th>{months.map((m) => <Th key={m} className="text-right">{m}</Th>)}</tr></thead>
         <tbody>
-          {d.accounts.map((a) => (
-            <tr key={a.account_id} className="border-t border-zinc-800/60">
-              <Td><span className="font-mono text-zinc-200">{a.account_id}</span>{a.name && <span className="ml-2 text-zinc-400">{a.name}</span>}</Td>
-              {months.map((m) => <Td key={m} className="text-right">{a.months[m] != null ? usd(a.months[m]) : "—"}</Td>)}
-            </tr>
-          ))}
+          {d.accounts.map((a) => {
+            const services = open === a.account_id ? servicesOf(a.account_id) : [];
+            return (
+              <Fragment key={a.account_id}>
+                <tr className="cursor-pointer border-t border-zinc-800/60 hover:bg-zinc-900/40" onClick={() => setOpen(open === a.account_id ? null : a.account_id)} title="what this account's months are made of, per service">
+                  <Td><span className="mr-1 text-zinc-500">{open === a.account_id ? "▾" : "▸"}</span><span className="font-mono text-zinc-200">{a.account_id}</span>{a.name && <span className="ml-2 text-zinc-400">{a.name}</span>}</Td>
+                  {months.map((m) => <Td key={m} className="text-right">{a.months[m] != null ? usd(a.months[m]) : "—"}</Td>)}
+                </tr>
+                {open === a.account_id && (services.length ? services.map((s) => (
+                  <tr key={s.name} className="text-xs text-zinc-400">
+                    <Td className="pl-8">{s.name}</Td>
+                    {months.map((m, i) => <Td key={m} className="text-right">{i < serviceMonths.length && s.amounts[i] != null ? usd(s.amounts[i]!) : ""}</Td>)}
+                  </tr>
+                )) : <tr className="text-xs text-zinc-500"><td className="px-2 py-2 pl-8" colSpan={months.length + 1}>No per-service figures yet: the next spend refresh reads them (POST /api/spend/refresh?force=1 does it now).</td></tr>)}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </Card>

@@ -3071,6 +3071,11 @@ points at localhost; `on` forces it, `off` never), a few seconds during which qu
 `steampipe_reload`; the connection test that follows retries through the restart. With a remote service, the response
 says to restart it yourself.
 
+**What an account's month is made of.** The spend refresh also reads Cost Explorer per linked account and service for
+the last three months (`aws_cost_usage`, `LINKED_ACCOUNT` × `SERVICE`, `spend_by_account_service_monthly`); "By account"
+on the This month page opens a row into its services (`GET /api/accounts/bill` returns them as `services`), which is how
+the parent's own few hundred dollars are explained next to a child's bill.
+
 **The Domains tab and the network layer scope like the rest.** Route 53 zones and records carry the account of the zone
 (Steampipe's column), so Inventory › Domains narrows to the scope; the links to resources are unchanged. Every node of the
 graph's network layer (`src/graph_network.ts`) carries the account its VPC lives in: VPCs, subnets and security groups from
