@@ -229,13 +229,13 @@ import { metricLabel } from "./Knowledge";
  * sidebar looks at: an AWS account has the AWS kinds, a Vercel team its deployments; "all accounts" shows every tab
  * that has a configured provider behind it.
  */
-const TABS = ["ec2", "rds", "elasticache", "lambda", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "dynamodb", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities" };
-const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · Vercel team members" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", dynamodb: "Tables", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities" };
+const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", dynamodb: "DynamoDB", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · Vercel team members" };
 /** Which providers each tab draws from; a tab shows when the scope's provider (or, for all accounts, any configured provider) is among them. */
-const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" };
+const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], dynamodb: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
@@ -292,7 +292,7 @@ const Tags = ({ tags }: { tags: Record<string, string> | null | undefined }) => 
 };
 
 /** Where a Route 53 link lands in the inventory: the tab and id, or nothing for kinds the inventory does not hold (distributions, NAT gateways). */
-const LINK_TAB: Record<string, Tab> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", s3: "s3", lambda: "lambda", alb: "elb", nlb: "elb", clb: "elb", lb: "elb" };
+const LINK_TAB: Record<string, Tab> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", s3: "s3", lambda: "lambda", dynamodb: "dynamodb", alb: "elb", nlb: "elb", clb: "elb", lb: "elb" };
 const LINK_KIND: Record<string, string> = { ec2: "instance", rds: "RDS", rds_cluster: "RDS cluster", elasticache: "ElastiCache", elasticache_group: "ElastiCache group", s3: "S3 bucket", lambda: "Lambda", alb: "ALB", nlb: "NLB", clb: "classic LB", lb: "load balancer", cloudfront: "CloudFront", nat: "NAT gateway", eip: "Elastic IP", eni: "interface", apigw: "API Gateway", beanstalk: "Beanstalk" };
 const ResourceLink = ({ l }: { l: { kind: string; id: string; name?: string | null; state?: string | null } }) => {
   const tab = LINK_TAB[l.kind]; const label = l.name && l.name !== l.id ? `${l.name} (${l.id})` : l.id;
@@ -565,6 +565,15 @@ export default function Inventory() {
         </div>
       )}
 
+      {tab === "dynamodb" && inv && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <Stat label="Tables" value={inv.total} hint={`${inv.on_demand} on demand · ${inv.total - inv.on_demand} provisioned · ${inv.active} read or written in 30 days${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
+          <Stat label="At list / month" value={usd(inv.monthly_usd)} hint={`${usd(inv.storage_usd)} storage · ${usd(inv.capacity_usd)} capacity (provisioned units by the hour, on-demand request units from 30 days of metrics)`} />
+          <Stat label="Stored" value={`${Number(inv.gb).toFixed(1)} GB`} hint={`${Number(inv.items).toLocaleString()} items`} />
+          <Stat label="Open recs · findings" value={`${inv.open_recs} · ${inv.findings}`} />
+        </div>
+      )}
+
       {awsView && tab !== "tags" && tab !== "sg" && <div className="flex flex-wrap items-center gap-2">
         {tab === "ec2" && (
           <>
@@ -653,6 +662,12 @@ export default function Inventory() {
                   <SortTh col="avg_duration_ms" className="text-right">Avg ms</SortTh><SortTh col="gb_seconds_month" className="text-right">GB-s / mo</SortTh><SortTh col="errors_30d" className="text-right">Errors 30d</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="open_recs" className="text-right">Recs</SortTh><SortTh col="findings" className="text-right">Findings</SortTh>
                 </tr></thead>
               )}
+              {tab === "dynamodb" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="name">Table</SortTh><SortTh col="billing_mode">Mode</SortTh><SortTh col="read_capacity" className="text-right">RCU / WCU</SortTh><SortTh col="size_bytes" className="text-right">Size</SortTh><SortTh col="item_count" className="text-right">Items</SortTh>
+                  <SortTh col="read_units_30d" className="text-right">Reads 30d</SortTh><SortTh col="write_units_30d" className="text-right">Writes 30d</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="open_recs" className="text-right">Recs</SortTh>
+                </tr></thead>
+              )}
               {tab === "elasticache" && (
                 <thead className="bg-zinc-900"><tr>
                   <SortTh col="cache_cluster_id">Cluster</SortTh><SortTh col="node_type">Node type</SortTh><SortTh col="engine">Engine</SortTh><SortTh col="num_nodes" className="text-right">Nodes</SortTh><SortTh col="status">Status</SortTh>
@@ -670,6 +685,7 @@ export default function Inventory() {
                         : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={(kind?: string) => runProbe(detail.instance_id, kind)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
                         : tab === "lambda" ? <LambdaDetail d={detail} />
+                        : tab === "dynamodb" ? <DynamoDetail d={detail} />
                         : tab === "elb" ? <ElbDetail d={detail} />
                         : tab === "ebs" ? <EbsDetail d={detail} />
                         : tab === "s3" ? <S3Detail d={detail} />
@@ -770,6 +786,19 @@ export default function Inventory() {
                       <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
                     </tr>{detailRow}
                   </Fragment>);
+                  if (tab === "dynamodb") return (<Fragment key={id}>
+                    <tr onClick={() => pick(id)} className={cls}>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.gone ? <Badge>gone</Badge> : null}{r.status && r.status !== "ACTIVE" ? <Badge>{r.status}</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{r.region}{r.table_class && r.table_class !== "STANDARD" ? ` · ${r.table_class}` : ""}</div></Td>
+                      <Td className="whitespace-nowrap text-zinc-400">{r.billing_mode === "PAY_PER_REQUEST" ? "on demand" : "provisioned"}</Td>
+                      <Td className="text-right text-zinc-400">{r.billing_mode === "PAY_PER_REQUEST" ? "—" : `${r.read_capacity + (r.gsi_read_capacity || 0)} / ${r.write_capacity + (r.gsi_write_capacity || 0)}`}</Td>
+                      <Td className="text-right">{r.size_bytes >= 1e9 ? `${(r.size_bytes / 1e9).toFixed(1)} GB` : `${Math.round(r.size_bytes / 1e6)} MB`}</Td>
+                      <Td className="text-right text-zinc-400">{Number(r.item_count || 0).toLocaleString()}</Td>
+                      <Td className="text-right">{r.read_units_30d ? Number(Math.round(r.read_units_30d)).toLocaleString() : <span className="text-zinc-600">0</span>}</Td>
+                      <Td className="text-right">{r.write_units_30d ? Number(Math.round(r.write_units_30d)).toLocaleString() : <span className="text-zinc-600">0</span>}</Td>
+                      <Td className="text-right font-medium text-zinc-100">{r.monthly_usd ? usd(r.monthly_usd, 2) : <span className="text-zinc-600">$0.00</span>}</Td>
+                      <Td className="text-right">{r.open_recs || "—"}</Td>
+                    </tr>{detailRow}
+                  </Fragment>);
                   if (tab === "lambda") return (<Fragment key={id}>
                     <tr onClick={() => pick(id)} className={cls}>
                       <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{id}</span>{r.arm ? <Badge>arm64</Badge> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-xs text-zinc-500">{r.region}</div></Td>
@@ -807,7 +836,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, dynamodb: 9, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5 };
 
 /** What a balancer fronts, in one line: the instances (linked), Lambda targets, the Beanstalk environment, ASGs and ECS services. */
 function ElbFronts({ r }: { r: any }) {
@@ -1416,6 +1445,38 @@ function Route53Detail({ d }: { d: any }) {
           </ul>
         )}
       </Group>
+    </>
+  );
+}
+
+function DynamoDetail({ d }: { d: any }) {
+  const onDemand = d.billing_mode === "PAY_PER_REQUEST";
+  const scale = d.metric_days > 0 ? 30 / d.metric_days : 0;
+  return (
+    <>
+      <h2 className="text-base font-medium text-zinc-100">{d.name}</h2>
+      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><Badge>{onDemand ? "on demand" : "provisioned"}</Badge>{d.table_class && d.table_class !== "STANDARD" ? <Badge>{d.table_class}</Badge> : null}{d.status && d.status !== "ACTIVE" ? <Badge>{d.status}</Badge> : null}{d.gone ? <Badge>gone</Badge> : null}<Mono>{d.arn}</Mono></div>
+      <div className="mt-1 text-xs text-zinc-500">created {day(d.created)} · first seen {when(d.first_seen)} · last seen {when(d.last_seen)}</div>
+      <Group title="Capacity">
+        <Dl rows={[
+          ["Mode", onDemand ? "on demand (pay per request)" : `provisioned: ${d.read_capacity} RCU, ${d.write_capacity} WCU`],
+          ["Indexes", d.gsi_count ? `${d.gsi_count} global secondary${onDemand ? "" : ` (${d.gsi_read_capacity} RCU, ${d.gsi_write_capacity} WCU provisioned)`}` : "none"],
+          ["Point-in-time recovery", d.pitr ? "enabled" : "off"], ["Streams", d.stream ? "enabled" : "off"], ["Region", d.region],
+        ]} />
+      </Group>
+      <Group title="Usage, last 30 days">
+        <Dl rows={[
+          ["Stored", `${(Number(d.size_bytes) / 1e9).toFixed(2)} GB · ${Number(d.item_count || 0).toLocaleString()} items`],
+          ["Consumed", d.metric_days ? `${Math.round(d.read_units_30d).toLocaleString()} read units · ${Math.round(d.write_units_30d).toLocaleString()} write units over ${d.metric_days} day${d.metric_days === 1 ? "" : "s"} with data` : "no CloudWatch data yet"],
+          ["Per month", onDemand ? `≈ ${Math.round(d.read_units_30d * scale).toLocaleString()} reads · ${Math.round(d.write_units_30d * scale).toLocaleString()} writes` : `provisioned units are billed whether used or not: ${Math.round(((d.read_capacity + (d.gsi_read_capacity || 0)) * 3600 * 730) ? (100 * d.read_units_30d * scale) / ((d.read_capacity + (d.gsi_read_capacity || 0)) * 3600 * 730) : 0)} % of the read units, ${Math.round(((d.write_capacity + (d.gsi_write_capacity || 0)) * 3600 * 730) ? (100 * d.write_units_30d * scale) / ((d.write_capacity + (d.gsi_write_capacity || 0)) * 3600 * 730) : 0)} % of the write units used`],
+        ]} />
+      </Group>
+      <Group title="At list, per month">
+        <Dl rows={[["Storage", usd(d.storage_usd, 2)], ["Capacity", `${usd(d.capacity_usd, 2)} (${onDemand ? "request units at the on-demand rates" : "provisioned units by the hour"})`], ["Total", usd(d.monthly_usd, 2)]]} />
+        <p className="mt-1 text-xs text-zinc-500">us-east-1 standard-class rates, before reservations and the free tier; the capacity-mode action compares both modes on the same metrics and files a recommendation when the other is cheaper.</p>
+      </Group>
+      {Object.keys(d.tags || {}).length > 0 && <Group title="Tags"><Dl rows={Object.entries(d.tags).map(([k, v]) => [k, String(v)] as [string, ReactNode])} /></Group>}
+      <Timeline kind="dynamodb" id={d.name} />
     </>
   );
 }

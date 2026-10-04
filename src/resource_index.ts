@@ -26,6 +26,8 @@ export function resourceAccountIndex(primary: string): { of: (resource: string |
   for (const r of rows("select gateway_id as id, account_id from inventory_gateway")) put(r.id, r.account_id);
   for (const r of rows("select name as id, account_id from log_groups")) put(r.id, r.account_id);
   for (const r of rows("select name as id, account_id from inventory_lambda")) put(r.id, r.account_id);
+  for (const r of rows("select arn as id, account_id from inventory_dynamodb where arn is not null")) put(r.id, r.account_id);
+  for (const r of rows("select name as id, account_id from inventory_dynamodb")) put(r.id, r.account_id);
   // platform accounts: a Vercel project, store or the team itself belongs to the team
   for (const r of rows("select id, team_id from vercel_projects")) put(r.id, r.team_id);
   for (const r of rows("select id, team_id from vercel_stores")) put(r.id, r.team_id);

@@ -168,7 +168,7 @@ const LIST_SQL = "select v.*, i.state as instance_state, i.name as instance_name
 /** state filters on the volume's own state (in-use, available), or "stopped" for volumes attached to an instance that is not running. */
 export function listEbs(f: { q?: string; sort?: string; gone?: boolean; state?: string; scope?: AccountScope | null } = {}) {
   const where: string[] = []; const params: unknown[] = [];
-  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
+  if (f.scope) { const a = accountWhere(f.scope, "v.account_id"); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("v.gone = 0");
   if (f.state === "stopped") where.push(ON_STOPPED);
   else if (f.state === "in-use" || f.state === "available") { where.push("v.state = ?"); params.push(f.state); }

@@ -11,9 +11,9 @@ import { db } from "./db.js";
 import { accountRank } from "./scope.js";
 import { shortResourceId } from "./paging.js";
 
-export type Kind = "ec2" | "rds" | "elasticache" | "lambda" | "elb" | "ebs" | "s3" | "snapshot" | "eip" | "vpc" | "nat" | "log-group" | "other";
+export type Kind = "ec2" | "rds" | "elasticache" | "lambda" | "dynamodb" | "elb" | "ebs" | "s3" | "snapshot" | "eip" | "vpc" | "nat" | "log-group" | "other";
 /** Inventory tabs that open a resource by id (`/inventory?tab=<tab>&id=<id>`, see ui/src/pages/Inventory.tsx). */
-export const TAB_FOR: Partial<Record<Kind, string>> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", lambda: "lambda", elb: "elb", ebs: "ebs", s3: "s3" };
+export const TAB_FOR: Partial<Record<Kind, string>> = { ec2: "ec2", rds: "rds", elasticache: "elasticache", lambda: "lambda", dynamodb: "dynamodb", elb: "elb", ebs: "ebs", s3: "s3" };
 
 export interface AffectedResource { id: string; name: string | null; kind: Kind; tab: string | null; found: boolean }
 
@@ -93,6 +93,8 @@ function lookup(idOrName: string, accountId: string | null | undefined): Hit | n
   if (ec) return { kind: "elasticache", id: ec.cache_cluster_id, name: null };
   const fn = q<{ name: string }>(`select name from inventory_lambda where name = ? or arn = ? order by ${rank.sql}`, idOrName, idOrName, ...rank.params);
   if (fn) return { kind: "lambda", id: fn.name, name: null };
+  const tbl = q<{ name: string }>(`select name from inventory_dynamodb where name = ? or arn = ? order by ${rank.sql}`, idOrName, idOrName, ...rank.params);
+  if (tbl) return { kind: "dynamodb", id: tbl.name, name: null };
   const vol = q<{ volume_id: string; name: string | null }>("select volume_id, name from inventory_ebs where volume_id = ?", idOrName);
   if (vol) return { kind: "ebs", id: vol.volume_id, name: vol.name };
   const bucket = q<{ name: string }>("select name from inventory_s3 where name = ?", idOrName);

@@ -12,6 +12,7 @@ import { pricebookCatalog, PRICEBOOK_DATE } from "./pricebook.js";
 import { ROLE_OPTIONS } from "./roles.js";
 import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE, logGroupTags, observedLogShipping } from "./logs.js";
 import { getReconciliation, lastFullMonth } from "./reconcile.js";
+import { resourceAccountIndex } from "./resource_index.js";
 import { PROVIDER, accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
 import { AttributionContext, ObservedShipping, attributeLogGroup } from "./log_attribution.js";
 import { LAMBDA_PRICE, lambdaFactsMap, lambdaMonthlyCost } from "./lambda_inventory.js";
@@ -134,6 +135,9 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   const systems = [...systemsFromInventory(ec2Rows, db.prepare("select * from inventory_rds").all(), db.prepare("select * from inventory_elasticache").all(), roles, nats), ...(lambdaFromAccount.length ? lambdaFromAccount : lambdaSystems(lambdaArns))];
   const observed = observedLogShipping();
   const attribution = attributionContext(systems, ec2Rows, observed);
+  // Member accounts (src/accounts.ts): a system belongs where its first member does (src/resource_index.ts); null reads as the mirror's account
+  const idx = resourceAccountIndex(account);
+  const accountOf = (s: SystemDef): string | null => { for (const m of s.members) { const a = idx.of(m); if (a) return a; } return null; };
   // a function's member is its ARN, which is the AdvisorFunction node's id (src/graph_mirror.ts), so it joins as a resource, not a ref
   const rows = systems.map((s) => {
     if (s.kind === "lambda") {
@@ -143,19 +147,22 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
         { id: f.arm ? "usage|lambda_gb_second_arm" : "usage|lambda_gb_second", key: "", kind: "usage", sku: f.arm ? "lambda_gb_second_arm" : "lambda_gb_second", region: f.region, count: cost.gb_seconds_month, hours_month: null, list_price: f.arm ? LAMBDA_PRICE.gb_second_arm : LAMBDA_PRICE.gb_second_x86, list_usd_month: Math.round(cost.gb_seconds_month * (f.arm ? LAMBDA_PRICE.gb_second_arm : LAMBDA_PRICE.gb_second_x86) * 100) / 100 },
         { id: "usage|lambda_requests", key: "", kind: "usage", sku: "lambda_requests", region: f.region, count: cost.invocations_month, hours_month: null, list_price: LAMBDA_PRICE.per_request, list_usd_month: Math.round(cost.invocations_month * LAMBDA_PRICE.per_request * 100) / 100 },
       ] : [];
-      return { id: s.id, name: s.name, kind: SYSTEM_KIND[s.kind], native_kind: s.kind, parent: null, pool_kind: null, archetype: s.archetype, member_count: 1, members: [], refs: s.members, storage_gb: 0, storage_usd_month: 0, region: s.region, monthly_list_usd: cost?.usd_month ?? 0, types, lambda: f ? { memory_mb: f.memory_mb, arm: f.arm, invocations_month: cost!.invocations_month, gb_seconds_month: cost!.gb_seconds_month, days: f.days } : null };
+      return { id: s.id, account_id: accountOf(s), name: s.name, kind: SYSTEM_KIND[s.kind], native_kind: s.kind, parent: null, pool_kind: null, archetype: s.archetype, member_count: 1, members: [], refs: s.members, storage_gb: 0, storage_usd_month: 0, region: s.region, monthly_list_usd: cost?.usd_month ?? 0, types, lambda: f ? { memory_mb: f.memory_mb, arm: f.arm, invocations_month: cost!.invocations_month, gb_seconds_month: cost!.gb_seconds_month, days: f.days } : null };
     }
     const types = s.types.map((t) => { const price = priceFor(t.kind, t.sku, t.region); return { ...t, id: t.key, hours_month: HOURS_PER_MONTH * t.count, list_price: price, list_usd_month: price != null ? Math.round(price * HOURS_PER_MONTH * t.count * 100) / 100 : null }; });
     const list = types.reduce((sum, t) => sum + (t.list_usd_month || 0), 0) + s.ebs_gb * 0.08;
-    return { id: s.id, name: s.name, kind: SYSTEM_KIND[s.kind], native_kind: s.kind, parent: s.parent ?? null, pool_kind: s.pool_kind ?? null, archetype: s.archetype, member_count: s.members.length, members: s.members, refs: [] as string[], storage_gb: Math.round(s.ebs_gb), storage_usd_month: Math.round(s.ebs_gb * 0.08 * 100) / 100, region: s.region, monthly_list_usd: Math.round(list * 100) / 100, types, lambda: null as any };
+    return { id: s.id, account_id: accountOf(s), name: s.name, kind: SYSTEM_KIND[s.kind], native_kind: s.kind, parent: s.parent ?? null, pool_kind: s.pool_kind ?? null, archetype: s.archetype, member_count: s.members.length, members: s.members, refs: [] as string[], storage_gb: Math.round(s.ebs_gb), storage_usd_month: Math.round(s.ebs_gb * 0.08 * 100) / 100, region: s.region, monthly_list_usd: Math.round(list * 100) / 100, types, lambda: null as any };
   });
   await writeCypher(`
 UNWIND $rows AS row
 MERGE (s:KnSystem {id: row.id})
-SET s += {name: row.name, kind: row.kind, native_kind: row.native_kind, pool_kind: row.pool_kind, archetype: row.archetype, member_count: row.member_count, storage_gb: row.storage_gb, storage_usd_month: row.storage_usd_month, region: row.region, monthly_list_usd: row.monthly_list_usd, provider: $provider, account_id: $account, native_type: 'system', native_id: row.id, gone: false, updated_at: $now}
+SET s += {name: row.name, kind: row.kind, native_kind: row.native_kind, pool_kind: row.pool_kind, archetype: row.archetype, member_count: row.member_count, storage_gb: row.storage_gb, storage_usd_month: row.storage_usd_month, region: row.region, monthly_list_usd: row.monthly_list_usd, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'system', native_id: row.id, gone: false, updated_at: $now}
 SET s.lambda_memory_mb = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.memory_mb END, s.lambda_arm = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.arm END, s.invocations_month = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.invocations_month END, s.gb_seconds_month = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.gb_seconds_month END
 WITH s, row
-MATCH (a:AdvisorAccount {id: $account}) MERGE (s)-[:IN_ACCOUNT]->(a)
+OPTIONAL MATCH (s)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
+WITH DISTINCT s, row
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account), a.updated_at = $now
+MERGE (s)-[:IN_ACCOUNT]->(a)
 WITH s, row
 OPTIONAL MATCH (s)-[old:IS_A]->() DELETE old
 WITH DISTINCT s, row
@@ -170,25 +177,25 @@ WITH s, row
 OPTIONAL MATCH (:AdvisorResource)-[m:MEMBER_OF]->(s) DELETE m
 WITH DISTINCT s, row
 FOREACH (id IN row.members | MERGE (res:AdvisorResource {id: id}) MERGE (res)-[:MEMBER_OF]->(s))
-FOREACH (id IN row.refs | MERGE (ref:AdvisorResource {id: id}) ON CREATE SET ref.account_id = $account, ref.provider = $provider, ref.native_type = 'lambda_function', ref.native_id = id MERGE (ref)-[:MEMBER_OF]->(s))
+FOREACH (id IN row.refs | MERGE (ref:AdvisorResource {id: id}) ON CREATE SET ref.account_id = coalesce(row.account_id, $account), ref.provider = $provider, ref.native_type = 'lambda_function', ref.native_id = id MERGE (ref)-[:MEMBER_OF]->(s))
 WITH s, row
 OPTIONAL MATCH (s)-[po:PART_OF]->() DELETE po
 WITH DISTINCT s, row
 OPTIONAL MATCH (parent:KnSystem {id: row.parent})
 FOREACH (_ IN CASE WHEN parent IS NULL THEN [] ELSE [1] END | MERGE (s)-[:PART_OF]->(parent))`, { rows: rows.map((r) => ({ ...r, types: r.types.map((t: any) => ({ ...t, generic_kind: typeKind(t.kind) })) })), account, provider: PROVIDER, now });
-  await writeCypher("MATCH (s:KnSystem {account_id: $account}) WHERE NOT s.id IN $ids SET s.gone = true, s.updated_at = $now", { account, ids: rows.map((r) => r.id), now });
+  await writeCypher("MATCH (s:KnSystem {provider: $provider}) WHERE NOT s.id IN $ids SET s.gone = true, s.updated_at = $now", { provider: PROVIDER, ids: rows.map((r) => r.id), now });
 
   // ---- pricing overlays: the Savings Plan (from the reconstruction) and reservations (from the account)
   const overlays: any[] = [];
   const rec = getReconciliation(lastFullMonth());
   if (rec) overlays.push({ id: `sp:${account}`, kind: "commitment", native_kind: "savings_plan", provider: PROVIDER, account_id: account, commitment_usd_month: rec.totals.sp_fee_model, covered_od_usd_month: rec.totals.sp_covered_od, discount_rate: rec.totals.sp_discount_rate, month: rec.month, covers_kind: "compute" });
   try {
-    const ris = await query<any>(`select reserved_db_instance_id as id, db_instance_class as sku, db_instance_count as count, product_description as engine, state, start_time, duration, offering_type from ${S}.aws_rds_reserved_db_instance where state = 'active'`);
-    for (const r of ris) overlays.push({ id: `ri:rds:${r.id}`, kind: "reservation", native_kind: "reserved_db_instance", provider: PROVIDER, account_id: account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "database" });
+    const ris = await query<any>(`select reserved_db_instance_id as id, account_id, db_instance_class as sku, db_instance_count as count, product_description as engine, state, start_time, duration, offering_type from ${S}.aws_rds_reserved_db_instance where state = 'active'`);
+    for (const r of ris) overlays.push({ id: `ri:rds:${r.id}`, kind: "reservation", native_kind: "reserved_db_instance", provider: PROVIDER, account_id: r.account_id ? String(r.account_id) : account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "database" });
   } catch { /* not readable; the overlay is skipped */ }
   try {
-    const ris = await query<any>(`select reserved_cache_node_id as id, cache_node_type as sku, cache_node_count as count, product_description as engine, state, start_time, duration, offering_type from ${S}.aws_elasticache_reserved_cache_node where state = 'active'`);
-    for (const r of ris) overlays.push({ id: `ri:cache:${r.id}`, kind: "reservation", native_kind: "reserved_cache_node", provider: PROVIDER, account_id: account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "cache" });
+    const ris = await query<any>(`select reserved_cache_node_id as id, account_id, cache_node_type as sku, cache_node_count as count, product_description as engine, state, start_time, duration, offering_type from ${S}.aws_elasticache_reserved_cache_node where state = 'active'`);
+    for (const r of ris) overlays.push({ id: `ri:cache:${r.id}`, kind: "reservation", native_kind: "reserved_cache_node", provider: PROVIDER, account_id: r.account_id ? String(r.account_id) : account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "cache" });
   } catch { /* skipped */ }
   if (overlays.length) await writeCypher(`
 UNWIND $rows AS row
@@ -208,11 +215,11 @@ MERGE (o)-[:COVERS]->(t)`, { rows: overlays, now });
   const regional = rec?.lines.find((l) => l.usage_type === "DataTransfer-Regional-Bytes");
   if (regional) { await writeCypher(`MATCH (a:AdvisorAccount {id: $account}) MATCH (r:KnDestination {id: 'regional'}) MERGE (a)-[e:TRANSFERS_TO]->(r) SET e += {mechanism: 'cross-az', gb_day: $gb, price_per_gb: 0.01, usd_month: $usd, source: $src, updated_at: $now}`, { account, gb: regional.quantity / 30, usd: regional.actual_od, src: `cost explorer ${rec!.month}`, now }); traffic++; }
   // the biggest groups by ingestion and size, plus every group an instance says it ships to (evidence is worth a node whatever the size)
-  const groups = db.prepare("select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where stored_bytes > 0 order by coalesce(ingest_bytes_day, 0) desc, stored_bytes desc limit 300").all() as any[];
+  const groups = db.prepare("select name, region, account_id, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where stored_bytes > 0 order by coalesce(ingest_bytes_day, 0) desc, stored_bytes desc limit 300").all() as any[];
   const have = new Set(groups.map((g) => g.name));
   const observedNames = [...observed.keys()].filter((n) => !have.has(n));
   if (observedNames.length) for (const chunk of Array.from({ length: Math.ceil(observedNames.length / 200) }, (_, i) => observedNames.slice(i * 200, i * 200 + 200)))
-    groups.push(...(db.prepare(`select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where name in (${chunk.map(() => "?").join(",")})`).all(...chunk) as any[]));
+    groups.push(...(db.prepare(`select name, region, account_id, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where name in (${chunk.map(() => "?").join(",")})`).all(...chunk) as any[]));
   const tags = logGroupTags();
   const lg = groups.map((g) => {
     const a = attributeLogGroup(g.name, attribution, tags.get(g.name) || {});
@@ -220,7 +227,7 @@ MERGE (o)-[:COVERS]->(t)`, { rows: overlays, now });
     return { id: g.name, name: g.name, region: g.region, retention_days: g.retention_days, stored_gb: (g.stored_bytes || 0) / 1e9, ingest_gb_day: g.ingest_bytes_day != null ? g.ingest_bytes_day / 1e9 : null,
       ingest_usd_month: g.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30 * LOG_INGEST_PRICE * 100) / 100 : null, storage_usd_month: Math.round(((g.stored_bytes || 0) / 1e9) * LOG_STORAGE_PRICE * 100) / 100,
       owner: a.owner, how: a.how, candidates: a.candidates, tags: t ? JSON.stringify(t).slice(0, 2000) : null, jev_choice: null as string | null, jev_confidence: null as number | null,
-      observed: (observed.get(g.name) || []).map((o) => ({ instance_id: o.instance_id, via: o.via, source: o.source, at: o.at })), account_id: account };
+      observed: (observed.get(g.name) || []).map((o) => ({ instance_id: o.instance_id, via: o.via, source: o.source, at: o.at })), account_id: g.account_id ? String(g.account_id) : account };
   });
   // the groups the evidence left unowned go to Jev, which picks a system from the name, the tags and the account's systems, or says none
   let jevAttributed = 0;
@@ -343,8 +350,7 @@ export async function systemView(idOrName: string) {
 }
 
 /** The bill as the graph explains it: the current fleet at list for a month, the Savings Plan overlay, transfer and logs from the edges. */
-export async function graphBill() {
-  const account = accountId();
+export async function graphBill(account: string = accountId()) {
   const compute = await readQuery(`MATCH (s:KnSystem {account_id: $account})-[r:RUNS_ON]->(t:KnSystemType) WHERE coalesce(s.gone, false) = false
     RETURN t.kind AS kind, sum(r.list_usd_month) AS list_usd_month, sum(r.count) AS units, count(DISTINCT s) AS systems`, { account });
   const ebs = await readQuery(`MATCH (s:KnSystem {account_id: $account}) WHERE coalesce(s.gone, false) = false RETURN sum(s.storage_usd_month) AS usd, sum(s.storage_gb) AS gb`, { account });

@@ -1452,6 +1452,19 @@ running instances, EBS GB, and the RDS and ElastiCache equivalents), `GET /api/i
 `GET /api/inventory/rds` and `GET /api/inventory/elasticache` (`q`, `sort`, `gone`), `POST /api/inventory/refresh`.
 The agent gets the same data through the `instance_inventory` MCP tool.
 
+### DynamoDB
+
+Inventory › Tables (`src/dynamodb_inventory.ts`, `GET /api/inventory/dynamodb`, refreshed with the rest of the inventory):
+every table in every account with its billing mode, provisioned read and write units (the table's own and its global
+secondary indexes'), size, item count, table class, point-in-time recovery and streams, plus 30 days of consumed read
+and write units from CloudWatch (one `GetMetricData` per account and region, 500 series a call, under that account's
+credentials). Priced at list: storage by the GB-month, a provisioned table's units by the hour whether used or not, an
+on-demand table's consumed request units scaled to a month (`dynamodbMonthlyCost`, us-east-1 standard-class rates,
+before reservations and the free tier). Table names are unique per account and region only, so the key is (account,
+region, name). The account overview counts tables and adds them to the list price; the Thrifty `dynamodb` benchmark
+and the capacity-mode action (`src/actions/dynamodb_capacity_mode.ts`) keep reading the tables live for their own
+verdicts.
+
 ### Lambda
 
 The Inventory page has a Lambda tab (`src/lambda_inventory.ts`, `GET /api/inventory/lambda`, refreshed with the
@@ -3076,12 +3089,18 @@ the last three months (`aws_cost_usage`, `LINKED_ACCOUNT` × `SERVICE`, `spend_b
 on the This month page opens a row into its services (`GET /api/accounts/bill` returns them as `services`), which is how
 the parent's own few hundred dollars are explained next to a child's bill.
 
-**The Domains tab and the network layer scope like the rest.** Route 53 zones and records carry the account of the zone
-(Steampipe's column), so Inventory › Domains narrows to the scope; the links to resources are unchanged. Every node of the
-graph's network layer (`src/graph_network.ts`) carries the account its VPC lives in: VPCs, subnets and security groups from
-their own inventory column, route tables, interfaces, ACLs and their rules through their VPC, an address through its
-interface or box, an instance port through its instance. Network and Knowledge therefore show one account's layer under
-its scope instead of everything stamped with the primary account.
+**Every graph layer is stamped per account.** The mirror used to write one account on every node it derived from a
+record or a layer (the run's), so Network and Knowledge showed the whole organisation under any scope. Now each node
+carries the account of what it derives from: a resource its own row; a network node its VPC (route tables, interfaces,
+ACLs and rules through the VPC, an address through its interface or box); a port, package or image its instance; a
+balancer's listeners and a database's endpoint their row; a Beanstalk environment its balancer or capacity pattern; a
+cluster's workloads, endpoints and policies the cluster; a knowledge system its first member; a log group its own row;
+a reservation overlay the account that owns it; a recommendation, alert, incident or action its stamped account, else
+the resource it names (`accountResolver` in `src/graph_mirror.ts`, on `src/resource_index.ts`). Pool ids and Beanstalk
+ids embed that account too. The Cypher reads `coalesce(row.account_id, $account)`, so a node nothing attributes falls
+back to the run's account. Runs, executor passes, security scans and the Savings Plan overlay stay account-level, since
+they are the parent's. The Domains tab scopes as well: Route 53 zones and records carry the zone's account. Deploying
+this needs one full mirror (a run, or Knowledge › Sync) to re-stamp what is already in the graph.
 
 **Which account the credentials resolve to is read from the parent's connection only.** The connection test and the
 credential gate select `account_id` from `aws_account`; over the aggregator that is one row per account in no fixed

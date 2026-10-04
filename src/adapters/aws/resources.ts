@@ -128,6 +128,21 @@ export function resourceFromLambda(row: any, account: string, roles: RoleMap = n
   }, observed);
 }
 
+/** A DynamoDB table as the generic database node: a serverless key-value engine, its capacity mode where RDS has an instance class. */
+export function resourceFromDynamodb(row: any, account: string, roles: RoleMap = new Map()): ResourceNode {
+  const observed: ResourceNode["observed"] = [apiObserved(row)];
+  if (Number(row.metric_days) > 0) observed.push({ kind: "metrics", status: "ok", last_at: str(row.last_seen), detail: `consumed units over ${num(row.metric_days)} days` });
+  const onDemand = row.billing_mode === "PAY_PER_REQUEST";
+  const id = str(row.arn) || `arn:aws:dynamodb:${row.region}:${row.account_id || account}:table/${row.name}`;
+  return base(id, "AdvisorDatabase", "dynamodb_table", row, str(row.name), str(row.status), str(row.region), roles, {
+    engine: "dynamodb", engine_version: null, type: onDemand ? "on-demand" : `provisioned ${num(row.read_capacity)} RCU / ${num(row.write_capacity)} WCU`, kind: "key_value", serverless: true,
+    cluster: null, cluster_role: "standalone", billing_mode: onDemand ? "on_demand" : "provisioned", read_capacity: num(row.read_capacity), write_capacity: num(row.write_capacity),
+    indexes: num(row.gsi_count), storage_gb: row.size_bytes == null ? null : Math.round((Number(row.size_bytes) / 1e9) * 100) / 100, storage_type: str(row.table_class), items: num(row.item_count),
+    backup_retention_days: Number(row.pitr) ? 35 : 0, point_in_time_recovery: Boolean(Number(row.pitr)), streams: Boolean(Number(row.stream)), publicly_accessible: null, encrypted: true,
+    reads_30d: num(row.read_units_30d), writes_30d: num(row.write_units_30d), created_at: str(row.created),
+  }, observed);
+}
+
 export function resourceFromS3(row: any, roles: RoleMap = new Map()): ResourceNode {
   const observed: ResourceNode["observed"] = [apiObserved(row)];
   if (row.metric_day) observed.push({ kind: "metrics", status: "ok", last_at: str(row.metric_day), detail: "storage metrics" });
@@ -217,7 +232,7 @@ export function guessedType(resource: string): string | null {
     if (svc === "s3") return "bucket";
     if (svc === "lambda") return "function";
     if (svc === "rds") return /:cluster:/.test(r) ? "database_cluster" : "database";
-    if (svc === "dynamodb") return "table";
+    if (svc === "dynamodb") return "database";
     if (svc === "ecr") return "repository";
     if (svc === "elasticfilesystem") return "file_system";
     if (svc === "kms") return "key";

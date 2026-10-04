@@ -1,5 +1,6 @@
 import { db } from "./db.js";
 import { PROVIDER, accountId, enabled, inBackground, neoParams, writeCypher } from "./graph_mirror.js";
+import { resourceAccountIndex } from "./resource_index.js";
 import { ecosystemOf, packageScope, vulnerabilityMatches, type VulnMatch } from "./software_vulns.js";
 
 /**
@@ -22,7 +23,7 @@ const PACKAGE_CYPHER = `
 UNWIND $rows AS row
 MATCH (c:AdvisorResource {id: row.instance_id})
 MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, native_type: 'package', native_id: row.id, provider: $provider, account_id: $account, updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, native_type: 'package', native_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
 SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}`;
 
@@ -30,7 +31,7 @@ const IMAGE_CYPHER = `
 UNWIND $rows AS row
 MATCH (c:AdvisorResource {id: row.instance_id})
 MERGE (i:AdvisorResource {id: row.id}) ON CREATE SET i.first_seen = $now
-SET i:AdvisorImage, i += {name: row.image, kind: 'container', repository: row.repository, tag: row.tag, digest: row.digest, created_at: row.created, platform: row.platform, native_type: 'container_image', native_id: row.image, provider: $provider, account_id: $account, updated_at: $now}
+SET i:AdvisorImage, i += {name: row.image, kind: 'container', repository: row.repository, tag: row.tag, digest: row.digest, created_at: row.created, platform: row.platform, native_type: 'container_image', native_id: row.image, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (c)-[r:RUNS_IMAGE]->(i)
 SET r += {image_id: row.image_id, first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}`;
 
@@ -67,7 +68,9 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   if (!enabled()) return null;
   if (instanceIds && !instanceIds.length) return null;
   const t0 = Date.now(); const now = new Date().toISOString(); const account = accountId();
-  const w = (cypher: string, batch: any[]) => writeCypher(cypher, neoParams({ rows: batch, now, provider: PROVIDER, account }));
+  // Member accounts (src/accounts.ts): a package or image node is stamped with the account of the box it was seen on
+  const idx = resourceAccountIndex(account);
+  const w = (cypher: string, batch: any[]) => writeCypher(cypher, neoParams({ rows: batch.map((r) => (r && typeof r === "object" && "instance_id" in r && !("account_id" in r) ? { ...r, account_id: idx.of(String(r.instance_id)) } : r)), now, provider: PROVIDER, account }));
   const where = instanceIds ? ` and instance_id in (${instanceIds.map(() => "?").join(",")})` : "";
   const args = instanceIds ?? [];
   const os = new Map<string, any>(); for (const o of rows(`select * from instance_os where 1=1${where}`, ...args)) os.set(o.instance_id, o);
@@ -118,7 +121,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of chunks(affects)) await w(AFFECTS_CYPHER, b);
   // a rebuilt verdict replaces the old ones of the same boxes; what no longer matches disappears
   if (instanceIds) await writeCypher(`UNWIND $ids AS id MATCH (c:AdvisorResource {id: id})-[r:VULNERABLE_TO]->() DELETE r`, { ids: instanceIds });
-  else await writeCypher(`MATCH (c:AdvisorResource {account_id: $account})-[r:VULNERABLE_TO]->() DELETE r`, { account });
+  else await writeCypher(`MATCH (c:AdvisorResource {provider: $provider})-[r:VULNERABLE_TO]->() DELETE r`, { provider: PROVIDER });
   for (const b of chunks(verdicts)) await w(VERDICT_CYPHER, b);
   // packages nobody has any more, advisories nothing is affected by
   await writeCypher("MATCH (p:AdvisorPackage) WHERE NOT (p)--() DELETE p");

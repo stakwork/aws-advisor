@@ -25,6 +25,7 @@ import { listRuntimeSettings, setRuntimeSetting } from "../runtime_settings.js";
 import { quotaStatus } from "../quota.js";
 import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refreshInventory } from "../inventory.js";
 import { listLambda } from "../lambda_inventory.js";
+import { listDynamodb } from "../dynamodb_inventory.js";
 import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { elbsForInstance, listElb } from "../elb_inventory.js";
@@ -711,6 +712,7 @@ api.post("/inventory/rds/:id/load/refresh", async (req, res) => {
   finally { loadInFlight.delete(id); }
 });
 api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
+api.get("/inventory/dynamodb", (req, res) => res.json(listDynamodb({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
 api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
 // Load balancers with their targets resolved; the Route 53 records that lead to each (kinds alb/nlb/clb from the resolver, lb when only an interface named it).
 api.get("/inventory/iam", (req, res) => res.json(listIamUsers({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));

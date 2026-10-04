@@ -27,6 +27,7 @@ export { RESOURCE_LABELS } from "./adapters/types.js";
 export type { ResourceLabel, GenericState, TelemetryKind, ResourceNode } from "./adapters/types.js";
 import { AWS, RESOURCE_LABELS, type ResourceLabel, type ResourceNode, type TelemetryKind } from "./adapters/types.js";
 import { TELEMETRY, telemetryId, poolId, lambdaArn, inventoryIdOf, guessedType, type RoleMap } from "./adapters/aws/resources.js";
+import { resourceAccountIndex } from "./resource_index.js";
 export const PROVIDER = AWS;
 export const BATCH = 250;
 export const QUERY_TIMEOUT_MS = 5_000;
@@ -364,6 +365,16 @@ const now = () => new Date().toISOString();
 const tableExists = (name: string) => Boolean(db.prepare("select 1 from sqlite_master where type = 'table' and name = ?").get(name));
 const rowsOf = (sql: string, ...params: unknown[]): any[] => { try { return db.prepare(sql).all(...params) as any[]; } catch { return []; } };
 
+/**
+ * Member accounts (src/accounts.ts): which account a record belongs to, for the nodes derived from records rather than
+ * inventory rows (recommendations, alerts, actions, ports, packages, pools). The row's own stamp when it has one, else
+ * the account of the resource it names (src/resource_index.ts), else null, which the Cypher reads as the mirror's account.
+ */
+function accountResolver(account = accountId()): (explicit: unknown, ...resources: (string | null | undefined)[]) => string | null {
+  const idx = resourceAccountIndex(account);
+  return (explicit, ...resources) => { if (explicit && /^\d{12}$/.test(String(explicit))) return String(explicit); for (const r of resources) { const a = idx.of(r); if (a) return a; } return null; };
+}
+
 /** Every id the mirror writes a resource node for, so references in records can be matched to nodes. */
 function inventoryIds(account = accountId()): Set<string> {
   const ids = new Set<string>();
@@ -476,7 +487,7 @@ FOREACH (_ IN CASE WHEN row.role IS NULL THEN [] ELSE [1] END |
   MERGE (ro:KnArchetype {id: row.role}) ON CREATE SET ro.name = row.role, ro.updated_at = $now
   MERGE (r)-[:HAS_ROLE]->(ro))
 FOREACH (_ IN CASE WHEN row.pool_id IS NULL THEN [] ELSE [1] END |
-  MERGE (p:AdvisorNodePool {id: row.pool_id}) SET p.name = row.pool, p.kind = coalesce(row.pool_kind, p.kind), p.account_id = $account, p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.pool, p.updated_at = $now
+  MERGE (p:AdvisorNodePool {id: row.pool_id}) SET p.name = row.pool, p.kind = coalesce(row.pool_kind, p.kind), p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.pool, p.updated_at = $now
   MERGE (r)-[:IN_POOL]->(p))
 WITH r, row
 UNWIND row.observed AS o
@@ -500,7 +511,7 @@ export async function mirrorResources(): Promise<{ resources: number }> {
   // the adapter emits the generic nodes from its own storage
   const rows: ResourceNode[] = awsAdapter.resources(account);
   const stamp = now();
-  const toRow = (n: ResourceNode) => ({ ...n, pool_id: n.pool ? poolId(account, n.pool) : null, observed: n.observed.map((o) => ({ ...o, id: telemetryId(account, o.kind) })) });
+  const toRow = (n: ResourceNode) => ({ ...n, pool_id: n.pool ? poolId(n.account_id ?? account, n.pool) : null, observed: n.observed.map((o) => ({ ...o, id: telemetryId(account, o.kind) })) });
   for (const label of RESOURCE_LABELS) {
     const mine = rows.filter((r) => r.label === label);
     for (const batch of chunks(mine)) await write(resourceCypher(label), { rows: batch.map(toRow), account, provider: PROVIDER, now: stamp });
@@ -521,7 +532,7 @@ UNWIND $rows AS row
 MERGE (rec:AdvisorRecommendation {id: row.id})
 SET rec += {fingerprint: row.fingerprint, title: row.title, action: row.action, native_action: row.native_action, tier: row.tier, status: row.status, source: row.source, rule: row.rule,
             est_monthly_saving: row.est_monthly_saving, confidence: row.confidence, decided_by: row.decided_by, decided_at: row.decided_at, decision_scope: row.decision_scope,
-            created_at: row.created_at, resource: row.resource, provider: $provider, account_id: $account, native_type: 'recommendation', native_id: toString(row.id), updated_at: $now}
+            created_at: row.created_at, resource: row.resource, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'recommendation', native_id: toString(row.id), updated_at: $now}
 WITH rec, row
 OPTIONAL MATCH (rec)-[t:TARGETS]->() DELETE t
 WITH DISTINCT rec, row
@@ -559,7 +570,8 @@ export async function mirrorRecommendations(ids?: number[]): Promise<{ recommend
   const stamp = now();
   // the AWS rules' and the agent's rows under the primary account; a platform provider's rules (rule vercel_*) under its own account, targeting its own nodes
   const aws = raw.filter((r) => !/^vercel_/.test(String(r.rule)));
-  const rows = aws.map((r) => recommendationNode(r, inv, concepts));
+  const acct = accountResolver(account);
+  const rows = aws.map((r) => { const node = recommendationNode(r, inv, concepts); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
   for (const batch of chunks(rows)) await write(RECOMMENDATION_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   const vercel = raw.filter((r) => /^vercel_/.test(String(r.rule)));
   if (vercel.length) {
@@ -633,7 +645,7 @@ export async function mirrorControls(runId = latestCompletedRunId(), opts: { pro
   const provider = opts.provider ?? PROVIDER; const account = opts.account ?? accountId();
   const findings = db.prepare("select control_id, control_title, resource, reason from findings where run_id = ? and status = 'alarm' and resource is not null order by id").all(runId) as any[];
   const edges = flagEdges(findings, opts.ids ?? inventoryIds(account), runId).map((e) => ({ ...e, ...controlFacts(e.control_id) }));
-  await write("MATCH (:AdvisorControl)-[f:FLAGGED]->(:AdvisorResource {account_id: $account}) WHERE f.run_id <> $runId DELETE f", { account, runId });
+  await write("MATCH (:AdvisorControl)-[f:FLAGGED]->(:AdvisorResource {provider: $provider}) WHERE f.run_id <> $runId DELETE f", { provider, runId });
   const stamp = now();
   for (const batch of chunks(edges)) await write(FLAG_CYPHER, { rows: batch, account, provider, now: stamp });
   return { controls: new Set(edges.map((e) => e.control_id)).size, flagged: edges.length };
@@ -673,7 +685,7 @@ UNWIND $rows AS row
 MERGE (a:AdvisorAlert {id: row.id})
 SET a += {kind: row.kind, level: row.level, message: row.message, created_at: row.created_at, acknowledged: row.acknowledged, acknowledged_by: row.acknowledged_by,
           resource: row.resource, cause_status: row.cause_status, cause: row.cause, cause_actor: row.cause_actor, cause_actor_kind: row.cause_actor_kind, cause_via: row.cause_via,
-          cause_event: row.cause_event, cause_at: row.cause_at, provider: $provider, account_id: $account, native_type: 'alert', native_id: toString(row.id), updated_at: $now}
+          cause_event: row.cause_event, cause_at: row.cause_at, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'alert', native_id: toString(row.id), updated_at: $now}
 WITH a, row
 FOREACH (_ IN CASE WHEN row.cause_action_id IS NULL THEN [] ELSE [1] END |
   MERGE (x:AdvisorAction {id: row.cause_action_id})
@@ -692,7 +704,7 @@ const INCIDENT_CYPHER = `
 UNWIND $rows AS row
 MERGE (i:AdvisorIncident {id: row.id})
 SET i += {status: row.status, cause: row.cause, confidence: row.confidence, episode_cost_usd: row.episode_cost_usd, monthly_run_rate_usd: row.monthly_run_rate_usd,
-          created_at: row.created_at, provider: $provider, account_id: $account, native_type: 'incident', native_id: toString(row.id), updated_at: $now}
+          created_at: row.created_at, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'incident', native_id: toString(row.id), updated_at: $now}
 WITH i, row
 MERGE (a:AdvisorAlert {id: row.alert_id})
 MERGE (i)-[:INVESTIGATES]->(a)`;
@@ -704,9 +716,12 @@ export async function mirrorAlertsAndIncidents(): Promise<{ alerts: number; inci
   const account = accountId();
   await mirrorAccount(account);
   const inv = inventoryIds(account);
-  const alerts = (db.prepare("select id, kind, resource, message, created_at, acknowledged, acknowledged_by, triage, cause from alerts").all() as any[])
-    .map((r) => alertNode(r, inv, alertLevel({ ...r, triage: safeJson(r.triage) })));
-  const incidents = (db.prepare("select id, alert_id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at from incidents").all() as any[]).map(incidentNode);
+  const acct = accountResolver(account);
+  const alerts = (db.prepare("select id, kind, resource, message, created_at, acknowledged, acknowledged_by, triage, cause, account_id from alerts").all() as any[])
+    .map((r) => { const node = alertNode(r, inv, alertLevel({ ...r, triage: safeJson(r.triage) })); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
+  // an incident belongs where its alert does
+  const incidents = (db.prepare("select i.id, i.alert_id, i.status, i.cause, i.confidence, i.episode_cost_usd, i.monthly_run_rate_usd, i.created_at, a.account_id as alert_account, a.resource as alert_resource from incidents i left join alerts a on a.id = i.alert_id").all() as any[])
+    .map((r) => ({ ...incidentNode(r), account_id: acct(r.alert_account, r.alert_resource) }));
   const stamp = now();
   for (const batch of chunks(alerts)) await write(ALERT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   for (const batch of chunks(incidents)) await write(INCIDENT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
@@ -721,7 +736,7 @@ MERGE (x:AdvisorAction {id: row.id})
 SET x += {kind: row.kind, status: row.status, mode: row.mode, trigger: row.trigger, title: row.title, reason: row.reason, rollback: row.rollback, est_usd_month: row.est_usd_month,
           result: row.result, error: row.error, resource: row.resource, resource_name: row.resource_name, region: row.region, created_at: row.created_at, seen_at: row.seen_at,
           applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, stage: row.stage, new_resource: row.new_resource,
-          bill_verdict: row.bill_verdict, realised_usd_month: row.realised_usd_month, provider: $provider, account_id: $account, native_type: 'executor_action', native_id: toString(row.id), updated_at: $now}
+          bill_verdict: row.bill_verdict, realised_usd_month: row.realised_usd_month, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'executor_action', native_id: toString(row.id), updated_at: $now}
 WITH x, row
 FOREACH (_ IN CASE WHEN row.new_resource IS NULL THEN [] ELSE [1] END |
   ${REF_MERGE("nr", "row.new_resource", "'instance'", "action")}
@@ -755,7 +770,8 @@ export async function mirrorActions(ids?: number[]): Promise<{ actions: number }
     (select v.realised_usd_month from action_verifications v where v.action_key = a.kind || ':' || a.resource order by v.id desc limit 1) as realised_usd_month` : "";
   try { raw = ids ? db.prepare(`select a.*${cols} from actions a where a.id in (${ids.map(() => "?").join(",")})`).all(...ids) : db.prepare(`select a.*${cols} from actions a`).all(); }
   catch { return { actions: 0 }; /* the executor has not created its table yet */ }
-  const rows = raw.map((r) => actionNode(r, inv));
+  const acct = accountResolver(account);
+  const rows = raw.map((r) => { const node = actionNode(r, inv); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
   const stamp = now();
   for (const batch of chunks(rows)) await write(ACTION_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   return { actions: rows.length };
@@ -916,7 +932,7 @@ export async function mirrorComplianceScan(scanId: number): Promise<{ scan: numb
       edges.push({ control_id: String(f.control_id), control_title: str(f.control_title), resource_id: rid, run_id: scanId, reason: f.reason ? String(f.reason).slice(0, 500) : null,
         severity: str(f.severity), benchmark: str(f.benchmark), first_seen_at: str(f.first_seen_at), ...controlFacts(String(f.control_id), str(f.benchmark)) });
     }
-    await write("MATCH (:AdvisorControl)-[f:SECURITY_FLAGGED]->(:AdvisorResource {account_id: $account}) WHERE f.scan_id <> $scanId DELETE f", { account, scanId });
+    await write("MATCH (:AdvisorControl)-[f:SECURITY_FLAGGED]->(:AdvisorResource {provider: $provider}) WHERE f.scan_id <> $scanId DELETE f", { provider: PROVIDER, scanId });
     const stamp = now();
     for (const batch of chunks(edges)) await write(SECURITY_FLAG_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
     flagged = edges.length;
@@ -1124,12 +1140,12 @@ export async function mirrorUsageProfiles(): Promise<{ profiles: number }> {
   await ensureSchema();
   const account = accountId();
   const reviews = new Map<string, any>(); for (const r of rowsOf("select subject, reviewed_at, verdict, schedule, confidence, reason from usage_reviews")) reviews.set(r.subject, r);
-  const rows = rowsOf("select subject, kind, name, computed_at, quiet_hours_week, confidence, suggested_schedule, off_hours_week, est_usd_month, summary, quiet_windows from usage_profiles")
-    .map((r) => ({ id: r.kind === "asg" ? poolId(account, String(r.name)) : String(r.subject), name: str(r.name), kind: r.kind, computed_at: r.computed_at, quiet_hours_week: r.quiet_hours_week, confidence: r.confidence, suggested_schedule: r.suggested_schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, summary: r.summary, quiet_windows: (() => { try { return (JSON.parse(r.quiet_windows) as any[]).map((w) => w.label); } catch { return []; } })(), review_verdict: reviews.get(r.subject)?.verdict ?? null, review_schedule: reviews.get(r.subject)?.schedule ?? null, review_confidence: reviews.get(r.subject)?.confidence ?? null, review_reason: reviews.get(r.subject)?.reason ?? null, reviewed_at: reviews.get(r.subject)?.reviewed_at ?? null }));
+  const rows = rowsOf("select subject, kind, name, account_id, computed_at, quiet_hours_week, confidence, suggested_schedule, off_hours_week, est_usd_month, summary, quiet_windows from usage_profiles")
+    .map((r) => ({ id: r.kind === "asg" ? poolId(r.account_id ? String(r.account_id) : account, String(r.name)) : String(r.subject), account_id: r.account_id ? String(r.account_id) : null, name: str(r.name), kind: r.kind, computed_at: r.computed_at, quiet_hours_week: r.quiet_hours_week, confidence: r.confidence, suggested_schedule: r.suggested_schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, summary: r.summary, quiet_windows: (() => { try { return (JSON.parse(r.quiet_windows) as any[]).map((w) => w.label); } catch { return []; } })(), review_verdict: reviews.get(r.subject)?.verdict ?? null, review_schedule: reviews.get(r.subject)?.schedule ?? null, review_confidence: reviews.get(r.subject)?.confidence ?? null, review_reason: reviews.get(r.subject)?.reason ?? null, reviewed_at: reviews.get(r.subject)?.reviewed_at ?? null }));
   const stamp = now();
   const props = "usage_computed_at: row.computed_at, usage_quiet_hours_week: row.quiet_hours_week, usage_confidence: row.confidence, usage_schedule: row.suggested_schedule, usage_off_hours_week: row.off_hours_week, usage_est_usd_month: row.est_usd_month, usage_summary: row.summary, usage_quiet_windows: row.quiet_windows, usage_review_verdict: row.review_verdict, usage_review_schedule: row.review_schedule, usage_review_confidence: row.review_confidence, usage_review_reason: row.review_reason, usage_reviewed_at: row.reviewed_at, updated_at: $now";
   for (const batch of chunks(rows.filter((r) => r.kind === "ec2"))) await write(`UNWIND $rows AS row MATCH (r:AdvisorResource {id: row.id}) SET r += {${props}}`, { rows: batch, now: stamp });
-  for (const batch of chunks(rows.filter((r) => r.kind === "asg"))) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.account_id = $account, p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name SET p += {${props}}`, { rows: batch, account, provider: PROVIDER, now: stamp });
+  for (const batch of chunks(rows.filter((r) => r.kind === "asg"))) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name SET p += {${props}}`, { rows: batch, account, provider: PROVIDER, now: stamp });
   return { profiles: rows.length };
 }
 export const mirrorUsageProfilesInBackground = () => inBackground("usage profile mirror", mirrorUsageProfiles);
@@ -1145,13 +1161,14 @@ export async function mirrorCapacityPatterns(): Promise<{ patterns: number; even
   const account = accountId();
   const rows = rowsOf("select env_id, env_name, asg, region, account_id, computed_at, json from capacity_patterns");
   const stamp = now();
-  const nodes = rows.flatMap((r) => { try { const p = JSON.parse(r.json); return [{ id: poolId(account, String(r.asg)), name: String(r.asg), env_id: r.env_id, env_name: r.env_name, region: r.region, computed_at: p.computed_at, days: p.days, weeks: p.weeks, coverage: p.coverage, confident: Boolean(p.confident), floor: p.floor, ceiling: p.ceiling ?? null, learned_min: p.learned, wanted: p.wanted, trigger: p.trigger ?? null, binding: p.binding ?? null, signals: p.signals?.summary ?? null, pressure_events: p.pressure_events, summary: p.summary }]; } catch { return []; } });
+  const nodes = rows.flatMap((r) => { try { const p = JSON.parse(r.json); return [{ id: poolId(r.account_id ? String(r.account_id) : account, String(r.asg)), account_id: r.account_id ? String(r.account_id) : null, name: String(r.asg), env_id: r.env_id, env_name: r.env_name, region: r.region, computed_at: p.computed_at, days: p.days, weeks: p.weeks, coverage: p.coverage, confident: Boolean(p.confident), floor: p.floor, ceiling: p.ceiling ?? null, learned_min: p.learned, wanted: p.wanted, trigger: p.trigger ?? null, binding: p.binding ?? null, signals: p.signals?.summary ?? null, pressure_events: p.pressure_events, summary: p.summary }]; } catch { return []; } });
   const props = "capacity_env_id: row.env_id, capacity_env_name: row.env_name, capacity_computed_at: row.computed_at, capacity_days: row.days, capacity_weeks: row.weeks, capacity_coverage: row.coverage, capacity_confident: row.confident, capacity_floor: row.floor, capacity_ceiling: row.ceiling, capacity_learned_min: row.learned_min, capacity_wanted: row.wanted, capacity_trigger: row.trigger, capacity_binding: row.binding, capacity_signals: row.signals, capacity_pressure_events: row.pressure_events, capacity_summary: row.summary, capacity_updated_at: $now";
-  for (const batch of chunks(nodes)) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = $account, p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name, p.region = row.region SET p += {${props}}`, { rows: batch, account, provider: PROVIDER, now: stamp });
-  const events = rowsOf("select id, env_id, asg, at, ring, desired, max_size, cpu_avg, action_id, note from capacity_pressure_events where datetime(at) > datetime('now', '-28 days')").map((e) => ({ ...e, pool_id: poolId(account, String(e.asg)) }));
+  for (const batch of chunks(nodes)) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name, p.region = row.region SET p += {${props}}`, { rows: batch, account, provider: PROVIDER, now: stamp });
+  const envAccount = new Map(rows.map((r) => [String(r.env_id), r.account_id ? String(r.account_id) : null]));
+  const events = rowsOf("select id, env_id, asg, at, ring, desired, max_size, cpu_avg, action_id, note from capacity_pressure_events where datetime(at) > datetime('now', '-28 days')").map((e) => { const a = envAccount.get(String(e.env_id)) ?? null; return { ...e, account_id: a, pool_id: poolId(a ?? account, String(e.asg)) }; });
   for (const batch of chunks(events)) await write(`UNWIND $rows AS row
-    MERGE (p:AdvisorNodePool {id: row.pool_id}) ON CREATE SET p.name = row.asg, p.kind = 'asg', p.account_id = $account, p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg
-    MERGE (e:AdvisorPressureEvent {id: row.id}) SET e += {env_id: row.env_id, at: row.at, ring: row.ring, desired: row.desired, max_size: row.max_size, signal: 'cpu', value: row.cpu_avg, cpu_avg: row.cpu_avg, note: row.note, provider: $provider, account_id: $account, native_type: 'pressure_event', native_id: toString(row.id), updated_at: $now}
+    MERGE (p:AdvisorNodePool {id: row.pool_id}) ON CREATE SET p.name = row.asg, p.kind = 'asg', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg
+    MERGE (e:AdvisorPressureEvent {id: row.id}) SET e += {env_id: row.env_id, at: row.at, ring: row.ring, desired: row.desired, max_size: row.max_size, signal: 'cpu', value: row.cpu_avg, cpu_avg: row.cpu_avg, note: row.note, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'pressure_event', native_id: toString(row.id), updated_at: $now}
     MERGE (p)-[:PRESSURED_AT]->(e)
     WITH e, row WHERE row.action_id IS NOT NULL
     MATCH (a:AdvisorAction {id: row.action_id}) MERGE (a)-[:ANSWERED]->(e)`, { rows: batch, account, provider: PROVIDER, now: stamp });
@@ -1175,7 +1192,7 @@ export function mirrorWakeProfile(instanceId: string): void {
     try { domains = row ? (JSON.parse(row.profile).domains ?? []) : []; } catch { /* kept empty */ }
     await write(`MERGE (r:AdvisorResource {id: $id}) ON CREATE SET r:AdvisorCompute, r.provider = $provider, r.account_id = $account, r.native_type = 'ec2_instance', r.native_id = $id
       SET r.wake_profile = $profile, r.wake_enabled = $enabled, r.wake_domains = $domains, r.wake_updated_at = $updated_at, r.wake_updated_by = $by, r.updated_at = $now`,
-      { id: instanceId, profile: row?.profile ?? null, enabled: row ? Boolean(row.enabled) : null, domains: row ? domains : null, updated_at: row?.updated_at ?? null, by: row?.updated_by ?? null, now: now(), provider: PROVIDER, account: accountId() });
+      { id: instanceId, profile: row?.profile ?? null, enabled: row ? Boolean(row.enabled) : null, domains: row ? domains : null, updated_at: row?.updated_at ?? null, by: row?.updated_by ?? null, now: now(), provider: PROVIDER, account: accountResolver()(null, instanceId) ?? accountId() });
   });
 }
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */

@@ -343,7 +343,10 @@ Edges: `IN_POOL` ← members; `PART_OF` → `AdvisorCluster`; `PRESSURED_AT` →
 ### AdvisorDatabase
 
 A managed or self-run database: RDS, Aurora, Cloud SQL, Azure SQL, Vercel Postgres, Neon, a Postgres on a box when
-the probe sees it (then it is an `AdvisorApp`, not this).
+the probe sees it (then it is an `AdvisorApp`, not this). A serverless key-value store is one too: a DynamoDB table is
+`native_type: dynamodb_table` with `engine: dynamodb`, `kind: key_value`, `serverless: true`, its capacity mode in
+`type` (`on-demand` or `provisioned N RCU / M WCU`) and `billing_mode`, the consumed units in `reads_30d` /
+`writes_30d`, and point-in-time recovery read as `backup_retention_days` 35 or 0.
 
 | property | meaning |
 |---|---|

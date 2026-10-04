@@ -31,12 +31,12 @@ OPTIONAL MATCH (old)-[f:FORWARDS_TO]->() DELETE f
 WITH DISTINCT lb, row
 FOREACH (l IN row.listeners |
   MERGE (e:AdvisorEndpoint {id: l.id}) ON CREATE SET e.first_seen = $now
-  SET e += {kind: 'listener', protocol: l.protocol, port: l.port, tls: l.tls, certificates: l.certificates, hostname: lb.dns_name, exposure: CASE WHEN lb.scheme = 'public' THEN 'internet' ELSE 'network' END, resource_id: lb.id, account_id: $account, provider: $provider, native_type: 'elb_listener', native_id: l.id, gone: false, last_seen: $now, updated_at: $now}
+  SET e += {kind: 'listener', protocol: l.protocol, port: l.port, tls: l.tls, certificates: l.certificates, hostname: lb.dns_name, exposure: CASE WHEN lb.scheme = 'public' THEN 'internet' ELSE 'network' END, resource_id: lb.id, account_id: coalesce(row.account_id, $account), provider: $provider, native_type: 'elb_listener', native_id: l.id, gone: false, last_seen: $now, updated_at: $now}
   MERGE (lb)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now)
 WITH lb, row
 FOREACH (e IN row.ec2_edges |
   MERGE (t:AdvisorEndpoint {id: e.target + ':tcp:' + toString(coalesce(e.port, 0))})
-    ON CREATE SET t.kind = 'port', t.protocol = 'tcp', t.port = e.port, t.resource_id = e.target, t.account_id = $account, t.provider = $provider, t.native_type = 'instance_port', t.native_id = t.id, t.first_seen = $now, t.gone = false
+    ON CREATE SET t.kind = 'port', t.protocol = 'tcp', t.port = e.port, t.resource_id = e.target, t.account_id = coalesce(row.account_id, $account), t.provider = $provider, t.native_type = 'instance_port', t.native_id = t.id, t.first_seen = $now, t.gone = false
   SET t.last_seen = $now, t.updated_at = $now
   MERGE (i:AdvisorResource {id: e.target})
   MERGE (i)-[ix:EXPOSES]->(t) ON CREATE SET ix.gone = false
@@ -48,7 +48,7 @@ FOREACH (e IN row.ec2_edges |
 FOREACH (e IN row.ref_edges |
   MERGE (fn:AdvisorResource {id: e.target})
   MERGE (t:AdvisorEndpoint {id: e.target + ':invoke'})
-    ON CREATE SET t.kind = 'url', t.protocol = 'https', t.resource_id = e.target, t.account_id = $account, t.provider = $provider, t.native_type = 'lambda_invoke', t.native_id = t.id, t.first_seen = $now, t.gone = false
+    ON CREATE SET t.kind = 'url', t.protocol = 'https', t.resource_id = e.target, t.account_id = coalesce(row.account_id, $account), t.provider = $provider, t.native_type = 'lambda_invoke', t.native_id = t.id, t.first_seen = $now, t.gone = false
   SET t.last_seen = $now, t.updated_at = $now
   MERGE (fn)-[fx:EXPOSES]->(t) ON CREATE SET fx.gone = false
   FOREACH (lid IN CASE WHEN e.listener IS NULL THEN [] ELSE [e.listener] END |
@@ -63,7 +63,7 @@ UNWIND $rows AS row
 MATCH (d:AdvisorResource {id: row.id})
 MERGE (e:AdvisorEndpoint {id: row.endpoint_id})
 ON CREATE SET e.first_seen = $now
-SET e += {kind: 'service_endpoint', protocol: 'tcp', port: row.port, hostname: row.host, exposure: CASE WHEN row.publicly_accessible THEN 'internet' ELSE 'network' END, resource_id: row.id, account_id: $account, provider: $provider, native_type: 'rds_endpoint', native_id: row.endpoint_id, gone: false, last_seen: $now, updated_at: $now}
+SET e += {kind: 'service_endpoint', protocol: 'tcp', port: row.port, hostname: row.host, exposure: CASE WHEN row.publicly_accessible THEN 'internet' ELSE 'network' END, resource_id: row.id, account_id: coalesce(row.account_id, $account), provider: $provider, native_type: 'rds_endpoint', native_id: row.endpoint_id, gone: false, last_seen: $now, updated_at: $now}
 MERGE (d)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now`;
 
 /** A volume's attachment: the instance STORES_ON it. */
@@ -97,12 +97,12 @@ UNWIND $rows AS row
 MERGE (d:AdvisorResource {id: row.id})
 ON CREATE SET d.first_seen = $now
 SET d:AdvisorDeployment
-SET d += {name: row.name, platform: 'beanstalk', workload_kind: 'environment', state: 'available', region: row.region, environment: row.environment, gone: false, provider: $provider, account_id: $account, native_type: 'beanstalk_environment', native_id: row.env_id, last_seen: $now, updated_at: $now}
+SET d += {name: row.name, platform: 'beanstalk', workload_kind: 'environment', state: 'available', region: row.region, environment: row.environment, gone: false, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'beanstalk_environment', native_id: row.env_id, last_seen: $now, updated_at: $now}
 WITH d, row
-MATCH (a:AdvisorAccount {id: $account}) MERGE (d)-[:IN_ACCOUNT]->(a)
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
 WITH d, row
 FOREACH (_ IN CASE WHEN row.pool_id IS NULL THEN [] ELSE [1] END |
-  MERGE (p:AdvisorNodePool {id: row.pool_id}) SET p.name = row.asg, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = $account, p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg, p.updated_at = $now
+  MERGE (p:AdvisorNodePool {id: row.pool_id}) SET p.name = row.asg, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg, p.updated_at = $now
   MERGE (d)-[:RUNS_ON_POOL]->(p))
 FOREACH (lb IN row.lbs |
   MERGE (b:AdvisorResource {id: lb})
@@ -137,17 +137,17 @@ export async function mirrorDnsLinks(records: any[], account: string, stamp: str
 
 /** Beanstalk environments the advisor knows (from the capacity patterns and the balancers' owner tag) as AdvisorDeployment nodes. */
 export async function mirrorDeployments(elbRows: any[], account: string, stamp: string): Promise<string[]> {
-  const envs = new Map<string, { id: string; env_id: string; name: string; region: string | null; asg: string | null; lbs: string[] }>();
-  for (const p of rowsOf("select env_id, env_name, asg, region from capacity_patterns")) envs.set(String(p.env_name || p.env_id), { id: `${PROVIDER}:${account}:beanstalk:${p.env_name || p.env_id}`, env_id: String(p.env_id), name: String(p.env_name || p.env_id), region: str(p.region), asg: str(p.asg), lbs: [] });
+  const envs = new Map<string, { id: string; env_id: string; name: string; region: string | null; asg: string | null; lbs: string[]; account_id: string | null }>();
+  for (const p of rowsOf("select env_id, env_name, asg, region, account_id from capacity_patterns")) envs.set(String(p.env_name || p.env_id), { id: `${PROVIDER}:${p.account_id || account}:beanstalk:${p.env_name || p.env_id}`, env_id: String(p.env_id), name: String(p.env_name || p.env_id), region: str(p.region), asg: str(p.asg), account_id: str(p.account_id), lbs: [] });
   for (const lb of elbRows) {
     if (!lb.beanstalk_env || lb.gone) continue;
     const name = String(lb.beanstalk_env);
-    const e = envs.get(name) || { id: `${PROVIDER}:${account}:beanstalk:${name}`, env_id: str(lb.beanstalk_env_id) || name, name, region: str(lb.region), asg: null, lbs: [] };
+    const e = envs.get(name) || { id: `${PROVIDER}:${lb.account_id || account}:beanstalk:${name}`, env_id: str(lb.beanstalk_env_id) || name, name, region: str(lb.region), asg: null, lbs: [], account_id: str(lb.account_id) };
     e.lbs.push(String(lb.arn));
     if (!e.asg) { const asgs = safeJson(lb.asgs); if (Array.isArray(asgs) && asgs.length === 1) e.asg = String(asgs[0]); }
     envs.set(name, e);
   }
-  const rows = [...envs.values()].map((e) => ({ ...e, pool_id: e.asg ? poolId(account, e.asg) : null, environment: /prod/i.test(e.name) ? "production" : /stag/i.test(e.name) ? "staging" : /dev|test/i.test(e.name) ? "development" : null }));
+  const rows = [...envs.values()].map((e) => ({ ...e, pool_id: e.asg ? poolId(e.account_id ?? account, e.asg) : null, environment: /prod/i.test(e.name) ? "production" : /stag/i.test(e.name) ? "staging" : /dev|test/i.test(e.name) ? "development" : null }));
   for (const batch of chunks(rows)) await write(DEPLOYMENT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   return rows.map((e) => e.id);
 }
@@ -158,8 +158,9 @@ export async function mirrorAwsEdges(account: string, stamp: string): Promise<st
   const ebsRows = rowsOf("select * from inventory_ebs");
   const rdsRows = rowsOf("select * from inventory_rds");
   const recordRows = rowsOf("select * from inventory_route53_record");
-  for (const batch of chunks(elbRows.map(elbEdges))) await write(ELB_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
-  const dbEndpoints = rdsRows.map((r) => { const net = (safeJson(r.snapshot) || {}).network || {}; return net.endpoint ? { id: String(r.db_instance_identifier), endpoint_id: `${r.db_instance_identifier}:tcp:${num(net.port) ?? 0}`, host: String(net.endpoint), port: num(net.port), publicly_accessible: Boolean(net.publicly_accessible) } : null; }).filter(Boolean);
+  // Member accounts (src/accounts.ts): a balancer's listeners and targets, a database's endpoint and an environment are stamped with the row's account
+  for (const batch of chunks(elbRows.map((r) => ({ ...elbEdges(r), account_id: str(r.account_id) })))) await write(ELB_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
+  const dbEndpoints = rdsRows.map((r) => { const net = (safeJson(r.snapshot) || {}).network || {}; return net.endpoint ? { id: String(r.db_instance_identifier), account_id: str(r.account_id), endpoint_id: `${r.db_instance_identifier}:tcp:${num(net.port) ?? 0}`, host: String(net.endpoint), port: num(net.port), publicly_accessible: Boolean(net.publicly_accessible) } : null; }).filter(Boolean);
   for (const batch of chunks(dbEndpoints)) await write(DB_ENDPOINT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   for (const batch of chunks(ebsRows.map((r) => ({ id: String(r.volume_id), instance_id: r.gone ? null : str(r.instance_id), device: str(r.device) })))) await write(VOLUME_CYPHER, { rows: batch, now: stamp });
   await mirrorDnsLinks(recordRows, account, stamp);

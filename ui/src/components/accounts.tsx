@@ -35,7 +35,7 @@ export function AccountsOverview() {
                 <div className="text-[11px] text-zinc-600">{a.access}{a.last_test && !a.last_test.ok ? <span className="text-red-300"> · {a.last_test.detail}</span> : null}</div>
               </Td>
               <Td className="text-xs text-zinc-300">
-                {a.resources.ec2_running}/{a.resources.ec2_total} EC2 · {a.resources.rds} RDS · {a.resources.lambda} λ · {a.resources.elb} LB · {a.resources.s3} S3 · {a.resources.ebs_gb} GB EBS{a.resources.clusters ? ` · ${a.resources.clusters} clusters` : ""}
+                {a.resources.ec2_running}/{a.resources.ec2_total} EC2 · {a.resources.rds} RDS · {a.resources.lambda} λ{a.resources.dynamodb ? ` · ${a.resources.dynamodb} tables` : ""} · {a.resources.elb} LB · {a.resources.s3} S3 · {a.resources.ebs_gb} GB EBS{a.resources.clusters ? ` · ${a.resources.clusters} clusters` : ""}
               </Td>
               <Td className="text-right">{usd(a.monthly_list_usd)}</Td>
               <Td className="text-right">{a.spend.usd != null ? <span title={a.spend.month}>{usd(a.spend.usd)}</span> : <span className="text-zinc-600">—</span>}</Td>

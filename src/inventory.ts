@@ -6,6 +6,7 @@ import { PriceWant, ec2OperatingSystem, elasticachePricingEngine, ensurePrices, 
 import { describeError, tablesIn } from "./permissions.js";
 import { poolOf } from "./pools.js";
 import { lambdaSummary, refreshLambdaInventory } from "./lambda_inventory.js";
+import { dynamodbSummary, refreshDynamodbInventory } from "./dynamodb_inventory.js";
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 import { ebsSummary, refreshEbsInventory } from "./ebs_inventory.js";
 import { s3Summary } from "./s3_inventory.js";
@@ -423,6 +424,8 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   })();
 
   const lambda = await refreshLambdaInventory((m) => errors.push(m));
+  const dynamodb = await refreshDynamodbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
+  console.log(`[inventory] dynamodb: ${dynamodb} table(s)`);
   const ebsVolumes = await refreshEbsInventory((m) => errors.push(m));
   // after EC2, so instance and IP targets resolve against the rows just written
   const elb = await refreshElbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
@@ -592,5 +595,5 @@ export function inventorySummary(scope?: AccountScope | null) {
     from inventory_elasticache where gone = 0`).get() as Record<string, number>;
   const cacheGone = (scopedStmt(scope, "select count(*) as n from inventory_elasticache where gone = 1").get() as { n: number }).n;
   const r1 = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 100) / 100 : v]));
-  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(scope), ebs: ebsSummary(scope), elb: elbSummary(scope), s3: s3Summary(scope), route53: route53Summary(scope), clusters: (() => { try { return clusterSummary(scope); } catch { return undefined; } })() };
+  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(scope), dynamodb: dynamodbSummary(scope), ebs: ebsSummary(scope), elb: elbSummary(scope), s3: s3Summary(scope), route53: route53Summary(scope), clusters: (() => { try { return clusterSummary(scope); } catch { return undefined; } })() };
 }
