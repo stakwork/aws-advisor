@@ -85,3 +85,18 @@ test("accessInstructions: access entries when the cluster supports them, aws-aut
   assert.match(cm.steps[1].command, /mapRoles/); assert.match(cm.steps[1].command, /clusterrole=view/);
   assert.ok(!cm.steps.some((s) => /delete|edit-cluster-config --delete/.test(s.command)), "nothing destructive");
 });
+
+test("clusterSummary and listClusters follow the account scope: a parent looking at itself does not count a member's clusters", async () => {
+  const { db } = await import("../db.js");
+  const now = "2026-10-04T00:00:00Z";
+  const ins = db.prepare("insert or replace into inventory_cluster(arn, kind, name, region, account_id, status, nodes, workloads, access_status, first_seen, last_seen, gone) values (?, ?, ?, 'us-east-1', ?, 'ACTIVE', ?, ?, 'ok', ?, ?, 0)");
+  ins.run("arn:aws:eks:us-east-1:111111111111:cluster/child-eks", "eks", "child-eks", "111111111111", 3, 4, now, now);
+  ins.run("arn:aws:ecs:us-east-1:111111111111:cluster/child-ecs", "ecs", "child-ecs", "111111111111", 2, 1, now, now);
+  ins.run("arn:aws:ecs:us-east-1:222222222222:cluster/parent-ecs", "ecs", "parent-ecs", "222222222222", 1, 0, now, now);
+  assert.equal(ci.clusterSummary(null).total, 3, "no scope: the fleet");
+  const child = ci.clusterSummary({ id: "111111111111", primary: false });
+  assert.deepEqual([child.total, child.eks, child.ecs, child.nodes, child.workloads], [2, 1, 1, 5, 5]);
+  const parent = ci.clusterSummary({ id: "222222222222", primary: true });
+  assert.deepEqual([parent.total, parent.eks, parent.ecs, parent.nodes, parent.workloads], [1, 0, 1, 1, 0]);
+  assert.deepEqual(ci.listClusters({ id: "222222222222", primary: true }).map((c) => c.name), ["parent-ecs"]);
+});

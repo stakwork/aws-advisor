@@ -11,6 +11,7 @@
  * IPv4 either (a mirror of a deliberate IPv4 rule, like 443 or a Lightning port, is not flagged).
  */
 import { db } from "./db.js";
+import { accountWhere, type AccountScope } from "./scope.js";
 import { BROAD_RANGE, ingressRulesFor, ruleRef, type IngressRule, type RuleRef } from "./instance_apps.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
@@ -123,9 +124,10 @@ export interface SgSummary {
   instances: number; running: number; others: number; unattached: boolean; listening_open: number; recommendation_id: number | null;
 }
 
-/** Every security group, the troubled ones first. */
-export function listSecurityGroups(): SgSummary[] {
-  const groups = db.prepare("select * from inventory_sg").all() as SgRow[];
+/** Every security group of the scope (every account when null), the troubled ones first. */
+export function listSecurityGroups(scope?: AccountScope | null): SgSummary[] {
+  const a = accountWhere(scope);
+  const groups = db.prepare(`select * from inventory_sg where ${a.sql}`).all(...a.params) as SgRow[];
   const recs = new Map((db.prepare("select resource, id from recommendations where rule = ? and status in ('open', 'approved', 'pending')").all(DORMANT_RULE) as { resource: string; id: number }[]).map((r) => [r.resource, r.id]));
   const out = groups.map((g) => {
     const rules = ingressRulesFor([g.group_id]);

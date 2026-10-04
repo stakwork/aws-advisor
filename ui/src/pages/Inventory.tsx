@@ -472,7 +472,7 @@ export default function Inventory() {
       <div className="flex gap-1 border-b border-zinc-800">
         {visibleTabs.map((t) => (
           <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} title={TAB_NATIVE[t]} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
-            {TAB_LABEL[t]}{awsView && s && (s as any)[t] && <span className="ml-1 text-xs text-zinc-500">{(s as any)[t].total}</span>}
+            {TAB_LABEL[t]}{awsView && tabCount(s, t) != null && <span className="ml-1 text-xs text-zinc-500">{tabCount(s, t)}</span>}
           </button>
         ))}
         <span className="ml-auto self-center pr-1 text-[11px] text-zinc-600">{TAB_NATIVE[tab]}</span>
@@ -835,6 +835,9 @@ export default function Inventory() {
     </div>
   );
 }
+
+/** The count next to a tab's label: the summary's total for the kind; the identities tab counts IAM users (the summary keeps them under iam). */
+const tabCount = (s: any, t: Tab): number | null => { const v = t === "identities" ? s?.iam?.users : s?.[t]?.total; return typeof v === "number" ? v : null; };
 
 const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, dynamodb: 9, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5 };
 

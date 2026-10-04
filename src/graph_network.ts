@@ -135,7 +135,7 @@ UNWIND $rows AS row
 MERGE (n:AdvisorNetwork {id: row.id})
 ON CREATE SET n.first_seen = $now
 SET n += {cidr_blocks: row.cidr_blocks, ipv6_blocks: row.ipv6_blocks, default: row.default, flat: false, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'vpc', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
-WITH n MATCH (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) MERGE (n)-[:IN_ACCOUNT]->(a)`;
+WITH n, row MATCH (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) MERGE (n)-[:IN_ACCOUNT]->(a)`;
 
 const SEGMENT_CYPHER = `
 UNWIND $rows AS row
@@ -573,7 +573,7 @@ export async function listInterfaces(account: string = accountId()) {
 }
 
 /** Every static public address and what it is assigned to (the Public IPs tab). */
-export async function listPublicIps() {
+export async function listPublicIps(account: string = accountId()) {
   const r = await readQuery(`MATCH (p:AdvisorPublicIp {account_id: $account})
     OPTIONAL MATCH (p)-[:ASSIGNED]->(x)
     OPTIONAL MATCH (x)-[:ATTACHED_TO]->(owner)
@@ -582,6 +582,6 @@ export async function listPublicIps() {
       x.id AS assigned_id, CASE WHEN x IS NULL THEN null WHEN x:AdvisorGateway THEN 'gateway' WHEN x:AdvisorInterface THEN 'interface' ELSE 'balancer' END AS assigned_kind, x.owner_kind AS interface_owner,
       owner.id AS owner_id, owner.name AS owner_name, CASE WHEN owner IS NULL THEN null WHEN owner:AdvisorGateway THEN 'AdvisorGateway' ELSE [l IN labels(owner) WHERE l <> 'AdvisorResource'][0] END AS owner_label,
       collect(DISTINCT d.fqdn)[..4] AS domains
-    ORDER BY p.associated, owner.name, p.ip`, { account: accountId() }, { rowCap: 2000, timeoutMs: 30_000 });
+    ORDER BY p.associated, owner.name, p.ip`, { account }, { rowCap: 2000, timeoutMs: 30_000 });
   return r.rows;
 }

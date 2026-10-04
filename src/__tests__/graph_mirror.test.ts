@@ -343,3 +343,11 @@ test("accountRows: a management account, its members PART_OF it, and a standalon
   assert.deepEqual(rows.map((r) => [r.id, r.role, r.parent_id, r.kind, r.native_type]), [["210987654321", "management", null, "account", "account"], ["210987654322", "member", "210987654321", "account", "account"], ["team_example123", "standalone", null, "account", "team"]]);
   assert.equal(rows[0].last_test_ok, true); assert.equal(rows[1].last_test_ok, null); assert.equal(rows[0].actuator, true); assert.equal(rows[2].name, "Example");
 });
+
+test("accountId: the credentials' account first, the latest run's only when none is saved (runs are history after a re-point)", () => {
+  db.prepare("insert or ignore into runs(id, status, trigger, account_id) values (1, 'completed', 'manual', ?)").run(TEST_ACCOUNT);
+  db.prepare("insert or replace into settings(key, value) values ('aws_credentials_meta', ?)").run(JSON.stringify({ accountId: "TEST-111111111111" }));
+  assert.equal(gm.accountId(), "TEST-111111111111");
+  db.prepare("delete from settings where key = 'aws_credentials_meta'").run();
+  assert.equal(gm.accountId(), TEST_ACCOUNT);
+});

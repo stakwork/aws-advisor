@@ -13,15 +13,16 @@ import { filterDetail, listGatewayNodes, listInterfaces, listPublicIps, listSegm
 export const graph = Router();
 graph.use(authMiddleware);
 
-graph.get("/graph", async (_req, res) => {
+graph.get("/graph", async (req, res) => {
   const uri = graphUriForDisplay();
-  if (!enabled()) return res.json({ configured: false, uri: null, connected: false, stats: null, account_id: accountId() });
+  const account = accountScope(req.query as any)?.id ?? accountId(); // the account the sidebar looks at, else the mirror's own
+  if (!enabled()) return res.json({ configured: false, uri: null, connected: false, stats: null, account_id: account });
   const conn = await verifyConnection();
   let stats = null; let error = conn.error ?? null;
   if (conn.connected) {
     try { stats = await graphStats(); } catch (e: any) { error = String(e?.message || e).slice(0, 300); }
   }
-  res.json({ configured: true, uri, connected: conn.connected, server: conn.server ?? null, error, stats, account_id: accountId() });
+  res.json({ configured: true, uri, connected: conn.connected, server: conn.server ?? null, error, stats, account_id: account });
 });
 
 // Full resync (idempotent). ?wipe=1 first removes every Advisor node of this account, so stale nodes disappear too.
@@ -68,6 +69,6 @@ graph.get("/graph/filter/:id", async (req, res) => { if (!enabled()) return off(
 graph.get("/graph/network-segments", async (req, res) => { if (!enabled()) return off(res); try { res.json({ segments: await listSegments(accountScope(req.query as any)?.id ?? accountId()) }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 graph.get("/graph/network-gateways", async (req, res) => { if (!enabled()) return off(res); try { res.json({ gateways: await listGatewayNodes(accountScope(req.query as any)?.id ?? accountId()) }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 graph.get("/graph/network-interfaces", async (req, res) => { if (!enabled()) return off(res); try { res.json({ interfaces: await listInterfaces(accountScope(req.query as any)?.id ?? accountId()) }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
-graph.get("/graph/network-public-ips", async (_req, res) => { if (!enabled()) return off(res); try { res.json({ public_ips: await listPublicIps() }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+graph.get("/graph/network-public-ips", async (req, res) => { if (!enabled()) return off(res); try { res.json({ public_ips: await listPublicIps(accountScope(req.query as any)?.id ?? accountId()) }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 // Rebuild the network layer and every endpoint's verdicts from the current inventory (what the post-run hook does).
 graph.post("/graph/network/sync", async (_req, res) => { if (!enabled()) return off(res); try { res.json(await mirrorNetwork()); } catch (e: any) { res.status(500).json({ error: e.message }); } });

@@ -15,10 +15,11 @@ export const clusters = Router();
 clusters.use(authMiddleware);
 
 clusters.get("/inventory/clusters", async (req, res) => {
-  const list = listClusters(accountScope(req.query as any));
+  const scope = accountScope(req.query as any);
+  const list = listClusters(scope);
   let principal: string | null = null;
   try { const id = await sdkIdentity(8_000); if (id.ok) principal = id.arn; } catch { principal = null; }
-  res.json({ summary: clusterSummary(), principal_arn: principal, clusters: list.map((c) => ({ ...c, access: c.kind === "eks" && c.access_status !== "ok" && principal ? accessInstructions({ name: c.name, region: c.region, authentication_mode: c.authentication_mode }, principal) : null })) });
+  res.json({ summary: clusterSummary(scope), principal_arn: principal, clusters: list.map((c) => ({ ...c, access: c.kind === "eks" && c.access_status !== "ok" && principal ? accessInstructions({ name: c.name, region: c.region, authentication_mode: c.authentication_mode }, principal) : null })) });
 });
 
 clusters.get("/inventory/clusters/:arn/workloads", (req, res) => {

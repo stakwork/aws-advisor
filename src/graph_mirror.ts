@@ -352,12 +352,17 @@ export async function wipeLegacy(): Promise<{ deleted: number }> {
 
 // ---- the account and the helpers every step shares -------------------------------------------------------------------
 
-/** The AWS account the mirrored data belongs to: the latest run's, else the credential test's, else "unknown". */
+/**
+ * The AWS account the mirrored data belongs to by default (rows that carry no account id, the unscoped reads): the one
+ * the credentials resolve to now, else the latest run's, else "unknown". The credentials come first because runs are
+ * history: after the advisor is re-pointed from a member to the parent, the runs still name the member until the next
+ * one completes (the adapter's primaryAccountId follows the same order).
+ */
 export function accountId(): string {
-  const run = db.prepare("select account_id from runs where provider = 'aws' and account_id is not null and account_id <> '' order by id desc limit 1").get() as { account_id: string } | undefined;
-  if (run?.account_id) return run.account_id;
   const meta = getJsonSetting<{ accountId?: string }>("aws_credentials_meta", {});
-  return meta.accountId || "unknown";
+  if (meta.accountId) return meta.accountId;
+  const run = db.prepare("select account_id from runs where provider = 'aws' and account_id is not null and account_id <> '' order by id desc limit 1").get() as { account_id: string } | undefined;
+  return run?.account_id || "unknown";
 }
 
 const now = () => new Date().toISOString();

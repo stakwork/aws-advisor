@@ -614,9 +614,9 @@ api.get("/wake-profiles/:id/status", async (req, res) => {
 });
 
 // ---- security groups (src/security_groups.ts): every group with its trouble flags, and one group in full ---------------
-api.get("/security-groups", async (_req, res) => {
+api.get("/security-groups", async (req, res) => {
   const { listSecurityGroups } = await import("../security_groups.js");
-  res.json({ groups: listSecurityGroups() });
+  res.json({ groups: listSecurityGroups(accountScope(req.query as any)) });
 });
 api.get("/security-groups/:id", async (req, res) => {
   const { securityGroupDetail } = await import("../security_groups.js");

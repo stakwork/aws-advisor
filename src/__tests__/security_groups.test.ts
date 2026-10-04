@@ -48,6 +48,9 @@ test("security groups: members, rules behind listeners, flags, and a dormant-IPv
 
   const list = listSecurityGroups();
   const web = list.find((g) => g.group_id === G)!;
+  // the account scope narrows the list (the Filters tab of one account never shows another account's groups)
+  assert.ok(listSecurityGroups({ id: "123456789012", primary: false }).some((g) => g.group_id === G));
+  assert.equal(listSecurityGroups({ id: "999999999999", primary: false }).some((g) => g.group_id === G || g.group_id === G2), false);
   assert.equal(web.vpc_ipv6, false);
   assert.equal(web.instances, 1); assert.equal(web.running, 1);
   assert.equal(web.listening_open, 1, "443 is open; 6379 only through the dormant IPv6 rule");
