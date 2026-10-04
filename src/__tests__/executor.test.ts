@@ -327,7 +327,7 @@ test("swarm park: idle only when every signal is quiet every day; a missing sign
 
 test("aurora storage: the newest approval per cluster wins and older ones ride along", async () => {
   const { targetsFrom } = await import("../actions/aurora_storage.js");
-  const rec = (id: number, action_type: string, resource = "hub") => ({ id, title: `r${id}`, decided_by: "ui", resource, resource_name: resource, action_type, rule: "x", est_monthly_saving: 100, evidence: { region: "us-east-1" } });
+  const rec = (id: number, action_type: string, resource = "hub") => ({ id, title: `r${id}`, decided_by: "ui", resource, resource_name: resource, action_type, rule: "x", est_monthly_saving: 100, evidence: { region: "us-east-1" }, account_id: null });
   const t = targetsFrom([rec(9, "aurora_set_storage_iopt"), rec(7, "aurora_set_storage_iopt"), rec(3, "aurora_set_storage_standard"), rec(5, "aurora_set_storage_iopt", "other")], "eu-west-1");
   assert.equal(t.length, 2);
   const hub = t.find((x) => x.cluster === "hub")!;

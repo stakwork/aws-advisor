@@ -5,7 +5,7 @@ import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
 import { sdkIdentity } from "../steampipe.js";
 import { consentErrorStatus, runAsPerson } from "../consent.js";
 import { PreviewError, previewAsPerson } from "../preview.js";
-import { actuatorCapabilities, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, stepAction, verifyAction } from "../executor.js";
+import { actuatorCapabilities, actuatorCapabilitiesByAccount, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, stepAction, verifyAction } from "../executor.js";
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
 import { environmentTimeline } from "../capacity_timeline.js";
@@ -30,10 +30,16 @@ actions.get("/actions/beanstalk/:env/timeline", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// Re-check what the role may do: drops the denials learned from failed applies (the role was widened) and simulates again.
-actions.post("/actions/capabilities/recheck", async (_req, res) => {
-  try { const r = await actuatorCapabilities(true); res.json({ capabilities: r.caps, capabilities_note: r.note ?? null }); }
-  catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
+// Re-check what the roles may do: drops the denials learned from failed applies (a role was widened) and simulates again,
+// the parent's role and every member's (body.account_id narrows it to one account).
+actions.post("/actions/capabilities/recheck", async (req, res) => {
+  const accountId = typeof req.body?.account_id === "string" && /^\d{12}$/.test(req.body.account_id) ? req.body.account_id : null;
+  try {
+    if (accountId) { const r = await actuatorCapabilities(accountId, true); return res.json({ account_id: accountId, capabilities: r.caps, capabilities_note: r.note ?? null }); }
+    const all = await actuatorCapabilitiesByAccount(true);
+    const parent = all.find((a) => a.is_parent);
+    res.json({ capabilities: parent?.capabilities ?? {}, capabilities_note: parent?.capabilities_note ?? null, accounts: all.filter((a) => !a.is_parent) });
+  } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 actions.get("/actions/status", async (_req, res) => {
   const status = await executorStatus();

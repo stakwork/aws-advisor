@@ -15,6 +15,7 @@ import { db } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { credsForAccount } from "../executor.js";
+import { accountWhere, type AccountScope } from "../scope.js";
 
 export const KIND = "alarm_cleanup" as const;
 export const ALARM_USD_MONTH = 0.10;
@@ -77,7 +78,7 @@ function regions(creds: Creds): string[] {
 }
 
 /** Existence checks per region, each memoised; a failed describe answers null (cannot tell), never true. */
-function goneChecker(region: string, creds: Creds): { gone: GoneCheck; resolve: (dims: Dim[]) => Promise<void>; destroy: () => void } {
+function goneChecker(region: string, creds: Creds, scope: AccountScope | null = null): { gone: GoneCheck; resolve: (dims: Dim[]) => Promise<void>; destroy: () => void } {
   const ec2 = new EC2Client({ region, credentials: creds.read });
   const rds = new RDSClient({ region, credentials: creds.read });
   const known = new Map<string, boolean | null>();
@@ -98,8 +99,9 @@ function goneChecker(region: string, creds: Creds): { gone: GoneCheck; resolve: 
         case "DBInstanceIdentifier": return !(await rds.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: d.value }))).DBInstances?.length;
         case "DBClusterIdentifier": return !(await rds.send(new DescribeDBClustersCommand({ DBClusterIdentifier: d.value }))).DBClusters?.length;
         case "FunctionName": {
-          // The Lambda inventory is the record: a function it has never seen cannot be called gone.
-          const row = db.prepare("select gone from inventory_lambda where name = ? and (region = ? or region is null)").get(d.value, region) as { gone: number } | undefined;
+          // The Lambda inventory is the record: a function it has never seen cannot be called gone. Names are unique per account only.
+          const w = accountWhere(scope);
+          const row = db.prepare(`select gone from inventory_lambda where name = ? and (region = ? or region is null) and ${w.sql}`).get(d.value, region, ...w.params) as { gone: number } | undefined;
           return row ? row.gone === 1 : null;
         }
         default: return null;
@@ -130,7 +132,7 @@ export const alarmCleanupAction: ActionModule = {
       const ac = credsForAccount(creds, acct.account_id);
       if (proposals.length >= MAX_PER_PLAN) { notes.push(`${MAX_PER_PLAN} proposals is enough for one pass; ${region} waits`); continue; }
       const cw = new CloudWatchClient({ region, credentials: ac.read });
-      const checker = goneChecker(region, ac);
+      const checker = goneChecker(region, ac, { id: acct.account_id, primary: acct.is_parent });
       try {
         const alarms: MetricAlarm[] = [];
         let NextToken: string | undefined;

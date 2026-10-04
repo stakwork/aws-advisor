@@ -404,6 +404,10 @@ create index if not exists compliance_findings_resource on compliance_findings(r
 
 // Member accounts (src/accounts.ts): the inventories and the executor's ledger remember which account a row belongs to.
 for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache", "inventory_ebs", "inventory_s3", "inventory_lambda", "log_groups"]) { try { addColumn(t, "account_id", "text"); } catch { /* table created by a module that has not loaded yet: it adds the column itself */ } }
+// RDS identifiers and cache cluster ids are unique per account only: two members can each have a "prod-db" (src/logs.ts and
+// src/lambda_inventory.ts do the same for log groups and functions).
+rekeyByAccount("inventory_rds", "db_instance_identifier");
+rekeyByAccount("inventory_elasticache", "cache_cluster_id");
 
 export function addColumn(table: string, column: string, type: string) {
   const cols = db.pragma(`table_info(${table})`) as { name: string }[];
@@ -411,6 +415,37 @@ export function addColumn(table: string, column: string, type: string) {
   // Two processes on one file (the test runner) can both pass the check; the second alter is then a no-op.
   try { db.exec(`alter table ${table} add column ${column} ${type}`); }
   catch (e: any) { if (!/duplicate column/i.test(String(e?.message))) throw e; }
+}
+
+/**
+ * Re-keys a table whose primary key is a name that is unique per account only (an RDS identifier, a log group, a
+ * Lambda function) to (account_id, name), so the same name in two member accounts is two rows instead of the last
+ * one written. `account_id` becomes `not null default ''`: the rows collected before the advisor kept account ids
+ * are the primary account's (src/scope.ts reads '' that way), and an upsert on the pair always matches. Idempotent:
+ * a table already keyed on the pair is left alone. The table is rebuilt in one transaction (no index or trigger is
+ * defined on these tables; a column's type, not-null and default are carried over).
+ */
+export function rekeyByAccount(table: string, key: string): boolean {
+  type Col = { name: string; type: string; notnull: number; dflt_value: string | null; pk: number };
+  const cols = db.pragma(`table_info(${table})`) as Col[];
+  if (!cols.length) return false;
+  if (!cols.some((c) => c.name === "account_id")) addColumn(table, "account_id", "text");
+  const now = db.pragma(`table_info(${table})`) as Col[];
+  if (now.find((c) => c.name === "account_id")!.pk) return false;
+  const def = (c: Col) => c.name === "account_id" ? "account_id text not null default ''"
+    : c.name === key ? `${c.name} ${c.type || "text"} not null`
+    // a default comes back as its expression text (0, '', datetime('now')); in parentheses it is valid again whatever it is
+    : `${c.name} ${c.type}${c.notnull ? " not null" : ""}${c.dflt_value != null ? ` default (${c.dflt_value})` : ""}`.replace(/\s+/g, " ").trim();
+  const names = now.map((c) => c.name);
+  const tmp = `${table}__rekey`;
+  db.exec(`drop table if exists ${tmp}`);
+  db.transaction(() => {
+    db.exec(`create table ${tmp} (${now.map(def).join(", ")}, primary key (account_id, ${key}))`);
+    db.exec(`insert into ${tmp} (${names.join(", ")}) select ${names.map((n) => (n === "account_id" ? "coalesce(account_id, '')" : n)).join(", ")} from ${table}`);
+    db.exec(`drop table ${table}`);
+    db.exec(`alter table ${tmp} rename to ${table}`);
+  })();
+  return true;
 }
 
 function migrateAgentRuns() {

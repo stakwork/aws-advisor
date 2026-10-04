@@ -71,6 +71,8 @@ export default function Actions() {
   const mode = status?.mode || "…";
   const paused = status?.paused?.paused ? status.paused : null;
   const reloadStatus = () => api("/actions/status").then(setStatus).catch((e) => setMsg(e.message));
+  // a member row (src/accounts.ts) is judged on its own account's actuator role; a parent row on the parent's
+  const capsOf = (a: any): Record<string, any> | undefined => (a.account_id ? status?.accounts?.find((x: any) => x.account_id === a.account_id)?.capabilities : status?.capabilities);
   const doPause = async () => {
     const reason = window.prompt("Pause auto-actions: nothing is planned or applied until someone resumes (Revert keeps working). Why?", "");
     if (reason === null) return;
@@ -127,6 +129,17 @@ export default function Actions() {
           );
         })()}
         {status?.capabilities_note && <div className="mt-1 text-xs text-zinc-500">{status.capabilities_note}</div>}
+        {(status?.accounts || []).map((acct: any) => {
+          const narrow = Object.entries(acct.capabilities || {}).filter(([, c]: any) => c.apply === false || c.revert === false);
+          if (!narrow.length && !acct.capabilities_note) return null;
+          return (
+            <div key={acct.account_id} className="mt-1 text-xs text-zinc-500">
+              Member {acct.name} ({acct.account_id}){acct.role_arn ? "" : ": no actuator role, dry runs only"}
+              {narrow.length > 0 && <span className="text-amber-300">: its role is narrower than the policy, {narrow.length} action{narrow.length === 1 ? " stays" : "s stay"} with a person ({narrow.map(([k, c]: any) => `${KIND_LABEL[k] || k}: ${c.missing.join(", ")}`).join("; ")})</span>}
+              {acct.capabilities_note && acct.role_arn && <span> · {acct.capabilities_note}</span>}
+            </div>
+          );
+        })}
         {status?.role_arn && (
           <div className="mt-1 text-xs text-zinc-500">
             <button className="text-sky-300 hover:underline disabled:opacity-50" disabled={busy === "recheck"} title="drop the denials learned from failed applies (after the role's policy was widened) and simulate the role again"
@@ -251,13 +264,13 @@ export default function Actions() {
                     <Td className="text-right text-emerald-300">{a.est_usd_month != null ? usd(a.est_usd_month, 2) : "—"}</Td>
                     <Td className={`text-xs ${STATUS_CLASS[a.status] || ""}`}>{a.status}{a.facts?.stage && a.facts.stage !== "done" && <div className="text-[11px] text-zinc-400" title={a.facts.stage_at ? `since ${when(a.facts.stage_at)}` : undefined}>stage: {String(a.facts.stage).replace(/_/g, " ")}</div>}{a.check?.verdict === "hold" && <div className="text-[11px] text-amber-300" title={a.check.reason}>held by Jev</div>}{a.check?.verdict === "proceed" && <div className="text-[11px] text-zinc-500" title={a.check.reason}>Jev ok</div>}{a.notify_result && <div className="text-[11px] text-zinc-600" title={a.notify_result}>sphinx: {a.notify_result.split(":")[0]}</div>}</Td>
                     <td className="whitespace-nowrap px-2 py-2 text-right align-top" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
-                      {a.status === "proposed" && (status?.capabilities?.[a.kind]?.apply === false
-                        ? <span className="text-[11px] text-amber-300" title={`the actuator role is not allowed ${status.capabilities[a.kind].missing.join(", ")}; do it by hand, or widen the role`}>by hand: role lacks {status.capabilities[a.kind].missing.join(", ")}</span>
+                      {a.status === "proposed" && (capsOf(a)?.[a.kind]?.apply === false
+                        ? <span className="text-[11px] text-amber-300" title={`the actuator role${a.account_id ? ` of account ${a.account_id}` : ""} is not allowed ${capsOf(a)?.[a.kind]?.missing.join(", ")}; do it by hand, or widen the role`}>by hand: role lacks {capsOf(a)?.[a.kind]?.missing.join(", ")}</span>
                         : <Button className="!px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/apply`, `apply-${a.id}`)} disabled={busy === `apply-${a.id}` || mode === "off" || !status?.identity?.ok} title={!status?.identity?.ok ? "the actuator role is not usable yet" : "make this change now under the actuator role"}>{busy === `apply-${a.id}` ? "Applying…" : "Apply"}</Button>)}
                       {a.status === "applied" && (a.facts?.offers ?? []).map((o: any) => <Button key={o.name} className="mr-1 !px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/step/${o.name}`, `step-${a.id}`)} disabled={busy === `step-${a.id}` || mode === "off" || !!paused} title={o.title}>{busy === `step-${a.id}` ? "Working…" : o.label}</Button>)}
                       {a.status === "applied" && <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/verify`, `verify-${a.id}`)} disabled={busy === `verify-${a.id}`}>Check</Button>}
-                      {(a.status === "applied" || a.status === "verified" || (a.status === "failed" && a.facts?.stage && a.facts.stage !== "reverted")) && (status?.capabilities?.[a.kind]?.revert === false
-                        ? <span className="ml-1 text-[11px] text-amber-300" title={`the actuator role is not allowed ${status.capabilities[a.kind].missing.join(", ")}`}>undo by hand: role lacks {status.capabilities[a.kind].missing.join(", ")}</span>
+                      {(a.status === "applied" || a.status === "verified" || (a.status === "failed" && a.facts?.stage && a.facts.stage !== "reverted")) && (capsOf(a)?.[a.kind]?.revert === false
+                        ? <span className="ml-1 text-[11px] text-amber-300" title={`the actuator role${a.account_id ? ` of account ${a.account_id}` : ""} is not allowed ${capsOf(a)?.[a.kind]?.missing.join(", ")}`}>undo by hand: role lacks {capsOf(a)?.[a.kind]?.missing.join(", ")}</span>
                         : <Button variant="danger" className="ml-1 !px-2 !py-1 !text-xs" onClick={() => run(`/actions/${a.id}/revert`, `revert-${a.id}`)} disabled={busy === `revert-${a.id}` || mode === "off"} title={a.rollback}>{busy === `revert-${a.id}` ? "Reverting…" : "Revert"}</Button>)}
                       <Button variant="ghost" className="ml-1 !px-2 !py-1 !text-xs" onClick={() => setAsking(asking === a.id ? null : a.id)} title="ask the advisor about this row: why this change, what happens if it is applied, what the revert does">{asking === a.id ? "Close" : "Ask"}</Button>
                     </td>
@@ -291,7 +304,7 @@ export default function Actions() {
                               </div>
                             );
                           })()}
-                          {(a.status === "proposed" || a.status === "failed" || a.status === "applied") && <div><div className="text-zinc-400">With your own credentials{status?.capabilities?.[a.kind]?.apply === false ? " (the actuator role lacks this one)" : ""}</div><RunAsMe actionId={a.id} onDone={() => load()} /></div>}
+                          {(a.status === "proposed" || a.status === "failed" || a.status === "applied") && <div><div className="text-zinc-400">With your own credentials{capsOf(a)?.[a.kind]?.apply === false ? " (the actuator role lacks this one)" : ""}</div><RunAsMe actionId={a.id} onDone={() => load()} /></div>}
                           {(a.status === "applied" || a.status === "verified") && String(a.trigger || "").startsWith("person:") && <div><div className="text-zinc-400">Done by a person; undo the same way</div><RunAsMe actionId={a.id} verb="revert" onDone={() => load()} /></div>}
                           {a.error && <div><div className="text-zinc-400">Error</div><div className="text-red-300">{a.error}</div></div>}
                           <div className="text-zinc-500">proposed {when(a.created_at)}{a.revived_at && ` · went stale, proposed again ${when(a.revived_at)}`} · last seen {when(a.seen_at)}{a.applied_at && ` · applied ${when(a.applied_at)}`}{a.verified_at && ` · verified ${when(a.verified_at)}`}{a.reverted_at && ` · reverted ${when(a.reverted_at)}`} · mode {a.mode}</div>

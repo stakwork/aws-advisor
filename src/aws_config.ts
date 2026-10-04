@@ -109,7 +109,8 @@ export function spcProfile(s: CredentialSettings, managedProfile: string): strin
  * Steampipe reaches it through a managed AWS profile that chains the member role onto the parent's identity, and
  * the connection named after it joins an aggregator that keeps the app's schema name, so every query spans all
  * accounts unchanged (rows carry `account_id`). Names that are only unique per account (log groups, RDS
- * identifiers) can collide across members; inventories keyed by name merge those (a known phase-2 item).
+ * identifiers, cache cluster ids, Lambda functions) are keyed on (account_id, name) in the inventories
+ * (rekeyByAccount in src/db.ts), so two members with the same name are two rows.
  */
 export interface MemberConnection { account_id: string; role_arn: string; regions?: string[]; default_region?: string }
 export const parentConnectionName = (connection: string) => `${connection}_p`;

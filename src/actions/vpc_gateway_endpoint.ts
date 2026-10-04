@@ -10,6 +10,7 @@
  */
 import { CreateVpcEndpointCommand, DeleteVpcEndpointsCommand, DescribeInstancesCommand, DescribeNatGatewaysCommand, DescribeRouteTablesCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client, type RouteTable, type VpcEndpoint } from "@aws-sdk/client-ec2";
 import { approvedRecs, markRecommendationsDone, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { db } from "../db.js";
 
 export const KIND = "vpc_gateway_endpoint" as const;
 export const ACTION_TYPES = ["add_vpc_endpoint"];
@@ -46,7 +47,21 @@ export function pickRouteTables(tables: Pick<RouteTable, "RouteTableId" | "Route
   return { ids, names: chosen.map((t) => ({ id: t.RouteTableId!, name: name(t) })), fallback: !viaNat.length };
 }
 
-interface Target { vpc: string; service: GatewayService; region: string; recs: Rec[]; nat: string | null }
+interface Target { vpc: string; service: GatewayService; region: string; account_id: string | null; recs: Rec[]; nat: string | null }
+
+/**
+ * The member account a recommendation's resource lives in (src/accounts.ts): the row's own stamp, else the NAT gateway,
+ * VPC or instance it names in the network inventories; null = the parent (or unknown, which the parent's read answers for).
+ */
+function accountOf(r: Rec): string | null {
+  if (r.account_id) return r.account_id;
+  const id = r.resource;
+  const q = (sql: string) => { try { return (db.prepare(sql).get(id) as { account_id: string | null } | undefined)?.account_id || null; } catch { return null; } };
+  if (/^nat-/.test(id)) return q("select account_id from inventory_gateway where gateway_id = ?");
+  if (/^vpc-/.test(id)) return q("select account_id from inventory_vpc where vpc_id = ?");
+  if (/^i-/.test(id)) return q("select account_id from inventory_ec2 where instance_id = ?");
+  return null;
+}
 
 async function resolveVpc(ec2: EC2Client, resource: string): Promise<{ vpc: string | null; nat: string | null; why?: string }> {
   switch (resourceKind(resource)) {
@@ -81,12 +96,16 @@ export const vpcGatewayEndpointAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const recs = approvedRecs(ACTION_TYPES);
     if (!recs.length) { notes.push("no approved recommendation to add a gateway endpoint"); return { proposals, notes }; }
-    // Resolve every approved fix to (vpc, service); several fixes for one VPC ride along on one proposal.
+    // Resolve every approved fix to (account, vpc, service); several fixes for one VPC ride along on one proposal.
+    // Per (account, region): a member's VPC is read through its own credentials and the endpoint is created under its actuator role.
     const targets = new Map<string, Target>();
     const byRegion = new Map<string, Rec[]>();
-    for (const r of recs) { const region = String(r.evidence?.region || r.evidence?.alert?.region || creds.region); if (!byRegion.has(region)) byRegion.set(region, []); byRegion.get(region)!.push(r); }
-    for (const [region, list] of byRegion) {
-      const ec2 = new EC2Client({ region, credentials: creds.read });
+    for (const r of recs) { const key = `${accountOf(r) || ""}|${String(r.evidence?.region || r.evidence?.alert?.region || creds.region)}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const acct = creds.forAccount(account || null);
+      const accountId = acct.is_parent ? null : acct.account_id;
+      const ec2 = new EC2Client({ region, credentials: acct.read });
       try {
         for (const r of list) {
           const skip = (why: string) => { notes.push(`#${r.id} ${r.resource}: ${why}`); log(`#${r.id} ${r.resource}: ${why}`); };
@@ -94,13 +113,13 @@ export const vpcGatewayEndpointAction: ActionModule = {
           try { res = await resolveVpc(ec2, r.resource); } catch (e: any) { skip(String(e?.message || e).slice(0, 160)); continue; }
           if (!res.vpc) { skip(res.why || "no VPC"); continue; }
           for (const svc of servicesOf({ title: r.title, evidence: r.evidence, rationale: (r as any).rationale })) {
-            const key = `${region}:${res.vpc}:${svc}`;
+            const key = `${accountId || ""}:${region}:${res.vpc}:${svc}`;
             const t = targets.get(key);
             if (t) { t.recs.push(r); if (!t.nat) t.nat = res.nat; }
-            else targets.set(key, { vpc: res.vpc, service: svc, region, recs: [r], nat: res.nat });
+            else targets.set(key, { vpc: res.vpc, service: svc, region, account_id: accountId, recs: [r], nat: res.nat });
           }
         }
-        for (const t of [...targets.values()].filter((t) => t.region === region)) {
+        for (const t of [...targets.values()].filter((t) => t.region === region && t.account_id === accountId)) {
           const label = `${t.vpc} ${t.service}`;
           const skip = (why: string) => { notes.push(`${label}: ${why}`); log(`${label}: ${why}`); };
           try {
@@ -120,7 +139,7 @@ export const vpcGatewayEndpointAction: ActionModule = {
             const lead = t.recs[0];
             const vpcName = vpc.Tags?.find((x) => x.Key === "Name")?.Value ?? null;
             proposals.push({
-              kind: KIND, resource: t.vpc, resource_name: vpcName ? `${vpcName} (${t.service})` : `${t.vpc} (${t.service})`, region,
+              kind: KIND, resource: t.vpc, resource_name: vpcName ? `${vpcName} (${t.service})` : `${t.vpc} (${t.service})`, region, account_id: t.account_id,
               dedupe: `${KIND}:${region}:${t.vpc}:${t.service}`,
               title: `${vpcName || t.vpc}: gateway endpoint for ${t.service === "s3" ? "S3" : "DynamoDB"} on ${pick.ids.length} route table${pick.ids.length === 1 ? "" : "s"}`,
               reason: `${lead.title}. Approved as recommendation #${lead.id}${lead.decided_by ? ` by ${lead.decided_by}` : ""}${t.recs.length > 1 ? ` (and #${t.recs.slice(1).map((r) => r.id).join(", #")})` : ""}. A gateway endpoint costs nothing and takes ${t.service === "s3" ? "S3" : "DynamoDB"} traffic off the NAT gateway${t.nat ? ` (${t.nat})` : ""}. ${pick.fallback ? "No route table sends 0.0.0.0/0 through a NAT gateway, so it goes on every route table of the VPC." : `It goes on the route table${pick.ids.length === 1 ? "" : "s"} that send 0.0.0.0/0 through a NAT gateway: ${pick.names.map((n) => n.name ? `${n.name} (${n.id})` : n.id).join(", ")}.`} Existing connections are not interrupted; new ones take the endpoint route.`,

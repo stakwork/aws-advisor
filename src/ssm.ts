@@ -5,7 +5,8 @@ import { recordContainerSamples } from "./history.js";
 import { db } from "./db.js";
 import { AWS_RUN_SHELL_SCRIPT, PermissionIssue, explainPermissionError, recordPermissionIssue, remedyFor, usesCustomProbeDocument } from "./permissions.js";
 import { NoSdkCredentials, credentialRemedy } from "./aws_config.js";
-import { S, credentialsMeta, query, sdkCredentials } from "./steampipe.js";
+import { S, credentialsMeta, query } from "./steampipe.js";
+import { accountCredentials } from "./accounts.js";
 import { checkProbeQuota } from "./quota.js";
 import { checkDiskLevels } from "./disk_alerts.js";
 import { applyProbeDisks } from "./ebs_inventory.js";
@@ -382,7 +383,7 @@ function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" |
   return new ProbeError("failed", `${name ? name + ": " : ""}${msg}`);
 }
 
-export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind }
+export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind; /** the member account the instance lives in (src/accounts.ts); default: what the SSM inventory says, else the parent */ accountId?: string | null }
 
 /**
  * Sends one kind's probe to one SSM-managed instance, waits for it, parses and stores the result, and runs the hooks
@@ -395,16 +396,16 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
   if (!/^i-[0-9a-f]{8,17}$/.test(instanceId)) throw new ProbeError("not_managed", `"${instanceId}" is not an EC2 instance id`);
   checkProbeQuota(instanceId);
   // The same identity Steampipe uses (keys, profile or default chain, with the role when one is set), as an SDK provider.
-  let creds: ReturnType<typeof sdkCredentials>;
-  try { creds = sdkCredentials(); }
-  catch (e: any) { throw new ProbeError("no_credentials", `${e instanceof NoSdkCredentials ? e.message : String(e?.message || e)}; the probe uses the credentials saved in Settings.`); }
-
-  const managed = await query<{ ping_status: string; region: string; platform_type: string }>(
-    `select ping_status, region, platform_type from ${S}.aws_ssm_managed_instance where instance_id = ${sqlLit(instanceId)} limit 1`);
+  // A member's instance (src/accounts.ts) is probed through that member's read role: SendCommand must run in its account.
+  const managed = await query<{ ping_status: string; region: string; platform_type: string; account_id: string | null }>(
+    `select ping_status, region, platform_type, account_id from ${S}.aws_ssm_managed_instance where instance_id = ${sqlLit(instanceId)} limit 1`);
   if (!managed.length) throw new ProbeError("not_managed", `${instanceId} is not registered with Systems Manager (no SSM agent, no instance profile, or outside the connection's regions)`);
   const m = managed[0];
   if (m.ping_status !== "Online") throw new ProbeError("not_managed", `${instanceId} is registered with SSM but its agent is ${m.ping_status}`);
   if (m.platform_type && m.platform_type !== "Linux") throw new ProbeError("not_managed", `${instanceId} runs ${m.platform_type}; the probe is Linux-only`);
+  let creds: ReturnType<typeof accountCredentials>;
+  try { creds = accountCredentials(opts.accountId ?? (m.account_id ? String(m.account_id) : null)); }
+  catch (e: any) { throw new ProbeError("no_credentials", `${e instanceof NoSdkCredentials ? e.message : String(e?.message || e)}; the probe uses the credentials saved in Settings.`); }
 
   const client = new SSMClient({ region: m.region || creds.region, credentials: creds.provider });
   const def = PROBE_DEFS[kind];

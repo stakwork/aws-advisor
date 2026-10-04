@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { registerDefaultPrompt } from "./prompts.js";
 import { credentialGate } from "./gate.js";
 import { db } from "./db.js";
+import { accountRank } from "./scope.js";
 import { askJev, jevEnabled } from "./jev.js";
 import { DecisionConcept, listDecisionConcepts, systemPromptFor } from "./concepts.js";
 import { Playbook, controlForRecommendation, playbookFor } from "./playbooks.js";
@@ -41,7 +42,7 @@ const safeJson = (s: unknown) => { if (typeof s !== "string") return s ?? null; 
 
 // ---- context pack ------------------------------------------------------------------------------------------------
 
-export interface RecRow { id: number; rule: string; source: string; title: string; resource: string | null; resource_name: string | null; action_type: string; est_monthly_saving: number | null; tier: Tier; confidence: number | null; rationale: string | null; evidence: string | null; status: string; decision_reason: string | null; decision_scope?: string | null }
+export interface RecRow { id: number; rule: string; source: string; title: string; resource: string | null; resource_name: string | null; action_type: string; est_monthly_saving: number | null; tier: Tier; confidence: number | null; rationale: string | null; evidence: string | null; status: string; decision_reason: string | null; decision_scope?: string | null; /** the member account the resource lives in (src/accounts.ts); null = the parent or unknown */ account_id?: string | null }
 
 export interface ResourceFacts {
   id: string | null;
@@ -67,10 +68,10 @@ export interface ResourceFacts {
   cluster?: { id: string; members: string[]; storage_type: string | null } | null;
 }
 
-const clusterMembers = (cluster: string) => (db.prepare("select db_instance_identifier from inventory_rds where cluster = ? and gone = 0 order by db_instance_identifier").all(cluster) as { db_instance_identifier: string }[]).map((m) => m.db_instance_identifier);
+const clusterMembers = (cluster: string, accountId: string | null | undefined = null) => { const rank = accountRank(accountId); const rows = db.prepare(`select db_instance_identifier, account_id from inventory_rds where cluster = ? and gone = 0 order by ${rank.sql}, db_instance_identifier`).all(cluster, ...rank.params) as { db_instance_identifier: string; account_id: string | null }[]; return rows.filter((m) => (m.account_id ?? "") === (rows[0]?.account_id ?? "")).map((m) => m.db_instance_identifier); };
 
 /** What the inventory, the roles cache and the latest probe know about the recommendation's resource. */
-export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "rule">): ResourceFacts {
+export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "rule" | "account_id">): ResourceFacts {
   const id = shortResourceId(rec.resource);
   const base: ResourceFacts = { id, kind: "other", name: rec.resource_name ?? null, type: null, state: null, region: null, launched: null, monthly_usd: null, cpu_30d: null, ssm_status: null, tags: {}, role: null, top_processes: [], probe_at: null, volumes: [], domains: [], engine: null };
   if (!id) return base;
@@ -89,15 +90,18 @@ export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "
       top_processes: procs, probe_at: probe?.collected_at ?? null, domains: domains("ec2"),
       volumes: ((snap.storage?.volumes || []) as any[]).map((v) => ({ volume_id: v.volume_id, size_gb: v.size != null ? Number(v.size) : null, type: v.volume_type ?? v.type ?? null, device: v.device ?? null })) };
   }
-  const rds = db.prepare("select * from inventory_rds where db_instance_identifier = ?").get(id) as any;
+  // RDS identifiers and cache cluster ids are unique per account only: the recommendation's account first
+  const rank = accountRank(rec.account_id);
+  const rds = db.prepare(`select * from inventory_rds where db_instance_identifier = ? order by ${rank.sql} limit 1`).get(id, ...rank.params) as any;
   if (rds) {
     const snap = safeJson(rds.snapshot) || {};
     return { ...base, kind: "rds", name: id, type: rds.class, state: rds.status, region: rds.region, launched: rds.created, monthly_usd: rds.monthly_usd, cpu_30d: rds.cpu_30d, engine: `${rds.engine} ${rds.engine_version || ""}`.trim(),
       tags: (snap.tags || {}) as Record<string, string>, volumes: rds.storage_gb ? [{ volume_id: "storage", size_gb: rds.storage_gb, type: rds.storage_type, device: null }] : [], domains: domains("rds"),
-      cluster: rds.cluster ? { id: rds.cluster, members: clusterMembers(rds.cluster), storage_type: rds.storage_type } : null, load: loadSummary(latestRdsLoad(id)) };
+      cluster: rds.cluster ? { id: rds.cluster, members: clusterMembers(rds.cluster, rec.account_id), storage_type: rds.storage_type } : null, load: loadSummary(latestRdsLoad(id)) };
   }
   // An Aurora recommendation names the cluster; its facts are the writer's inventory row plus the cluster's load profile.
-  const members = db.prepare("select * from inventory_rds where cluster = ? and gone = 0 order by db_instance_identifier").all(id) as any[];
+  const allMembers = db.prepare(`select * from inventory_rds where cluster = ? and gone = 0 order by ${rank.sql}, db_instance_identifier`).all(id, ...rank.params) as any[];
+  const members = allMembers.filter((m) => (m.account_id ?? "") === (allMembers[0]?.account_id ?? ""));
   if (members.length) {
     const w = members[0];
     const snap = safeJson(w.snapshot) || {};
@@ -108,7 +112,7 @@ export function resourceFacts(rec: Pick<RecRow, "resource" | "resource_name" | "
       volumes: w.storage_gb ? [{ volume_id: "cluster volume", size_gb: w.storage_gb, type: w.storage_type, device: null }] : [],
       cluster: { id, members: members.map((m) => m.db_instance_identifier), storage_type: w.storage_type }, load: loadSummary(latestRdsLoad(id)) };
   }
-  const cache = db.prepare("select * from inventory_elasticache where cache_cluster_id = ?").get(id) as any;
+  const cache = db.prepare(`select * from inventory_elasticache where cache_cluster_id = ? order by ${rank.sql} limit 1`).get(id, ...rank.params) as any;
   if (cache) return { ...base, kind: "elasticache", name: id, type: cache.node_type, state: cache.status, region: cache.region, launched: cache.created, monthly_usd: cache.monthly_usd, engine: `${cache.engine} ${cache.engine_version || ""}`.trim(), domains: domains("elasticache") };
   if (/^arn:aws:lambda:/.test(rec.resource || "") || /lambda/i.test(rec.rule)) return { ...base, kind: "lambda", name: id, region: rec.resource?.split(":")[3] ?? null };
   return base;

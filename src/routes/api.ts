@@ -17,7 +17,7 @@ import { ACCOUNT_TARGET_RE, dismissAccountChange, noteAccountChange, pendingAcco
 import { postRejectionLearning } from "../learnings.js";
 import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
 import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy } from "../permissions.js";
-import { checkPermissions, lastPermissionCheck } from "../permission_check.js";
+import { checkPermissions, lastPermissionCheck, permissionCheckSummary } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
 import { latestWatchSummary, watchOnce } from "../watcher.js";
 import { cronOff } from "../scheduler.js";
@@ -51,7 +51,7 @@ import { confirmRule, deleteRule, listRules, signalKinds, upsertRule } from "../
 import { latestS3Usage, refreshS3Usage, s3UsagePass } from "../s3_usage.js";
 import { ask, createThread } from "../chat.js";
 import { describeError } from "../permissions.js";
-import { accountScope, accountWhere, latestRunIdFor, resourceInScope, rowInScope, stampRowAccounts } from "../scope.js";
+import { accountRank, accountScope, accountWhere, latestRunIdFor, resourceInScope, rowInScope, stampRowAccounts } from "../scope.js";
 
 export const api = Router();
 
@@ -93,15 +93,22 @@ api.get("/jev/calls", (req, res) => {
 // ---- permissions -------------------------------------------------------------
 // Issues seen anywhere in the app (benchmarks, queries, watcher, inventory, probe, MCP tools), the merged policy that
 // fixes them, the last capability check, and the complete read-only policy the advisor recommends.
-api.get("/permissions", (_req, res) => {
+// ?account=<12 digits> reads a member's last check and the policy with its id (src/accounts.ts); default: the parent. `accounts`
+// is one line per account (the parent first) with its last check, for the card's account picker.
+api.get("/permissions", (req, res) => {
   const issues = listPermissionIssues();
-  const last = lastPermissionCheck();
+  const accountId = typeof req.query.account === "string" && /^\d{12}$/.test(req.query.account) ? req.query.account : null;
+  const last = lastPermissionCheck(accountId);
+  let accounts: ReturnType<typeof permissionCheckSummary> = [];
+  try { accounts = permissionCheckSummary(); } catch { /* no credentials yet */ }
   res.json({
     issues,
     policy: policyForIssues(issues),
     checked_at: last?.checked_at ?? null,
     last_check: last,
-    recommended_policy: recommendedPolicy(credentialsMeta()?.accountId || "*"),
+    account_id: accountId || credentialsMeta()?.accountId || null,
+    accounts,
+    recommended_policy: recommendedPolicy(accountId || credentialsMeta()?.accountId || "*"),
     probe_document: probeDocumentInfo(), probe_documents: probeDocumentsInfo(),
   });
 });
@@ -115,12 +122,15 @@ api.delete("/permissions/issues/:action", (req, res) => {
   res.json({ ok: true, issues: listPermissionIssues() });
 });
 
+// body.account_id (12 digits) checks a registered member through its read role and its own Steampipe connection; default: the parent.
 api.post("/permissions/check", async (req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
   const instanceId = typeof req.body?.instance_id === "string" && req.body.instance_id.trim() ? req.body.instance_id.trim() : undefined;
   if (instanceId && !/^i-[0-9a-f]{8,17}$/.test(instanceId)) return res.status(400).json({ error: `"${instanceId}" is not an EC2 instance id` });
-  try { res.json(await checkPermissions({ instanceId })); }
-  catch (e: any) { res.status(502).json({ error: e.message }); }
+  const accountId = typeof req.body?.account_id === "string" && req.body.account_id.trim() ? req.body.account_id.trim() : null;
+  if (accountId && !/^\d{12}$/.test(accountId)) return res.status(400).json({ error: `"${accountId}" is not a 12-digit AWS account id` });
+  try { res.json(await checkPermissions({ instanceId, accountId })); }
+  catch (e: any) { res.status(/not a registered/.test(String(e?.message)) ? 400 : 502).json({ error: e.message }); }
 });
 
 // The host probe's SSM document, for compatibility; every kind is at GET /api/probes/:kind/document (src/routes/probes.ts).
@@ -553,10 +563,12 @@ api.get("/instances/:id/logs", (req, res) => {
   const id = String(req.params.id);
   const latest = latestProbe(id);
   const shipping: { group: string; via: string; source: string | null }[] = Array.isArray(latest?.data?.log_shipping) ? latest!.data.log_shipping.filter((s: any) => s && typeof s.group === "string").map((s: any) => ({ group: String(s.group), via: String(s.via || "unknown"), source: s.source == null ? null : String(s.source) })) : [];
-  const groupRow = db.prepare("select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days, last_seen from log_groups where name = ?");
+  // log group names are unique per account only: the group in the instance's own account first
+  const rank = accountRank((db.prepare("select account_id from inventory_ec2 where instance_id = ?").get(id) as { account_id: string | null } | undefined)?.account_id);
+  const groupRow = db.prepare(`select name, region, retention_days, stored_bytes, ingest_bytes_day, ingest_days, last_seen from log_groups where name = ? order by ${rank.sql} limit 1`);
   const seen = new Set<string>();
   const groups = shipping.filter((s) => { const k = `${s.group}|${s.via}`; if (seen.has(k)) return false; seen.add(k); return true; }).map((s) => {
-    const g = groupRow.get(s.group) as any;
+    const g = groupRow.get(s.group, ...rank.params) as any;
     return { ...s, known: Boolean(g), region: g?.region ?? null, retention_days: g?.retention_days ?? null, stored_gb: g?.stored_bytes != null ? Math.round((g.stored_bytes / 1e9) * 100) / 100 : null, ingest_gb_day: g?.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 1000) / 1000 : null, ingest_usd_month: g?.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30.4 * 0.5 * 100) / 100 : null, storage_usd_month: g?.stored_bytes != null ? Math.round((g.stored_bytes / 1e9) * 0.03 * 100) / 100 : null, last_seen: g?.last_seen ?? null };
   });
   res.json({ instance_id: id, probed_at: latest?.collected_at ?? null, probe_has_section: Array.isArray(latest?.data?.log_shipping), groups });

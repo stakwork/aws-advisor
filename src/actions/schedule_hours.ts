@@ -22,6 +22,7 @@ import { DescribeAddressesCommand, DescribeInstancesCommand, EC2Client, StartIns
 import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient, type DescribeDBClustersCommandOutput, type DescribeDBInstancesCommandOutput, StartDBClusterCommand, StartDBInstanceCommand, StopDBClusterCommand, StopDBInstanceCommand, type DBCluster, type DBInstance } from "@aws-sdk/client-rds";
 import { ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand, Route53Client, type Change, type ResourceRecordSet } from "@aws-sdk/client-route-53";
 import { db } from "../db.js";
+import { accountRank } from "../scope.js";
 import { stillLanding, type ActionModule, type Creds, type Proposal } from "../executor.js";
 import { normalDns, type DnsGrant } from "../autopark_grant.js";
 import { config } from "../config.js";
@@ -427,7 +428,9 @@ export const scheduleHoursAction: ActionModule = {
         const clusters: DBCluster[] = [];
         marker = undefined;
         do { const r: DescribeDBClustersCommandOutput = await rds.send(new DescribeDBClustersCommand({ Marker: marker })); clusters.push(...(r.DBClusters ?? [])); marker = r.Marker; } while (marker);
-        const monthly = (id: string) => (db.prepare("select monthly_usd from inventory_rds where db_instance_identifier = ?").get(id) as { monthly_usd: number | null } | undefined)?.monthly_usd ?? null;
+        // identifiers are unique per account only: this account's row first
+        const rank = accountRank(account || null);
+        const monthly = (id: string) => (db.prepare(`select monthly_usd from inventory_rds where db_instance_identifier = ? order by ${rank.sql} limit 1`).get(id, ...rank.params) as { monthly_usd: number | null } | undefined)?.monthly_usd ?? null;
         for (const i of instances) {
           const tag = tagOf(i.TagList, SCHEDULE_TAG); if (tag == null) continue;
           const id = i.DBInstanceIdentifier!;

@@ -12,16 +12,18 @@ export function PermissionsCard() {
   const [check, setCheck] = useState<any>(null);
   const [checking, setChecking] = useState(false);
   const [instanceId, setInstanceId] = useState("");
+  // which account the check runs for: "" is the parent, else a member's id (src/accounts.ts); each keeps its own last result
+  const [account, setAccount] = useState("");
   const [err, setErr] = useState("");
   const [showFull, setShowFull] = useState(false);
 
-  const load = () => api("/permissions").then((d) => { setP(d); if (d.last_check) setCheck(d.last_check); }).catch((e) => setErr(e.message));
-  useEffect(() => { load(); }, []);
+  const load = (acct = account) => api(`/permissions${acct ? `?account=${acct}` : ""}`).then((d) => { setP(d); setCheck(d.last_check || null); }).catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, [account]);
 
   const dismiss = async (action: string) => { try { await api(`/permissions/issues/${encodeURIComponent(action)}`, { method: "DELETE" }); load(); } catch { /* shown on the next load */ } };
   const run = async () => {
     setChecking(true); setErr("");
-    try { setCheck(await api("/permissions/check", { method: "POST", body: JSON.stringify({ instance_id: instanceId.trim() || undefined }) })); load(); }
+    try { setCheck(await api("/permissions/check", { method: "POST", body: JSON.stringify({ instance_id: instanceId.trim() || undefined, account_id: account || undefined }) })); load(); }
     catch (e: any) { setErr(e.message); }
     finally { setChecking(false); }
   };
@@ -56,9 +58,16 @@ export function PermissionsCard() {
       </div>
 
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <Button type="button" onClick={run} disabled={checking}>{checking ? "Checking…" : "Check permissions"}</Button>
+        {(p.accounts || []).length > 1 && (
+          <select className="text-sm" value={account} onChange={(e) => setAccount(e.target.value)} title="which account to check: the parent through its own credentials, a member through its read role and its own Steampipe connection">
+            {(p.accounts || []).map((a: any) => (
+              <option key={a.account_id} value={a.is_parent ? "" : a.account_id}>{a.is_parent ? `parent ${a.account_id}` : `${a.name} ${a.account_id}`}{a.checked_at ? ` · ${a.missing} missing, ${a.errors} errors` : " · not checked yet"}</option>
+            ))}
+          </select>
+        )}
+        <Button type="button" onClick={run} disabled={checking}>{checking ? "Checking…" : `Check permissions${account ? " of this member" : ""}`}</Button>
         <input className="w-64" placeholder="instance id for a real probe (optional)" value={instanceId} onChange={(e) => setInstanceId(e.target.value)} />
-        {check && <span className="text-xs text-zinc-500">last check {when(check.checked_at)} · account {check.account_id || "?"} · region {check.region} · {counts.ok || 0} ok, {counts.missing || 0} missing, {counts.error || 0} errors, {counts.skipped || 0} skipped · {check.took_ms} ms</span>}
+        {check && <span className="text-xs text-zinc-500">last check {when(check.checked_at)} · {check.target && !check.target.is_parent ? `member ${check.target.name} · ` : ""}account {check.account_id || "?"}{check.target?.schema ? ` via ${check.target.schema}` : ""} · region {check.region} · {counts.ok || 0} ok, {counts.missing || 0} missing, {counts.error || 0} errors, {counts.skipped || 0} skipped · {check.took_ms} ms</span>}
       </div>
       {err && <div className="mb-2 text-sm text-red-300">{err}</div>}
       {check?.credentials_error && <div className="mb-2 text-sm text-amber-300">{check.credentials_error}</div>}

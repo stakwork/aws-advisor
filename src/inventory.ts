@@ -162,25 +162,28 @@ export function markGone(table: "inventory_ec2" | "inventory_rds" | "inventory_e
   return db.prepare(`update ${table} set gone = 1 where last_seen <> ? and coalesce(account_id, '') in (${list.map(() => "?").join(",")})`).run(now, ...list).changes;
 }
 const primaryAccountIdOf = (): string | null => { try { return credentialsMeta()?.accountId ?? null; } catch { return null; } };
-// Member accounts (src/accounts.ts): which account a row came from, written next to the upsert so the prepared statements above stay as they are.
-const setAccount = { ec2: db.prepare("update inventory_ec2 set account_id = ? where instance_id = ?"), rds: db.prepare("update inventory_rds set account_id = ? where db_instance_identifier = ?"), elasticache: db.prepare("update inventory_elasticache set account_id = ? where cache_cluster_id = ?") };
+// Member accounts (src/accounts.ts): which account a row came from. Instance ids are unique everywhere, so EC2 keeps its
+// id key and the account is written next to the upsert; RDS identifiers and cache cluster ids are unique per account
+// only, so those tables are keyed on (account_id, id) (rekeyByAccount in src/db.ts) and the account is part of the upsert.
+const setAccount = { ec2: db.prepare("update inventory_ec2 set account_id = ? where instance_id = ?") };
+const accountOf = (r: { account_id?: unknown }): string => (r.account_id ? String(r.account_id) : "");
 
 const upsertRds = db.prepare(`
-  insert into inventory_rds(db_instance_identifier, class, engine, engine_version, multi_az, storage_type, storage_gb, status, region, created, cluster,
+  insert into inventory_rds(account_id, db_instance_identifier, class, engine, engine_version, multi_az, storage_type, storage_gb, status, region, created, cluster,
     cpu_30d, cpu_days, monthly_usd, open_recs, findings, first_seen, last_seen, gone, snapshot)
-  values (@db_instance_identifier, @class, @engine, @engine_version, @multi_az, @storage_type, @storage_gb, @status, @region, @created, @cluster,
+  values (@account_id, @db_instance_identifier, @class, @engine, @engine_version, @multi_az, @storage_type, @storage_gb, @status, @region, @created, @cluster,
     @cpu_30d, @cpu_days, @monthly_usd, @open_recs, @findings, @now, @now, 0, @snapshot)
-  on conflict(db_instance_identifier) do update set class = excluded.class, engine = excluded.engine, engine_version = excluded.engine_version,
+  on conflict(account_id, db_instance_identifier) do update set class = excluded.class, engine = excluded.engine, engine_version = excluded.engine_version,
     multi_az = excluded.multi_az, storage_type = excluded.storage_type, storage_gb = excluded.storage_gb, status = excluded.status, region = excluded.region,
     created = excluded.created, cluster = excluded.cluster, cpu_30d = excluded.cpu_30d, cpu_days = excluded.cpu_days, monthly_usd = excluded.monthly_usd,
     open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0, snapshot = excluded.snapshot`);
 
 const upsertElasticache = db.prepare(`
-  insert into inventory_elasticache(cache_cluster_id, node_type, engine, engine_version, num_nodes, status, region, created, replication_group,
+  insert into inventory_elasticache(account_id, cache_cluster_id, node_type, engine, engine_version, num_nodes, status, region, created, replication_group,
     monthly_usd, open_recs, findings, first_seen, last_seen, gone, snapshot)
-  values (@cache_cluster_id, @node_type, @engine, @engine_version, @num_nodes, @status, @region, @created, @replication_group,
+  values (@account_id, @cache_cluster_id, @node_type, @engine, @engine_version, @num_nodes, @status, @region, @created, @replication_group,
     @monthly_usd, @open_recs, @findings, @now, @now, 0, @snapshot)
-  on conflict(cache_cluster_id) do update set node_type = excluded.node_type, engine = excluded.engine, engine_version = excluded.engine_version,
+  on conflict(account_id, cache_cluster_id) do update set node_type = excluded.node_type, engine = excluded.engine, engine_version = excluded.engine_version,
     num_nodes = excluded.num_nodes, status = excluded.status, region = excluded.region, created = excluded.created, replication_group = excluded.replication_group,
     monthly_usd = excluded.monthly_usd, open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0, snapshot = excluded.snapshot`);
 
@@ -361,12 +364,11 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
           price: price ? { hourly: price.hourly, monthly: price.monthly, pricing_engine: want!.engine, fetched_at: price.fetched_at } : null,
         };
         upsertRds.run({
-          db_instance_identifier: id, class: r.class, engine: r.engine, engine_version: r.engine_version, multi_az: r.multi_az ? 1 : 0, storage_type: r.storage_type,
+          account_id: accountOf(r), db_instance_identifier: id, class: r.class, engine: r.engine, engine_version: r.engine_version, multi_az: r.multi_az ? 1 : 0, storage_type: r.storage_type,
           storage_gb: num(r.allocated_storage), status: r.status, region: r.region, created: iso(r.create_time), cluster: r.db_cluster_identifier || null,
           cpu_30d: num(cpu?.avg_max), cpu_days: num(cpu?.days) ?? 0, monthly_usd: price?.monthly ?? null,
           open_recs: counters.recs(id), findings: counters.findings(id), now, snapshot: JSON.stringify(snapshot),
         });
-        if (r.account_id) setAccount.rds.run(String(r.account_id), id);
         rds++;
       }
       markGone("inventory_rds", now, rdsRows, (l) => console.log(`[inventory] ${l}`));
@@ -390,11 +392,10 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
           price: price ? { hourly_per_node: price.hourly, monthly_per_node: price.monthly, monthly: monthly, pricing_engine: want!.engine, fetched_at: price.fetched_at } : null,
         };
         upsertElasticache.run({
-          cache_cluster_id: id, node_type: r.cache_node_type, engine: r.engine, engine_version: r.engine_version, num_nodes: nodes, status: r.cache_cluster_status,
+          account_id: accountOf(r), cache_cluster_id: id, node_type: r.cache_node_type, engine: r.engine, engine_version: r.engine_version, num_nodes: nodes, status: r.cache_cluster_status,
           region: r.region, created: iso(r.cache_cluster_create_time), replication_group: r.replication_group_id || null, monthly_usd: monthly,
           open_recs: counters.recs(id), findings: counters.findings(id), now, snapshot: JSON.stringify(snapshot),
         });
-        if (r.account_id) setAccount.elasticache.run(String(r.account_id), id);
         elasticache++;
       }
       markGone("inventory_elasticache", now, cacheRows, (l) => console.log(`[inventory] ${l}`));

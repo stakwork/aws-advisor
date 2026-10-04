@@ -8,6 +8,7 @@
  * because the rationale also names what the agent ruled out.
  */
 import { db } from "./db.js";
+import { accountRank } from "./scope.js";
 import { shortResourceId } from "./paging.js";
 
 export type Kind = "ec2" | "rds" | "elasticache" | "lambda" | "elb" | "ebs" | "s3" | "snapshot" | "eip" | "vpc" | "nat" | "log-group" | "other";
@@ -76,16 +77,21 @@ export function namesInText(text: string, names: Iterable<string>): string[] {
 
 interface Hit { kind: Kind; id: string; name: string | null }
 
-/** The inventory row an id or a name points at, if any: each tab's identifier, plus EC2 names and RDS / ElastiCache group names. */
-function lookup(idOrName: string): Hit | null {
+/**
+ * The inventory row an id or a name points at, if any: each tab's identifier, plus EC2 names and RDS / ElastiCache group
+ * names. RDS identifiers, cache cluster ids and function names are unique per account only, so the row of `accountId`
+ * (the recommendation's) comes first when two members share a name.
+ */
+function lookup(idOrName: string, accountId: string | null | undefined): Hit | null {
   const q = <T>(sql: string, ...p: unknown[]) => { try { return db.prepare(sql).get(...p) as T | undefined; } catch { return undefined; } };
-  const ec2 = q<{ instance_id: string; name: string | null }>("select instance_id, name from inventory_ec2 where instance_id = ? or name = ? order by case when instance_id = ? then 0 else 1 end, last_seen desc", idOrName, idOrName, idOrName);
+  const rank = accountRank(accountId);
+  const ec2 = q<{ instance_id: string; name: string | null }>(`select instance_id, name from inventory_ec2 where instance_id = ? or name = ? order by case when instance_id = ? then 0 else 1 end, ${rank.sql}, last_seen desc`, idOrName, idOrName, idOrName, ...rank.params);
   if (ec2) return { kind: "ec2", id: ec2.instance_id, name: ec2.name };
-  const rds = q<{ db_instance_identifier: string; cluster: string | null }>("select db_instance_identifier, cluster from inventory_rds where db_instance_identifier = ? or cluster = ? order by case when db_instance_identifier = ? then 0 else 1 end", idOrName, idOrName, idOrName);
+  const rds = q<{ db_instance_identifier: string; cluster: string | null }>(`select db_instance_identifier, cluster from inventory_rds where db_instance_identifier = ? or cluster = ? order by case when db_instance_identifier = ? then 0 else 1 end, ${rank.sql}`, idOrName, idOrName, idOrName, ...rank.params);
   if (rds) return { kind: "rds", id: rds.db_instance_identifier, name: rds.cluster && rds.cluster === idOrName ? `${idOrName} (cluster)` : null };
-  const ec = q<{ cache_cluster_id: string }>("select cache_cluster_id from inventory_elasticache where cache_cluster_id = ? or replication_group = ? order by case when cache_cluster_id = ? then 0 else 1 end", idOrName, idOrName, idOrName);
+  const ec = q<{ cache_cluster_id: string }>(`select cache_cluster_id from inventory_elasticache where cache_cluster_id = ? or replication_group = ? order by case when cache_cluster_id = ? then 0 else 1 end, ${rank.sql}`, idOrName, idOrName, idOrName, ...rank.params);
   if (ec) return { kind: "elasticache", id: ec.cache_cluster_id, name: null };
-  const fn = q<{ name: string }>("select name from inventory_lambda where name = ? or arn = ?", idOrName, idOrName);
+  const fn = q<{ name: string }>(`select name from inventory_lambda where name = ? or arn = ? order by ${rank.sql}`, idOrName, idOrName, ...rank.params);
   if (fn) return { kind: "lambda", id: fn.name, name: null };
   const vol = q<{ volume_id: string; name: string | null }>("select volume_id, name from inventory_ebs where volume_id = ?", idOrName);
   if (vol) return { kind: "ebs", id: vol.volume_id, name: vol.name };
@@ -96,9 +102,9 @@ function lookup(idOrName: string): Hit | null {
   return null;
 }
 
-function resolve(rawId: string, name: string | null): AffectedResource {
+function resolve(rawId: string, name: string | null, accountId: string | null | undefined): AffectedResource {
   const short = shortResourceId(rawId) || rawId;
-  const hit = lookup(short) || (name ? lookup(name) : null);
+  const hit = lookup(short, accountId) || (name ? lookup(name, accountId) : null);
   const kind = hit?.kind ?? kindOfId(rawId) ?? "other";
   return { id: hit?.id ?? short, name: hit?.name ?? name, kind, tab: TAB_FOR[kind] ?? null, found: Boolean(hit) };
 }
@@ -113,15 +119,15 @@ function inventoryNames(): string[] {
  * `resources`: the resource column, one entry per id, resolved against the inventory. `mentioned`: ids and
  * inventory names that appear in the title or rationale but not in the resource column, resolved the same way.
  */
-export function affectedResources(rec: { resource: string | null; resource_name: string | null; title: string | null; rationale: string | null }): { resources: AffectedResource[]; mentioned: AffectedResource[] } {
-  const resources = splitResourceList(rec.resource, rec.resource_name).map((r) => resolve(r.id, r.name));
+export function affectedResources(rec: { resource: string | null; resource_name: string | null; title: string | null; rationale: string | null; account_id?: string | null }): { resources: AffectedResource[]; mentioned: AffectedResource[] } {
+  const resources = splitResourceList(rec.resource, rec.resource_name).map((r) => resolve(r.id, r.name, rec.account_id));
   const seen = new Set<string>();
   for (const r of resources) { seen.add(r.id); if (r.name) seen.add(r.name); }
   const text = `${rec.title || ""}\n${rec.rationale || ""}`;
   const mentioned: AffectedResource[] = [];
   for (const m of [...idsInText(text), ...namesInText(text, inventoryNames())]) {
     if (seen.has(m)) continue;
-    const r = resolve(m, null);
+    const r = resolve(m, null, rec.account_id);
     if (seen.has(r.id) || (r.name && seen.has(r.name))) continue;
     seen.add(r.id); if (r.name) seen.add(r.name);
     mentioned.push(r);

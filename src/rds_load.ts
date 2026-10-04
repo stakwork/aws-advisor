@@ -3,7 +3,8 @@ import { DescribeDBClustersCommand, DescribeDBInstancesCommand, DescribeDBLogFil
 import { DescribeDimensionKeysCommand, PIClient } from "@aws-sdk/client-pi";
 import { choice, noul } from "@typesafe-ai/sdk";
 import { db } from "./db.js";
-import { sdkCredentials } from "./steampipe.js";
+import { accountCredentials } from "./accounts.js";
+import { accountRank } from "./scope.js";
 import { askJev, jevEnabled } from "./jev.js";
 import { describeError } from "./permissions.js";
 import { config } from "./config.js";
@@ -34,6 +35,8 @@ export interface LoadTarget {
   kind: "cluster" | "instance";
   id: string;
   region: string;
+  /** The member account the database lives in (src/accounts.ts); null = the parent. Every AWS call for the target runs under it. */
+  account_id?: string | null;
   engine: string | null;
   engine_version: string | null;
   storage_type: string | null;
@@ -285,15 +288,20 @@ export function buildProfile(target: LoadTarget, series: Record<string, Series>,
 
 // ---- AWS ------------------------------------------------------------------------------------------------------
 
-const clients = () => {
-  const creds = sdkCredentials();
+/** The AWS clients for one account: the parent's credentials, or the member's read role assumed from them (src/accounts.ts). */
+const clients = (accountId: string | null | undefined = null) => {
+  const creds = accountCredentials(accountId);
   return { creds, rds: (region: string) => new RDSClient({ region, credentials: creds.provider }), cw: (region: string) => new CloudWatchClient({ region, credentials: creds.provider }), pi: (region: string) => new PIClient({ region, credentials: creds.provider }) };
 };
 
 /** Which database the id names: the cluster or instance in the inventory first (its region), then RDS itself for the live configuration. */
-export async function resolveTarget(id: string, opts: { region?: string } = {}): Promise<LoadTarget> {
-  const inv = db.prepare("select db_instance_identifier, region, engine, engine_version, class, cluster, storage_type, snapshot from inventory_rds where db_instance_identifier = ? or cluster = ? order by db_instance_identifier").all(id, id) as any[];
-  const c = clients();
+export async function resolveTarget(id: string, opts: { region?: string; accountId?: string | null } = {}): Promise<LoadTarget> {
+  // identifiers are unique per account only: the asked-for account's rows first, else whichever account has the name
+  const rank = accountRank(opts.accountId);
+  const all = db.prepare(`select db_instance_identifier, region, engine, engine_version, class, cluster, storage_type, snapshot, account_id from inventory_rds where db_instance_identifier = ? or cluster = ? order by ${rank.sql}, db_instance_identifier`).all(id, id, ...rank.params) as any[];
+  const inv = all.filter((r) => (r.account_id ?? "") === (all[0]?.account_id ?? ""));
+  const accountId = opts.accountId || inv[0]?.account_id || null;
+  const c = clients(accountId);
   const region = opts.region || inv[0]?.region || c.creds.region;
   const rds = c.rds(region);
   const clusterFirst = !inv.length || inv.some((r) => r.cluster === id) || !inv.some((r) => r.db_instance_identifier === id);
@@ -310,7 +318,7 @@ export async function resolveTarget(id: string, opts: { region?: string } = {}):
         const w = writer ? await instanceInfo(writer).catch(() => null) : null;
         const sv2 = cl.ServerlessV2ScalingConfiguration;
         return {
-          kind: "cluster", id, region, engine: cl.Engine ?? null, engine_version: cl.EngineVersion ?? null, storage_type: cl.StorageType ?? "aurora",
+          kind: "cluster", id, region, account_id: accountId, engine: cl.Engine ?? null, engine_version: cl.EngineVersion ?? null, storage_type: cl.StorageType ?? "aurora",
           serverless: Boolean(sv2) || w?.DBInstanceClass === "db.serverless", configured_min_acu: sv2?.MinCapacity ?? null, configured_max_acu: sv2?.MaxCapacity ?? null,
           instance_class: w?.DBInstanceClass ?? null, members: cl.DBClusterMembers?.length ?? 0, writer, dbi_resource_id: w?.DbiResourceId ?? null, performance_insights: Boolean(w?.PerformanceInsightsEnabled),
         };
@@ -322,7 +330,7 @@ export async function resolveTarget(id: string, opts: { region?: string } = {}):
   const inst = await instanceInfo(id);
   if (!inst) throw Object.assign(new Error(`no RDS cluster or instance named ${id} in ${region}`), { code: "not_found" });
   return {
-    kind: "instance", id, region, engine: inst.Engine ?? null, engine_version: inst.EngineVersion ?? null, storage_type: inst.StorageType ?? null,
+    kind: "instance", id, region, account_id: accountId, engine: inst.Engine ?? null, engine_version: inst.EngineVersion ?? null, storage_type: inst.StorageType ?? null,
     serverless: inst.DBInstanceClass === "db.serverless", configured_min_acu: null, configured_max_acu: null, instance_class: inst.DBInstanceClass ?? null, members: 1,
     writer: id, dbi_resource_id: inst.DbiResourceId ?? null, performance_insights: Boolean(inst.PerformanceInsightsEnabled),
   };
@@ -351,7 +359,7 @@ function specsFor(t: LoadTarget): Spec[] {
 
 /** One GetMetricData for every series (paginated), keyed by spec key, ascending in time. */
 export async function fetchSeries(t: LoadTarget, now = Date.now()): Promise<Record<string, Series>> {
-  const cw = clients().cw(t.region);
+  const cw = clients(t.account_id).cw(t.region);
   const specs = specsFor(t);
   const dim = t.kind === "cluster" ? { Name: "DBClusterIdentifier", Value: t.id } : { Name: "DBInstanceIdentifier", Value: t.id };
   const maxDays = Math.max(...specs.map((s) => s.days));
@@ -381,7 +389,7 @@ export async function topStatements(t: LoadTarget, now = Date.now()): Promise<St
   const base = { enabled: t.performance_insights, window_days: STATEMENT_WINDOW_DAYS, statements: [] as StatementsResult["statements"] };
   if (!t.performance_insights || !t.dbi_resource_id) return { ...base, note: `Performance Insights is off on ${t.writer || t.id}: enable it (7 days of retention are free) to see which statements make the load` };
   try {
-    const pi = clients().pi(t.region);
+    const pi = clients(t.account_id).pi(t.region);
     const r = await pi.send(new DescribeDimensionKeysCommand({
       ServiceType: "RDS", Identifier: t.dbi_resource_id, StartTime: new Date(now - STATEMENT_WINDOW_DAYS * 86400000), EndTime: new Date(now),
       Metric: "db.load.avg", PeriodInSeconds: 3600, GroupBy: { Group: "db.sql_tokenized", Dimensions: ["db.sql_tokenized.statement"], Limit: 10 },
@@ -425,7 +433,7 @@ export async function slowLog(t: LoadTarget): Promise<SlowLogResult> {
   const empty: SlowLogResult = { files: [], lines_scanned: 0, duration_lines: 0, temp_file_lines: 0, checkpoint_lines: 0, statements: [] };
   const instance = t.writer || t.id;
   try {
-    const rds = clients().rds(t.region);
+    const rds = clients(t.account_id).rds(t.region);
     const list = await rds.send(new DescribeDBLogFilesCommand({ DBInstanceIdentifier: instance }));
     const files = (list.DescribeDBLogFiles ?? []).filter((f) => f.LogFileName && (f.Size ?? 0) > 0 && !/audit/i.test(f.LogFileName)).sort((a, b) => (b.LastWritten ?? 0) - (a.LastWritten ?? 0)).slice(0, 2);
     if (!files.length) return { ...empty, note: `no log files on ${instance}` };
@@ -518,9 +526,9 @@ export const JEV_REUSE_HOURS = 24;
  * resolved or CloudWatch fails. jev "auto" (the hourly pass) reuses the previous classification while the
  * profile hash is unchanged and the answer is under a day old; true always asks; false never does.
  */
-export async function refreshRdsLoad(id: string, opts: { region?: string; onLog?: (l: string) => void; jev?: boolean | "auto" } = {}): Promise<RdsLoadRow> {
+export async function refreshRdsLoad(id: string, opts: { region?: string; accountId?: string | null; onLog?: (l: string) => void; jev?: boolean | "auto" } = {}): Promise<RdsLoadRow> {
   const log = opts.onLog || (() => {});
-  const target = await resolveTarget(id, { region: opts.region });
+  const target = await resolveTarget(id, { region: opts.region, accountId: opts.accountId });
   const series = await fetchSeries(target);
   const profile = buildProfile(target, series);
   const [statements, slow] = await Promise.all([topStatements(target), slowLog(target)]);
@@ -572,13 +580,14 @@ export type RdsLoadSummary = NonNullable<ReturnType<typeof loadSummary>>;
 export interface RdsLoadPassResult { candidates: number; refreshed: string[]; skipped: number; failed: { id: string; message: string }[]; took_ms: number }
 
 /** Every database the inventory knows (a cluster once, standalone instances by id), skipping those profiled within the probe interval. */
-export function rdsLoadTargets(minIntervalHours = config.probeMinIntervalHours): { id: string; region: string }[] {
-  const rows = db.prepare("select db_instance_identifier, cluster, region from inventory_rds where gone = 0 order by cluster, db_instance_identifier").all() as { db_instance_identifier: string; cluster: string | null; region: string }[];
-  const seen = new Map<string, string>();
-  for (const r of rows) { const id = r.cluster || r.db_instance_identifier; if (!seen.has(id)) seen.set(id, r.region); }
+export function rdsLoadTargets(minIntervalHours = config.probeMinIntervalHours): { id: string; region: string; account_id: string | null }[] {
+  const rows = db.prepare("select db_instance_identifier, cluster, region, account_id from inventory_rds where gone = 0 order by cluster, db_instance_identifier").all() as { db_instance_identifier: string; cluster: string | null; region: string; account_id: string | null }[];
+  // one target per (account, cluster or instance): identifiers are unique per account only
+  const seen = new Map<string, { id: string; region: string; account_id: string | null }>();
+  for (const r of rows) { const id = r.cluster || r.db_instance_identifier; const key = `${r.account_id || ""}|${id}`; if (!seen.has(key)) seen.set(key, { id, region: r.region, account_id: r.account_id || null }); }
   const windowMin = Math.max(1, Math.round(minIntervalHours * 60) - 5);
   const fresh = db.prepare("select 1 from rds_load_profiles where target_id = ? and datetime(collected_at) > datetime('now', ?) limit 1");
-  return [...seen.entries()].filter(([id]) => !fresh.get(id, `-${windowMin} minutes`)).map(([id, region]) => ({ id, region }));
+  return [...seen.values()].filter((t) => !fresh.get(t.id, `-${windowMin} minutes`));
 }
 
 let passInFlight: Promise<RdsLoadPassResult> | null = null;
@@ -597,7 +606,7 @@ export function rdsLoadPass(limit = 50): Promise<RdsLoadPassResult> {
     const queue = [...targets];
     const worker = async () => {
       for (let t = queue.shift(); t; t = queue.shift()) {
-        try { await refreshRdsLoad(t.id, { region: t.region, jev: "auto", onLog: (l) => console.log(`[rds-load] ${l}`) }); result.refreshed.push(t.id); }
+        try { await refreshRdsLoad(t.id, { region: t.region, accountId: t.account_id, jev: "auto", onLog: (l) => console.log(`[rds-load] ${l}`) }); result.refreshed.push(t.id); }
         catch (e: any) {
           const message = describeError(e, `rds load ${t.id} (cloudwatch:GetMetricData, rds:DescribeDBClusters)`, 200);
           result.failed.push({ id: t.id, message });

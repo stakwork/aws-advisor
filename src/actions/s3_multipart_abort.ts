@@ -64,7 +64,7 @@ async function handsOff(s3: S3Client, bucket: string): Promise<boolean> {
 
 const isRedirect = (e: any) => /PermanentRedirect|AuthorizationHeaderMalformed|301/i.test(String(e?.name || e?.message || e?.$metadata?.httpStatusCode));
 
-async function bucketRegion(creds: Creds, bucket: string): Promise<string> {
+async function bucketRegion(creds: Pick<Creds, "region" | "read">, bucket: string): Promise<string> {
   const s3 = new S3Client({ region: creds.region, credentials: creds.read });
   try { return (await s3.send(new GetBucketLocationCommand({ Bucket: bucket }))).LocationConstraint || "us-east-1"; }
   finally { s3.destroy(); }
@@ -85,19 +85,21 @@ export const s3MultipartAbortAction: ActionModule = {
   async plan(creds, log) {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const days = Math.max(1, Math.round(config.actMultipartDays));
-    const rows = db.prepare("select name, region, total_gb from inventory_s3 where gone = 0 order by coalesce(total_gb, 0) desc").all() as { name: string; region: string | null; total_gb: number | null }[];
+    const rows = db.prepare("select name, region, total_gb, account_id from inventory_s3 where gone = 0 order by coalesce(total_gb, 0) desc").all() as { name: string; region: string | null; total_gb: number | null; account_id: string | null }[];
     if (!rows.length) { notes.push("no bucket in the inventory"); return { proposals, notes }; }
     let covered = 0;
     for (const b of rows.slice(0, MAX_PER_PLAN)) {
       const skip = (why: string) => { notes.push(`${b.name}: ${why}`); log(`${b.name}: ${why}`); };
-      let region = b.region || creds.region;
-      let s3 = new S3Client({ region, credentials: creds.read });
+      // the bucket's own account (src/accounts.ts): a member's bucket is read, and later changed, through its roles
+      const acct = creds.forAccount(b.account_id || null);
+      let region = b.region || acct.region;
+      let s3 = new S3Client({ region, credentials: acct.read });
       try {
         let cur: { rules: LifecycleRule[]; had: boolean };
         try { cur = await currentRules(s3, b.name); }
         catch (e: any) {
           if (!isRedirect(e)) throw e;
-          s3.destroy(); region = await bucketRegion(creds, b.name); s3 = new S3Client({ region, credentials: creds.read });
+          s3.destroy(); region = await bucketRegion(acct, b.name); s3 = new S3Client({ region, credentials: acct.read });
           cur = await currentRules(s3, b.name);
         }
         const have = existingAbort(cur.rules);
@@ -107,7 +109,7 @@ export const s3MultipartAbortAction: ActionModule = {
         const merged = mergeRules(cur.rules, [abortRule(days)]);
         const analysed = mp ? `${mp.uploads.toLocaleString()}${mp.uploads >= 1000 ? "+" : ""} incomplete upload(s) seen on ${mp.collected_at.slice(0, 10)}${mp.oldest_at ? `, the oldest from ${mp.oldest_at.slice(0, 10)}` : ""}` : "not analysed yet (Inventory › S3 counts the incomplete uploads for buckets above the threshold), so the parts' size is unknown";
         proposals.push({
-          kind: KIND, resource: b.name, resource_name: b.name, region,
+          kind: KIND, resource: b.name, resource_name: b.name, region, account_id: acct.is_parent ? null : acct.account_id,
           dedupe: `${KIND}:${b.name}:${days}`,
           title: `${b.name}: abort incomplete multipart uploads after ${days} days${b.total_gb != null ? ` (${b.total_gb.toFixed(1)} GB)` : ""}`,
           reason: `no lifecycle rule aborts incomplete multipart uploads on the whole bucket; ${analysed}. Their parts bill as Standard storage and never appear in a listing. ${cur.rules.length ? `${cur.rules.length} existing rule(s) kept as they are (${cur.rules.map(ruleId).join(", ")}). ` : ""}Completed objects are never touched; an upload still running past ${days} days is aborted too.`,

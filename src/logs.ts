@@ -5,7 +5,7 @@
  * the review raises a step in a group's ingestion, the brief lists the top ingesters, and the agent reads it
  * through the log_groups tool. In the graph design this is the "ships logs to" edge with its rate and price.
  */
-import { addColumn, db } from "./db.js";
+import { addColumn, db, rekeyByAccount } from "./db.js";
 import { accountWhere, type AccountScope } from "./scope.js";
 import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
@@ -22,6 +22,7 @@ create table if not exists log_ingest_daily (
   primary key (name, day)
 )`);
 addColumn("log_groups", "account_id", "text");
+rekeyByAccount("log_groups", "name"); // log group names are unique per account only: keyed on (account_id, name)
 /** The group's tags as JSON (logs:ListTagsForResource); null until fetched. The log attribution reads them (src/log_attribution.ts). */
 addColumn("log_groups", "tags", "text");
 
@@ -44,15 +45,15 @@ export async function refreshLogs(onLog: (s: string) => void = () => {}): Promis
     groups = await query(`select name, account_id, region, retention_in_days, stored_bytes, log_group_class, creation_time from ${S}.aws_cloudwatch_log_group`);
   } catch (e) { out.errors.push(describeError(e, "log groups (aws_cloudwatch_log_group)")); out.took_ms = Date.now() - t0; return out; }
   const now = new Date().toISOString();
-  const up = db.prepare(`insert into log_groups(name, region, retention_days, stored_bytes, log_class, created_at, last_seen) values (?, ?, ?, ?, ?, ?, ?)
-    on conflict(name) do update set region = excluded.region, retention_days = excluded.retention_days, stored_bytes = excluded.stored_bytes, log_class = excluded.log_class, created_at = excluded.created_at, last_seen = excluded.last_seen`);
-  const setLogAccount = db.prepare("update log_groups set account_id = ? where name = ?");
-  for (const g of groups) { up.run(g.name, g.region, g.retention_in_days ?? null, Number(g.stored_bytes ?? 0), g.log_group_class ?? null, g.creation_time ? new Date(g.creation_time).toISOString() : null, now); if (g.account_id) setLogAccount.run(String(g.account_id), g.name); out.groups++; }
+  const acct = (g: { account_id?: unknown }) => (g.account_id ? String(g.account_id) : "");
+  const up = db.prepare(`insert into log_groups(account_id, name, region, retention_days, stored_bytes, log_class, created_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?)
+    on conflict(account_id, name) do update set region = excluded.region, retention_days = excluded.retention_days, stored_bytes = excluded.stored_bytes, log_class = excluded.log_class, created_at = excluded.created_at, last_seen = excluded.last_seen`);
+  for (const g of groups) { up.run(acct(g), g.name, g.region, g.retention_in_days ?? null, Number(g.stored_bytes ?? 0), g.log_group_class ?? null, g.creation_time ? new Date(g.creation_time).toISOString() : null, now); out.groups++; }
   // tags in a query of their own: the column costs one ListTagsForResource per group, and a denial must not cost the inventory
   try {
-    const tagged = await query<{ name: string; tags: Record<string, string> | string | null }>(`select name, tags from ${S}.aws_cloudwatch_log_group where tags is not null`);
-    const setTags = db.prepare("update log_groups set tags = ? where name = ?");
-    for (const g of tagged) { const t = typeof g.tags === "string" ? g.tags : JSON.stringify(g.tags || {}); if (t && t !== "{}") setTags.run(t, g.name); }
+    const tagged = await query<{ name: string; account_id?: string | null; tags: Record<string, string> | string | null }>(`select name, account_id, tags from ${S}.aws_cloudwatch_log_group where tags is not null`);
+    const setTags = db.prepare("update log_groups set tags = ? where account_id = ? and name = ?");
+    for (const g of tagged) { const t = typeof g.tags === "string" ? g.tags : JSON.stringify(g.tags || {}); if (t && t !== "{}") setTags.run(t, acct(g), g.name); }
   } catch (e) { out.errors.push(describeError(e, "log group tags (aws_cloudwatch_log_group.tags, logs:ListTagsForResource)")); }
   // ingestion per day: the account total (no dimension) plus the biggest groups
   const upIngest = db.prepare("insert into log_ingest_daily(name, day, bytes) values (?, ?, ?) on conflict(name, day) do update set bytes = excluded.bytes");
@@ -70,7 +71,7 @@ export async function refreshLogs(onLog: (s: string) => void = () => {}): Promis
     catch (e) { out.errors.push(describeError(e, `log ingestion total ${region} (aws_cloudwatch_metric_statistic_data_point)`)); }
   }
   const big = groups.filter((g) => Number(g.stored_bytes ?? 0) >= MIN_STORED_BYTES).sort((a, b) => Number(b.stored_bytes) - Number(a.stored_bytes)).slice(0, MAX_METRIC_GROUPS);
-  const setIngest = db.prepare("update log_groups set ingest_bytes_day = ?, ingest_days = ? where name = ?");
+  const setIngest = db.prepare("update log_groups set ingest_bytes_day = ?, ingest_days = ? where account_id = ? and name = ?");
   const upBase = db.prepare(`insert into baselines(scope_kind, scope_id, metric, window_days, source, unit, samples, days, median, mad, p95, mean, max, min, by_hour, by_dow, computed_at)
     values ('loggroup', ?, 'ingest_bytes_day', ?, 'cloudwatch', 'bytes/day', ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', datetime('now'))
     on conflict(scope_kind, scope_id, metric) do update set samples = excluded.samples, days = excluded.days, median = excluded.median, mad = excluded.mad, p95 = excluded.p95, mean = excluded.mean, max = excluded.max, min = excluded.min, computed_at = excluded.computed_at`);
@@ -79,7 +80,7 @@ export async function refreshLogs(onLog: (s: string) => void = () => {}): Promis
       const pts = await fetchDaily(g.name, g.region, JSON.stringify([{ Name: "LogGroupName", Value: g.name }]));
       if (!pts.length) continue;
       const b = buildBaseline(pts, INGEST_DAYS, "cloudwatch", "bytes/day");
-      setIngest.run(b.mean, pts.length, g.name);
+      setIngest.run(b.mean, pts.length, acct(g), g.name);
       const n = (x: number) => (Number.isFinite(x) ? x : null);
       upBase.run(g.name, INGEST_DAYS, b.samples, b.days, n(b.median), n(b.mad), n(b.p95), n(b.mean), n(b.max), n(b.min));
       out.metered++;

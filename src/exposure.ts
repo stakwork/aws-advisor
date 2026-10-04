@@ -4,6 +4,7 @@
  * decision buttons and handed to Jev's gate and the plan through the resource facts (src/resolve.ts).
  */
 import { db } from "./db.js";
+import { accountRank } from "./scope.js";
 import { affectedResources } from "./affected.js";
 import { domainsFor } from "./route53_inventory.js";
 
@@ -30,7 +31,7 @@ export function domainsReaching(kind: string, id: string): DomainRef[] {
   return out;
 }
 
-export function exposureOf(kind: string, id: string, name: string | null): ResourceExposure {
+export function exposureOf(kind: string, id: string, name: string | null, accountId: string | null | undefined = null): ResourceExposure {
   const alerts = q<{ id: number; kind: string; message: string; created_at: string }>("select id, kind, message, created_at from alerts where acknowledged = 0 and (resource = ? or resource like ?) order by created_at desc limit 10", id, `${id}:%`);
   const out: ResourceExposure = { id, kind, name, domains: domainsReaching(kind, id), volumes: [], open_alerts: alerts, pool: null, cluster: null };
   if (kind === "ec2") {
@@ -38,17 +39,19 @@ export function exposureOf(kind: string, id: string, name: string | null): Resou
     const ec2 = q<{ pool_kind: string | null; pool: string | null }>("select pool_kind, pool from inventory_ec2 where instance_id = ?", id)[0];
     if (ec2?.pool) out.pool = { kind: ec2.pool_kind || "pool", name: ec2.pool };
   } else if (kind === "rds") {
-    const rds = q<{ cluster: string | null; storage_gb: number | null; storage_type: string | null }>("select cluster, storage_gb, storage_type from inventory_rds where db_instance_identifier = ?", id)[0];
+    // identifiers are unique per account only: the row of the recommendation's account first
+    const rank = accountRank(accountId);
+    const rds = q<{ cluster: string | null; storage_gb: number | null; storage_type: string | null }>(`select cluster, storage_gb, storage_type from inventory_rds where db_instance_identifier = ? order by ${rank.sql} limit 1`, id, ...rank.params)[0];
     if (rds?.cluster) out.cluster = rds.cluster;
-    // an Aurora item names the cluster: the members' records reach it too
-    const members = q<{ db_instance_identifier: string }>("select db_instance_identifier from inventory_rds where cluster = ? and gone = 0", id);
-    for (const m of members) for (const d of domainsReaching("rds", m.db_instance_identifier)) if (!out.domains.some((x) => x.name === d.name && x.type === d.type)) out.domains.push(d);
+    // an Aurora item names the cluster: the members' records reach it too (the cluster of the nearest account only)
+    const members = q<{ db_instance_identifier: string; account_id: string | null }>(`select db_instance_identifier, account_id from inventory_rds where cluster = ? and gone = 0 order by ${rank.sql}, db_instance_identifier`, id, ...rank.params);
+    for (const m of members.filter((m) => (m.account_id ?? "") === (members[0]?.account_id ?? ""))) for (const d of domainsReaching("rds", m.db_instance_identifier)) if (!out.domains.some((x) => x.name === d.name && x.type === d.type)) out.domains.push(d);
   }
   return out;
 }
 
 /** The exposure of every affected resource the inventory knows, and whether the action is the disruptive kind. */
-export function exposureFor(rec: { resource: string | null; resource_name: string | null; title: string | null; rationale: string | null; action_type: string }): { disruptive: boolean; resources: ResourceExposure[] } {
+export function exposureFor(rec: { resource: string | null; resource_name: string | null; title: string | null; rationale: string | null; action_type: string; account_id?: string | null }): { disruptive: boolean; resources: ResourceExposure[] } {
   const affected = affectedResources(rec).resources.filter((r) => r.found && ["ec2", "rds", "elasticache", "s3", "lambda"].includes(r.kind));
-  return { disruptive: DISRUPTIVE.test(rec.action_type), resources: affected.map((r) => exposureOf(r.kind, r.id, r.name)) };
+  return { disruptive: DISRUPTIVE.test(rec.action_type), resources: affected.map((r) => exposureOf(r.kind, r.id, r.name, rec.account_id)) };
 }

@@ -7,3 +7,11 @@ mod/.powerpipe/
 mod/.mod.cache.json
 *.log
 .test-data/
+# outputs of the setup wizard and the README's manual steps (carry real account ids)
+.DS_Store
+/aws-advisor-setup.sh
+/policy.json
+/trust.json
+/assume.json
+/probe-*.json
+/eb-ops-tags.json

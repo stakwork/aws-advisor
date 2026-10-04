@@ -11,9 +11,10 @@ import { sdkCredentials } from "./steampipe.js";
 
 export interface ProbeDocumentStatus { kind: ProbeKind; name: string; status: "current" | "stale" | "missing" | "error"; deployed_description: string | null; deployed_version: string | null; expected_hash: string; owner: string | null; error: string | null }
 
-export async function probeDocumentStatus(region?: string): Promise<ProbeDocumentStatus[]> {
-  let creds: ReturnType<typeof sdkCredentials>;
-  try { creds = sdkCredentials(); }
+export async function probeDocumentStatus(region?: string, credentials?: Pick<ReturnType<typeof sdkCredentials>, "provider" | "region">): Promise<ProbeDocumentStatus[]> {
+  let creds: Pick<ReturnType<typeof sdkCredentials>, "provider" | "region">;
+  // the parent's credentials, or a member's read role when the caller passes it (the permission check per account)
+  try { creds = credentials ?? sdkCredentials(); }
   catch (e: any) { return PROBE_KINDS.map((kind) => ({ kind, name: probeDocumentName(kind), status: "error" as const, deployed_description: null, deployed_version: null, expected_hash: probeScriptHash(kind), owner: null, error: `no SDK credentials: ${e?.message || e}` })); }
   const client = new SSMClient({ region: region || creds.region, credentials: creds.provider });
   try {

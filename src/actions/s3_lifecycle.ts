@@ -46,10 +46,12 @@ export const s3LifecycleAction: ActionModule = {
       const skip = (why: string) => { notes.push(`${bucket}: ${why}`); log(`${bucket}: ${why}`); };
       const add = (Array.isArray(rec.evidence?.rules) ? rec.evidence.rules : []).map((r: any) => r?.rule).filter((r: any) => r && typeof r === "object" && r.ID) as LifecycleRule[];
       if (!add.length) { skip(`recommendation #${rec.id} carries no rule JSON`); continue; }
-      const inv = db.prepare("select region, total_gb, gone from inventory_s3 where name = ?").get(bucket) as { region: string | null; total_gb: number | null; gone: number } | undefined;
+      const inv = db.prepare("select region, total_gb, gone, account_id from inventory_s3 where name = ?").get(bucket) as { region: string | null; total_gb: number | null; gone: number; account_id: string | null } | undefined;
       if (inv?.gone) { skip("bucket is gone from the inventory"); continue; }
-      const region = inv?.region || creds.region;
-      const s3 = new S3Client({ region, credentials: creds.read });
+      // the bucket's own account (src/accounts.ts): a member's bucket is read, and later changed, through its roles
+      const acct = creds.forAccount(inv?.account_id || null);
+      const region = inv?.region || acct.region;
+      const s3 = new S3Client({ region, credentials: acct.read });
       try {
         if (await handsOff(s3, bucket)) { skip("tagged advisor:hands-off"); continue; }
         const existing = await currentRules(s3, bucket);
@@ -57,7 +59,7 @@ export const s3LifecycleAction: ActionModule = {
         if (!missing.length) { markRecommendationsDone([rec.id], "every rule was already on the bucket when the executor checked (done by hand); recommendation closed"); skip(`every rule of recommendation #${rec.id} is already on the bucket; marked done`); continue; }
         const merged = mergeRules(existing, add);
         proposals.push({
-          kind: KIND, resource: bucket, resource_name: bucket, region,
+          kind: KIND, resource: bucket, resource_name: bucket, region, account_id: acct.is_parent ? null : acct.account_id,
           dedupe: `${KIND}:${bucket}:${add.map(ruleId).sort().join(",")}`,
           title: `${bucket}: lifecycle ${add.map((r) => ruleId(r).replace(/^aws-advisor-/, "")).join(", ")}${inv?.total_gb != null ? ` (${inv.total_gb.toFixed(1)} GB)` : ""}`,
           reason: `${rec.title}. Approved as recommendation #${rec.id}${rec.decided_by ? ` by ${rec.decided_by}` : ""}. ${existing.length ? `${existing.length} existing rule(s) kept as they are (${existing.map(ruleId).join(", ")}). ` : ""}Transitions take effect from the next lifecycle run (within a day); a transition carries the class's minimum-storage and retrieval terms.`,

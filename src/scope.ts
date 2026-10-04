@@ -23,6 +23,17 @@ export function accountWhere(scope: AccountScope | null | undefined, column = "a
 }
 
 /**
+ * An `order by` term for a lookup by a name that is unique per account only (an RDS identifier, a log group, a Lambda
+ * function): the row of `accountId` first, then any other, so a caller that knows the account gets its row and one
+ * that does not still gets one. The rows stored before account ids were kept ('') count as the primary account's.
+ */
+export function accountRank(accountId: string | null | undefined, column = "account_id"): { sql: string; params: [string, number] } {
+  const id = accountId || "";
+  const primary = !id || id === awsAdapter.primaryAccountId() ? 1 : 0;
+  return { sql: `(case when coalesce(${column}, '') = ? then 0 when coalesce(${column}, '') = '' and ? = 1 then 0 else 1 end)`, params: [id, primary] };
+}
+
+/**
  * For tables without an account column (recommendations, alerts, actions): whether the resource a row names belongs
  * to the scope, attributed through the inventories' ids (exact, or contained in an ARN). Every account when null.
  * Built once per request: the index reads the inventories.

@@ -3052,11 +3052,20 @@ with its read role, acts under that child's actuator role only, and stamps every
 (`src/accounts.ts`; `GET/POST /api/accounts`, `POST /api/accounts/:id/test`, `GET /api/accounts/bill`). The Bill
 page shows the payer's cost per linked account.
 
-Known gaps in this first cut: names unique only per account (log groups, RDS identifiers, DynamoDB tables, Lambda
-names) merge across children in name-keyed inventories, the last account written wins; the actuator capability
-check simulates the parent's role only, a narrower child role is learnt from denied applies; Settings › Permissions
-checks the parent only; four actions plan in the parent only (gateway endpoints, S3 lifecycle, multipart abort,
-Lambda memory) though apply and revert of every row run under the row's account.
+Names that are unique per account only (RDS identifiers, cache cluster ids, Lambda functions, log groups) are keyed on
+(account, name) in the inventories (`rekeyByAccount` in `src/db.ts` rebuilds a table keyed on the name alone on
+startup, once), so two children with a `prod-db` are two rows; the lookups that start from a recommendation, an
+action row or an instance prefer the row of that account (`accountRank` in `src/scope.ts`) and fall back to any.
+The actuator capability check runs per account: each child's actuator role is simulated from that child's read role
+and a denial learnt from a failed apply is remembered for that child's role only (`actuatorCapabilities(accountId)`,
+`GET /api/actions/status` returns `accounts` with each member's capabilities, "re-check the role" re-simulates them
+all). Settings › Permissions has an account picker: a child is checked through its own Steampipe connection
+(`<schema>_<account id>`) and its read role, the parent through `<schema>_p`, and each account keeps its own last
+result (`POST /api/permissions/check` with `account_id`, `GET /api/permissions?account=`). Every executor action
+plans per account; the SSM probes and the RDS load profiles run under the account the instance or database lives in.
+Buckets stay keyed on the name alone (bucket names are global). Two name-keyed side tables are deliberately shared
+across accounts: the log group ingest history and baselines (keyed by group name) and Jev's log-group attribution
+cache; a colliding group name shares those with its namesake.
 
 ## Cost per swarm
 

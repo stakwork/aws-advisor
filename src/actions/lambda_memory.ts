@@ -104,13 +104,13 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
   return out;
 }
 
-interface Candidate { name: string; arn: string | null; region: string; memory_mb: number; arm: boolean; invocations_30d: number; invocations_month: number }
+interface Candidate { name: string; arn: string | null; region: string; account_id: string | null; memory_mb: number; arm: boolean; invocations_30d: number; invocations_month: number }
 
 function candidates(defaultRegion: string): Candidate[] {
   const min = Math.max(1, config.actLambdaMinInvocations);
-  const rows = db.prepare("select name, arn, region, memory_mb, arm, invocations_30d, invocations_month from inventory_lambda where gone = 0 and invocations_30d * ? / 30 >= ? and memory_mb > ? order by monthly_usd desc limit ?")
+  const rows = db.prepare("select name, arn, region, account_id, memory_mb, arm, invocations_30d, invocations_month from inventory_lambda where gone = 0 and invocations_30d * ? / 30 >= ? and memory_mb > ? order by monthly_usd desc limit ?")
     .all(WINDOW_DAYS, min, MIN_MEMORY_MB, MAX_FUNCTIONS_PER_PLAN) as any[];
-  return rows.map((r) => ({ name: r.name, arn: r.arn ?? null, region: r.region || defaultRegion, memory_mb: Number(r.memory_mb || 128), arm: Boolean(r.arm), invocations_30d: Number(r.invocations_30d || 0), invocations_month: Number(r.invocations_month || 0) }));
+  return rows.map((r) => ({ name: r.name, arn: r.arn ?? null, region: r.region || defaultRegion, account_id: r.account_id || null, memory_mb: Number(r.memory_mb || 128), arm: Boolean(r.arm), invocations_30d: Number(r.invocations_30d || 0), invocations_month: Number(r.invocations_month || 0) }));
 }
 
 async function configuration(lambda: LambdaClient, name: string) {
@@ -128,12 +128,16 @@ export const lambdaMemoryAction: ActionModule = {
     const approved = approvedRecs([ACTION_TYPE]);
     const cands = candidates(creds.region);
     if (!cands.length) { notes.push(`no Lambda function with ${config.actLambdaMinInvocations.toLocaleString()}+ invocations in ${WINDOW_DAYS} days above ${MIN_MEMORY_MB} MB`); return { proposals, notes }; }
+    // Per (account, region): a member's functions are read through its own credentials (src/accounts.ts); names are unique per account only.
     const byRegion = new Map<string, Candidate[]>();
-    for (const c of cands) { if (!byRegion.has(c.region)) byRegion.set(c.region, []); byRegion.get(c.region)!.push(c); }
+    for (const c of cands) { const key = `${c.account_id || ""}|${c.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(c); }
     let filed = 0, queried = 0;
-    for (const [region, list] of byRegion) {
-      const logs = new CloudWatchLogsClient({ region, credentials: creds.read });
-      const lambda = new LambdaClient({ region, credentials: creds.read });
+    for (const [key, list] of byRegion) {
+      const [account, region] = key.split("|");
+      const acct = creds.forAccount(account || null);
+      const accountId = acct.is_parent ? null : acct.account_id;
+      const logs = new CloudWatchLogsClient({ region, credentials: acct.read });
+      const lambda = new LambdaClient({ region, credentials: acct.read });
       try {
         const stats = await mapLimit(list, QUERY_CONCURRENCY, async (c) => { try { return await reportStats(logs, c.name); } catch (e: any) { return { stats: null, note: String(e?.message || e).slice(0, 160) }; } });
         const recs: RecInput[] = [];
@@ -151,19 +155,20 @@ export const lambdaMemoryAction: ActionModule = {
           if (cfg.MemorySize != null && cfg.MemorySize !== configured) { skip(`memory is ${cfg.MemorySize} MB now, the REPORT lines say ${configured}; wait for the next window`); continue; }
           const arn = cfg.FunctionArn || c.arn;
           if (arn) { try { if ("advisor:hands-off" in ((await lambda.send(new ListTagsCommand({ Resource: arn }))).Tags ?? {})) { skip("tagged advisor:hands-off"); continue; } } catch { /* the policy's Deny still protects a tagged function */ } }
-          const evidence = { region, configured_mb: configured, max_used_mb: Math.round(s.stats.max_used_mb), avg_used_mb: Math.round(s.stats.avg_used_mb), p95_ms: Math.round(s.stats.p95_ms), avg_ms: Math.round(s.stats.avg_ms), reports: s.stats.n, target_mb: v.target_mb, invocations_month: Math.round(c.invocations_month), arm: c.arm };
+          const evidence = { region, account_id: accountId, configured_mb: configured, max_used_mb: Math.round(s.stats.max_used_mb), avg_used_mb: Math.round(s.stats.avg_used_mb), p95_ms: Math.round(s.stats.p95_ms), avg_ms: Math.round(s.stats.avg_ms), reports: s.stats.n, target_mb: v.target_mb, invocations_month: Math.round(c.invocations_month), arm: c.arm };
           recs.push({
             rule: RULE, title: `${c.name}: memory ${configured} → ${v.target_mb} MB (≈ ${v.saving_usd_month.toFixed(2)} USD/month)`,
             resource: c.name, resourceName: c.name, actionType: ACTION_TYPE, estMonthlySaving: v.saving_usd_month, tier: "approve", confidence: s.stats.n >= 1000 ? 0.8 : 0.65,
             rationale: `${v.reason}. Lambda gives CPU in proportion to memory, so a lower setting can lengthen the duration and eat part of the saving; that is why this needs a person and keeps 50 % headroom above the observed peak. Apply with update-function-configuration --memory-size ${v.target_mb}; the executor does it once approved.`,
             evidence,
           });
-          const rec = approved.find((a) => a.resource === c.name);
+          // a recommendation not stamped with an account yet (src/scope.ts stampRowAccounts) still counts; a stamped one must match
+          const rec = approved.find((a) => a.resource === c.name && (!a.account_id || a.account_id === accountId));
           if (!rec) { log(`${c.name}: recommendation filed, waiting for approval`); continue; }
           const target = Number(rec.evidence?.target_mb) > 0 ? Number(rec.evidence.target_mb) : v.target_mb;
           if (cfg.MemorySize === target) { skip(`already at ${target} MB`); continue; }
           proposals.push({
-            kind: KIND, resource: c.name, resource_name: c.name, region,
+            kind: KIND, resource: c.name, resource_name: c.name, region, account_id: accountId,
             dedupe: `${KIND}:${region}:${c.name}:${target}`,
             title: `${c.name}: memory ${configured} → ${target} MB`,
             reason: `${v.reason}. Approved as recommendation #${rec.id}${rec.decided_by ? ` by ${rec.decided_by}` : ""}. UpdateFunctionConfiguration: online, the next invocations run at ${target} MB; CPU scales with memory, so watch the duration.`,
