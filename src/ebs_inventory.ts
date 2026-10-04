@@ -17,6 +17,7 @@
 import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
+import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 
 db.exec(`create table if not exists inventory_ebs (
   volume_id text primary key, region text, volume_type text, size_gb integer, iops integer, throughput_mibps integer, state text, encrypted integer,
@@ -165,8 +166,9 @@ const ON_STOPPED = "v.instance_id is not null and i.state is not null and i.stat
 const LIST_SQL = "select v.*, i.state as instance_state, i.name as instance_name from inventory_ebs v left join inventory_ec2 i on i.instance_id = v.instance_id";
 
 /** state filters on the volume's own state (in-use, available), or "stopped" for volumes attached to an instance that is not running. */
-export function listEbs(f: { q?: string; sort?: string; gone?: boolean; state?: string } = {}) {
+export function listEbs(f: { q?: string; sort?: string; gone?: boolean; state?: string; scope?: AccountScope | null } = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("v.gone = 0");
   if (f.state === "stopped") where.push(ON_STOPPED);
   else if (f.state === "in-use" || f.state === "available") { where.push("v.state = ?"); params.push(f.state); }
@@ -181,11 +183,11 @@ function ebsRow(r: any) {
   return { ...r, provisioned_iops: ebsProvisionedIops(r), mounts };
 }
 
-export function ebsSummary() {
-  const r = db.prepare(`select count(*) as total, coalesce(sum(v.size_gb), 0) as gb, coalesce(sum(v.monthly_usd), 0) as monthly_usd,
+export function ebsSummary(scope?: AccountScope | null) {
+  const r = scopedStmt(scope, `select count(*) as total, coalesce(sum(v.size_gb), 0) as gb, coalesce(sum(v.monthly_usd), 0) as monthly_usd,
       coalesce(sum(v.state = 'available'), 0) as unattached, coalesce(sum(case when v.state = 'available' then v.monthly_usd else 0 end), 0) as unattached_usd,
       coalesce(sum(${ON_STOPPED}), 0) as on_stopped, coalesce(sum(case when ${ON_STOPPED} then v.monthly_usd else 0 end), 0) as on_stopped_usd,
       coalesce(sum(v.volume_type = 'gp2'), 0) as gp2, coalesce(sum(v.used_pct is not null), 0) as probed, coalesce(sum(v.used_pct >= 80), 0) as high
     from inventory_ebs v left join inventory_ec2 i on i.instance_id = v.instance_id where v.gone = 0`).get() as any;
-  return { ...r, gone: (db.prepare("select count(*) as n from inventory_ebs where gone = 1").get() as any).n };
+  return { ...r, gone: (scopedStmt(scope, "select count(*) as n from inventory_ebs where gone = 1").get() as any).n };
 }

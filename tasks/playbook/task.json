@@ -1,0 +1,54 @@
+{
+  "kind": "playbook",
+  "title": "Playbooks from sources",
+  "when": "when playbooks are generated or rebuilt for a batch of benchmark controls, with each control's mod definition, documentation and referenced provider pages in the prompt",
+  "tools": [],
+  "max_turns": 12,
+  "rubric": [
+    {
+      "check": "min_items",
+      "path": "playbooks[]",
+      "min": 1,
+      "label": "at least one playbook"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].meaning",
+      "label": "every playbook says what the alarm means"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].act_when",
+      "label": "every playbook says when to act"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].ignore_when",
+      "label": "every playbook says when to leave it alone"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].steps[].text",
+      "label": "every step says what to do"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].steps[].source",
+      "label": "every step cites its source"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].saving",
+      "label": "every playbook states the saving formula (or that there is none)"
+    },
+    {
+      "check": "required",
+      "path": "playbooks[].confidence",
+      "label": "every playbook says how fully the sources support it"
+    }
+  ],
+  "retry": {
+    "on_score_below": 0.75,
+    "max": 1
+  }
+}

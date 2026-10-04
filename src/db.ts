@@ -130,6 +130,7 @@ create table if not exists instance_metrics (
 );
 create index if not exists instance_metrics_instance on instance_metrics(instance_id, collected_at);
 
+
 create table if not exists watch_samples (
   id integer primary key autoincrement,
   sample_id integer not null,
@@ -322,6 +323,10 @@ create table if not exists inventory_elasticache (
   snapshot text not null
 );
 `);
+// recommendations and alerts carry the account they were made for (src/scope.ts stampRowAccounts); older rows get it on their next listing
+for (const t of ["recommendations", "alerts"]) if (!(db.prepare(`pragma table_info(${t})`).all() as { name: string }[]).some((c) => c.name === "account_id")) { try { db.exec(`alter table ${t} add column account_id text`); } catch (e: any) { if (!/duplicate column/i.test(String(e?.message))) throw e; } }
+// runs carry their provider: the AWS collection run (default) or a platform provider's rules pass (vercel); every "latest run" lookup names the provider it wants
+if (!(db.prepare("pragma table_info(runs)").all() as { name: string }[]).some((c) => c.name === "provider")) { try { db.exec("alter table runs add column provider text not null default 'aws'"); } catch (e: any) { if (!/duplicate column/i.test(String(e?.message))) throw e; } }
 
 // agent_runs grew a kind (findings | incident) and an alert_id, and run_id became optional, when alert
 // investigations arrived. SQLite cannot relax a NOT NULL, so databases from before that are rebuilt once.
@@ -353,6 +358,9 @@ db.exec(`create table if not exists notifications (
 )`);
 addColumn("alerts", "notify_result", "text");
 for (const t of ["inventory_ec2", "inventory_rds", "inventory_elasticache"]) addColumn(t, "watch", "integer");
+// probe 2.0 (src/probes.ts): which probe kind wrote the row; pre-2.0 rows carry the combined probe and count as "all"
+addColumn("instance_metrics", "kind", "text not null default 'all'");
+db.exec("create index if not exists instance_metrics_kind on instance_metrics(instance_id, kind, collected_at)");
 addColumn("inventory_ec2", "pool_kind", "text");
 addColumn("inventory_ec2", "pool", "text");
 

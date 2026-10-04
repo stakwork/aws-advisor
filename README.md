@@ -1,6 +1,9 @@
-# aws-advisor
+# Cloud Advisor (aws-advisor)
 
-An AWS cost advisor that lives next to a sphinx-swarm. Steampipe and Powerpipe collect the facts,
+A cloud cost and security advisor that lives next to a sphinx-swarm; AWS is the first provider (the graph model is
+provider-neutral, see `docs/cloud-ontology.md`). Names that live inside a provider account keep that provider's
+prefix: the IAM user `aws-advisor-read`, the SSM documents `AwsAdvisorProbe-<kind>`, the setup script; a second
+provider brings its own. Steampipe and Powerpipe collect the facts,
 fixed rules draft recommendations, repo2graph's agent ranks and enriches them with evidence it gathers
 itself, and a small web app is where the team reviews, decides and watches. The advisor reads, the agent
 proposes, humans decide. The one exception is the [executor](#auto-actions-the-executor): a short catalog of
@@ -240,21 +243,22 @@ advisor (or mount the same files into its container).
 
 | page | what it shows | actions |
 | --- | --- | --- |
-| Overview | last full month invoice and coverage, open recommendations and their total, findings in the last run, open watcher alerts, top recommendations, on-demand spend by service, EC2 Other breakdown, commitment expiries | run now, acknowledge alerts |
+| Overview | per scope: one account's own overview (AWS: the cards below; Vercel: health, activity, exposure, billing, stores, attention), or for "all accounts" the table across them. AWS cards:  last full month invoice and coverage, open recommendations and their total, findings in the last run, open watcher alerts, top recommendations, on-demand spend by service, EC2 Other breakdown, commitment expiries | run now, acknowledge alerts |
 | Runs | one row per collection with counts and status | start, open |
 | Alerts | every watcher alert (open, acknowledged or all) with Jev's triage (kind, severity, expected probability, auto-acknowledged by Jev), expandable to its details (top receivers table for NAT alerts) and its incident: cause, confidence, episode cost, run-rate, evidence, fixes linking to their recommendations | investigate, poll result, retry, acknowledge, reopen (undo) |
 | Run detail | live log, findings by control, what changed vs the previous run, agent runs for this collection with a live event stream | send findings to agent, watch, poll result |
 | Findings | every alarm from the benchmarks and custom queries, filterable by control, searchable | |
-| Inventory | EC2 / RDS / ElastiCache / Lambda / EBS / S3 / Route 53 tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, the domains that reach the resource, and links to the resource's findings and recommendations; gone resources on request. The EBS tab shows, next to AWS's own state (in-use means attached, even to a stopped instance), the state of the instance the volume is on, counts what sits on stopped instances, and for every volume on a probed instance how much of it is used and free (the probe credits each mount to its volume by the NVMe serial, or by device name on Xen). The Route 53 tab lists every record with what it leads to in this account (or that it is dangling, or outside AWS) | refresh now, probe (SSM-online Linux instances) |
+| Inventory | tabs are the generic kinds (Compute, Databases, Caches, Functions, Load balancers, Volumes, Object storage, DNS, Deployments, Clusters, Filters, Tags), the provider's own word as the hint; the tabs shown follow the account the sidebar looks at (an AWS account has the AWS kinds, a Vercel team its Deployments; all accounts, every tab with a configured provider behind it). EC2 / RDS / ElastiCache / Lambda / EBS / S3 / Route 53 tabs: summary tiles (running, stopped, SSM online, SSM not managed, on-demand price of what runs, EBS GB), filters by state and SSM status, search, sortable table, sticky detail drawer with identity, network, storage and volumes, SSM, tags, utilisation with probe history, price, the domains that reach the resource, and links to the resource's findings and recommendations; gone resources on request. The EBS tab shows, next to AWS's own state (in-use means attached, even to a stopped instance), the state of the instance the volume is on, counts what sits on stopped instances, and for every volume on a probed instance how much of it is used and free (the probe credits each mount to its volume by the NVMe serial, or by device name on Xen). The Route 53 tab lists every record with what it leads to in this account (or that it is dangling, or outside AWS) | refresh now, probe (SSM-online Linux instances) |
 | Recommendations | ranked list with saving, tier, confidence and source, searchable by text or `#id`; sticky detail panel with rationale, evidence, probe data and a step checklist with a follow-up day | approve, reject with reason, snooze, mark pending, mark done, reopen, tick steps, probe (idle instances) |
-| Settings | AWS credentials (mode picker: access keys, AWS profile, instance / default chain, each with an optional role to assume; save and test checks Steampipe and the SDK side), permissions (what the credentials should be, the SSM probe document and its commands, per-capability check results, missing actions seen anywhere in the app with when and where, the IAM policy JSON that fixes them), benchmark toggles, agent configuration, Jev (enabled, calls and tokens today, last error), dev API token | save and test, remove, check permissions |
+| Settings | organised around the configured accounts (`?tab=accounts&account=…&section=…`): the Accounts tab lists every account with its provider; opening one shows that provider's own sections, for AWS: Access (the one-command setup and the manual credentials), Permissions, Probes (the SSM documents, their scripts, scopes and crons), Benchmarks, Member accounts. Add account picks the provider; only AWS has an adapter today. Top-level tabs hold what is provider-neutral: Schedules (the non-probe crons with Run now), Auto-actions, Agent & Jev, Notifications, Other. The AWS Access section: AWS credentials (mode picker: access keys, AWS profile, instance / default chain, each with an optional role to assume; save and test checks Steampipe and the SDK side), permissions (what the credentials should be, the SSM probe document and its commands, per-capability check results, missing actions seen anywhere in the app with when and where, the IAM policy JSON that fixes them), benchmark toggles, agent configuration, Jev (enabled, calls and tokens today, last error), dev API token | save and test, remove, check permissions |
 
 ## Onboarding: set up AWS access in 10 minutes
 
 ### The one-command way
 
-Settings > **Set up AWS access** is a four-step wizard: pick a path (**Laptop / server with a long-lived key**
-or **EC2 host with an instance role**), keep or change the names, read the plan, copy one command:
+Settings > **Set up AWS access** is a four-step wizard: pick a path (**Laptop / server with a long-lived key**,
+**EC2 host with an instance role**, or **Member account of the organisation** for a child, see
+[Member accounts](#member-accounts)), keep or change the names, read the plan, copy one command:
 
 ```
 curl -fsSL "http://localhost:9034/api/setup/script?path=laptop-key" -o aws-advisor-setup.sh && less aws-advisor-setup.sh && bash aws-advisor-setup.sh
@@ -281,7 +285,7 @@ passed, then offers **Check permissions**.
   `~/.aws/credentials` under `[aws-advisor-user]` with `aws configure set` (the secret is never printed; AWS
   allows two keys per user); write `[profile aws-advisor]` with `role_arn` / `source_profile` / `region`; verify
   `aws sts get-caller-identity --profile aws-advisor` answers as `assumed-role/aws-advisor-read`; create (or
-  update) the SSM probe document `AwsAdvisorProbe`; `PUT /api/settings/aws` with the profile and print the test
+  update) the four SSM probe documents `AwsAdvisorProbe-<kind>`; `PUT /api/settings/aws` with the profile and print the test
   result; `POST /api/permissions/check` and print the summary. The EC2 path instead creates the instance role
   with its instance profile when missing, attaches `AmazonSSMManagedInstanceCore` to it (the host is
   SSM-managed too), makes the read-only role trust it and gives it `aws-advisor-assume`; with an instance id it
@@ -600,7 +604,7 @@ The complete minimal read-only policy the app needs (the same document is served
       "Effect": "Allow",
       "Action": ["ssm:SendCommand"],
       "Resource": [
-        "arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe",
+        "arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe*",
         "arn:aws:ec2:*:*:instance/*"
       ]
     },
@@ -608,7 +612,7 @@ The complete minimal read-only policy the app needs (the same document is served
       "Sid": "AdvisorSsmProbeDocument",
       "Effect": "Allow",
       "Action": ["ssm:DescribeDocument", "ssm:GetDocument"],
-      "Resource": "arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe"
+      "Resource": "arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe*"
     },
     {
       "Sid": "AdvisorSsmProbeResults",
@@ -625,40 +629,47 @@ preference enabled on the payer account), `pricing:GetProducts` the price list, 
 `iam:ListAccountAliases` the `aws_account` table every run starts with. The wildcards (`ec2:Describe*`,
 `ecs:List*`...) are all read-only families; nothing in the document can create, change or delete a resource.
 
-### The SSM probe document
+### The SSM probe documents
 
 `AWS-RunShellScript` runs whatever shell it is handed, so a policy that allows `ssm:SendCommand` on it lets the
 credentials run *any* command on every instance, and IAM alone cannot make the probe read-only. The advisor
-therefore runs the probe through its own SSM Command document, `AwsAdvisorProbe` (`PROBE_DOCUMENT`, the
-default), which embeds the fixed probe script, and the policy above grants `ssm:SendCommand` on
-`arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe` and `arn:aws:ec2:*:*:instance/*` only. **Never grant the
-advisor `ssm:SendCommand` on `AWS-RunShellScript`** (or on `document/*`): with it a leaked key runs arbitrary
-commands on the fleet. The setup script creates the document and updates it when the probe changes; by hand:
+therefore runs its probes through its own SSM Command documents, one per probe (`src/probes.ts`):
+`AwsAdvisorProbe-host`, `AwsAdvisorProbe-docker`, `AwsAdvisorProbe-apps` and `AwsAdvisorProbe-software` (the base
+name is `PROBE_DOCUMENT`, default `AwsAdvisorProbe`), each embedding its fixed script, and the policy above grants
+`ssm:SendCommand` on `arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe*` and `arn:aws:ec2:*:*:instance/*` only.
+**Never grant the advisor `ssm:SendCommand` on `AWS-RunShellScript`** (or on `document/*`): with it a leaked key runs
+arbitrary commands on the fleet. The setup script creates the four documents and updates them when a probe changes;
+Settings › Probes shows each one's status (deployed and current, stale, missing) and the commands; by hand:
 
 ```
-curl -s http://localhost:9034/api/probe/document > probe-document.json   # schemaVersion 2.2, one aws:runShellScript step, the PROBE_SCRIPT lines, 60 s timeout
-aws ssm create-document --name AwsAdvisorProbe --document-type Command --document-format JSON --content file://probe-document.json
+curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/host/document > probe-host.json   # schemaVersion 2.2, one aws:runShellScript step, the script lines, the timeout
+aws ssm create-document --name AwsAdvisorProbe-host --document-type Command --document-format JSON --content file://probe-host.json
+# the same for docker, apps and software
 ```
 
-The advisor sends that document with no `commands` parameter (the script is inside the document); the policy
-also grants `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations`, `ssm:DescribeInstanceInformation` (the SSM
-inventory) and `ssm:DescribeDocument` / `ssm:GetDocument` on the document (the permission check verifies it
-exists and is readable, and prints the create command when it does not). SSM documents are regional: create it
-in every region with instances to probe (`--region`). To limit which instances can be probed, add a condition
-on the instance ARN, e.g. `"Condition": {"StringEquals": {"ssm:resourceTag/Environment": "staging"}}` on the
-`AdvisorSsmProbe` statement. When `PROBE_VERSION` in `src/ssm.ts` changes, rerun the setup script or update
-the document:
+The advisor sends a document by name with no `commands` parameter (the script is inside the document; the docker
+one takes the use-signal patterns as its `signals` parameter); the policy also grants `ssm:GetCommandInvocation`,
+`ssm:ListCommandInvocations`, `ssm:DescribeInstanceInformation` (the SSM inventory) and `ssm:DescribeDocument` /
+`ssm:GetDocument` on the documents (the permission check verifies they exist and match, and Settings › Probes prints
+the create command when one does not). SSM documents are regional: create them in every region with instances to
+probe (`--region`). To limit which instances can be probed, add a condition on the instance ARN, e.g. `"Condition":
+{"StringEquals": {"ssm:resourceTag/Environment": "staging"}}` on the `AdvisorSsmProbe` statement. A document's
+description carries the probe kind, its version and a hash of the script, so after a probe changes (a new version, or
+a script edited in Settings › Probes) the page says which documents are stale; rerun the setup script or update them:
 
 ```
-curl -s http://localhost:9034/api/probe/document > probe-document.json
-aws ssm update-document --name AwsAdvisorProbe --document-version '$LATEST' --document-format JSON --content file://probe-document.json
-aws ssm update-document-default-version --name AwsAdvisorProbe --document-version "$(aws ssm describe-document --name AwsAdvisorProbe --query Document.LatestVersion --output text)"
+curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/host/document > probe-host.json
+aws ssm update-document --name AwsAdvisorProbe-host --document-version '$LATEST' --document-format JSON --content file://probe-host.json
+aws ssm update-document-default-version --name AwsAdvisorProbe-host --document-version "$(aws ssm describe-document --name AwsAdvisorProbe-host --query Document.LatestVersion --output text)"
 ```
+
+A fleet that still has only the pre-2.0 combined document `AwsAdvisorProbe` keeps working: the host, docker and
+apps probes fall back to it (once per process, with a warning) until their own documents exist; the software probe
+has no fallback and waits for its document.
 
 `PROBE_DOCUMENT=AWS-RunShellScript` exists only for a throwaway test with credentials that are deleted
-afterwards: the advisor then passes the script as the `commands` parameter, the permission check flags the
-setup as unsafe, and the recommended policy still names only `AwsAdvisorProbe`, so nothing in this document
-ever grants the stock one.
+afterwards: the permission check flags the setup as unsafe, and the recommended policy still names only the
+`AwsAdvisorProbe*` documents, so nothing in this document ever grants the stock one.
 
 ### Shortcut
 
@@ -676,7 +687,7 @@ aws iam create-user --user-name aws-advisor
 aws iam create-policy --policy-name aws-advisor-read --policy-document file://policy.json --query Policy.Arn --output text
 aws iam attach-user-policy --user-name aws-advisor --policy-arn <the ARN printed above>
 aws iam create-access-key --user-name aws-advisor          # paste AccessKeyId and SecretAccessKey into Settings
-aws ssm create-document --name AwsAdvisorProbe --document-type Command --document-format JSON --content file://probe-document.json
+for k in host docker apps software; do curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/$k/document > probe-$k.json; aws ssm create-document --name AwsAdvisorProbe-$k --document-type Command --document-format JSON --content file://probe-$k.json; done
 ```
 
 Use a managed policy (`create-policy` + `attach-user-policy`), not `put-user-policy`: a user's inline policies
@@ -867,6 +878,13 @@ outcome under the row.
 
 ## Who changed an instance's state
 
+An instance is called gone only when the pass could see its account: the watcher records each instance's account
+with its sample and, when a previous sample's account returns no instance at all this time (a parent switch, a
+member not registered yet, a role that stopped resolving), leaves its instances as they were and logs how many it
+could not see (`canCallGone` in `src/watcher.ts`). The inventory marks rows gone the same way, only in the accounts
+the refresh returned rows for (`markGone` in `src/inventory.ts`). An instance seen again closes the "is gone" alert
+it got (acknowledged by "watcher (seen again)"): the earlier pass could not see it, it did not leave.
+
 Every `instance_state` alert is explained as it is raised (`src/alert_cause.ts`): who started, stopped, launched
 or terminated the instance, how and from where. Three sources, cheapest first: the advisor's own ledger (an
 executor row on the instance in the window: office hours, parking, a wake, Revert, the Stop / Start buttons),
@@ -992,11 +1010,33 @@ auditing and Settings shows whether Jev is enabled, today's calls and tokens and
 questions name the key they refer to ("Consider only the resource under resources.r3"): without that Jev
 answers the batch as a whole and every resource gets the same answer.
 
-## SSM probe
+## SSM probes
 
-A fixed, versioned shell script (`PROBE_SCRIPT` in `src/ssm.ts`, read-only: `/proc`, `df`, `ps`) is sent through
-the SSM document named by `PROBE_DOCUMENT` (`AwsAdvisorProbe`, the custom document that embeds the script and
-the only one the policy ever grants; the setup script creates it; see [The SSM probe document](#the-ssm-probe-document))
+Four fixed, versioned, read-only shell scripts (`src/probes.ts`), each in its own SSM document and on its own
+schedule, so the cheap hourly readings and the heavy daily ones never share a cadence:
+
+| probe | document | collects | default schedule | setting |
+|---|---|---|---|---|
+| host | `AwsAdvisorProbe-host` | memory, swap, load, CPUs, uptime, disks (with the EBS volume behind each mount), top processes by CPU and memory; the disk, memory and load alerts, the daily roll-ups and the charts read it; the pass also refreshes the RDS load profiles | `PROBE_CRON` (daily; hourly `5 * * * *` fills the charts) | Schedules › Probe: host |
+| docker | `AwsAdvisorProbe-docker` | the containers (state, CPU, memory, network) and the [activity section](#activity-is-anyone-using-this-box): container logs and use signals, connections, the front door, logins, traffic; the usage profiles and the swarm costs read it | `PROBE_DOCKER_CRON` | Schedules › Probe: containers and activity |
+| apps | `AwsAdvisorProbe-apps` | [what runs](#what-runs-on-the-box-probe-16) (process groups), [what listens](#exposed-ports-and-who-serves-them-probe-18) and where the log agents ship; an opened internet-facing port raises `port_exposed`, and the graph's reachability verdicts are rebuilt for the box | `PROBE_APPS_CRON` | Schedules › Probe: programs and ports |
+| software | `AwsAdvisorProbe-software` | the OS and kernel, every installed package with its version and its source package (dpkg, rpm or apk; the advisories name the source, `openssh`, not the binary, `openssh-server`), the version of well-known programs read from the binary (`ssh -V`, `nginx -v`, `openssl version`, …), the images behind the running containers with their digests; stored in `instance_os`, `instance_packages`, `instance_binaries`, `instance_images` with first and last seen and a change log (`src/software_inventory.ts`); the inventory a CVE is matched against | `PROBE_SOFTWARE_CRON` (daily) | Schedules › Probe: installed software |
+
+Host, docker and apps share the scope (`PROBE_SCOPE`: idle candidates, or every box) and the minimum interval
+between probes of one box (`PROBE_MIN_INTERVAL_HOURS`); the software probe has its own (`PROBE_SOFTWARE_SCOPE`,
+every box by default, since a vulnerability has to be found everywhere, and `PROBE_SOFTWARE_INTERVAL_HOURS`). Every
+script prints exactly one JSON object on its last line carrying `probe` (`aws-advisor/<kind>/<version>`) and `kind`;
+each row is stored in `instance_metrics` with its kind, and an instance is read back as one merged view (each section
+from its kind's newest row; a pre-2.0 combined row counts for host, docker and apps). **Settings › Probes** lists the
+probes with what each collects, its document and whether the deployed one matches, its schedule and scope, when it
+last ran and on how many boxes, "Run pass now", and the script itself: an edit is saved as a setting (refused when it
+stops looking like a read-only probe), embedded in the document and takes effect when the document is redeployed;
+the status column says when that is due. `GET /api/probes`, `PUT/DELETE /api/probes/:kind/script`,
+`GET /api/probes/:kind/document`, `POST /api/probes/:kind/pass`; `POST /api/instances/:id/probe?kind=` runs one
+probe on one box (without `kind`, every probe in turn); `GET /api/instances/:id/software`, `GET /api/software`,
+`GET /api/software/where?name=` read the software inventory.
+
+A probe is sent
 to one instance that `aws_ssm_managed_instance` reports as online Linux, using the same
 identity Steampipe uses (the saved keys, the profile or the default chain, with the role when one is set; see
 [Three ways to authenticate](#three-ways-to-authenticate)). It prints one JSON object (memory total and used,
@@ -1130,8 +1170,8 @@ hole without a reason, a leftover, or an IPv6 rule on an IPv4-only box). Rows li
 the app events under its owner's name, and a port open to the internet raises a `port_exposed` alert (warning)
 when first seen, once while it stays open. The EC2 detail's "What runs" tab lists them under **Listens on**, the
 `instance_apps` tool carries them (and `port: 443` answers where a port is open across the fleet), `GET
-/api/ports` lists the fleet's open ports, and the graph holds `(:AdvisorResource)-[:LISTENS_ON]->(:AdvisorPort)`
-with `(:AdvisorApp)-[:SERVES]->(:AdvisorPort)`. Update the SSM document to 1.8 (Settings › Permissions prints the
+/api/ports` lists the fleet's open ports, and the graph holds `(:AdvisorCompute)-[:EXPOSES]->(:AdvisorEndpoint {kind: port})`
+with `(:AdvisorApp)-[:SERVES]->(:AdvisorEndpoint)`. Update the SSM document to 1.8 (Settings › Permissions prints the
 command) so the probe sends the section.
 
 ### Security groups and the Ports tab
@@ -1152,6 +1192,93 @@ or a range wider than 1,000 ports from `::/0`, or a port the group does not open
 group gets one recommendation (rule `sg_dormant_ipv6`, `security_fix`, tier approve, no saving) naming the rules,
 the listening ports they would open and the revoke command; it is refreshed with every inventory and resolved when
 the rule is gone.
+
+### Clusters and the workloads inside them
+
+The inventory reads every EKS and ECS cluster (`src/cluster_inventory.ts`, Inventory › Clusters). ECS comes from
+Steampipe: clusters, services, task definitions, running tasks and container instances. EKS needs the Kubernetes API:
+the advisor signs an EKS bearer token the way `aws eks get-token` does (a presigned `sts:GetCallerIdentity` carrying
+the cluster name, `src/k8s_client.ts`) and lists Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services,
+Ingresses, NetworkPolicies and pods, read-only, over TLS pinned to the cluster's CA. The cluster has to know the
+advisor's IAM identity: the Clusters tab shows each cluster's access status (readable, identity not mapped, mapped
+but may not list, endpoint not reachable) and, for one it cannot read, the commands that grant read access, either
+an access entry with the `AmazonEKSViewPolicy` or an `aws-auth` mapping bound to the `view` ClusterRole. A private-only
+endpoint is reachable from inside the VPC only, where the swarm's advisor runs.
+
+Every workload is one row with its containers and images, replicas desired and ready, the nodes its pods run on (by
+owner reference through the ReplicaSet, or by labels), the Services that select it, the Ingresses that route to those
+Services and the NetworkPolicies whose podSelector matches it. The graph (`src/graph_clusters.ts`) draws
+`AdvisorCluster` nodes (with the control plane as an `api` endpoint and its public CIDRs as `REACHABLE_FROM` sources,
+`requires_auth` true), one `AdvisorDeployment` per workload `RUNS_IN` its cluster, `BUILT_FROM` one `AdvisorImage` per
+container image, `SCHEDULED_ON` its nodes, `EXPOSES` a `service_endpoint` per Service port and a `url` per Ingress host
+and path, and `GUARDED_BY` the NetworkPolicies as `AdvisorFilter {kind: network_policy}` with their rules. An Ingress
+or a LoadBalancer Service names the balancer AWS created for it; when that balancer is in the inventory its listener
+`FORWARDS_TO` the endpoint and the listener's internet verdict is copied onto it, so "which workload runs the
+vulnerable image and can the internet reach it" is one query inside a cluster too. Node groups are `PART_OF` their
+cluster. `GET /api/inventory/clusters`, `GET /api/inventory/clusters/:arn/workloads`, `POST /api/inventory/clusters/refresh`.
+
+### The network layer and reachability verdicts in the graph
+
+The inventory also reads, every refresh, the network objects behind reachability (`src/network_inventory.ts`):
+subnets, route tables, internet, NAT and egress-only gateways, VPC peerings and endpoints, Elastic IPs, every network
+interface with its addresses and groups, and the security groups' egress rules (the ingress rules, VPCs, groups and
+network ACLs were already read). RDS instances and ElastiCache clusters now carry their security groups in the
+snapshot. The graph (`src/graph_network.ts`, rebuilt after every inventory and resource mirror) draws them as
+`AdvisorNetwork` (VPC), `AdvisorSegment` (subnet, `public` when its route table sends the default route to an
+internet gateway), `AdvisorRouteTable` with `ROUTES` edges, `AdvisorGateway`, `AdvisorInterface` (`ATTACHED_TO` its
+instance, balancer, function or gateway, `WEARS` its groups, `IN_SEGMENT`), `AdvisorPublicIp`, and `AdvisorFilter`
+(security groups and network ACLs) with one `AdvisorFilterRule` per rule or ACL entry and a `FROM` edge to the
+`AdvisorSource` it admits (`internet`, `cidr:<range>`, `prefix:<id>`) or to the group it references. Resources wear
+their groups directly too (`GUARDED_BY`).
+
+On top of it the verdicts, so no agent query re-implements security group and ACL logic: every `AdvisorEndpoint` gets
+`REACHABLE_FROM` edges to the sources that can reach it (with the rule and the ACL entry it passed in `through`),
+`ALLOWED_BY` edges to the rules that let each source in, and `BLOCKED_BY` edges to what stops a source a rule would
+otherwise admit (a network ACL entry, the ACL's implicit deny, or the groups themselves when no rule matches), plus
+`exposure`, `reach_reason` and `reach_computed_at` on the endpoint. They are computed by the same code the Ports tab
+uses (`reachOf`, `naclVerdict`) for instance ports (groups, public address, subnet ACL), balancer listeners (groups
+and scheme; a balancer without groups admits what its scheme allows) and RDS endpoints (groups and
+`publicly_accessible`), and refreshed per instance after each probe. The question "is this vulnerable sshd
+reachable" is then one query: the box `EXPOSES` port 22 (its `process` says sshd), and the endpoint either
+`REACHABLE_FROM` the internet or `BLOCKED_BY` something that says why.
+
+The **Network** page shows the layer as the graph holds it (`GET /api/graph/network`, `/api/graph/network/:vpc`,
+`/api/graph/filter/:id`, `POST /api/graph/network/sync` to rebuild): what is reachable from the internet and the rule
+that lets it in, what a rule admits but something else blocks, every network with its segments, routes, gateways and
+peers, and every filter with its rules and what wears it.
+
+### Vulnerabilities: the installed software against the advisories
+
+The software probe's inventory is matched against published advisories (`src/software_vulns.ts`), never against a
+hand-written list, and the result is judged by reachability, the way the rest of the graph is:
+
+- **Sources.** [OSV](https://osv.dev) for Ubuntu, Debian, Alpine, Rocky Linux and AlmaLinux: the batch API is asked
+  about each distinct (distribution release, source package, exact version) the fleet has, under OSV's
+  release-qualified ecosystems (`Ubuntu:24.04:LTS`, `Debian:12`, `Alpine:v3.19`). Amazon Linux is not in OSV, so
+  AL2 and AL2023 use the core repository's `updateinfo.xml.gz` on `cdn.amazonlinux.com` (the feed `dnf updateinfo`
+  reads; public, about 1.5 MB per release and architecture, re-read when its timestamp changes), matched by binary
+  package with rpm's own version order (`src/alas_feed.ts`). RHEL, CentOS, Fedora and SUSE are reported as not
+  matchable, with the reason, on the Security page.
+- **Scores.** Ubuntu's and Debian's advisories carry no CVSS; the CVE they fix is read from OSV and lends its score
+  and attack vector (`severity_from`). Amazon's `Important`/`Critical` words are kept and the CVEs add the score.
+  Ubuntu and Debian publish both per-CVE records and the USN/DSA bundles that fixed several; when the per-CVE records
+  exist the bundles are left out, so one hole is one row.
+- **The verdict.** Each match is judged by what the affected program listens on (the apps probe's ports and their
+  exposure through security groups and network ACLs): `critical` when the internet can reach it, `exposed` when the
+  network or another group can, `mitigated` when it listens but is blocked, `local_only` when only loopback can or
+  the attack needs local access, `affected` when it is installed with no listening program of its own (a library,
+  the kernel, a tool). A package is tied to its program by name (`openssh` → `sshd`, `postgresql` → `postgres`, …).
+- **Where it shows.** Security page › Vulnerabilities (grouped by advisory, worst verdict first, each box underneath
+  with its version, the fixed version, the port and its exposure; "Match now" runs a scan); Inventory › EC2 › a box ›
+  Software tab (its OS and kernel, the advisories matched against it with the verdict, every package with its source,
+  searchable, the programs by version flag, the container images it runs, recent version changes, "Probe software now"). `GET
+  /api/security/vulnerabilities`, `/api/security/vulnerabilities/:id`, `/api/instances/:id/vulnerabilities`,
+  `POST /api/security/vulnerabilities/scan`. In the graph: `AdvisorPackage` nodes `INSTALLED_ON` the box,
+  `KnVulnerability` nodes with `AFFECTS` edges and the `VULNERABLE_TO` verdict from the box (`docs/ontology.md` §1b),
+  so "which boxes run a vulnerable sshd the internet can reach" is one query.
+- **Cadence and cost.** `VULN_CRON` (default `40 4 * * *`, after the software probe) asks only about versions not
+  asked about in the last 6 hours and reads only advisories not stored or changed since; the first scan of a fleet
+  reads a few hundred advisories (about half a minute). Everything is cached in SQLite.
 
 ### Testing the probe
 
@@ -1383,8 +1510,9 @@ classic load balancer with what it fronts and what reaches it:
 - **Domains**: the Route 53 records that lead to the balancer, from the Route 53 links below.
 
 The agent reads the same table through the `load_balancer_inventory` MCP tool (with `instance_id`: the balancers in
-front of one instance), and the graph carries every balancer as an `AdvisorResource {kind: elb}` (id = ARN) with a
-`ROUTES_TO {target_group, port, health}` edge to each instance behind it (a `AdvisorResourceRef` for a Lambda target).
+front of one instance), and the graph carries every balancer as an `AdvisorLoadBalancer` (id = ARN) that `EXPOSES` one
+`AdvisorEndpoint {kind: listener}` per listener, each with a `FORWARDS_TO {target_group, health}` edge to the instance port
+endpoints behind it (or a function's invoke endpoint for a Lambda target).
 Rows keep `first_seen` / `last_seen` and `gone` like the other tabs.
 
 ### Usage profiles
@@ -1571,6 +1699,215 @@ null saving with the reason when resource-level cost data is not available. The 
 `graviton_migration:<resource>`, every rationale ends with the playbook's steps in one sentence and the evidence carries
 `{ playbook, current_sku, target_sku, prices }`.
 
+### The adapter boundary and the account scope
+
+Everything provider-specific sits behind `src/adapters/` (`types.ts` is the contract, `index.ts` the registry, `aws/`
+the one adapter today). An adapter owns its credentials and accounts, its collection, its storage (the SQLite tables it
+fills, listed on the adapter) and emits the generic model: resource nodes from its storage and the graph layers it
+writes; the mirror core, the rules, the executor and the pages read the generic shape. `GET /api/providers` lists the
+adapters (configured or not, with their Settings sections) and the providers the advisor knows but cannot collect from
+yet. The sidebar's "Looking at" picks the account scope: every read carries `?account=<id>` and the inventories,
+clusters, cost findings, security findings, recommendations, alerts, changes, runs, network and the Overview narrow
+to it (rows stored before the inventory recorded account ids belong to the primary account; recommendations and alerts
+are attributed through the resource they name, the details a rules pass wrote or the run that proposed them, and
+stamped with the account once). Under one AWS account the Overview shows that account's recommendations, alerts,
+inventory and findings count, and its own months from Cost Explorer's per-account view (`spend_by_account_monthly`,
+unblended, refreshed with the daily spend); the daily spend, the service breakdown and the invoice figures stay the
+payer's consolidated bill and are labelled "whole organisation" when members are registered. The daily review, the
+open alerts list and the Impact card (`GET /api/review`, `/alerts`, `/verifications`) narrow the same way; the morning
+observation is the agent's read of the whole fleet. Overview › Accounts is the view across accounts
+(`GET /api/accounts/overview`): under one account it lists that provider's family (an AWS parent with its members),
+under "all accounts" every provider.
+
+
+### Vercel
+
+The second adapter (`src/adapters/vercel/`). Settings › Accounts › Add account › Vercel takes a read-scope token and,
+for a team, the team id; the token is tested against the API, saved as a runtime secret (`VERCEL_TOKEN`,
+`VERCEL_TEAM_ID`) and never shown again. Every 30 minutes (`VERCEL_CRON`) the adapter reads the projects with their
+framework and Node version, the latest deployments, the domains, the names of environment variables (never values)
+and the firewall state, and mirrors them: a project is an `AdvisorDeployment`, each URL it serves an `AdvisorEndpoint`
+reachable from the internet with `requires_auth` taken from the project's deployment protection (Vercel login,
+password or trusted IPs, per target), the runtime an `AdvisorPackage`. The account's Projects section shows all of it;
+`GET /api/vercel/projects`, `GET /api/vercel/stores?kind=`, `POST /api/vercel/refresh`, `POST`/`DELETE /api/accounts/vercel`.
+Usage is read from `/v2/usage` per type and day (requests with cache hits, bandwidth, function invocations by
+outcome and GB-hours, builds, blob, cron, data cache, log volume) with Vercel's per-project breakdown: the team's
+Overview shows the last week and month, a daily series and a per-project table, and flags error rates, throttles,
+timeouts, failed builds and a cold edge cache; the project nodes carry `usage_*_7d`.
+Billing is read from Vercel's invoices (`GET /v1/invoices`: totals, status, the groups and line items, with the
+marketplace stores such as Neon billed through them) and from the team's subscription (plan, seats and their price,
+the current period): the Overview for the team shows the last invoice, the average of the last three, the
+subscription and the current period; the accounts table shows the last paid invoice as the team's spend.
+This month for a Vercel team (`GET /api/vercel/bill`, `ui/src/components/vercelBill.tsx`) is the bill page the
+sidebar opens when it looks at the team: the subscription and where the period stands (day n of 30), the estimate
+for the period (subscription plus what infrastructure usage cost on the last three invoices, since Vercel has no
+cost-to-date endpoint), the metered usage since the period started with a daily series and the per-project split,
+every invoice with its groups and line items (click a row), and the team's own unit prices (amount over quantity on
+the last paid invoice). Each project in Inventory › Deployments opens a detail panel (`GET /api/vercel/projects/:id`,
+`VercelProjectDetail` in `ui/src/components/vercel.tsx`) with the depth an instance gets: repository, latest
+deployment, protection, firewall and Secure Compute, the URLs it serves and the stores it uses, its last 30
+deployments, domains, env variable names (never values), and its own usage (requests, invocations, errors,
+bandwidth, builds for 7 and 30 days with a daily series; read per project from `/v2/usage?projectId=`, so exact
+where the team-wide split is whole percent).
+The stores get the same depth. Each store row under Databases, Caches and Object storage carries what the store
+object says: a Neon database's compute hours this billing period as Neon reports them to Vercel, its project id at
+Neon and whether Neon Auth is on; a Redis store's high availability and storage type; a Blob store's size, object
+count, access and whether its token expired; for all of them the plan with its price lines and quotas ("$0.106 per
+CU-hour", "30 MB"), the partner's status, the secret names it injects (never values), and the projects on it with
+the variables each gets. Clicking a store opens its detail (`GET /api/vercel/stores/:id`) with those, the blob
+store's daily requests from Vercel's per-store breakdown, and what the store costs at its plan's listed rates at
+this period's pace. The Overview adds the stores in numbers (blob GB and objects, database compute hours, the cost
+at their plans), the team's people (members, owners, how many without MFA) and its log drains (where logs go, which
+projects they cover); a member without MFA, a project no drain covers, an expired blob token, a store over quota or a
+production database on a free plan land in the attention list. Project detail shows what the project costs at the
+team's listed rates for its last 30 days of metered usage, before the plan's included allocation, and which drains
+keep its logs.
+
+Vercel's prices are pricing knowledge in the graph, the same shapes AWS fills from its pricing API
+(`src/adapters/vercel/pricing.ts`, the layer "vercel pricing knowledge and systems", `GET /api/vercel/rates`, the
+"Your rates" card on This month). The team object lists every metered item with its price in cents per unit; the
+advisor stores them in dollars with the unit the item is priced per and writes one `KnSystemType {kind: usage,
+source: team_billing}` each (function invocations, GB-hours, edge requests, data transfer, build minutes, blob, log
+volume, ...), one `KnSystemType {kind: plan}` for the Pro plan (seat price, base fee, included usage), one type per
+price line of each marketplace plan a store is on plus a plan type carrying the quotas as `included`
+(`source: marketplace_plan`), and one `KnSystemType {source: invoice}` per line the last paid invoice charged
+(amount over quantity: the observed price next to the listed one). `KnPricingOverlay {kind: plan}` nodes for the
+team's subscription and for each store's plan COVER those types. Every project is a `KnSystem {kind: deployment}`
+and every store a `KnSystem` of its kind, MEMBER_OF from the resource, RUNS_ON the usage types with the quantity
+and the cost at list: the project's `monthly_list_usd` is its last 30 days priced at the team's rates, the store's is
+its marketplace usage (Neon compute hours) or blob size at the plan's rate; the resource nodes carry the same number
+as `monthly_usd`, so "what does this project cost" is one hop for the agent, on Vercel as on AWS.
+
+The agent is told all of this. The MCP fact server's instructions name every account the advisor is pointed at
+(the AWS account as the default for the aws_* tools, the Vercel team for `vercel_projects`, `vercel_stores`,
+`vercel_bill`, the vercel.* Steampipe tables and the graph tools with the team id as `account`); the graph schema
+summary that `graph_query` carries describes the Vercel shapes (the project as an `AdvisorDeployment` with its
+protection, usage and cost, its URL endpoints with `requires_auth`, the stores it `USES`, the log drains it
+`SHIPS_LOGS_TO`) and the pricing knowledge (`KnSystemType` by source, `KnPricingOverlay` plans, `KnSystem` per
+project and store priced line by line); `graph_systems` and `graph_log_groups` take an `account`. The general chat
+brief names the Vercel team in a few numbers next to the AWS account whenever a token is saved, and the chat
+prompt says the graph holds every provider in one model.
+
+Log drains are the team's log layer, in the shape CloudWatch groups have: one `KnLogGroup {native_type:
+log_drain}` per drain with the host it delivers to (never the URL with its token), sources, environments,
+sampling, the team's metered log volume split evenly across its enabled drains and priced at the team's
+`logDrainsVolume` rate; `SHIPS_LOGS_TO` from every project system the drain covers, from the team account when it
+covers them all, and from the project resource itself. There is nothing to attribute: a drain names its projects.
+Knowledge › Logs shows the drains when the sidebar looks at the team, and a project no drain covers is in the
+Overview's attention list.
+
+What the partners behind the marketplace stores know is read with their own keys (Settings › Accounts › Vercel ›
+Partners; `NEON_API_KEY`, `REDIS_CLOUD_API_KEY` + `REDIS_CLOUD_SECRET_KEY`, runtime secrets tested against the
+partner's API before they are saved, `src/adapters/vercel/partners.ts`). With a Neon key each Neon store carries
+what Neon says about its project (the store's `external_id`): storage, branches and which are protected, the
+compute endpoints with their autoscaling range, state, suspend timeout and last activity, the databases, the
+consumption this period (compute and active hours, data written and transferred), the history retention and the IP
+allow list. With Redis Cloud keys each Redis store (matched by name on the account, Pro and Essentials
+subscriptions alike) carries memory used against its limit, persistence, replication, eviction, throughput, the
+Redis version, the public endpoint, TLS and the source IPs allowed to connect. The numbers land flat on the store
+node (`pg_version`, `storage_gb`, `branches`, `compute_min_cu`, `suspend_timeout_s`, `memory_used_pct`,
+`persistence`, `source_ips`, ...), the partner's own compute hours override the ones Vercel relays (kept as
+`compute_hours_relayed`), and the store's network endpoints become `AdvisorEndpoint {kind: service_endpoint}`
+nodes `REACHABLE_FROM` the internet with `requires_auth` and `restricted_to` (the IP allow list or source IPs), the
+same shape a port on a box has. The attention list gains Redis memory above 80% of its limit, a public Redis
+endpoint open to any source IP, a production cache without persistence, a Neon compute that never suspends, a
+production Neon with no IP allow list, and a project with more than ten branches. Passwords and connection URIs
+never leave the fold: the snapshots keep hosts and names only.
+
+What the advisor notices about the team is a finding, and the actionable ones are recommendations, the same way
+AWS findings and rules work (`src/adapters/vercel/rules.ts`). Every collection ends with a rules pass: a run row
+with `provider: vercel` and the team as its account, one finding per control and resource (`vercel.control.*`:
+a failed production deployment, preview URLs open to anyone, an unverified domain, the firewall off, a member
+without MFA, a project no log drain covers, an unconnected store, a store over quota or unhealthy at the partner,
+an expired blob token, a free plan in production, function errors, throttles and timeouts, failing builds, a cold
+edge cache, and with the partner keys a Neon compute that never suspends, a Neon database without an IP allow
+list, many branches, Redis memory near its limit, a Redis endpoint open to any address, a production cache without
+persistence), and a recommendation in the shared table for the ones a person can act on, with the tier (approve
+or report, never auto: there is no Vercel actuator), the confidence, the rationale and the evidence, and a saving
+where one can be estimated (idle Neon compute hours at the plan's CU-hour rate). The fingerprint is rule and
+resource, so a decision survives the next pass, and a finding that goes away resolves its recommendation. Runs,
+Findings and Recommendations open under the Vercel scope (capability `findings`; the Runs list and the default
+run follow the account the sidebar looks at), the Overview's attention list is the latest pass, the resolution
+thread and the playbooks work as on AWS (there are no hand-written seeds for Vercel: each control names the
+Vercel, Neon or Redis Cloud documentation pages it is about in `CONTROL_REFERENCES`, and the agent writes the
+playbook from those pages alone, published on its own confidence since there is no reference to grade against), and the
+graph records it all: `AdvisorRun {native_type: rules_pass}`, `AdvisorControl -[:FLAGGED]-> project | store`,
+`AdvisorRecommendation -[:TARGETS]->` the project or store under the team's account, `DECIDED_AS` when a person
+decides. The AWS rules' reconcile leaves `vercel_*` rules alone and the Vercel pass reconciles its own.
+
+The general view ("all accounts" in the sidebar, `GET /api/accounts/general`, the Overview's top strip) sums the
+month across providers where it means the same thing (the AWS forecast, the Vercel period estimate, the stores at
+their plans), counts open recommendations and claimed savings per provider, alarms, alerts and security findings
+across accounts, and lists what needs attention with the account each item is about: the latest AWS run's alarm
+controls, unacknowledged alerts, and the Vercel team's findings. "Open" on a line scopes the sidebar to that
+account and opens the page.
+
+IAM users are in the inventory (Inventory › Identities, `src/iam_inventory.ts`, `GET /api/inventory/iam`): per
+user, console access, MFA, groups and policy names, whether a policy is administrative (AdministratorAccess or an
+inline Allow * on *), the access keys with status, age and last use (the key id masked to its last four
+characters), the last sign-in or call, and the account the user belongs to. The summary counts console users
+without MFA, administrators, active keys and keys older than 90 days, and users unused for 90 days. In the graph
+each is an `AdvisorIdentity {kind: user}` with the ontology's `human`, `mfa`, `admin`, `credentials`,
+`credential_age_days` and `last_used_at`. Under the Vercel scope the same tab lists the team's members with role and
+MFA.
+
+Accounts are nodes with their hierarchy. Every account the advisor is pointed at is an `AdvisorAccount` with its
+name, how it is reached (in words, never a secret), whether it is enabled and may be acted in, its last credential
+test and its role: `management` for an AWS parent other accounts are members of, `member` for a child, `standalone`
+otherwise. A member is `PART_OF` its parent, and every resource, run, pass and scan is `IN_ACCOUNT` of the account it
+was collected from, so a member's instances hang off the member and not off the parent, and "what runs in this
+account" and "what runs in the organisation" are one hop apart.
+
+Changes and alerts follow for the team too. Every collection ends with a snapshot of what matters (projects with
+their production deployment, protection, firewall, runtime, domains and env variable names; stores with plan,
+status and projects; members with role and MFA; log drains; the subscription) diffed against the previous one
+(`src/adapters/vercel/changes.ts`, `GET /api/vercel/changes?days=`): each difference is a row with its before and
+after, in words ("production deployment READY at …", "deployment protection (sso) changed from off to all
+except custom domains", "3 env variables added to hive: …", "alice enabled MFA"), and the Changes page shows them
+under the Vercel scope the way CloudTrail is shown for AWS. The rules pass raises an alert for every alarm or
+warning finding that was not there in the previous pass (kind `vercel_<control>`, the finding's severity as the
+alert's level, the fingerprint in its details) and closes the alert when the finding goes away (acknowledged by
+the system with the reason), so the Alerts page and the Sphinx notifier carry Vercel the way they carry the
+watcher's alerts; info findings never page, and the very first pass records the backlog without paging it.
+Capabilities `changes` and `alerts` gate the two pages.
+
+Nothing in a playbook is hand-written. `src/playbooks.ts` is a table of official sources per control (the
+provider's documentation pages; for a Thrifty control the benchmark mod's own text is the primary source and the
+list may be empty), the Vercel controls list theirs in `src/adapters/vercel/rules.ts`, and every playbook is
+written by the agent from those sources, cited step by step, judged by Jev for tier and effort, and published on
+the agent's own confidence. A control whose playbook is unwritten or held shows none, with the reason, rather
+than prose someone typed; the seed catalogue and its coverage check are gone.
+
+Saving the token also writes the Steampipe connection `vercel` (plugin `turbot/vercel`, `steampipe plugin install
+vercel` once per host) into `<STEAMPIPE_CONFIG_DIR>/vercel.spc`, owned by the advisor and removed with the account, so
+the agent's `steampipe_query` tool and ad-hoc SQL can read `vercel.vercel_project`, `vercel_deployment`,
+`vercel_domain`, `vercel_dns_record`, `vercel_team`, `vercel_user` next to the AWS tables. Collection itself stays on
+the REST client, which reads what the plugin does not expose: deployment protection, the env variable names and the
+firewall.
+
+### Playbooks from sources
+
+The playbooks (what a finding means, when to act, when not to, the steps, the saving) are written by the agent from
+named sources, never by hand (`src/playbook_gen.ts`, `src/sources.ts`, `tasks/playbook/`):
+
+- **Sources.** The installed benchmark mods' own control definitions and documents, parsed from the `.pp` files
+  under `POWERPIPE_MOD_DIR/.powerpipe/mods` (Thrifty: title, description and the check's SQL plus the service's doc
+  page; Compliance: title, description and, for CIS and Foundational Security, a Remediation document per control),
+  and the provider pages those documents reference (docs.aws.amazon.com and a short allow-list, read as text, re-read
+  weekly). Every source is hashed; `GET /api/playbooks/:id/sources` shows them.
+- **Generation.** A batch of four controls per agent run with their sources in the prompt and a strict schema: each
+  step cites the source it came from. Jev then judges the tier the way it judges recommendations (could the steps
+  destroy data, what would users notice; stricter only) and the effort; the agent's confidence decides publication
+  (0.5 or more), a held one says why, and a person can mark one reviewed (pins it) or disputed (unpublishes).
+- **The catalogue** in `src/playbooks.ts` lists each control's official sources and nothing else: there is no
+  hand-written playbook text anywhere; the "How to act" panel shows the generated playbook with its citations or
+  says none is in force.
+- **When.** `PLAYBOOK_CRON` weekly (default Monday 07:00) rebuilds what a changed source or age made due and writes
+  the ones controls flagged in the latest run still lack, a few per run under the agent quota; Findings › Playbooks
+  has Generate now. `GET /api/playbooks/due`, `/api/playbooks/jobs`, `POST /api/playbooks/generate`,
+  `PUT /api/playbooks/:id/review`. In the graph: `KnPlaybook` with provenance and `CITES` edges to `KnSource`
+  (`docs/ontology.md` §1c).
+
 ### Tailored resolutions
 
 A playbook is generic; a resolution is the playbook applied to one recommendation on one resource, with the graph,
@@ -1692,37 +2029,48 @@ to the account. Closing those is the graph's own eval, the same way the reconstr
 
 ### Schema
 
-All labels are prefixed `Advisor` (the Neo4j is shared with stakgraph and repo2graph; nothing without the prefix is
-ever created, changed or deleted), every node carries `account_id` and `updated_at`, and the only foreign label used is
-`Concept`, matched by id, never created:
+The graph follows the provider-neutral model of `docs/cloud-ontology.md`; `docs/ontology.md` lists what the AWS
+adapter writes today, label by label. In short: labels are prefixed `Advisor` (records of things that exist: resources,
+endpoints, recommendations, actions, alerts) or `Kn` (knowledge rebuilt from them: systems, types, archetypes, log
+groups, playbooks); the Neo4j is shared with stakgraph and repo2graph, nothing without those prefixes is ever created,
+changed or deleted, and the only foreign label used is `Concept`, matched by id, never created. Every node carries
+`provider`, `account_id`, `native_type` (the provider's word: `ec2_instance`, `rds_instance`, `s3_bucket`), `native_id`
+and `updated_at`.
 
 ```
-(:AdvisorAccount {id})
+(:AdvisorAccount {id, kind: account})
    ▲ IN_ACCOUNT
-(:AdvisorResource {id, kind: ec2|rds|elasticache|elb, name, type, state, region, role, role_confidence, protected_prob,
-                   monthly_usd, cpu_30d, ssm_status, gone, first_seen, last_seen})
-   ├─[:HAS_ROLE]──▶ (:AdvisorRole {name})                one node per Jev role name
-   ├─[:IN_POOL]───▶ (:AdvisorNodePool {name})            Karpenter pool / EKS node group / ASG (EC2 only)
-   ├─[:ROUTES_TO {target_group, port, health}]─▶ (:AdvisorResource | :AdvisorResourceRef)   a load balancer (kind elb, id = ARN; dns_name, scheme,
-   │                                                          beanstalk_env, targets, healthy, requests_30d, gb_30d, asgs, ecs_services) and the instances or Lambda behind it
-   ◀─[:TARGETS]──── (:AdvisorRecommendation {id, fingerprint, title, action_type, tier, status, source, rule,
-   │                  est_monthly_saving, confidence, decided_by, decided_at, decision_scope, created_at})
-   │                  ├─[:TARGETS]──────▶ (:AdvisorResourceRef {id})   when the resource is not in the inventory (a VPC, a bucket, a Lambda)
+(:AdvisorResource + one of :AdvisorCompute | :AdvisorDatabase | :AdvisorCache | :AdvisorLoadBalancer | :AdvisorFunction
+                   | :AdvisorStorage | :AdvisorDeployment | :AdvisorDnsZone | :AdvisorDnsRecord
+   {id, name, state: running|stopped|pending|terminated|available|degraded|unknown, native_state, region, monthly_usd,
+    role, role_confidence, protected_prob, gone, first_seen, last_seen, + the label's own properties})
+   ├─[:HAS_ROLE]────▶ (:KnArchetype {id, name, description})       the judged workload role; systems reach the same node with IS_A
+   ├─[:IN_POOL]─────▶ (:AdvisorNodePool {id, name, kind: asg|karpenter|node_group|batch})   usage profile and capacity pattern live here
+   ├─[:OBSERVED_BY {since, last_at, status, detail}]─▶ (:AdvisorTelemetry {kind: api|metrics|probe, native})
+   │                                                          what the advisor can see of it; no probe edge = cannot look inside
+   ├─[:EXPOSES {gone}]─▶ (:AdvisorEndpoint {id, kind: port|listener|service_endpoint|url, protocol, port, hostname, bind, scope, exposure})
+   │        ◀─[:SERVES]── (:AdvisorApp {id, name, kind: app|infra})        the program behind a port
+   │        ─[:FORWARDS_TO {target_group, health}]─▶ (:AdvisorEndpoint)    a balancer listener to the ports it fronts
+   ├─[:RUNS {user, count, cpu_pct, rss_bytes, command, first_seen, last_seen, gone}]─▶ (:AdvisorApp)
+   ├─[:STORES_ON {device}]─▶ (:AdvisorStorage {kind: block})               a volume attached to an instance
+   ├─[:SHIPS_LOGS_TO {via, source, observed_at}]─▶ (:KnLogGroup)           what the box's own log agent config writes to
+   ├─[:MEMBER_OF]───▶ (:KnSystem)                                         the system it is part of (knowledge layer)
+   ◀─[:TARGETS]──── (:AdvisorRecommendation {id, title, action, native_action, tier, status, source, rule, est_monthly_saving,
+   │                  confidence, decided_by, decided_at, decision_scope, verdict, realised_usd_month})
+   │                  ├─[:TARGETS]──────▶ (:AdvisorResourceRef {id, guessed_type})   a resource with no node yet (a VPC, a table, a new instance)
    │                  ├─[:DECIDED_AS]───▶ (:Concept)                   the team's decision or rule in repo2graph (MATCH only)
    │                  ├─[:PROPOSED_IN]──▶ (:AdvisorRun {id, started_at, finished_at, status, trigger, findings_count, recommendations_count})
-   │                  └─[:FROM_INCIDENT]▶ (:AdvisorIncident {id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd, created_at})
-   │                                        └─[:INVESTIGATES]▶ (:AdvisorAlert {id, kind, level, message, created_at, acknowledged, acknowledged_by})
-   ◀─[:ABOUT]────────────────────────────────────────────────────┘        (alerts point at an AdvisorResource or an AdvisorResourceRef)
-   ◀─[:FLAGGED {run_id, reason}]── (:AdvisorControl {id, title}) ─[:HAS_PLAYBOOK]─▶ (:AdvisorPlaybook {control_id, title, tier, effort})
-   ◀─[:TARGETS]──── (:AdvisorAction {id, kind, status, mode, trigger, title, reason, rollback, est_usd_month, result, error,
-                      created_at, applied_at, verified_at, reverted_at})   the executor's ledger: planned, made, read back, undone, retired
+   │                  └─[:FROM_INCIDENT]▶ (:AdvisorIncident {id, status, cause, confidence, episode_cost_usd, monthly_run_rate_usd})
+   │                                        └─[:INVESTIGATES]▶ (:AdvisorAlert {id, kind, level, message, cause, cause_actor_kind, ...})
+   ◀─[:ABOUT]────────────────────────────────────────────────────┘        ─[:CAUSED_BY]─▶ (:AdvisorAction) when the advisor did it
+   ◀─[:FLAGGED {run_id, reason}]── (:AdvisorControl {id, title, framework, category}) ─[:HAS_PLAYBOOK]─▶ (:KnPlaybook {control_id, title, meaning, steps, tier, effort})
+   ◀─[:SECURITY_FLAGGED {scan_id, reason, severity, first_seen_at}]── (:AdvisorControl)      the latest security scan's alarms
+   ◀─[:TARGETS]──── (:AdvisorAction {id, kind, status, mode, trigger, title, reason, rollback, est_usd_month, result, error, ...})
                       ├─[:CARRIES_OUT]▶ (:AdvisorRecommendation)           when the change executes an approved recommendation
-                      └─[:TOUCHED_IN {event, outcome, at, trigger, detail}]▶ (:AdvisorPass {id, started_at, finished_at, trigger, mode,
-                            proposed, fresh, applied, verified, failed, refused, held, stale, took_ms, errors})   the executor's activity log, one node per pass
-   │   (an EC2 resource also carries its status checks: system_status, instance_status, ebs_status, scheduled_events, status_checked_at)
-   ├─[:RUNS {user, count, cpu_pct, rss_bytes, oldest_seconds, command, first_seen, last_seen, probes, gone}]─▶ (:AdvisorApp {id, name, kind: app|infra})
-   │                                                          what runs on the box, from the probe's process list (probe 1.6), the OS set aside; gone = it left
-   └─[:SHIPS_LOGS_TO {via, source, observed_at}]─▶ (:KnLogGroup)   what the box's own log agent config says it writes to (probe 1.6)
+                      ├─[:LAUNCHED]───▶ (:AdvisorResourceRef)              the instance a relaunch created
+                      └─[:TOUCHED_IN {event, outcome, at, trigger, detail}]▶ (:AdvisorPass {...})   the executor's activity log
+(:AdvisorDnsRecord)-[:IN_ZONE]->(:AdvisorDnsZone); (:AdvisorDnsRecord)-[:POINTS_TO {hop, via}]->(resource | :AdvisorResourceRef)
+(:AdvisorDeployment {platform: beanstalk})-[:RUNS_ON_POOL]->(:AdvisorNodePool), -[:BACKED_BY]->(:AdvisorLoadBalancer)
 ```
 
 Everything the advisor plans, does or decides is in the graph, always: the ledger is mirrored on every pass, apply,
@@ -1732,8 +2080,11 @@ recommendation the executor closes fires the same Concept sync and re-mirror as 
 Findings are not mirrored one node per row (thousands per run); instead the latest completed run's alarm findings
 whose resource is in the inventory become `FLAGGED` edges from the control to the resource, one per control and
 resource, and earlier runs' edges are dropped. Resource references are matched as the id itself or the last segment
-of an ARN (`arn:...:instance/i-abc` → `i-abc`); anything else becomes an `AdvisorResourceRef`. Playbooks come from
-`src/playbooks.ts`. Unique constraints on each label's id (name for roles and pools) are created if missing.
+of an ARN (`arn:...:instance/i-abc` → `i-abc`, `arn:aws:s3:::name` → `name`); anything else becomes an
+`AdvisorResourceRef` with a `guessed_type` read off the id's shape. Playbooks come from `src/playbooks.ts`. Unique
+constraints on each label's id are created if missing, and the v1 labels (`AdvisorRole`, `AdvisorPort`,
+`AdvisorPlaybook`, `KnService`) are removed once per process. After deploying the v2 mirror run
+`POST /api/graph/sync?wipe=1` once, so nodes written by the old mirror lose their old property names too.
 
 ### Configuration
 
@@ -2635,7 +2986,65 @@ parent's read identity (Settings › Member accounts prints the trust policy wit
 - `aws-advisor-act`, with the actuator policy (Auto-actions page), only if the executor may change that account;
   without it the child is dry-run only.
 
-Add the child (id, name, the two ARNs, optional regions) in Settings › Member accounts. Saving rewrites the
+The child side is one script too: Settings › Set up AWS access › **Member account of the organisation** renders
+it with the parent's read identity filled in; run it in a terminal with the *child's* admin credentials. It
+creates the child's read role trusting that identity (or merges the trust into an existing role, keeping other
+principals), applies the read policy, creates the probe documents and registers the child with the advisor,
+which tests the assumption from the parent. Both sides of a cross-account assumption are needed: the child's
+trust policy, and the parent's read policy statement `AdvisorAssumeMembers` (`sts:AssumeRole` on
+`arn:aws:iam::*:role/aws-advisor-read`), which the parent's setup script applies on a rerun if it predates it.
+The actuator role stays a manual step for now.
+
+**Production: the advisor on an EC2 host in a member account.** The host has no key; its instance profile is the
+base identity, and the chain is instance role (in the host's account) → the parent's read role (in the parent) →
+each member's read role, the host's own account included. Two scripts, one per account:
+1. In the host's account, **EC2 host in a member account** (`ec2-host`, run with that account's admin credentials):
+   creates the instance role and profile, attaches the SSM core policy, and lets the role assume the parent's read
+   role and nothing else.
+2. In the parent, **EC2 host with an instance role** with "Host instance role in another account" set to that
+   instance role's ARN (`ec2-role&hostRoleArn=`): the parent's read role trusts the host's instance role across
+   accounts (merged into an existing trust policy), the policy and documents are refreshed; nothing is created for
+   the host there.
+On the host, Settings › AWS credentials › Instance / default chain with the parent's read role as the role to
+assume and credential source Ec2InstanceMetadata (the parent-side script prints exactly that); the members
+registered under Member accounts, including the host's own account, are reached through their read roles from
+there. Hop limit 2 on the instance's IMDS when the advisor runs in a container.
+
+Settings › Member accounts also lists the organisation's accounts as the parent sees them
+(`organizations:ListAccounts`, in the recommended policy; the management account only), with which are the
+parent, registered members, or not registered yet, and a "Set up as member" link into the wizard for each.
+
+When the credentials start resolving to a different account than the one the advisor was collecting (a new
+parent), nothing is deleted on its own: the change is recorded and Settings › Access shows what is still stored
+about the previous account with three explicit ways out: make the previous account a member of the new parent
+(its rows already carry its account id, so they become the member's), keep the data, or purge it, which removes
+every row and graph node attributed to that account after typing its id again (`GET/DELETE /api/settings/aws/change`,
+`POST /api/settings/aws/purge`). Recording the change also stamps the rows collected before the advisor kept
+account ids with the previous parent (the only account collected then), so the scope rule, which reads an empty
+account as the parent's, does not hand them to the new parent.
+
+Settings › Accounts › Data wipes on request (`src/purge.ts`): one account (an AWS account, the current one
+included, or a Vercel team: its tables, the rows attributed to it, its runs and its graph nodes) or everything.
+The full wipe empties every collected table and the collection state in `settings`, deletes every Advisor* and Kn*
+node in the graph and mirrors the playbooks straight back; it keeps the configuration (credentials metadata,
+registered accounts, runtime settings), the public reference data (price lists, Amazon Linux advisories), the
+generated playbooks with their sources and, with the switch on (the default), the Concepts and learnings. The
+Concepts in repo2graph's graph are never deleted. Each wipe shows what goes first, is confirmed by typing the
+account id or WIPE, and is refused while a run is collecting (`GET /api/settings/data/preview`,
+`POST /api/settings/data/wipe`). For a production install that collected before accounts were scoped, wipe
+everything with the Concepts kept and start a run. The inventory summary the tabs count from is scoped the same way as the lists
+(`scopedStmt` in `src/scope.ts` adds the account clause to each summary query; a table without an account column,
+the Route 53 rows, stays unscoped), so the parent's tabs count the parent's resources only. The other pages scope the same way: Findings and Security
+by the rows' account id (the Security header says the account's share of the scan's findings; a scan spans the
+organisation), Recommendations and Alerts by an `account_id` each row gets once, from the resource it names
+through the inventories, from the details a platform pass wrote, or from the run that proposed it (what cannot be
+attributed reads as the primary account's), Network and Knowledge by the graph's account, Changes by a CloudTrail
+read per account (the parent with its own credentials, each member through its read role, every event stamped),
+Logs by the groups' account, the vulnerability card by the instances' account. This month stays the payer's whole bill, since Cost Explorer and the forecast are
+organisation-wide; under one account's scope it shows that account's own months from Cost Explorer's per-account
+view. A collection run reads every account in one pass, so the Runs list does not scope.
+
+Otherwise add the child (id, name, the two ARNs, optional regions) in Settings › Member accounts by hand. Saving rewrites the
 Steampipe connection: the app's schema becomes an aggregator over the parent and one connection per child
 (through a managed AWS profile chaining the child role onto the parent's identity), so every query, inventory,
 finding and rule spans all accounts as is, with `account_id` on the rows. The executor reads a child's resources
@@ -2815,6 +3224,8 @@ What each one is for (✎ = also editable in Settings):
 - `GET /api/observe`, `GET /api/observe/brief`, `POST /api/observe/run?force=1` (see [The morning observation](#the-morning-observation-the-agents-read-of-the-day))
 - `GET /api/review`, `POST /api/review/run` (see [The daily review](#the-daily-review-what-the-statistics-say))
 - `GET /api/baselines?scope_kind&scope_id`, `POST /api/baselines/refresh` (see [Baselines](#baselines-what-is-typical))
+- `GET /api/accounts/general` (the month, open items and attention across every account), `GET /api/runs?account=` and `GET /api/findings?account=` (a platform account's rules passes and their findings)
+- `GET /api/vercel/stores/:id` (one store in full with its usage and cost at plan), `GET /api/vercel/rates` (the team's listed metered rates, the marketplace plans' lines, the invoice-observed unit prices)
 - `GET /api/forecast` (this month's forecast, its history and the last price check), `POST /api/forecast/run`; `GET /api/bill?month=YYYY-MM`, `POST /api/bill/reconcile?month=` (the price check, see [This month](#this-month-the-bill-forecast-from-what-is-running-now))
 - `GET /api/graph/systems?kind=`, `GET /api/graph/system/:id`, `GET /api/graph/bill`, `POST /api/graph/knowledge` (see [the knowledge graph](#graph-mirror-and-the-knowledge-graph))
 - `GET /api/graph`, `POST /api/graph/sync?wipe=1`, `GET /api/graph/resource/:id` (the Neo4j mirror, see [Graph mirror](#graph-mirror))

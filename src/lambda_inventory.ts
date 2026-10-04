@@ -8,6 +8,7 @@ import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 import { config } from "./config.js";
+import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 
 const openErr = db.prepare("select id from alerts where kind = 'lambda_errors' and resource = ? and acknowledged = 0 limit 1");
 const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
@@ -81,17 +82,18 @@ export async function refreshLambdaInventory(onError: (m: string) => void = () =
 }
 
 const SORTS = ["name", "runtime", "memory_mb", "invocations_month", "gb_seconds_month", "avg_duration_ms", "errors_30d", "monthly_usd", "open_recs", "findings"];
-export function listLambda(f: { q?: string; sort?: string; gone?: boolean } = {}) {
+export function listLambda(f: { q?: string; sort?: string; gone?: boolean; scope?: AccountScope | null } = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("gone = 0");
   if (f.q) { where.push("(name like ? or runtime like ? or arn like ?)"); params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`); }
   const desc = f.sort?.startsWith("-"); const col = (f.sort || "").replace(/^-/, "");
   const order = SORTS.includes(col) ? `order by ${col} ${desc ? "desc" : "asc"} nulls last` : "order by monthly_usd desc, invocations_month desc";
   return db.prepare(`select * from inventory_lambda ${where.length ? `where ${where.join(" and ")}` : ""} ${order} limit 2000`).all(...params) as any[];
 }
-export function lambdaSummary() {
-  const r = db.prepare("select count(*) as total, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(invocations_month), 0) as invocations_month, coalesce(sum(gb_seconds_month), 0) as gb_seconds_month, coalesce(sum(arm), 0) as arm, coalesce(sum(open_recs), 0) as open_recs, coalesce(sum(findings), 0) as findings, coalesce(sum(invocations_30d > 0), 0) as active from inventory_lambda where gone = 0").get() as any;
-  const gone = (db.prepare("select count(*) as n from inventory_lambda where gone = 1").get() as any).n;
+export function lambdaSummary(scope?: AccountScope | null) {
+  const r = scopedStmt(scope, "select count(*) as total, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(invocations_month), 0) as invocations_month, coalesce(sum(gb_seconds_month), 0) as gb_seconds_month, coalesce(sum(arm), 0) as arm, coalesce(sum(open_recs), 0) as open_recs, coalesce(sum(findings), 0) as findings, coalesce(sum(invocations_30d > 0), 0) as active from inventory_lambda where gone = 0").get() as any;
+  const gone = (scopedStmt(scope, "select count(*) as n from inventory_lambda where gone = 1").get() as any).n;
   return { ...r, gone };
 }
 export function lambdaFactsMap(): Map<string, LambdaFacts & { arn: string }> {

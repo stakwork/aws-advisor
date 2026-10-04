@@ -14,6 +14,7 @@ import { CloudWatchClient, GetMetricDataCommand, type MetricDataQuery } from "@a
 import { addColumn, db } from "./db.js";
 import { S, query, sdkCredentials } from "./steampipe.js";
 import { describeError } from "./permissions.js";
+import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 
 db.exec(`create table if not exists inventory_elb (
   arn text primary key, name text not null, kind text not null, scheme text, dns_name text, state text, region text, vpc_id text, created text,
@@ -205,8 +206,9 @@ export async function refreshElbInventory(onError: (m: string) => void = () => {
 const parseRow = (r: any) => ({ ...r, security_groups: arr(r.security_groups), tags: obj(r.tags) || {}, listeners: arr(r.listeners), target_groups: arr(r.target_groups), asgs: arr(r.asgs), ecs_services: arr(r.ecs_services) });
 
 const SORTS = ["name", "kind", "scheme", "state", "region", "targets", "healthy", "requests_30d", "gb_30d", "monthly_usd", "created", "beanstalk_env", "open_recs", "findings"];
-export function listElb(f: { q?: string; sort?: string; gone?: boolean; kind?: string; scheme?: string } = {}) {
+export function listElb(f: { q?: string; sort?: string; gone?: boolean; kind?: string; scheme?: string; scope?: AccountScope | null } = {}) {
   const where: string[] = []; const params: unknown[] = [];
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (!f.gone) where.push("gone = 0");
   if (f.kind) { where.push("kind = ?"); params.push(f.kind); }
   if (f.scheme) { where.push("scheme = ?"); params.push(f.scheme); }
@@ -235,11 +237,11 @@ export function elbsForLambda(name: string) {
   return rows.map((r) => ({ arn: r.arn, name: r.name, kind: r.kind, dns_name: r.dns_name, target_groups: arr(r.target_groups).filter((g: any) => (g.targets || []).some((t: any) => t.lambda === name)).map((g: any) => g.name) }));
 }
 
-export function elbSummary() {
-  const r = db.prepare(`select count(*) as total, coalesce(sum(kind = 'alb'), 0) as alb, coalesce(sum(kind = 'nlb'), 0) as nlb, coalesce(sum(kind = 'clb'), 0) as clb, coalesce(sum(kind = 'gwlb'), 0) as gwlb,
+export function elbSummary(scope?: AccountScope | null) {
+  const r = scopedStmt(scope, `select count(*) as total, coalesce(sum(kind = 'alb'), 0) as alb, coalesce(sum(kind = 'nlb'), 0) as nlb, coalesce(sum(kind = 'clb'), 0) as clb, coalesce(sum(kind = 'gwlb'), 0) as gwlb,
     coalesce(sum(scheme = 'internet-facing'), 0) as internet_facing, coalesce(sum(targets), 0) as targets, coalesce(sum(healthy), 0) as healthy, coalesce(sum(unhealthy), 0) as unhealthy,
     coalesce(sum(healthy = 0), 0) as no_healthy_target, coalesce(sum(requests_30d), 0) as requests_30d, coalesce(sum(gb_30d), 0) as gb_30d, coalesce(sum(monthly_usd), 0) as monthly_usd,
     coalesce(sum(beanstalk_env is not null), 0) as beanstalk, coalesce(sum(open_recs), 0) as open_recs, coalesce(sum(findings), 0) as findings from inventory_elb where gone = 0`).get() as any;
-  const gone = (db.prepare("select count(*) as n from inventory_elb where gone = 1").get() as any).n;
+  const gone = (scopedStmt(scope, "select count(*) as n from inventory_elb where gone = 1").get() as any).n;
   return { ...r, gone };
 }

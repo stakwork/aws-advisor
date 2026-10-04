@@ -51,7 +51,7 @@ export function checkDiskLevels(instanceId: string, name: string | null, disks: 
 /** Evaluates the latest probe of every running instance (startup, and after a probe pass). */
 export function checkAllDiskLevels(): { instances: number; raised: number } {
   const rows = db.prepare(`select m.instance_id, m.collected_at, m.json, i.name from instance_metrics m join inventory_ec2 i on i.instance_id = m.instance_id
-    where m.id in (select max(id) from instance_metrics group by instance_id) and i.gone = 0 and i.state = 'running'`).all() as { instance_id: string; collected_at: string; json: string; name: string | null }[];
+    where m.id in (select max(id) from instance_metrics where coalesce(kind, 'all') in ('host', 'all') group by instance_id) and i.gone = 0 and i.state = 'running'`).all() as { instance_id: string; collected_at: string; json: string; name: string | null }[];
   let raised = 0;
   for (const r of rows) {
     let d: any; try { d = JSON.parse(r.json); } catch { continue; }

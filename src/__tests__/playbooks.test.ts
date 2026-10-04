@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PLAYBOOKS, RULE_CONTROL, controlForRecommendation, listPlaybooks, playbookFor, stepsSentence } from "../playbooks.js";
+import { CONTROL_SOURCES, RULE_CONTROL, controlForRecommendation, listPlaybooks, playbookFor, stepsSentence } from "../playbooks.js";
 import { EC2_GRAVITON_CONTROL, GravitonFacts, LAMBDA_GRAVITON_CONTROL, RDS_GRAVITON_CONTROL, ec2ArmEquivalent, gravitonPriceKey, gravitonSaving, k8sPoolOf, rdsArmEquivalent } from "../graviton.js";
 import { RoleFacts, buildRecommendations, ec2GravitonTier, gravitonRecommendations } from "../rules.js";
 
@@ -19,23 +19,18 @@ const CONTROLS_SEEN = [
   "query.commitments", "query.eip_unattached", "query.idle_instances", "query.log_groups_no_retention", "query.old_snapshots", "query.stopped_instance_ebs",
 ];
 
-test("every control that raised an alarm in the account has a playbook, and every playbook is complete", () => {
-  for (const id of CONTROLS_SEEN) {
-    const pb = playbookFor(id);
-    assert.ok(pb, `no playbook for ${id}`);
-    assert.equal(pb.control_id, id);
-  }
+test("every control that raised an alarm in the account is known to the generator, and every published playbook is complete", () => {
+  // nothing is hand-written: a control has its official sources listed (or the mod's text), and a playbook only once the agent wrote one
+  for (const id of CONTROLS_SEEN) assert.ok(id in CONTROL_SOURCES, `no sources listed for ${id}`);
   for (const pb of listPlaybooks()) {
-    assert.ok(pb.title && pb.meaning.length > 40 && pb.act_when.length > 20 && pb.ignore_when.length > 20, `${pb.control_id}: text too thin`);
-    assert.ok(pb.steps.length >= 2 && pb.steps.every((s) => s.length > 15), `${pb.control_id}: steps`);
-    assert.ok(pb.saving.length > 10, `${pb.control_id}: saving formula`);
+    assert.ok(pb.provenance?.origin === "generated" && pb.provenance.published, `${pb.control_id}: only published generated playbooks are in force`);
+    assert.ok(pb.title && pb.meaning && pb.act_when && pb.ignore_when, `${pb.control_id}: text`);
     assert.ok(["auto", "approve", "report"].includes(pb.tier) && ["low", "medium", "high"].includes(pb.effort), `${pb.control_id}: tier/effort`);
   }
-  // The rules that have no Thrifty control behind them, and every rule the app drafts, map to a playbook.
-  for (const [rule, control] of Object.entries(RULE_CONTROL)) assert.ok(PLAYBOOKS[control], `rule ${rule} -> ${control} missing`);
+  // The rules that have no Thrifty control behind them, and every rule the app drafts, map to a known control.
+  for (const [rule, control] of Object.entries(RULE_CONTROL)) assert.ok(control in CONTROL_SOURCES, `rule ${rule} -> ${control} missing`);
   assert.equal(playbookFor("aws_thrifty.control.does_not_exist"), null);
-  assert.equal(playbookFor(null), null);
-  assert.ok(Object.keys(PLAYBOOKS).length >= CONTROLS_SEEN.length + 4);
+  assert.equal(playbookFor("query.never_generated_control"), null, "a control nobody generated has nothing in force");
 });
 
 test("controlForRecommendation prefers evidence.playbook and falls back to the rule's control", () => {
@@ -43,7 +38,7 @@ test("controlForRecommendation prefers evidence.playbook and falls back to the r
   assert.equal(controlForRecommendation({ rule: "graviton_migration", evidence: { playbook: LAMBDA_GRAVITON_CONTROL } }), LAMBDA_GRAVITON_CONTROL);
   assert.equal(controlForRecommendation({ rule: "idle_instance", evidence: "{}" }), "query.idle_instances");
   assert.equal(controlForRecommendation({ rule: "agent:other", evidence: null }), null);
-  const sentence = stepsSentence(playbookFor(EC2_GRAVITON_CONTROL)!);
+  const sentence = stepsSentence({ control_id: EC2_GRAVITON_CONTROL, title: "EC2 instance is not on Graviton", meaning: "m", act_when: "a", ignore_when: "i", steps: ["List what runs on the box.", "Check each one has an arm64 build: `docker manifest inspect <image>`.", "Move it."], saving: "s", tier: "approve", effort: "medium" });
   assert.match(sentence, /^Playbook \(EC2 instance is not on Graviton\): list what runs on the box, then check each one has an arm64 build, then /);
   assert.ok(sentence.endsWith("."));
 });
@@ -148,6 +143,14 @@ const roles: Record<string, RoleFacts> = {
   "i-k8s": role("k8s_node"), "i-web": role("web_or_api"), "i-dev": role("dev_or_test", 0.96), "i-chain": role("blockchain_node", 1.0),
   "i-unknown": role("unknown", 0.85), "i-protected": role("unknown", 0.66, 0.94), "i-noprice": role("web_or_api"), "i-stopped": role("web_or_api"),
 };
+
+// the rules quote the playbook in force in their rationale; nothing is hand-written, so the test writes generated rows the way the generator would
+const { db: pbDb } = await import("../db.js");
+const putGenerated = pbDb.prepare(`insert or replace into playbooks(control_id, title, meaning, act_when, ignore_when, steps, saving, references_, gaps, confidence, tier, effort, judged, sources, generated_at, generated_by, stale_after, review_status, published, reason, status)
+  values (?, ?, 'm', 'a', 'i', ?, 's', '[]', '[]', 0.8, 'approve', 'medium', '{"judged":true}', '[]', '2026-10-04T00:00:00Z', 'test', '2999-01-01T00:00:00Z', 'generated', 1, 'confidence', 'completed')`);
+putGenerated.run(EC2_GRAVITON_CONTROL, "EC2 instance is not on Graviton", JSON.stringify(["List what runs on the box.", "Check each one has an arm64 build: docker manifest inspect must list linux/arm64.", "Kubernetes: add an arm64 node group or Karpenter NodePool and make every image multi-arch.", "Hand-built boxes: launch the replacement from the arm64 AMI in the same subnet."].map((text) => ({ text, source: null }))));
+putGenerated.run(RDS_GRAVITON_CONTROL, "RDS instance is not on Graviton", JSON.stringify(["Confirm the engine version supports the Graviton class.", "Modify the instance class in a maintenance window."].map((text) => ({ text, source: null }))));
+putGenerated.run(LAMBDA_GRAVITON_CONTROL, "Lambda function is not on Graviton", JSON.stringify(["Check native dependencies have arm64 builds.", "Switch the architecture to arm64 and redeploy."].map((text) => ({ text, source: null }))));
 
 test("graviton rule: tier by role, protected and k8s detection, skips with reasons", () => {
   const { recs, skipped } = gravitonRecommendations(fixtureFacts(), roles);

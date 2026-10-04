@@ -1,0 +1,90 @@
+{
+  "type": "object",
+  "properties": {
+    "playbooks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "control_id": {
+            "type": "string",
+            "description": "exactly as given in the prompt"
+          },
+          "title": {
+            "type": "string",
+            "description": "the finding in one line, in the engineer's words (not the control's title)"
+          },
+          "meaning": {
+            "type": "string",
+            "description": "what the alarm actually says, one or two sentences"
+          },
+          "act_when": {
+            "type": "string",
+            "description": "when it is worth acting on, from the sources"
+          },
+          "ignore_when": {
+            "type": "string",
+            "description": "when to leave it alone and why, from the sources"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "one concrete step: console path or CLI command with <placeholders>, and what to verify"
+                },
+                "source": {
+                  "type": "string",
+                  "description": "the id of the source this step comes from (a mod:... id or a URL from the prompt)"
+                }
+              },
+              "required": [
+                "text",
+                "source"
+              ]
+            }
+          },
+          "saving": {
+            "type": "string",
+            "description": "the saving formula in words, with the quantities the rule can read; 'none: a security control' when there is no saving"
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "URLs cited, from the sources only"
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "a list (possibly empty) of short items: what the sources do not say that a colleague would want to know"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "a number between 0 and 1 (not a word): how fully the sources support the playbook"
+          }
+        },
+        "required": [
+          "control_id",
+          "title",
+          "meaning",
+          "act_when",
+          "ignore_when",
+          "steps",
+          "saving",
+          "references",
+          "gaps",
+          "confidence"
+        ]
+      }
+    }
+  },
+  "required": [
+    "playbooks"
+  ]
+}

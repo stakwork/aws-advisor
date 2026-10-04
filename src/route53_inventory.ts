@@ -10,6 +10,7 @@
  * 0.40 USD per million from the DNSQueries metric).
  */
 import { db, getSetting, setSetting } from "./db.js";
+import { scopedStmt, type AccountScope } from "./scope.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 
@@ -509,9 +510,9 @@ export function domainsByResource(kind: string): Map<string, any[]> {
   return out;
 }
 
-export function route53Summary() {
-  const r = db.prepare(`select count(*) as total, coalesce(sum(link_state = 'linked'), 0) as linked, coalesce(sum(link_state = 'external'), 0) as external, coalesce(sum(link_state = 'unmatched'), 0) as unmatched,
+export function route53Summary(scope?: AccountScope | null) {
+  const r = scopedStmt(scope, `select count(*) as total, coalesce(sum(link_state = 'linked'), 0) as linked, coalesce(sum(link_state = 'external'), 0) as external, coalesce(sum(link_state = 'unmatched'), 0) as unmatched,
     coalesce(sum(link_state = 'none'), 0) as none, coalesce(sum(alias), 0) as aliases from inventory_route53_record where gone = 0`).get() as any;
-  const z = db.prepare("select count(*) as zones, coalesce(sum(private), 0) as private_zones, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(queries_30d), 0) as queries_30d, coalesce(sum(records <= 2), 0) as empty_zones from inventory_route53_zone where gone = 0").get() as any;
-  return { ...r, ...z, monthly_usd: Math.round(z.monthly_usd * 100) / 100, gone: (db.prepare("select count(*) as n from inventory_route53_record where gone = 1").get() as any).n };
+  const z = scopedStmt(scope, "select count(*) as zones, coalesce(sum(private), 0) as private_zones, coalesce(sum(monthly_usd), 0) as monthly_usd, coalesce(sum(queries_30d), 0) as queries_30d, coalesce(sum(records <= 2), 0) as empty_zones from inventory_route53_zone where gone = 0").get() as any;
+  return { ...r, ...z, monthly_usd: Math.round(z.monthly_usd * 100) / 100, gone: (scopedStmt(scope, "select count(*) as n from inventory_route53_record where gone = 1").get() as any).n };
 }

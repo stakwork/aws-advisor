@@ -17,7 +17,7 @@ import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { config } from "./config.js";
 import { getJsonSetting, setSetting } from "./db.js";
 import { ROLE_ARN_RE, type MemberConnection } from "./aws_config.js";
-import { credentialsMeta, currentCredentialSettings, sdkCredentials, writeConnection } from "./steampipe.js";
+import { credentialsMeta, currentCredentialSettings, sdkCredentials, updateCredentialsMeta, writeConnection } from "./steampipe.js";
 
 export interface MemberAccount {
   account_id: string;
@@ -80,7 +80,10 @@ export function validateAccount(input: any): MemberAccount {
 export function rewriteConnectionFiles(): boolean {
   const settings = currentCredentialSettings();
   if (!settings) return false;
+  // the credentials are unchanged: the account they resolve to stays known (a rewrite is not a new credential test)
+  const accountId = credentialsMeta()?.accountId;
   writeConnection(settings, memberConnections());
+  if (accountId) updateCredentialsMeta({ accountId });
   return true;
 }
 

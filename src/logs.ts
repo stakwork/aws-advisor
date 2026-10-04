@@ -6,6 +6,7 @@
  * through the log_groups tool. In the graph design this is the "ships logs to" edge with its rate and price.
  */
 import { addColumn, db } from "./db.js";
+import { accountWhere, type AccountScope } from "./scope.js";
 import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
@@ -93,10 +94,11 @@ export async function refreshLogs(onLog: (s: string) => void = () => {}): Promis
 export interface LogGroupRow { name: string; region: string; retention_days: number | null; stored_gb: number; ingest_gb_day: number | null; ingest_usd_month: number | null; storage_usd_month: number; log_class: string | null }
 
 /** Groups by ingestion cost then by stored size; `limit` rows. */
-export function topLogGroups(limit = 25): { refreshed_at: string | null; total_gb_day: number | null; total_stored_gb: number; groups: LogGroupRow[]; no_retention: number } {
+export function topLogGroups(limit = 25, scope?: AccountScope | null): { refreshed_at: string | null; total_gb_day: number | null; total_stored_gb: number; groups: LogGroupRow[]; no_retention: number } {
+  const a = accountWhere(scope);
   const refreshed = (db.prepare("select max(last_seen) as t from log_groups").get() as { t: string | null }).t;
-  const rows = db.prepare("select * from log_groups order by coalesce(ingest_bytes_day, 0) desc, stored_bytes desc limit ?").all(limit) as any[];
-  const totals = db.prepare("select sum(stored_bytes) as stored, sum(case when retention_days is null then 1 else 0 end) as never from log_groups").get() as { stored: number | null; never: number };
+  const rows = db.prepare(`select * from log_groups where ${a.sql} order by coalesce(ingest_bytes_day, 0) desc, stored_bytes desc limit ?`).all(...a.params, limit) as any[];
+  const totals = db.prepare(`select sum(stored_bytes) as stored, sum(case when retention_days is null then 1 else 0 end) as never from log_groups where ${a.sql}`).get(...a.params) as { stored: number | null; never: number };
   const total = db.prepare("select avg(bytes) as b from (select day, sum(bytes) as bytes from log_ingest_daily where name like '__total__/%' and day >= date('now', '-7 days') group by day)").get() as { b: number | null };
   return {
     refreshed_at: refreshed, total_gb_day: total.b != null ? total.b / 1e9 : null, total_stored_gb: (totals.stored ?? 0) / 1e9, no_retention: totals.never,

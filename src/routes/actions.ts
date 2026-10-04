@@ -9,6 +9,7 @@ import { actuatorCapabilities, applyAction, deleteActions, dispatchActionNotific
 import { askAboutAction, listMessages, threadForAction } from "../chat.js";
 import { eventsForAction, listExecutorLog } from "../executor_log.js";
 import { environmentTimeline } from "../capacity_timeline.js";
+import { accountScope } from "../scope.js";
 
 export const actions = Router();
 actions.use(authMiddleware);
@@ -45,7 +46,7 @@ actions.get("/actions", (req, res) => {
   const kind = req.query.kind ? String(req.query.kind) : undefined;
   if (kind && !/^[a-z0-9_]{1,40}$/.test(kind)) return res.status(400).json({ error: "kind must be an action kind (letters, digits, _)" });
   const id = Number(req.query.id);
-  res.json(listActions({ status: String(req.query.status || "all"), kind, page: Number(req.query.page) || undefined, page_size: Number(req.query.page_size) || undefined, id: Number.isInteger(id) ? id : undefined }));
+  res.json(listActions({ scope: accountScope(req.query as any), status: String(req.query.status || "all"), kind, page: Number(req.query.page) || undefined, page_size: Number(req.query.page_size) || undefined, id: Number.isInteger(id) ? id : undefined }));
 });
 actions.get("/actions/preview", async (_req, res) => {
   try { res.json(await previewActions()); } catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }

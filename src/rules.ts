@@ -4,6 +4,9 @@
  */
 import { EC2_GRAVITON_CONTROL, GravitonEc2Fact, GravitonFacts, LAMBDA_ARM_DISCOUNT, LAMBDA_GRAVITON_CONTROL, RDS_GRAVITON_CONTROL, ec2ArmEquivalent, gravitonPriceKey, gravitonSaving, k8sPoolOf, rdsArmEquivalent } from "./graviton.js";
 import { playbookFor, stepsSentence } from "./playbooks.js";
+
+/** The generated playbook's steps as one sentence for a rationale, or nothing when no playbook is in force for the control. */
+const howTo = (controlId: string): string => { const pb = playbookFor(controlId); return pb ? stepsSentence(pb) : `No playbook is in force for ${controlId} yet; Findings › Playbooks generates one from its sources.`; };
 import { poolOf } from "./pools.js";
 import type { RdsLoadSummary } from "./rds_load.js";
 
@@ -336,7 +339,7 @@ export function gravitonRecommendations(facts: GravitonFacts | undefined, roles:
         estMonthlySaving: saving,
         tier: t.tier,
         confidence: t.confidence,
-        rationale: `${f.instance_type} bills ${cur!.toFixed(4)} USD/h on demand; ${target} is the same size on Graviton at ${arm!.toFixed(4)} USD/h (${pct(cur!, arm!)}% less), ${saving.toFixed(2)} USD/month at 730 h. Same vCPU and memory; every binary and image on the box must have an arm64 build.${t.note} ${stepsSentence(playbookFor(EC2_GRAVITON_CONTROL)!)}`,
+        rationale: `${f.instance_type} bills ${cur!.toFixed(4)} USD/h on demand; ${target} is the same size on Graviton at ${arm!.toFixed(4)} USD/h (${pct(cur!, arm!)}% less), ${saving.toFixed(2)} USD/month at 730 h. Same vCPU and memory; every binary and image on the box must have an arm64 build.${t.note} ${howTo(EC2_GRAVITON_CONTROL)}`,
         evidence: { playbook: EC2_GRAVITON_CONTROL, current_sku: f.instance_type, target_sku: target, prices: { current_hourly: cur, target_hourly: arm, region, operating_system: f.operating_system }, state: f.state, ...(pool ? { k8s_pool: pool } : {}), ...(role ? { role } : {}), finding: a.resource },
       });
       continue;
@@ -364,7 +367,7 @@ export function gravitonRecommendations(facts: GravitonFacts | undefined, roles:
         estMonthlySaving: saving,
         tier: "approve",
         confidence: 0.7,
-        rationale: `${f.class} (${label}) bills ${cur!.toFixed(4)} USD/h; ${target} runs the same ${f.engine ?? "engine"} on Graviton at ${arm!.toFixed(4)} USD/h (${pct(cur!, arm!)}% less), ${saving.toFixed(2)} USD/month. The engine does not change; the class change restarts the instance (a Multi-AZ failover takes about a minute), so do it in the maintenance window, and check no reservation covers the current class. ${stepsSentence(playbookFor(RDS_GRAVITON_CONTROL)!)}`,
+        rationale: `${f.class} (${label}) bills ${cur!.toFixed(4)} USD/h; ${target} runs the same ${f.engine ?? "engine"} on Graviton at ${arm!.toFixed(4)} USD/h (${pct(cur!, arm!)}% less), ${saving.toFixed(2)} USD/month. The engine does not change; the class change restarts the instance (a Multi-AZ failover takes about a minute), so do it in the maintenance window, and check no reservation covers the current class. ${howTo(RDS_GRAVITON_CONTROL)}`,
         evidence: { playbook: RDS_GRAVITON_CONTROL, current_sku: f.class, target_sku: target, prices: { current_hourly: cur, target_hourly: arm, region, engine: label }, engine: f.engine, finding: a.resource },
       });
       continue;
@@ -386,7 +389,7 @@ export function gravitonRecommendations(facts: GravitonFacts | undefined, roles:
       estMonthlySaving: saving,
       tier: "approve",
       confidence: saving == null ? 0.4 : 0.6,
-      rationale: `${a.id} runs on ${f.architectures.join("/") || "x86_64"}${f.runtime ? ` (${f.runtime})` : ""}${f.package_type === "Image" ? ", deployed as a container image (the image needs a linux/arm64 manifest)" : ""}.${costNote} Pure Python/Node code just needs the architecture switched; native extensions need arm64 wheels or builds. ${stepsSentence(playbookFor(LAMBDA_GRAVITON_CONTROL)!)}`,
+      rationale: `${a.id} runs on ${f.architectures.join("/") || "x86_64"}${f.runtime ? ` (${f.runtime})` : ""}${f.package_type === "Image" ? ", deployed as a container image (the image needs a linux/arm64 manifest)" : ""}.${costNote} Pure Python/Node code just needs the architecture switched; native extensions need arm64 wheels or builds. ${howTo(LAMBDA_GRAVITON_CONTROL)}`,
       evidence: { playbook: LAMBDA_GRAVITON_CONTROL, current_sku: f.architectures[0] || "x86_64", target_sku: "arm64", prices: { last_month_cost: f.last_month_cost, discount: LAMBDA_ARM_DISCOUNT }, runtime: f.runtime, package_type: f.package_type, finding: a.resource },
     });
   }

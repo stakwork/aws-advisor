@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate, Link, useSearchParams } from "react-router-dom";
-import { api, realProcesses, usd, when } from "../api";
+import { api, cachedProviders, currentScope, currentScopeProvider, realProcesses, rememberProviders, setScope, usd, when } from "../api";
+import { ClustersPanel } from "../components/clusters";
 import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
 import { Badge, Button, Card, Code, CopyButton, DetailCell, Empty, Stat, Td, Th } from "../components/ui";
@@ -9,6 +10,9 @@ import { InstanceCharts } from "../components/instanceCharts";
 import { UsageProfile } from "../components/usageProfile";
 import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 import { GroupLink, PortsPanel, SecurityGroupsPanel } from "../components/securityGroups";
+import { SoftwarePanel } from "../components/software";
+import { VercelMembers, VercelProjects } from "../components/vercel";
+import { VercelStores } from "../components/vercelStores";
 import { WakeProfilePanel } from "../components/wakeProfile";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
@@ -219,10 +223,19 @@ function ActivityBlock({ activity, summary, collectedAt, previous, instanceId, r
 import { RdsLoadPanel } from "../components/rdsLoad";
 import { metricLabel } from "./Knowledge";
 
-const TABS = ["ec2", "rds", "elasticache", "lambda", "elb", "ebs", "s3", "route53", "sg", "tags"] as const;
+/**
+ * One tab per generic kind (the words of docs/cloud-ontology.md), with the provider's own word as the hint; the tab
+ * ids stay the historical ones so links from other pages keep working. Which tabs show depends on the account the
+ * sidebar looks at: an AWS account has the AWS kinds, a Vercel team its deployments; "all accounts" shows every tab
+ * that has a configured provider behind it.
+ */
+const TABS = ["ec2", "rds", "elasticache", "lambda", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", lambda: "Lambda", elb: "Load balancers", ebs: "EBS", s3: "S3", route53: "Route 53", sg: "Security groups", tags: "Tags" };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", sg: "group_id", tags: "resource" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities" };
+const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · Vercel team members" };
+/** Which providers each tab draws from; a tab shows when the scope's provider (or, for all accounts, any configured provider) is among them. */
+const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" };
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
@@ -322,7 +335,21 @@ const Related = ({ id, recs, findings, list }: { id: string; recs: number; findi
 
 export default function Inventory() {
   const [params, setParams] = useSearchParams();
-  const tab = (TABS.includes(params.get("tab") as Tab) ? params.get("tab") : "ec2") as Tab;
+  // which kinds to show: the scope's provider (remembered with the scope, so the first paint is right), or every configured provider
+  const [providersUp, setProvidersUp] = useState<string[] | null>(cachedProviders()); // the configured providers, by id
+  const [scopeProvider, setScopeProvider] = useState<string | null>(currentScope() === "all" ? null : currentScopeProvider());
+  const [scopeKnown, setScopeKnown] = useState(currentScope() === "all" || currentScopeProvider() !== null);
+  useEffect(() => {
+    api("/providers").then((d) => { const ids = (d.providers || []).filter((p: any) => p.configured).map((p: any) => p.id); rememberProviders(ids); setProvidersUp(ids); }).catch(() => setProvidersUp((p) => p ?? ["aws"]));
+    const scope = currentScope();
+    if (scope === "all") { setScopeProvider(null); setScopeKnown(true); }
+    else api("/accounts").then((d) => { const prov = (d.records || []).find((r: any) => r.id === scope)?.provider ?? null; setScopeProvider(prov); setScopeKnown(true); if (prov) setScope(scope, prov); }).catch(() => setScopeKnown(true));
+  }, []);
+  const ready = scopeKnown && (scopeProvider !== null || providersUp !== null);
+  const awsView = scopeProvider !== "vercel"; // the AWS lists, stats and search only when the scope is AWS or every account
+  const visibleTabs = TABS.filter((t) => (scopeProvider ? TAB_PROVIDERS[t].includes(scopeProvider) : TAB_PROVIDERS[t].some((p) => (providersUp ?? ["aws"]).includes(p))));
+  const requested = params.get("tab") as Tab;
+  const tab = (TABS.includes(requested) && visibleTabs.includes(requested) ? requested : visibleTabs[0] ?? "ec2") as Tab;
   const selectedId = params.get("id");
   const state = params.get("state") || "";
   const ssm = params.get("ssm") || "";
@@ -361,7 +388,7 @@ export default function Inventory() {
     setRows(null);
     // The Tags tab is its own report (src/tag_hygiene.ts): nothing to fetch here.
     // So is Security groups (src/security_groups.ts): its panel fetches its own rows.
-    if (tab === "tags" || tab === "sg") { setRows([]); return Promise.resolve(); }
+    if (tab === "tags" || tab === "sg" || tab === "clusters" || tab === "deployments" || scopeProvider === "vercel") { setRows([]); return Promise.resolve(); }
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (tab === "ebs" && state) qs.set("state", state);
@@ -370,7 +397,7 @@ export default function Inventory() {
     if (params.get("q")) qs.set("q", params.get("q")!);
     if (sort) qs.set("sort", sort);
     if (gone) qs.set("gone", "1");
-    return api(`/inventory/${tab}?${qs}`).then((r) => { if (seq === rowsRequest.current) setRows(r); }).catch((e) => { if (seq === rowsRequest.current) { setErr(e.message); setRows([]); } });
+    return api(`/inventory/${tab === "identities" ? "iam" : tab}?${qs}`).then((r) => { if (seq === rowsRequest.current) setRows(r); }).catch((e) => { if (seq === rowsRequest.current) { setErr(e.message); setRows([]); } });
   };
   const loadDetail = () => {
     if (!selectedId) { setDetail(null); return Promise.resolve(); }
@@ -415,11 +442,10 @@ export default function Inventory() {
     finally { setRefreshing(false); }
   };
 
-  const runProbe = async (id: string) => {
+  const runProbe = async (id: string, kind?: string) => {
     setProbe({ busy: true, error: "" });
-    try { await api(`/instances/${id}/probe`, { method: "POST" }); await refresh(); }
+    try { const r = await api(`/instances/${id}/probe${kind ? `?kind=${kind}` : ""}`, { method: "POST" }); await refresh(); if (r?.failed?.length) setProbe({ busy: false, error: `${r.failed.map((f: any) => `${f.kind}: ${f.message}`).join("; ")}` }); else setProbe({ busy: false, error: "" }); return; }
     catch (e: any) { setProbe({ busy: false, error: e.message }); return; }
-    setProbe({ busy: false, error: "" });
   };
 
   const toggleSort = (col: string) => set({ sort: sort === col ? `-${col}` : sort === `-${col}` ? null : col });
@@ -428,8 +454,9 @@ export default function Inventory() {
   );
 
   const s = summary;
-  const inv = s?.[tab];
+  const inv = awsView ? s?.[tab] : null;
 
+  if (!ready) return <div className="space-y-4"><h1 className="text-xl font-semibold text-zinc-100">Inventory</h1><Empty>Loading…</Empty></div>;
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -443,15 +470,22 @@ export default function Inventory() {
       {err && <div className="text-sm text-red-300">{err}</div>}
 
       <div className="flex gap-1 border-b border-zinc-800">
-        {TABS.map((t) => (
-          <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
-            {TAB_LABEL[t]}{s && s[t] && <span className="ml-1 text-xs text-zinc-500">{s[t].total}</span>}
+        {visibleTabs.map((t) => (
+          <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} title={TAB_NATIVE[t]} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
+            {TAB_LABEL[t]}{awsView && s && (s as any)[t] && <span className="ml-1 text-xs text-zinc-500">{(s as any)[t].total}</span>}
           </button>
         ))}
+        <span className="ml-auto self-center pr-1 text-[11px] text-zinc-600">{TAB_NATIVE[tab]}</span>
       </div>
 
+      {tab === "deployments" && <VercelProjects />}
+      {scopeProvider === "vercel" && tab === "identities" && <VercelMembers />}
+      {scopeProvider === "vercel" && tab === "rds" && <VercelStores kind="database" />}
+      {scopeProvider === "vercel" && tab === "elasticache" && <VercelStores kind="cache" />}
+      {scopeProvider === "vercel" && tab === "s3" && <VercelStores kind="storage" />}
       {tab === "tags" && <TagsPanel />}
       {tab === "sg" && <SecurityGroupsPanel selected={selectedId} onSelect={(id) => set({ id })} />}
+      {tab === "clusters" && <ClustersPanel selected={selectedId} onSelect={(id) => set({ id })} />}
 
       {tab === "ec2" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
@@ -505,6 +539,14 @@ export default function Inventory() {
           <Stat label="Fixed price / month" value={usd(inv.monthly_usd)} hint="hourly list price × 730; LCU-hours (ALB, NLB) and per-GB (classic) come on top" />
         </div>
       )}
+      {tab === "identities" && inv?.iam && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <Stat label="IAM users" value={inv.iam.users} hint={`${inv.iam.admins} administrator${inv.iam.admins === 1 ? "" : "s"}`} />
+          <Stat label="Console without MFA" value={<span className={inv.iam.console_without_mfa ? "text-orange-300" : "text-emerald-300"}>{inv.iam.console_without_mfa}</span>} hint="a password alone opens the console" />
+          <Stat label="Active access keys" value={inv.iam.keys_active} hint={`${inv.iam.keys_over_90d} older than 90 days`} />
+          <Stat label="Unused 90 days" value={inv.iam.unused_90d} hint="console or key, no sign-in or call in 90 days" />
+        </div>
+      )}
       {tab === "route53" && inv && (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <Stat label="Hosted zones" value={inv.zones} hint={`${inv.private_zones ? `${inv.private_zones} private · ` : ""}${inv.total} records${inv.gone ? ` · ${inv.gone} gone` : ""}`} />
@@ -523,7 +565,7 @@ export default function Inventory() {
         </div>
       )}
 
-      {tab !== "tags" && tab !== "sg" && <div className="flex flex-wrap items-center gap-2">
+      {awsView && tab !== "tags" && tab !== "sg" && <div className="flex flex-wrap items-center gap-2">
         {tab === "ec2" && (
           <>
             <select value={state} onChange={(e) => set({ state: e.target.value })}>
@@ -559,7 +601,7 @@ export default function Inventory() {
         {rows && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
       </div>}
 
-      {tab !== "tags" && tab !== "sg" && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
+      {awsView && tab !== "tags" && tab !== "sg" && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
         {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>{s?.refreshed_at ? "Nothing matches." : "No snapshot yet."}</Empty> : (
           <div className="min-w-0 overflow-x-auto self-start">
             <table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
@@ -600,6 +642,11 @@ export default function Inventory() {
                   <SortTh col="requests_30d" className="text-right">Requests 30d</SortTh><SortTh col="gb_30d" className="text-right">GB 30d</SortTh><SortTh col="monthly_usd" className="text-right">$ / mo</SortTh><SortTh col="created">Created</SortTh>
                 </tr></thead>
               )}
+              {tab === "identities" && (
+                <thead className="bg-zinc-900"><tr>
+                  <SortTh col="name">User</SortTh><Th>Console</Th><Th>MFA</Th><Th>Admin</Th><Th>Groups · policies</Th><SortTh col="keys">Access keys</SortTh><SortTh col="last_used">Last used</SortTh><SortTh col="created">Created</SortTh>
+                </tr></thead>
+              )}
               {tab === "lambda" && (
                 <thead className="bg-zinc-900"><tr>
                   <SortTh col="name">Function</SortTh><SortTh col="runtime">Runtime</SortTh><SortTh col="memory_mb" className="text-right">Memory</SortTh><SortTh col="invocations_month" className="text-right">Invocations / mo</SortTh>
@@ -620,7 +667,7 @@ export default function Inventory() {
                   const detailRow = selectedId === id ? (
                     <tr className="border-t border-zinc-800 bg-zinc-950/40"><td colSpan={COLUMNS[tab]} className="max-w-0 p-3"><DetailCell onClose={() => set({ id: null })} id={id}><div className={tab === "ec2" ? "" : "lg:columns-2 lg:gap-8"}>
                       {!detail ? <div className="text-sm text-zinc-500">{rows ? "Not in the snapshot." : "Loading…"}</div>
-                        : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={() => runProbe(detail.instance_id)} />
+                        : tab === "ec2" ? <Ec2Detail d={detail} probe={probe} onProbe={(kind?: string) => runProbe(detail.instance_id, kind)} />
                         : tab === "rds" ? <RdsDetail d={detail} />
                         : tab === "lambda" ? <LambdaDetail d={detail} />
                         : tab === "elb" ? <ElbDetail d={detail} />
@@ -658,6 +705,18 @@ export default function Inventory() {
                       <Td className="text-right">{r.open_recs || "—"}</Td>
                       <Td className="text-right">{r.findings || "—"}</Td>
                     </tr>{detailRow}
+                  </Fragment>);
+                  if (tab === "identities") return (<Fragment key={id}>
+                    <tr className={cls}>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name}</span>{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-[11px] text-zinc-500">{r.arn}</div></Td>
+                      <Td className="text-xs">{r.console_access ? <span className="text-zinc-200">yes</span> : <span className="text-zinc-500">no</span>}</Td>
+                      <Td className="text-xs">{r.mfa_enabled ? <span className="text-emerald-300">on</span> : r.console_access ? <span className="text-orange-300">off</span> : <span className="text-zinc-500">—</span>}</Td>
+                      <Td className="text-xs">{r.admin ? <span className="text-orange-300">admin</span> : <span className="text-zinc-500">—</span>}</Td>
+                      <Td className="max-w-xs text-xs text-zinc-400">{[...r.groups.map((g: string) => `group ${g}`), ...r.attached_policies, ...r.inline_policies.map((p: string) => `inline ${p}`)].join(" · ") || "—"}{r.permissions_boundary ? <div className="text-zinc-500">boundary {r.permissions_boundary}</div> : null}</Td>
+                      <Td className="text-xs">{r.access_keys.length ? r.access_keys.map((k: any) => <div key={k.id} className={k.status === "Active" && (k.age_days ?? 0) > 90 ? "text-orange-300" : "text-zinc-300"}><span className="font-mono">{k.id}</span> {k.status}{k.age_days != null ? ` · ${k.age_days} d` : ""}{k.last_used ? ` · used ${day(k.last_used)}${k.service ? ` (${k.service})` : ""}` : " · never used"}</div>) : <span className="text-zinc-500">none</span>}</Td>
+                      <Td className="whitespace-nowrap text-xs text-zinc-400">{r.last_used ? day(r.last_used) : <span className="text-zinc-500">never</span>}</Td>
+                      <Td className="whitespace-nowrap text-zinc-400">{day(r.created)}</Td>
+                    </tr>
                   </Fragment>);
                   if (tab === "ebs") return (<Fragment key={id}>
                     <tr onClick={() => pick(id)} className={cls}>
@@ -748,7 +807,7 @@ export default function Inventory() {
   );
 }
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, elb: 9, ebs: 10, s3: 8, route53: 6, sg: 5, tags: 5 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5 };
 
 /** What a balancer fronts, in one line: the instances (linked), Lambda targets, the Beanstalk environment, ASGs and ECS services. */
 function ElbFronts({ r }: { r: any }) {
@@ -948,8 +1007,8 @@ const Glance = ({ label, value, hint, tone }: { label: string; value: ReactNode;
   </div>
 );
 
-type Ec2Tab = "overview" | "usage" | "ports" | "ondemand" | "running" | "logs" | "links";
-const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["ports", "Ports"], ["ondemand", "On-demand"], ["running", "What runs"], ["logs", "Logs"], ["links", "Links & history"]];
+type Ec2Tab = "overview" | "usage" | "ports" | "ondemand" | "running" | "software" | "logs" | "links";
+const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage"], ["ports", "Ports"], ["ondemand", "On-demand"], ["running", "What runs"], ["software", "Software"], ["logs", "Logs"], ["links", "Links & history"]];
 
 /**
  * The EC2 detail in four tabs, every fact once: a header with what identifies the box and the two switches, a glance
@@ -958,7 +1017,7 @@ const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage
  * What runs (apps, activity, containers, the process and disk lines) and Links & history (DNS, balancers,
  * recommendations, findings, the graph, the timeline).
  */
-function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; error: string }; onProbe: () => void }) {
+function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; error: string }; onProbe: (kind?: string) => void }) {
   const [rules, setRules] = useState<any[]>([]);
   const [tab, setTab] = useState<Ec2Tab>("overview");
   const [usage, setUsage] = useState<any>(null);
@@ -976,7 +1035,15 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
   const diskMax = latest?.data?.disks?.length ? Math.max(...latest.data.disks.map((x: any) => Number(x.used_pct) || 0)) : null;
   const lastUse = latest?.summary?.last_use_at ?? null;
   const recs = d.open_recs || 0, findings = d.findings_count ?? 0, domains = d.domains?.length || 0, behind = d.load_balancers?.length || 0;
-  const probeButton = canProbe ? <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={onProbe} disabled={probe.busy}>{probe.busy ? "Probing…" : latest ? "Probe again" : "Probe now"}</Button> : null;
+  const probesAt: Record<string, string> = latest?.data?.probes_at || {};
+  const probeButton = canProbe ? (
+    <span className="inline-flex items-center gap-1">
+      <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={() => onProbe()} disabled={probe.busy} title="Run every probe: host, containers, programs and ports, installed software">{probe.busy ? "Probing…" : latest ? "Probe again" : "Probe now"}</Button>
+      <select className="rounded border border-zinc-700 bg-zinc-900 px-1 py-1 text-xs text-zinc-300" value="" disabled={probe.busy} onChange={(e) => { if (e.target.value) onProbe(e.target.value); }} title="Run one probe only">
+        <option value="">one probe…</option>
+        {[["host", "host: memory, load, disks"], ["docker", "containers and activity"], ["apps", "programs, ports, log shipping"], ["software", "installed software"]].map(([k, l]) => <option key={k} value={k}>{l}{probesAt[k] ? ` (last ${when(probesAt[k])})` : " (never)"}</option>)}
+      </select>
+    </span>) : null;
   return (
     <>
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1">
@@ -1094,6 +1161,8 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
           {latest?.data?.docker && !latest.data.docker.available && <div className="mt-2 text-xs text-zinc-600">No Docker daemon on this instance.</div>}
         </>
       )}
+
+      {tab === "software" && <SoftwarePanel instanceId={d.instance_id} canProbe={canProbe} busy={probe.busy} onProbe={() => onProbe("software")} />}
 
       {tab === "logs" && <LogsBlock instanceId={d.instance_id} />}
 

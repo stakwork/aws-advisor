@@ -367,7 +367,7 @@ export async function completeIncident(run: AgentRunRow, payload: { status: stri
   // Jev's tier check (src/tiercheck.ts) can only tighten a fix's tier; the fix stored on the incident carries the checked tier too.
   const { recs, changed } = await checkTiers(drafts);
   if (changed) console.log(`[investigate] incident ${incident.id}: Jev tightened ${changed} fix tier(s)`);
-  const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+  const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
   upsertRecommendations(runId, recs, "agent", run.request_id, { reconcile: false });
   const fixes = parsed.fixes.map((f, i) => {
     const rec = db.prepare("select id from recommendations where fingerprint = ?").get(`${recs[i].rule}:${recs[i].resource}`) as { id: number } | undefined;
@@ -439,7 +439,7 @@ export async function refreshFlowLogRecommendations(vpcIds?: string[]): Promise<
   const recs = await flowLogRecommendations({ vpcIds, onError: (m) => errors.push(m) });
   for (const e of errors) console.error(`[flowlogs] ${e}`);
   if (!recs.length) return 0;
-  const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+  const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
   upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
   return recs.length;
 }

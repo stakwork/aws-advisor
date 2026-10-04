@@ -26,6 +26,7 @@ import { ingressRulesFor, portsOn } from "./instance_apps.js";
 import { configured as sphinxConfigured, inQuietHours, sendSphinx } from "./notify.js";
 import { mirrorComplianceScanInBackground } from "./graph_mirror.js";
 import { syncDecisionConceptInBackground } from "./concepts.js";
+import { accountWhere, type AccountScope } from "./scope.js";
 
 export const COMPLIANCE_BENCHMARKS: { id: string; title: string }[] = [
   { id: "foundational_security", title: "AWS Foundational Security Best Practices" },
@@ -324,7 +325,7 @@ export function getScan(id: number) {
 
 const safeJson = (s: string | null) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
-export interface FindingQuery { scan_id?: number; severity?: string; control_id?: string; q?: string; only_new?: boolean; resource?: string }
+export interface FindingQuery { scan_id?: number; severity?: string; control_id?: string; q?: string; only_new?: boolean; resource?: string; scope?: AccountScope | null }
 
 /** One scan's findings, filtered, worst first; `controls` counts the whole scan so the filter keeps its options. */
 export function complianceFindings(f: FindingQuery) {
@@ -333,6 +334,7 @@ export function complianceFindings(f: FindingQuery) {
   const where = ["scan_id = ?"]; const params: unknown[] = [scanId];
   if (f.severity) { if (f.severity === "unrated") where.push("severity is null"); else { where.push("severity = ?"); params.push(f.severity); } }
   if (f.control_id) { where.push("control_id = ?"); params.push(f.control_id); }
+  if (f.scope) { const a = accountWhere(f.scope); where.push(a.sql); params.push(...a.params); }
   if (f.only_new) where.push("first_seen_scan = scan_id and exists (select 1 from compliance_scans p where p.status = 'completed' and p.id < compliance_findings.scan_id)");
   if (f.resource) { where.push("resource like ?"); params.push(`%${f.resource}%`); }
   if (f.q) { where.push("(resource like ? or reason like ? or control_title like ?)"); params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`); }

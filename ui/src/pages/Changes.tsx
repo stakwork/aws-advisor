@@ -1,3 +1,5 @@
+import { useScopeInfo } from "../scope";
+import { VercelChanges } from "../components/vercel";
 import { useEffect, useState } from "react";
 import { api, when } from "../api";
 import { Badge, Button, Card, Empty, Td, Th } from "../components/ui";
@@ -11,6 +13,12 @@ const HOURS = [24, 72, 168];
 
 /** What changed in the account (CloudTrail write events by people and deployments) and what the logs cost. */
 export default function Changes() {
+  const scopeInfo = useScopeInfo();
+  if (scopeInfo.provider && scopeInfo.provider !== "aws") return scopeInfo.provider === "vercel" ? <div className="space-y-6"><h1 className="text-xl font-semibold text-zinc-100">Changes</h1><VercelChanges /></div> : <Empty>No change record for {scopeInfo.label} yet.</Empty>;
+  return <AwsChanges />;
+}
+
+function AwsChanges() {
   const [hours, setHours] = useState(24);
   const [trail, setTrail] = useState<Trail | null>(null);
   const [logs, setLogs] = useState<Logs | null>(null);
@@ -28,7 +36,7 @@ export default function Changes() {
       <h1 className="text-xl font-semibold text-zinc-100">Changes and logs</h1>
       <p className="max-w-3xl text-sm text-zinc-400">Who changed what in the account, from CloudTrail write events, with machine heartbeat (agents checking in, log streams opening, Batch and EKS running their tasks) counted but left out. Below, what CloudWatch Logs ingests and stores, priced at list. Both feed the agent's morning observation.</p>
       {msg && <div className="text-xs text-zinc-500">{msg}</div>}
-      <Card title={<span className="flex flex-wrap items-center justify-between gap-2"><span>Changes · CloudTrail {trail?.last_fetch ? <span className="font-normal text-zinc-500">· collected {when(trail.last_fetch)} · {trail.events} events, {trail.noise.toLocaleString()} heartbeats hidden</span> : null}</span>
+      <Card title={<span className="flex flex-wrap items-center justify-between gap-2"><span>Changes · CloudTrail <span className="font-normal text-zinc-500">(per account: the parent with its own credentials, each member through its read role)</span> {trail?.last_fetch ? <span className="font-normal text-zinc-500">· collected {when(trail.last_fetch)} · {trail.events} events, {trail.noise.toLocaleString()} heartbeats hidden</span> : null}</span>
         <span className="flex items-center gap-1 text-xs">{HOURS.map((h) => <button key={h} onClick={() => setHours(h)} className={`rounded border px-1.5 py-0.5 ${h === hours ? "border-zinc-400 text-zinc-100" : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}>{h === 168 ? "7d" : `${h}h`}</button>)}<Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => refresh("trail")} disabled={busy !== ""}>{busy === "trail" ? "Collecting (3-4 min)…" : "Collect now"}</Button></span></span>}>
         {!trail ? <Empty>Loading…</Empty> : !trail.last_fetch ? <Empty>Not collected yet. The daily job needs cloudtrail:LookupEvents (Settings › Permissions names it); Collect now runs it.</Empty> : trail.by_action.length === 0 ? <Empty>No changes by people or deployments in this window.</Empty> : (
           <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,1fr)]">

@@ -4,8 +4,8 @@
  */
 import { getSetting, setSetting, db } from "./db.js";
 
-export type PromptKind = "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report" | "usage";
-export const PROMPT_KINDS: PromptKind[] = ["findings", "incident", "resolution", "observe", "chat", "pass_report", "usage"];
+export type PromptKind = "findings" | "incident" | "resolution" | "observe" | "chat" | "pass_report" | "usage" | "playbook";
+export const PROMPT_KINDS: PromptKind[] = ["findings", "incident", "resolution", "observe", "chat", "pass_report", "usage", "playbook"];
 export const PROMPT_LABELS: Record<PromptKind, { title: string; when: string }> = {
   findings: { title: "Findings batch", when: "sent after a collection run, with the findings, the rules' drafts, the diff and the team's decisions" },
   usage: { title: "Usage investigation", when: "once a day after the usage review, for the boxes Jev was not sure about, or on demand from a box's usage profile: decides the running window the executor may follow" },
@@ -14,6 +14,7 @@ export const PROMPT_LABELS: Record<PromptKind, { title: string; when: string }> 
   observe: { title: "Daily observation", when: "sent every morning after the review, with what changed in the last day: review findings, alerts, spend against baseline, pools, run changes" },
   pass_report: { title: "Narrated executor pass", when: "sent after an executor pass whose outcome differs from the last narrated one (ACT_NARRATE), with the rows it touched, every module's notes and errors; the answer is posted to Sphinx and shown on the Auto-actions page" },
   chat: { title: "Recommendation chat", when: "sent when someone writes in a thread; the first message carries the brief (the recommendation, its plan, the step outcomes, or the account header), later ones go in the same session with only what changed" },
+  playbook: { title: "Playbooks from sources", when: "sent when playbooks are generated or rebuilt (weekly, or Generate now on Findings › Playbooks), with each control's mod definition, documentation and referenced provider pages; the answer is judged by Jev and compared with the seed before it is published" },
 };
 
 const defaults = new Map<PromptKind, string>();

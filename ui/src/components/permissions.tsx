@@ -43,15 +43,16 @@ export function PermissionsCard() {
       </p>
 
       <div className="mb-4 rounded border border-zinc-800 p-3">
-        <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">SSM probe document</div>
+        <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">SSM probe documents</div>
         <p className="text-sm text-zinc-400">
-          The probe runs through <code className="text-zinc-200">{doc?.name}</code>{doc?.custom
-            ? <>, a custom document that embeds the probe script (version <code className="text-zinc-200">{doc.version}</code>), so <code className="text-zinc-200">ssm:SendCommand</code> is granted on that document only and the credentials can never run any other shell on the fleet.</>
-            : <>, the stock document that runs any shell script, so IAM alone cannot make the probe read-only. Recommended: create the custom document below and set <code className="text-zinc-200">PROBE_DOCUMENT=AwsAdvisorProbe</code>; then the SSM statement is scoped to it.</>}
-          {" "}Create it (once) and update it when the probe version changes:
+          The probes run through custom documents named <code className="text-zinc-200">{doc?.name?.replace(/-host$/, "")}-&lt;kind&gt;</code>, one per probe (host, docker, apps, software), each embedding its read-only script, so <code className="text-zinc-200">ssm:SendCommand</code> is granted on those documents only and the credentials can never run anything else on the fleet.
+          {" "}Create them once and update them when a probe changes; Settings › Probes shows each one's status, script and commands.
         </p>
-        <div className="mt-2 flex items-start gap-2"><Code>{doc?.create_command || ""}</Code><CopyButton text={doc?.create_command || ""} /></div>
-        <div className="mt-2 flex items-start gap-2"><Code>{doc?.update_command || ""}</Code><CopyButton text={doc?.update_command || ""} /></div>
+        {(p.probe_documents || []).map((x: any) => (
+          <div key={x.kind} className="mt-2 text-xs"><span className="font-mono text-zinc-300">{x.name}</span> <span className="text-zinc-500">{x.kind} {x.version} · {x.hash}{x.edited ? " · edited" : ""}</span>
+            <div className="mt-1 flex items-start gap-2"><Code>{x.create_command}</Code><CopyButton text={x.create_command} /></div>
+          </div>
+        ))}
       </div>
 
       <div className="mb-2 flex flex-wrap items-center gap-2">

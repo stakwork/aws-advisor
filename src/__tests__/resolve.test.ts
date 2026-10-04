@@ -69,6 +69,12 @@ test("filterConcepts keeps what names the resource or its role, generic rules by
 });
 
 test("assembleContext: playbook from evidence, the resource, the filtered concepts, history without the recommendation itself", () => {
+  // nothing is hand-written: the playbooks the context carries are generated rows
+  const put = db.prepare(`insert or replace into playbooks(control_id, title, meaning, act_when, ignore_when, steps, saving, references_, gaps, confidence, tier, effort, judged, sources, generated_at, generated_by, stale_after, review_status, published, reason, status)
+    values (?, ?, 'm', 'a', 'i', '[{"text":"s","source":null}]', 's', '[]', '[]', 0.8, ?, 'low', '{"judged":true}', '[]', '2026-10-04T00:00:00Z', 'test', '2999-01-01T00:00:00Z', 'generated', 1, 'confidence', 'completed')`);
+  put.run("aws_thrifty.control.ec2_instance_with_graviton", "EC2 instance is not on Graviton", "approve");
+  db.prepare("update playbooks set steps = ? where control_id = 'aws_thrifty.control.ec2_instance_with_graviton'").run(JSON.stringify([{ text: "List what runs on the box.", source: null }, { text: "Check each one has an arm64 build.", source: null }]));
+  put.run("query.eip_unattached", "Elastic IP not attached to anything", "approve");
   const ctx = assembleContext(rec(1), concepts);
   assert.equal(ctx.control_id, EC2_GRAVITON_CONTROL);
   assert.equal(ctx.playbook?.title, "EC2 instance is not on Graviton");

@@ -22,3 +22,12 @@ test("rejects anything that is not a single read-only select", () => {
   // keywords inside literals are fine
   assert.doesNotThrow(() => ok("select 'drop table; insert' as note from aws_account -- update nothing"));
 });
+
+test("the vercel connection is readable, qualified like aws_* tables, minus the secret-bearing parts", () => {
+  assert.equal(ok("select name, framework from vercel_project"), "select name, framework from vercel.vercel_project");
+  ok("select name, sso_protection, password_protection from vercel.vercel_project where live");
+  ok("select url, state from vercel.vercel_deployment where state = 'READY'");
+  bad("select * from vercel.vercel_project");
+  bad("select name, env from vercel_project");
+  bad("select * from vercel.vercel_secret");
+});

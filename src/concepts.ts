@@ -133,10 +133,10 @@ export const scopeOf = (rec: Pick<RecRow, "decision_scope">): ConceptScope => (r
 
 async function ensureParent(scope: ConceptScope): Promise<void> {
   const parent = PARENTS[scope];
-  const r = await fetch(`${config.repo2graphUrl}/gitree/concepts/${enc(parent.id)}`, { headers: headers() });
+  const r = await fetch(`${config.repo2graphUrl}/gitree/concepts/${enc(parent.id)}`, { headers: headers(), signal: AbortSignal.timeout(10_000) });
   if (r.ok) return;
   const c = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, {
-    method: "POST", headers: headers(),
+    method: "POST", headers: headers(), signal: AbortSignal.timeout(10_000),
     body: JSON.stringify({ name: parent.name, repo: CONCEPT_NAMESPACE, description: parent.description, documentation: parent.documentation }),
   });
   if (!c.ok && c.status !== 409) throw new Error(`parent concept create failed: ${c.status} ${(await c.text()).slice(0, 200)}`);
@@ -228,7 +228,7 @@ export async function syncDecisionConcept(recommendationId: number): Promise<{ c
   try {
     await ensureParent(scope);
     if (prev) {
-      await fetch(`${config.repo2graphUrl}/gitree/concepts/${enc(prev.concept_id)}`, { method: "DELETE", headers: headers() }).catch(() => {});
+      await fetch(`${config.repo2graphUrl}/gitree/concepts/${enc(prev.concept_id)}`, { method: "DELETE", headers: headers(), signal: AbortSignal.timeout(10_000) }).catch(() => {});
     }
     const body = {
       name: scope === "generic" ? genericConceptName(rec) : conceptNameFor(rec),
@@ -236,15 +236,15 @@ export async function syncDecisionConcept(recommendationId: number): Promise<{ c
       description: descriptionFor(rec),
       documentation: scope === "generic" ? genericDocumentation(rec) : documentationFor(rec),
     };
-    let res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+    let res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), signal: AbortSignal.timeout(10_000), body: JSON.stringify(body) });
     let conceptId: string | undefined;
     if (res.status === 409) {
       // Same slug already exists (e.g. created outside our table): replace it.
       const err = (await res.json().catch(() => ({}))) as { conceptId?: string };
       conceptId = err.conceptId;
       if (conceptId) {
-        await fetch(`${config.repo2graphUrl}/gitree/concepts/${enc(conceptId)}`, { method: "DELETE", headers: headers() }).catch(() => {});
-        res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+        await fetch(`${config.repo2graphUrl}/gitree/concepts/${enc(conceptId)}`, { method: "DELETE", headers: headers(), signal: AbortSignal.timeout(10_000) }).catch(() => {});
+        res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), signal: AbortSignal.timeout(10_000), body: JSON.stringify(body) });
       }
     }
     if (!res.ok) throw new Error(`create concept failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -301,7 +301,7 @@ export async function seedOperationalPatterns(): Promise<{ created: string[]; ad
     const fp = patternFingerprint(seed.key);
     if (known.has(fp)) continue;
     const body = { name: seed.name, repo: CONCEPT_NAMESPACE, parent: PARENTS.pattern.id, description: seed.rule, documentation: patternDocumentation(seed) };
-    const res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+    const res = await fetch(`${config.repo2graphUrl}/gitree/create-concept-direct`, { method: "POST", headers: headers(), signal: AbortSignal.timeout(10_000), body: JSON.stringify(body) });
     if (res.status === 409) {
       const err = (await res.json().catch(() => ({}))) as { conceptId?: string };
       if (!err.conceptId) throw new Error(`pattern ${seed.key} exists but repo2graph returned no id`);
@@ -356,7 +356,8 @@ export async function listDecisionConcepts(limit = 60): Promise<DecisionConcept[
   if (!enabled()) return [];
   await ensureOperationalPatterns();
   try {
-    const r = await fetch(`${config.repo2graphUrl}/gitree/concepts?repo=${encodeURIComponent(CONCEPT_NAMESPACE)}`, { headers: headers() });
+    // repo2graph can stall; a page must not hang on it (the Knowledge page waited on this for 40 s)
+    const r = await fetch(`${config.repo2graphUrl}/gitree/concepts?repo=${encodeURIComponent(CONCEPT_NAMESPACE)}`, { headers: headers(), signal: AbortSignal.timeout(10_000) });
     if (!r.ok) return [];
     const data = (await r.json()) as { concepts?: Omit<DecisionConcept, "scope">[] } | Omit<DecisionConcept, "scope">[];
     const items = Array.isArray(data) ? data : data.concepts || [];
@@ -367,10 +368,13 @@ export async function listDecisionConcepts(limit = 60): Promise<DecisionConcept[
       .map((c) => ({ id: c.id, name: c.name, description: c.description, scope: scopes.get(c.id) || "internal" }))
       .sort((a, b) => SCOPE_ORDER[a.scope] - SCOPE_ORDER[b.scope])
       .slice(0, limit);
-  } catch {
+  } catch (e: any) {
+    lastConceptsError = `${new Date().toISOString()}: ${String(e?.name === "TimeoutError" ? "repo2graph did not answer within 10 s" : e?.message || e).slice(0, 160)}`;
     return [];
   }
 }
+/** The last failure reading the concepts from repo2graph, for the pages to say why the list is empty. */
+export let lastConceptsError: string | null = null;
 
 /**
  * Suggests whether a decision is generic knowledge or an internal, resource-specific call, using Jev when

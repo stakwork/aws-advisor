@@ -24,7 +24,7 @@ test("guardReadCypher accepts read-only statements", () => {
   for (const q of [
     "MATCH (r:AdvisorResource {id: 'i-1'})-[e]-(x) RETURN r, e, x",
     "  optional match (r:AdvisorResource) return count(r);",
-    "WITH 'set' AS word MATCH (n:AdvisorRole {name: word}) RETURN n",
+    "WITH 'set' AS word MATCH (n:KnArchetype {name: word}) RETURN n",
     "CALL { MATCH (n:AdvisorAlert) RETURN n LIMIT 5 } RETURN n",
     "MATCH (n) WHERE n.title CONTAINS 'DELETE the snapshot' RETURN n // comment with MERGE",
     "MATCH (n:AdvisorRecommendation) WHERE n.status = \"created\" RETURN n.title",
@@ -62,7 +62,8 @@ test("inventoryIdOf matches ids and ARN tails, and nothing else", () => {
   assert.equal(gm.inventoryIdOf("arn:aws:ec2:us-east-1:1:instance/i-1", ids), "i-1");
   assert.equal(gm.inventoryIdOf("arn:aws:rds:us-east-1:1:db:prod-db", ids), "prod-db");
   assert.equal(gm.inventoryIdOf("arn:aws:rds:us-east-1:1:cluster:prod-db-cluster", ids), null);
-  assert.equal(gm.inventoryIdOf("arn:aws:s3:::bucket", ids), null);
+  assert.equal(gm.inventoryIdOf("arn:aws:s3:::bucket", ids), null, "no bucket in the inventory");
+  assert.equal(gm.inventoryIdOf("arn:aws:s3:::bucket", new Set(["bucket"])), "bucket");
   assert.equal(gm.inventoryIdOf("vpc-1", ids), null);
   assert.equal(gm.inventoryIdOf(null, ids), null);
 });
@@ -76,17 +77,73 @@ test("poolOf reads Karpenter, EKS and ASG tags and prefixes the cluster", () => 
   assert.equal(gm.poolOf(null), null);
 });
 
-test("resource nodes carry the same shape for EC2, RDS and ElastiCache", () => {
+test("resource nodes carry the generic shape with the provider's word in native_type, for every inventory", () => {
   const roles = new Map([["i-1", { role: "web_or_api", role_confidence: 0.9, protected_prob: 0.1 }], ["prod-db", { role: "database", role_confidence: "0.8" as any, protected_prob: null }]]);
-  const ec2 = gm.resourceFromEc2({ instance_id: "i-1", name: "web", instance_type: "m6i.large", state: "running", region: "us-east-1", monthly_usd: "70.08", cpu_30d: 12.5, ssm_status: "Online", gone: 0, first_seen: "2026-01-01 00:00:00", last_seen: "2026-09-19 00:00:00", snapshot: JSON.stringify({ tags: { "eks:nodegroup-name": "ng", "eks:cluster-name": "c" } }) }, roles);
-  assert.deepEqual(ec2, { id: "i-1", kind: "ec2", name: "web", type: "m6i.large", state: "running", region: "us-east-1", role: "web_or_api", role_confidence: 0.9, protected_prob: 0.1, monthly_usd: 70.08, cpu_30d: 12.5, ssm_status: "Online", gone: false, first_seen: "2026-01-01 00:00:00", last_seen: "2026-09-19 00:00:00", pool: "c/ng" });
-  const rds = gm.resourceFromRds({ db_instance_identifier: "prod-db", class: "db.r6g.large", status: "available", region: "us-east-1", monthly_usd: null, cpu_30d: null, gone: 1, first_seen: "a", last_seen: "b", snapshot: "{}" }, roles);
-  assert.deepEqual(rds, { id: "prod-db", kind: "rds", name: "prod-db", type: "db.r6g.large", state: "available", region: "us-east-1", role: "database", role_confidence: 0.8, protected_prob: null, monthly_usd: null, cpu_30d: null, ssm_status: null, gone: true, first_seen: "a", last_seen: "b", pool: null });
-  const cache = gm.resourceFromElasticache({ cache_cluster_id: "cache-1", node_type: "cache.t4g.small", status: "available", region: "eu-west-1", monthly_usd: 24.8, gone: 0, first_seen: "a", last_seen: "b", snapshot: "{}" });
-  assert.equal(cache.kind, "elasticache");
-  assert.equal(cache.role, null);
-  assert.equal(cache.monthly_usd, 24.8);
-  assert.deepEqual(Object.keys(cache).sort(), Object.keys(ec2).sort());
+  const ec2 = gm.resourceFromEc2({ instance_id: "i-1", name: "web", instance_type: "m6i.large", state: "running", region: "us-east-1", az: "us-east-1a", monthly_usd: "70.08", cpu_30d: 12.5, cpu_days: 30, ssm_status: "Online", probe_at: "2026-09-19 01:00:00", gone: 0, first_seen: "2026-01-01 00:00:00", last_seen: "2026-09-19 00:00:00",
+    snapshot: JSON.stringify({ tags: { "eks:nodegroup-name": "ng", "eks:cluster-name": "c" }, architecture: "arm64", network: { private_ip: "10.0.0.5", public_ip: "203.0.113.9", vpc_id: "vpc-1", subnet_id: "subnet-1", security_groups: [{ GroupId: "sg-1" }] } }) }, roles);
+  assert.equal(ec2.id, "i-1"); assert.equal(ec2.label, "AdvisorCompute"); assert.equal(ec2.native_type, "ec2_instance");
+  assert.equal(ec2.state, "running"); assert.equal(ec2.native_state, "running");
+  assert.deepEqual([ec2.role, ec2.role_confidence, ec2.protected_prob, ec2.monthly_usd, ec2.gone], ["web_or_api", 0.9, 0.1, 70.08, false]);
+  assert.equal(ec2.pool, "c/ng"); assert.equal(ec2.pool_kind, "node_group");
+  assert.equal(ec2.props.type, "m6i.large"); assert.equal(ec2.props.arch, "arm64"); assert.equal(ec2.props.public_ip, "203.0.113.9"); assert.deepEqual(ec2.props.security_groups, ["sg-1"]); assert.equal(ec2.props.cpu_30d, 12.5);
+  assert.deepEqual(ec2.observed.map((o) => [o.kind, o.status]), [["api", "ok"], ["metrics", "ok"], ["probe", "ok"]], "api, CloudWatch and the SSM probe cover it");
+  // the pool kind the inventory recorded wins over the tag shape; an offline agent is an offline probe edge
+  const asg = gm.resourceFromEc2({ instance_id: "i-2", name: "worker", instance_type: "c6g.large", state: "stopped", region: "us-east-1", pool: "web-asg", pool_kind: "asg", ssm_status: "ConnectionLost", gone: 0, snapshot: "{}" });
+  assert.equal(asg.pool, "web-asg"); assert.equal(asg.pool_kind, "asg"); assert.equal(asg.state, "stopped");
+  assert.deepEqual(asg.observed.map((o) => [o.kind, o.status, o.detail]), [["api", "ok", null], ["probe", "offline", "ConnectionLost"]]);
+  const rds = gm.resourceFromRds({ db_instance_identifier: "prod-db", class: "db.r6g.large", engine: "postgres", engine_version: "15.4", status: "backing-up", region: "us-east-1", monthly_usd: null, cpu_30d: null, gone: 1, first_seen: "a", last_seen: "b", snapshot: JSON.stringify({ network: { endpoint: "prod-db.example.com", port: 5432, publicly_accessible: false }, storage_encrypted: true, backup_retention_period: 7 }) }, roles);
+  assert.equal(rds.label, "AdvisorDatabase"); assert.equal(rds.native_type, "rds_instance"); assert.equal(rds.state, "pending"); assert.equal(rds.native_state, "backing-up");
+  assert.deepEqual([rds.role, rds.role_confidence, rds.gone], ["database", 0.8, true]);
+  assert.deepEqual([rds.props.engine, rds.props.engine_version, rds.props.endpoint_host, rds.props.port, rds.props.publicly_accessible, rds.props.encrypted, rds.props.backup_retention_days], ["postgres", "15.4", "prod-db.example.com", 5432, false, true, 7]);
+  assert.deepEqual(rds.observed.map((o) => o.kind), ["api"], "no probe on a managed database");
+  const cache = gm.resourceFromElasticache({ cache_cluster_id: "cache-1", node_type: "cache.t4g.small", engine: "redis", status: "available", region: "eu-west-1", num_nodes: 2, replication_group: "rg", monthly_usd: 24.8, gone: 0, first_seen: "a", last_seen: "b", snapshot: "{}" });
+  assert.equal(cache.label, "AdvisorCache"); assert.equal(cache.role, null); assert.equal(cache.monthly_usd, 24.8); assert.equal(cache.props.nodes, 2); assert.equal(cache.props.group, "rg");
+  const fn = gm.resourceFromLambda({ name: "hello", arn: null, region: "us-east-1", runtime: "nodejs20.x", memory_mb: 512, arm: 1, timeout_s: 30, invocations_30d: 1000, days: 30, monthly_usd: 0.2, gone: 0 }, "123456789012");
+  assert.equal(fn.id, "arn:aws:lambda:us-east-1:123456789012:function:hello"); assert.equal(fn.label, "AdvisorFunction"); assert.equal(fn.props.runtime_version, "20"); assert.equal(fn.props.arch, "arm64"); assert.equal(fn.state, "available");
+  const bucket = gm.resourceFromS3({ name: "my-bucket", region: "us-east-1", total_gb: 12.5, objects: 100, public: 1, versioning: 0, lifecycle_rules: 2, metric_day: "2026-09-18", gone: 0 });
+  assert.equal(bucket.id, "my-bucket"); assert.equal(bucket.label, "AdvisorStorage"); assert.equal(bucket.native_type, "s3_bucket"); assert.equal(bucket.props.kind, "object"); assert.equal(bucket.props.public, true); assert.equal(bucket.props.versioning, false);
+  const vol = gm.resourceFromEbs({ volume_id: "vol-1", region: "us-east-1", volume_type: "gp3", size_gb: 100, iops: 3000, state: "in-use", encrypted: 1, instance_id: "i-1", device: "/dev/xvda", read_iops_avg: 10, write_iops_avg: 5, metric_days: 14, gone: 0 });
+  assert.equal(vol.label, "AdvisorStorage"); assert.equal(vol.native_type, "ebs_volume"); assert.equal(vol.props.kind, "block"); assert.equal(vol.props.class, "gp3"); assert.equal(vol.props.attached_to, "i-1"); assert.equal(vol.props.iops_30d, 15); assert.equal(vol.state, "available");
+  const zone = gm.resourceFromZone({ zone_id: "Z1", name: "example.com.", private: 0, records: 12, gone: 0 });
+  assert.equal(zone.label, "AdvisorDnsZone"); assert.equal(zone.props.records, 12);
+  const rec = gm.resourceFromDnsRecord({ id: "Z1:api.example.com.:A", zone_id: "Z1", name: "API.example.com.", type: "A", ttl: 300, alias: 0, values: JSON.stringify(["203.0.113.9"]), link_state: "unmatched", gone: 0 });
+  assert.equal(rec.label, "AdvisorDnsRecord"); assert.equal(rec.props.fqdn, "api.example.com"); assert.deepEqual(rec.props.values, ["203.0.113.9"]); assert.equal(rec.props.link_state, "dangling");
+  for (const n of [ec2, rds, cache, fn, bucket, vol, zone, rec]) assert.deepEqual(Object.keys(n).sort(), Object.keys(ec2).sort(), `${n.label} has the shared shape`);
+});
+
+test("genericState maps every provider word onto the closed list", () => {
+  assert.equal(gm.genericState("ec2_instance", "shutting-down"), "terminated");
+  assert.equal(gm.genericState("ec2_instance", "stopping"), "stopped");
+  assert.equal(gm.genericState("rds_instance", "storage-full"), "degraded");
+  assert.equal(gm.genericState("elb_alb", "active"), "available");
+  assert.equal(gm.genericState("elb_alb", "provisioning"), "pending");
+  assert.equal(gm.genericState("elasticache_cluster", "deleting"), "terminated");
+  assert.equal(gm.genericState("rds_instance", "something-new"), "unknown");
+  assert.equal(gm.genericState("rds_instance", null), "unknown");
+});
+
+test("guessedType reads the id shape; actionVerb maps provider actions onto the generic verbs; controlFacts reads the id", () => {
+  assert.equal(gm.guessedType("arn:aws:s3:::bucket"), "bucket");
+  assert.equal(gm.guessedType("arn:aws:lambda:us-east-1:1:function:fn"), "function");
+  assert.equal(gm.guessedType("arn:aws:ec2:us-east-1:1:snapshot/snap-1"), "snapshot");
+  assert.equal(gm.guessedType("vpc-1"), "vpc");
+  assert.equal(gm.guessedType("snap-1"), "snapshot");
+  assert.equal(gm.guessedType("whisper-engine"), null);
+  assert.equal(gm.actionVerb("stop_instance"), "stop");
+  assert.equal(gm.actionVerb("migrate_graviton"), "migrate_arch");
+  assert.equal(gm.actionVerb("aurora_set_storage_iopt"), "change_storage_tier");
+  assert.equal(gm.actionVerb("security_fix"), "security_fix");
+  assert.equal(gm.actionVerb("delete_old_amis"), "delete");
+  assert.equal(gm.actionVerb("never_seen"), "other");
+  assert.deepEqual(gm.controlFacts("aws_thrifty.control.ec2_instance_with_graviton"), { framework: "cost", category: "cost" });
+  assert.deepEqual(gm.controlFacts("aws_compliance.control.cis_v300_2_1_1", "cis_v300"), { framework: "cis", category: "security" });
+  assert.deepEqual(gm.controlFacts("aws_compliance.control.foundational_security_ec2_1", "foundational_security"), { framework: "foundational_security", category: "security" });
+  assert.deepEqual(gm.controlFacts("query.sg_dormant_ipv6"), { framework: "advisor", category: "security" });
+  assert.deepEqual(gm.controlFacts("query.idle_instance"), { framework: "advisor", category: "cost" });
+  assert.equal(gm.healthOf("ok", "ok", "not-applicable"), "ok");
+  assert.equal(gm.healthOf("ok", "impaired", "ok"), "impaired");
+  assert.equal(gm.healthOf("initializing", "ok", "ok"), "initializing");
+  assert.equal(gm.healthOf(null, null, null), "unknown");
 });
 
 test("recommendation nodes resolve their target, concept, run and incident", () => {
@@ -101,13 +158,15 @@ test("recommendation nodes resolve their target, concept, run and incident", () 
   assert.equal(n.incident_id, null);
   assert.equal(n.est_monthly_saving, 70.08);
   assert.equal(n.decision_scope, "generic");
+  assert.equal(n.action, "stop"); assert.equal(n.native_action, "stop_instance");
   // an incident fix: run 0 (no run), evidence carries the incident, the VPC is not in the inventory -> a ResourceRef
-  const fix = gm.recommendationNode({ ...row, id: 8, fingerprint: "incident:enable_flow_logs:vpc-1", rule: "incident:enable_flow_logs", run_id: 0, resource: "vpc-1", evidence: JSON.stringify({ incident_id: 3, alert_id: 23 }) }, inv, concepts);
+  const fix = gm.recommendationNode({ ...row, id: 8, fingerprint: "incident:enable_flow_logs:vpc-1", rule: "incident:enable_flow_logs", action_type: "enable_flow_logs", run_id: 0, resource: "vpc-1", evidence: JSON.stringify({ incident_id: 3, alert_id: 23 }) }, inv, concepts);
   assert.equal(fix.resource_id, null);
   assert.equal(fix.resource, "vpc-1");
   assert.equal(fix.run_id, null);
   assert.equal(fix.incident_id, 3);
   assert.equal(fix.concept_id, null);
+  assert.equal(fix.guessed_type, "vpc"); assert.equal(fix.action, "enable_logging");
 });
 
 test("alert, incident and run nodes; flag edges only for inventory resources, one per control and resource", () => {
@@ -117,6 +176,9 @@ test("alert, incident and run nodes; flag edges only for inventory resources, on
   assert.equal(a.acknowledged, true);
   assert.equal(a.resource_id, null);
   assert.equal(gm.alertNode({ id: 2, kind: "instance_state", resource: "i-2", message: "m", created_at: "t", acknowledged: 0 }, inv, "warning").resource_id, "i-2");
+  const caused = gm.alertNode({ id: 3, kind: "instance_state", resource: "i-2", message: "m", created_at: "t", acknowledged: 0, cause: JSON.stringify({ status: "found", summary: "retired by AWS", actor: "aws", actor_kind: "aws", via: "scheduled event", event_name: null, event_time: "t2" }) }, inv, "info");
+  assert.equal(caused.cause_actor_kind, "provider", "the provider's own hand is 'provider', not the provider's name");
+  assert.equal(caused.cause, "retired by AWS");
   const i = gm.incidentNode({ id: 3, alert_id: 1, status: "completed", cause: "pulls", confidence: "0.6", episode_cost_usd: 0.14, monthly_run_rate_usd: null, created_at: "t" });
   assert.deepEqual(i, { id: 3, alert_id: 1, status: "completed", cause: "pulls", confidence: 0.6, episode_cost_usd: 0.14, monthly_run_rate_usd: null, created_at: "t" });
   const r = gm.runNode({ id: 6, started_at: "s", finished_at: null, status: "running", trigger: "manual", findings_count: null, recommendations_count: 3 });
@@ -202,13 +264,22 @@ test("live: mirrorAll into the local Neo4j, graphStats, DECIDED_AS to an existin
     assert.equal(byLabel.AdvisorAlert, 2);
     assert.equal(byLabel.AdvisorIncident, 1);
     assert.equal(byLabel.AdvisorResourceRef, 2, "vpc-test and nat-test");
-    assert.equal(byLabel.AdvisorRole, 2);
+    assert.equal(byLabel.AdvisorCompute, 3);
+    assert.equal(byLabel.AdvisorDatabase, 1);
+    assert.equal(byLabel.AdvisorCache, 1);
     assert.equal(byLabel.AdvisorNodePool, 1);
+    assert.equal(byLabel.AdvisorTelemetry, Object.keys(gm.TELEMETRY).length);
+    const archetypes = await gm.readQuery("MATCH (r:AdvisorResource {account_id: $a})-[:HAS_ROLE]->(k:KnArchetype) RETURN count(DISTINCT k) AS n", { a: TEST_ACCOUNT }, { rowCap: 1 });
+    assert.equal(Number(archetypes.rows[0].n), 2, "roles are KnArchetype nodes");
+    const observed = await gm.readQuery("MATCH (r:AdvisorResource {id: 'i-test1'})-[o:OBSERVED_BY]->(t:AdvisorTelemetry) RETURN t.kind AS kind, o.status AS status ORDER BY kind", {}, { rowCap: 10 });
+    assert.deepEqual(observed.rows.map((x) => [x.kind, x.status]), [["api", "ok"], ["metrics", "ok"], ["probe", "ok"]]);
     for (const [l, n] of Object.entries(byLabel)) assert.ok((stats.nodes[l] || 0) >= n, `${l} in graphStats`);
 
     const view = await gm.resourceView("i-test2");
     assert.ok(view);
     assert.equal(view.role, "blockchain_node");
+    assert.deepEqual(view.labels, ["AdvisorCompute"]);
+    assert.ok(view.observed.some((o) => o.kind === "api"));
     assert.equal(view.counts.recommendations, 1);
     assert.equal(view.counts.controls, 1);
     assert.equal(view.recommendations[0].concept?.id ?? null, concept ?? null, "DECIDED_AS only to a Concept that exists");
@@ -218,8 +289,8 @@ test("live: mirrorAll into the local Neo4j, graphStats, DECIDED_AS to an existin
     assert.equal(web?.recommendations[0].concept, null, "a concept id the graph does not know draws no edge");
     const notGone = await gm.readQuery("MATCH (r:AdvisorResource {id: 'i-test3'}) RETURN r.gone AS gone", {}, { rowCap: 1 });
     assert.equal(notGone.rows[0].gone, false);
-    const fix = await gm.readQuery("MATCH (rec:AdvisorRecommendation {id: 3})-[:FROM_INCIDENT]->(i:AdvisorIncident)-[:INVESTIGATES]->(a:AdvisorAlert)-[:ABOUT]->(x) RETURN i.id AS incident, a.id AS alert, labels(x) AS about", {}, { rowCap: 1 });
-    assert.deepEqual(fix.rows[0], { incident: 1, alert: 1, about: ["AdvisorResourceRef"] });
+    const fix = await gm.readQuery("MATCH (rec:AdvisorRecommendation {id: 3})-[:FROM_INCIDENT]->(i:AdvisorIncident)-[:INVESTIGATES]->(a:AdvisorAlert)-[:ABOUT]->(x) RETURN i.id AS incident, a.id AS alert, labels(x) AS about, x.guessed_type AS guessed", {}, { rowCap: 1 });
+    assert.deepEqual(fix.rows[0], { incident: 1, alert: 1, about: ["AdvisorResourceRef"], guessed: "nat_gateway" });
 
     // Gone in the inventory, or vanished from it altogether, both mark the node gone; a decision changes the node in place; nothing duplicates.
     db.prepare("update inventory_ec2 set gone = 1 where instance_id = 'i-test1'").run();
@@ -260,4 +331,15 @@ test("action nodes resolve their target and the recommendations they carry out",
   assert.equal(b.resource_id, null);
   assert.deepEqual(b.recommendation_ids, []);
   assert.equal(b.rollback, null);
+});
+
+test("accountRows: a management account, its members PART_OF it, and a standalone team, with name, access and actuator", async () => {
+  const gm = await import("../graph_mirror.js");
+  const rows = gm.accountRows([
+    { provider: "aws", id: "210987654321", native_type: "account", name: "parent", parent_id: null, access: "access key AKIA…TEST", actuator: true, enabled: true, last_test: { ok: true, detail: "connected", at: "2026-10-04T00:00:00Z" } },
+    { provider: "aws", id: "210987654322", native_type: "account", name: "staging", parent_id: "210987654321", access: "role advisor-read from the parent", actuator: false, enabled: true, last_test: null },
+    { provider: "vercel", id: "team_example123", native_type: "team", name: "Example", parent_id: null, access: "token vcp_…", actuator: false, enabled: true, last_test: null },
+  ]);
+  assert.deepEqual(rows.map((r) => [r.id, r.role, r.parent_id, r.kind, r.native_type]), [["210987654321", "management", null, "account", "account"], ["210987654322", "member", "210987654321", "account", "account"], ["team_example123", "standalone", null, "account", "team"]]);
+  assert.equal(rows[0].last_test_ok, true); assert.equal(rows[1].last_test_ok, null); assert.equal(rows[0].actuator, true); assert.equal(rows[2].name, "Example");
 });

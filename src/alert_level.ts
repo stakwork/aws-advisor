@@ -17,8 +17,10 @@ function triageOf(a: { triage?: unknown }): { severity?: unknown; expected?: unk
   return typeof t === "object" ? (t as { severity?: unknown; expected?: unknown }) : null;
 }
 
-export function alertLevel(a: { kind: string; triage?: unknown }): AlertLevel {
+export function alertLevel(a: { kind: string; triage?: unknown; details?: unknown }): AlertLevel {
   const triage = triageOf(a);
+  // a platform provider's rules pass says the level itself (the finding's severity) in the alert's details
+  if (a.kind.startsWith("vercel_")) { try { const d = typeof a.details === "string" ? JSON.parse(a.details) : a.details; const l = String((d as any)?.level ?? ""); if (l === "alarm" || l === "warning" || l === "info") return l; } catch { /* */ } return "warning"; }
   if (a.kind === "credentials") return "alarm";
   if (a.kind === "nat_traffic") return triage && Number(triage.severity) < 1 ? "warning" : "alarm";
   if (a.kind === "instance_state") return triage && Number(triage.expected) >= 0.7 ? "info" : "warning";

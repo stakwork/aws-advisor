@@ -29,6 +29,7 @@ import { syncDecisionConceptInBackground } from "./concepts.js";
 import { beginPass, endPass, logEvent } from "./executor_log.js";
 import { mirrorPassInBackground } from "./graph_mirror.js";
 import { checkLine, checkProposals, parseCheck, reusableCheck, type ProposalCheck } from "./proposal_check.js";
+import { accountWhere, type AccountScope } from "./scope.js";
 
 db.exec(`create table if not exists actions (
   id integer primary key autoincrement,
@@ -487,9 +488,10 @@ export interface ActionPage { actions: ActionRow[]; total: number; page: number;
  * others. `id` without `page` lands on the page that holds that row (a deep link from Sphinx); an id outside the
  * filter gives page 1.
  */
-export function listActions(opts: { status?: string; kind?: string; page?: number; page_size?: number; id?: number } = {}): ActionPage {
+export function listActions(opts: { status?: string; kind?: string; page?: number; page_size?: number; id?: number; scope?: AccountScope | null } = {}): ActionPage {
   const page_size = Math.min(200, Math.max(1, Math.floor(opts.page_size || 25)));
   const where: string[] = []; const args: unknown[] = [];
+  if (opts.scope) { const a = accountWhere(opts.scope); where.push(a.sql); args.push(...a.params); }
   if (opts.status && opts.status !== "all") { where.push("status = ?"); args.push(opts.status); }
   const scope = where.length ? `where ${where.join(" and ")}` : "";
   const kinds: Record<string, number> = {};

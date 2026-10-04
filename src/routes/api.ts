@@ -9,11 +9,13 @@ import { isBusy, runEvents, startRun } from "../collector.js";
 import { ALL_BENCHMARKS, DEFAULT_BENCHMARKS } from "../powerpipe.js";
 import { clearConnection, credentialsMeta, hasConnectionFile, sdkIdentity, testConnection, updateCredentialsMeta, writeConnection } from "../steampipe.js";
 import { CREDENTIAL_SOURCES, DEFAULT_CREDENTIAL_SOURCE, PROFILE_NAME_RE, ROLE_ARN_RE, validateSettings } from "../aws_config.js";
-import { memberConnections } from "../accounts.js";
+import { listAccounts, memberConnections } from "../accounts.js";
 import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } from "../agent.js";
 import { getRunChanges } from "../changes.js";
+import { listIamUsers, iamSummary } from "../iam_inventory.js";
+import { ACCOUNT_TARGET_RE, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
 import { postRejectionLearning } from "../learnings.js";
-import { ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeErrorStatus, probeInstance, summarizeProbe } from "../ssm.js";
+import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
 import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy } from "../permissions.js";
 import { checkPermissions, lastPermissionCheck } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
@@ -49,6 +51,7 @@ import { confirmRule, deleteRule, listRules, signalKinds, upsertRule } from "../
 import { latestS3Usage, refreshS3Usage, s3UsagePass } from "../s3_usage.js";
 import { ask, createThread } from "../chat.js";
 import { describeError } from "../permissions.js";
+import { accountScope, accountWhere, latestRunIdFor, resourceInScope, rowInScope, stampRowAccounts } from "../scope.js";
 
 export const api = Router();
 
@@ -59,6 +62,7 @@ api.use(authMiddleware);
 // ---- settings -------------------------------------------------------------
 api.get("/settings", (_req, res) => {
   res.json({
+    account_change: pendingAccountChange(),
     aws: {
       configured: hasConnectionFile(),
       ...(credentialsMeta() || {}),
@@ -75,7 +79,7 @@ api.get("/settings", (_req, res) => {
     schema: config.schema,
     mcp: { url: `${config.publicUrl}/mcp`, protected: Boolean(config.mcpToken) },
     schedule: { runCron: cronOff(config.runCron) ? null : config.runCron, watchCron: cronOff(config.watchCron) ? null : config.watchCron, agentAutoDispatch: config.agentAutoDispatch, alertInvestigate: config.alertInvestigate },
-    probeDocument: probeDocumentInfo(),
+    probeDocument: probeDocumentInfo(), probeDocuments: probeDocumentsInfo(),
     jev: jevStats(),
   });
 });
@@ -98,7 +102,7 @@ api.get("/permissions", (_req, res) => {
     checked_at: last?.checked_at ?? null,
     last_check: last,
     recommended_policy: recommendedPolicy(credentialsMeta()?.accountId || "*"),
-    probe_document: probeDocumentInfo(),
+    probe_document: probeDocumentInfo(), probe_documents: probeDocumentsInfo(),
   });
 });
 
@@ -119,8 +123,8 @@ api.post("/permissions/check", async (req, res) => {
   catch (e: any) { res.status(502).json({ error: e.message }); }
 });
 
-// The SSM Command document that embeds the probe script: `aws ssm create-document --name AwsAdvisorProbe --document-type Command --content file://doc.json`.
-api.get("/probe/document", (_req, res) => res.json(probeDocument()));
+// The host probe's SSM document, for compatibility; every kind is at GET /api/probes/:kind/document (src/routes/probes.ts).
+api.get("/probe/document", (req, res) => { const k = String(req.query.kind || "host"); res.json(probeDocument((PROBE_KINDS as readonly string[]).includes(k) ? (k as ProbeKind) : "host")); });
 
 // ---- one-command setup (Settings > Set up AWS access) -----------------------------------------------------------------
 // The plan (what the script will do, numbered as the script prints it) and the script itself, from the same options:
@@ -149,23 +153,62 @@ api.put("/settings/aws", async (req, res) => {
   let settings;
   try { settings = validateSettings(req.body || {}); }
   catch (e: any) { return res.status(400).json({ error: e.message }); }
+  const previous = credentialsMeta()?.accountId ?? null;
   const meta = writeConnection(settings, memberConnections());
   const [test, sdk] = await Promise.all([testConnection(45_000), sdkIdentity(20_000)]);
   if (test.ok) updateCredentialsMeta({ accountId: test.accountId });
   else if (sdk.ok && sdk.accountId) updateCredentialsMeta({ accountId: sdk.accountId });
-  res.json({ saved: meta, test, sdk });
+  const account_change = noteAccountChange(previous, test.ok ? test.accountId : sdk.ok ? sdk.accountId : null);
+  res.json({ saved: meta, test, sdk, account_change });
 });
 
 // Tests the saved credentials both ways: the Steampipe schema (aws_account) and the advisor's own SDK provider (sts:GetCallerIdentity).
 api.post("/settings/aws/test", async (_req, res) => {
   if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  const previous = credentialsMeta()?.accountId ?? null;
   const [test, sdk] = await Promise.all([testConnection(15_000), sdkIdentity(15_000)]);
   if (test.ok) updateCredentialsMeta({ accountId: test.accountId });
   else if (sdk.ok && sdk.accountId) updateCredentialsMeta({ accountId: sdk.accountId });
-  res.json({ ...test, sdk });
+  const account_change = noteAccountChange(previous, test.ok ? test.accountId : sdk.ok ? sdk.accountId : null);
+  res.json({ ...test, sdk, account_change });
 });
 
 api.delete("/settings/aws", (_req, res) => { clearConnection(); res.json({ ok: true }); });
+
+// The parent changed: what is still stored about the previous account, and the three ways out (keep, purge, make it a member).
+api.get("/settings/aws/change", (_req, res) => { const c = pendingAccountChange(); res.json({ change: c, preview: c ? purgePreview(c.from) : null }); });
+api.delete("/settings/aws/change", (_req, res) => { dismissAccountChange(); res.json({ ok: true }); });
+// ---- wiping data (Settings › Accounts › Data) ---------------------------------------------------------------
+// ?target=all | <AWS account id> | <Vercel team id>, &preserve_concepts=1 for the full wipe's Concept switch.
+api.get("/settings/data/preview", (req, res) => {
+  const target = String(req.query.target || "all").trim();
+  if (target === "all") return res.json({ target, ...wipePreview(req.query.preserve_concepts === "1") });
+  if (!ACCOUNT_TARGET_RE.test(target)) return res.status(400).json({ error: "target must be all, a 12-digit AWS account id or a Vercel team id" });
+  res.json({ target, ...purgePreview(target) });
+});
+// Body: { target: "all" | <account id>, confirm: <"WIPE" for all, the id typed again otherwise>, preserve_concepts?: boolean }. Irreversible; refused while a run is collecting.
+api.post("/settings/data/wipe", async (req, res) => {
+  const target = String(req.body?.target || "").trim(); const confirm = String(req.body?.confirm || "").trim();
+  if (isBusy()) return res.status(409).json({ error: "a collection run is in progress; wait for it to finish" });
+  try {
+    if (target === "all") {
+      if (confirm !== "WIPE") return res.status(400).json({ error: "type WIPE under confirm" });
+      return res.json(await wipeAllData({ preserveConcepts: Boolean(req.body?.preserve_concepts) }));
+    }
+    if (!ACCOUNT_TARGET_RE.test(target)) return res.status(400).json({ error: "target must be all, a 12-digit AWS account id or a Vercel team id" });
+    if (confirm !== target) return res.status(400).json({ error: "type the account id again under confirm" });
+    res.json(await purgeAccountData(target));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+// Body: { account, confirm: "<the account id typed again>" }. Removes every row and graph node attributed to that account. Irreversible.
+api.post("/settings/aws/purge", async (req, res) => {
+  const account = String(req.body?.account || "").trim();
+  if (!/^\d{12}$/.test(account)) return res.status(400).json({ error: "account must be a 12-digit AWS account id" });
+  if (String(req.body?.confirm || "").trim() !== account) return res.status(400).json({ error: "type the account id again under confirm" });
+  if (account === (credentialsMeta()?.accountId ?? "")) return res.status(400).json({ error: "that is the account the credentials resolve to now; point the advisor elsewhere first" });
+  if (listAccounts().some((a) => a.account_id === account && !a.is_parent)) return res.status(400).json({ error: "that account is a registered member; remove it under Member accounts first" });
+  try { res.json(await purgeAccountData(account)); } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
 
 // Runtime settings: the agent, Jev, the graph, the schedules, the probe pass. Saved values win over the env.
 api.get("/settings/runtime", (_req, res) => res.json({ settings: listRuntimeSettings() }));
@@ -190,8 +233,11 @@ api.put("/settings/benchmarks", (req, res) => {
 });
 
 // ---- runs -----------------------------------------------------------------
-api.get("/runs", (_req, res) => {
-  res.json(db.prepare("select id, started_at, finished_at, status, trigger, account_id, findings_count, recommendations_count, error from runs order by id desc limit 100").all());
+api.get("/runs", (req, res) => {
+  // the AWS collection runs, or a platform account's rules passes when the sidebar looks at one
+  const scope = accountScope(req.query as any); const platform = scope && !scope.primary && !/^\d{12}$/.test(scope.id);
+  res.json(platform ? db.prepare("select id, started_at, finished_at, status, trigger, account_id, findings_count, recommendations_count, error, provider from runs where provider <> 'aws' and account_id = ? order by id desc limit 100").all(scope!.id)
+    : db.prepare("select id, started_at, finished_at, status, trigger, account_id, findings_count, recommendations_count, error, provider from runs where provider = 'aws' order by id desc limit 100").all());
 });
 
 api.post("/runs", (_req, res) => {
@@ -288,7 +334,7 @@ api.get("/nat/:id/attribution", async (req, res) => {
 
 // ---- findings -------------------------------------------------------------
 api.get("/findings", (req, res) => {
-  const runId = req.query.run_id ? Number(req.query.run_id) : (db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  const runId = req.query.run_id ? Number(req.query.run_id) : (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
   if (!runId) return res.json({ run_id: null, findings: [] });
   const where: string[] = ["run_id = ?"]; const params: unknown[] = [runId];
   if (req.query.control_id) { where.push("control_id = ?"); params.push(req.query.control_id); }
@@ -341,13 +387,18 @@ api.get("/learnings", (_req, res) => {
 // ---- instances (SSM probe) -------------------------------------------------
 const probeInFlight = new Set<string>();
 
+// ?kind=host|docker|apps|software runs one probe; without it every kind runs in turn and the merged view comes back.
 api.post("/instances/:id/probe", async (req, res) => {
   const id = String(req.params.id);
+  const kind = typeof req.query.kind === "string" ? req.query.kind : typeof req.body?.kind === "string" ? req.body.kind : "";
+  if (kind && !(PROBE_KINDS as readonly string[]).includes(kind)) return res.status(400).json({ error: `kind must be one of ${PROBE_KINDS.join(", ")}` });
   if (probeInFlight.has(id)) return res.status(409).json({ error: `a probe of ${id} is already running` });
   probeInFlight.add(id);
   try {
-    const p = await probeInstance(id);
-    res.json({ ...p, summary: summarizeProbe(p.data) });
+    if (kind) { const p = await probeInstance(id, { kind: kind as ProbeKind }); const merged = latestProbe(id); return res.json({ ...p, merged: merged?.data ?? null, summary: merged ? summarizeProbe(merged.data) : summarizeProbe(p.data) }); }
+    const r = await probeInstanceAll(id);
+    if (!r.probe) { const f = r.failed[0]; return res.status(f && ["no_credentials", "not_managed", "permission"].includes(f.code) ? 400 : 502).json({ error: f?.message || "no probe succeeded", code: f?.code || "failed", failed: r.failed }); }
+    res.json({ ...r.probe, summary: summarizeProbe(r.probe.data), ran: r.ran, failed: r.failed });
   } catch (e: any) {
     if (e instanceof ProbeError) return res.status(probeErrorStatus(e)).json({ error: e.message, code: e.code });
     res.status(502).json({ error: e?.message || String(e), code: "failed" });
@@ -610,10 +661,10 @@ api.post("/inventory/refresh", async (_req, res) => {
   catch (e: any) { res.status(502).json({ error: e.message }); }
 });
 
-api.get("/inventory/summary", (_req, res) => res.json(inventorySummary()));
+api.get("/inventory/summary", (req, res) => { const scope = accountScope(req.query as any); res.json({ ...inventorySummary(scope), iam: iamSummary(scope) }); });
 
 api.get("/inventory/ec2", (req, res) => {
-  res.json(withDomains(listEc2({ state: str(req.query.state), ssm: str(req.query.ssm), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["ec2", "instance_id"]));
+  res.json(withDomains(listEc2({ scope: accountScope(req.query as any), state: str(req.query.state), ssm: str(req.query.ssm), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["ec2", "instance_id"]));
 });
 
 api.get("/inventory/ec2/:id", (req, res) => {
@@ -628,7 +679,7 @@ const withDomains = <T extends Record<string, any>>(rows: T[], ...by: Array<[kin
   const maps = by.map(([kind, idCol]) => [domainsByResource(kind), idCol] as const);
   return rows.map((r) => ({ ...r, domains: maps.flatMap(([m, idCol]) => (r[idCol] ? m.get(String(r[idCol])) || [] : [])) }));
 };
-api.get("/inventory/rds", (req, res) => res.json(withDomains(listRds({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }).map((r: any) => ({ ...r, role: resourceRole(String(r.db_instance_identifier)) })), ["rds", "db_instance_identifier"], ["rds_cluster", "cluster"])));
+api.get("/inventory/rds", (req, res) => res.json(withDomains(listRds({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }).map((r: any) => ({ ...r, role: resourceRole(String(r.db_instance_identifier)) })), ["rds", "db_instance_identifier"], ["rds_cluster", "cluster"])));
 // The load profile behind a database (cluster or instance id): the hourly pass keeps it; refresh collects it again now.
 api.get("/inventory/rds/:id/load", (req, res) => {
   const row = latestRdsLoad(String(req.params.id));
@@ -645,12 +696,13 @@ api.post("/inventory/rds/:id/load/refresh", async (req, res) => {
   catch (e: any) { res.status(e?.code === "not_found" ? 404 : 502).json({ error: describeError(e, `rds load ${id} (cloudwatch:GetMetricData, rds:DescribeDBClusters)`) }); }
   finally { loadInFlight.delete(id); }
 });
-api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
-api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
+api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
+api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
 // Load balancers with their targets resolved; the Route 53 records that lead to each (kinds alb/nlb/clb from the resolver, lb when only an interface named it).
-api.get("/inventory/elb", (req, res) => res.json(withDomains(listElb({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), kind: str(req.query.kind), scheme: str(req.query.scheme) }), ["alb", "name"], ["nlb", "name"], ["clb", "name"], ["lb", "name"])));
-api.get("/inventory/ebs", (req, res) => res.json(listEbs({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));
-api.get("/inventory/s3", (req, res) => res.json(withDomains(listS3({ q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["s3", "name"])));
+api.get("/inventory/iam", (req, res) => res.json(listIamUsers({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
+api.get("/inventory/elb", (req, res) => res.json(withDomains(listElb({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), kind: str(req.query.kind), scheme: str(req.query.scheme) }), ["alb", "name"], ["nlb", "name"], ["clb", "name"], ["lb", "name"])));
+api.get("/inventory/ebs", (req, res) => res.json(listEbs({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone), state: str(req.query.state) })));
+api.get("/inventory/s3", (req, res) => res.json(withDomains(listS3({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["s3", "name"])));
 api.post("/inventory/s3/refresh", async (_req, res) => { try { res.json(await refreshS3Inventory()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 // the usage analysis and the lifecycle rules that fit (src/s3_usage.ts)
 api.get("/inventory/s3/:name/usage", (req, res) => { const u = latestS3Usage(String(req.params.name)); u ? res.json(u) : res.status(404).json({ error: "not analysed yet" }); });
@@ -689,7 +741,9 @@ api.get("/watch", (_req, res) => res.json(latestWatchSummary()));
 api.get("/alerts", (req, res) => {
   const all = req.query.all === "1" || req.query.all === "true";
   const status = typeof req.query.status === "string" ? req.query.status : all ? "all" : "open";
-  res.json(listAlerts(status === "acknowledged" ? "acknowledged" : status === "all" ? "all" : "open"));
+  stampRowAccounts("alerts");
+  const inScope = rowInScope(accountScope(req.query as any));
+  res.json(listAlerts(status === "acknowledged" ? "acknowledged" : status === "all" ? "all" : "open").filter((a: any) => inScope(a)));
 });
 
 api.post("/alerts/:id/ack", (req, res) => {
@@ -775,17 +829,34 @@ api.get("/alerts/:id/incident", (req, res) => {
 api.get("/incidents", (_req, res) => res.json(listIncidents()));
 
 // ---- overview -------------------------------------------------------------
-api.get("/overview", (_req, res) => {
+api.get("/overview", (req, res) => {
+  // One account or every account: recommendations, alerts and the inventory narrow to the scope; the cost metrics
+  // come from the payer's Cost Explorer and stay organisation-wide (the scope block names the account's own months).
+  const scope = accountScope(req.query as any);
+  const inScope = rowInScope(scope);
   // the latest completed run that produced cost metrics: an interrupted or empty run must not blank the cards
-  const latest = db.prepare("select * from runs where status = 'completed' and id in (select run_id from metrics) order by id desc limit 1").get() as any;
-  const running = db.prepare("select id, started_at from runs where status = 'running' order by id desc limit 1").get() as any;
+  const latest = db.prepare("select * from runs where provider = 'aws' and status = 'completed' and id in (select run_id from metrics) order by id desc limit 1").get() as any;
+  const running = db.prepare("select id, started_at from runs where provider = 'aws' and status = 'running' order by id desc limit 1").get() as any;
   const metrics = latest ? db.prepare("select key, label, value, dims from metrics where run_id = ? order by key, value desc").all(latest.id) as any[] : [];
-  const recs = db.prepare("select status, count(*) as n, coalesce(sum(est_monthly_saving), 0) as saving from recommendations group by status").all();
+  if (scope) stampRowAccounts("recommendations");
+  const recRows = (db.prepare("select id, title, status, resource, resource_name, est_monthly_saving, tier, confidence, source, account_id from recommendations").all() as any[]).filter(inScope);
+  const recs = Object.values(recRows.reduce((acc, r) => { const a = (acc[r.status] ??= { status: r.status, n: 0, saving: 0 }); a.n++; a.saving += Number(r.est_monthly_saving) || 0; return acc; }, {} as Record<string, { status: string; n: number; saving: number }>));
+  const openRecs = recRows.filter((r) => r.status === "open");
   // The open total counted once per resource (src/related.ts): two actions on one box do not both happen.
-  const openSaving = distinctSaving(db.prepare("select resource, resource_name, est_monthly_saving from recommendations where status = 'open'").all() as any[]);
-  const top = db.prepare("select id, title, est_monthly_saving, tier, confidence, source from recommendations where status = 'open' order by coalesce(est_monthly_saving, -1) desc limit 8").all();
+  const openSaving = distinctSaving(openRecs);
+  const top = [...openRecs].sort((a, b) => (b.est_monthly_saving ?? -1) - (a.est_monthly_saving ?? -1)).slice(0, 8).map(({ id, title, est_monthly_saving, tier, confidence, source }) => ({ id, title, est_monthly_saving, tier, confidence, source }));
   const commitments = latest ? db.prepare("select reason, dimensions from findings where run_id = ? and control_id = 'query.commitments' order by id").all(latest.id) : [];
-  const alerts = listAlerts("open", 50);
+  if (scope) stampRowAccounts("alerts");
+  const alerts = listAlerts("open", 50).filter((a: any) => inScope(a));
+  // the scope's own numbers: its findings in the latest run, and its months from Cost Explorer's per-account view
+  const latestRunId = latestRunIdFor(scope);
+  const aw = accountWhere(scope);
+  const findings = latestRunId != null ? (db.prepare(`select count(*) as n from findings where run_id = ? and ${aw.sql}`).get(latestRunId, ...aw.params) as { n: number }).n : null;
+  const scopeBlock = scope ? {
+    account: scope.id, findings, latest_run_id: latestRunId ?? null,
+    consolidated: listAccounts().length > 1,
+    spend: db.prepare("select month, usd from spend_by_account_monthly where account_id = ? order by month desc limit 6").all(scope.id) as { month: string; usd: number }[],
+  } : null;
   res.json({ latestRun: latest || null, running: running || null, busy: isBusy(), awsConfigured: hasConnectionFile(), aws: credentialsMeta(), metrics, recommendations: recs, open_saving: openSaving, top, commitments, alerts,
-    agentConfigured: Boolean(config.repo2graphUrl), alertInvestigate: config.alertInvestigate, inventory: inventorySummary() });
+    agentConfigured: Boolean(config.repo2graphUrl), alertInvestigate: config.alertInvestigate, inventory: inventorySummary(scope), scope: scopeBlock });
 });

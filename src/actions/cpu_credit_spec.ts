@@ -110,7 +110,7 @@ export const cpuCreditSpecAction: ActionModule = {
     const proposals: Proposal[] = []; const notes: string[] = [];
     const rows = (db.prepare("select instance_id, account_id, name, instance_type, region, monthly_usd, pool_kind from inventory_ec2 where gone = 0 and state = 'running' and instance_type is not null order by name").all() as Candidate[]).filter((r) => BURSTABLE.test(r.instance_type));
     if (!rows.length) { notes.push("no running burstable (t2/t3/t3a/t4g) instance in the inventory"); return { proposals, notes }; }
-    const runId = (db.prepare("select id from runs order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
+    const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     const approved = approvedRecs([ACTION_TYPE]);
     const byRegion = new Map<string, Candidate[]>();
     for (const r of rows) { const key = `${r.account_id || ""}|${r.region || creds.region}`; if (!byRegion.has(key)) byRegion.set(key, []); byRegion.get(key)!.push(r); }

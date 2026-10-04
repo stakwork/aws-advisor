@@ -33,6 +33,8 @@ import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, S
 import { registerSwarmTools } from "./mcp_swarms.js";
 import { registerTagTools } from "./mcp_tags.js";
 import { complianceFindings, exposureOfResource, shortControl } from "./compliance.js";
+import { credentialsMeta } from "./steampipe.js";
+import { vercelTeam } from "./adapters/vercel/inventory.js";
 
 /**
  * MCP fact server, mounted at /mcp (Streamable HTTP, stateless: one server+transport per request).
@@ -80,8 +82,13 @@ export function prepareUserSql(input: string): { sql: string } | { error: string
     if (schema !== S.toLowerCase() && /^aws_/i.test(m[2])) return { error: `"${m[1]}.${m[2]}" names another Steampipe connection; only schema ${S} (this account, the advisor\'s credentials) can be queried` };
     if (/^(aws|aws_[a-z0-9_]*|steampipe[a-z0-9_]*)$/.test(schema) && schema !== S.toLowerCase()) return { error: `schema "${m[1]}" is not available to the agent; use ${S}` };
   }
-  // Qualify unqualified aws_* table references so they hit this app's connection, not another one on the search path.
-  const qualified = sql.replace(/\b(from|join)(\s+)(?!\w+\.)(aws_[a-z0-9_]+)\b/gi, (_m, kw: string, ws: string, t: string) => `${kw}${ws}${S}.${t}`);
+  // The Vercel connection (plugin turbot/vercel, written from the saved token) is readable, minus what holds secrets:
+  // vercel_secret, and vercel_project.env (variable values). Name the columns on vercel_project.
+  if (/\bvercel_secret\b/i.test(bare)) return { error: "vercel_secret holds secret values and is not available to the agent" };
+  if (/\bvercel_project\b/i.test(bare) && (/select\s+(distinct\s+)?\*/i.test(bare) || /\benv\b/i.test(bare))) return { error: "on vercel_project name the columns you need; env (variable values) and select * are not available to the agent" };
+  // Qualify unqualified aws_* / vercel_* table references so they hit this app's connections, not another one on the search path.
+  const qualified = sql.replace(/\b(from|join)(\s+)(?!\w+\.)(aws_[a-z0-9_]+)\b/gi, (_m, kw: string, ws: string, t: string) => `${kw}${ws}${S}.${t}`)
+    .replace(/\b(from|join)(\s+)(?!\w+\.)(vercel_[a-z0-9_]+)\b/gi, (_m, kw: string, ws: string, t: string) => `${kw}${ws}vercel.${t}`);
   return { sql: qualified };
 }
 
@@ -184,7 +191,7 @@ function recommendationHistory(a: { resource?: string; rule?: string; limit: num
 }
 
 function findingsForResource(a: { resource: string; run_id?: number; limit: number }) {
-  const runId = a.run_id ?? (db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  const runId = a.run_id ?? (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
   if (!runId) return text({ run_id: null, findings: [] });
   const rows = db.prepare(`
     select control_id, control_title, status, resource, reason, region, account_id, source, benchmark, dimensions
@@ -248,15 +255,23 @@ function alertContextTool(a: { alert_id: number; hours: number }) {
   return text({ ...ctx, note: "watch_samples: nat_bytes_hour values are bytes in + out through the gateway over the hour before each sample (dims carry in/out); instance_state values are state codes (dims.state is the name)." });
 }
 
+/** The accounts the advisor is pointed at, for the server instructions and the chat brief: the AWS account and, when a token is saved, the Vercel team. */
+export function accountsNote(): { aws: string | null; vercel: { id: string; name: string | null; plan: string | null } | null; line: string } {
+  let aws: string | null = null; try { aws = credentialsMeta()?.accountId ?? null; } catch { /* no credentials yet */ }
+  let vercel: { id: string; name: string | null; plan: string | null } | null = null; try { const t = vercelTeam(); if (t) vercel = { id: t.id, name: t.name ?? t.slug, plan: t.plan }; } catch { /* no table yet */ }
+  const parts = [aws ? `AWS account ${aws} (the default for every aws_* table and tool)` : null, vercel ? `Vercel team ${vercel.name ?? vercel.id} (${vercel.id}; vercel_projects, vercel_stores, vercel_bill, the vercel.* Steampipe tables, and graph_systems / graph_query with account_id '${vercel.id}')` : null].filter(Boolean);
+  return { aws, vercel, line: parts.length ? `Accounts: ${parts.join("; ")}.` : "No account is configured yet." };
+}
+
 export function createFactServer(): McpServer {
-  const server = new McpServer({ name: "aws-advisor", version: "0.1.0" }, {
-    instructions: `Read-only facts about one AWS account, served by aws-advisor. Steampipe tables live in schema "${S}": write them as ${S}.aws_ec2_instance etc. (bare aws_* names in FROM/JOIN are qualified for you). Use these tools to verify a recommendation before making it: whether a VPC endpoint already exists, the real on-demand price of a type, the resource's cost trend, and what the team decided about it before.`,
+  const server = new McpServer({ name: "cloud-advisor", version: "0.2.0" }, {
+    instructions: `Read-only facts about the accounts Cloud Advisor is pointed at. ${accountsNote().line} Steampipe tables live in schema "${S}": write them as ${S}.aws_ec2_instance etc. (bare aws_* names in FROM/JOIN are qualified for you; vercel_* tables as vercel.vercel_project). Use these tools to verify a recommendation before making it: whether a VPC endpoint already exists, the real on-demand price of a type, the resource's cost trend, and what the team decided about it before. The graph (graph_query, graph_systems, graph_system) holds every provider in one model: resources carry provider and account_id, and the same labels (AdvisorDeployment, AdvisorEndpoint, AdvisorDatabase, KnSystem, KnSystemType) describe an EC2 instance and a Vercel project alike.`,
   });
   const ro = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 
   server.registerTool("steampipe_query", {
     title: "Steampipe SQL query",
-    description: `Run one read-only SELECT against the AWS Steampipe tables (schema ${S}, e.g. ${S}.aws_vpc_endpoint, ${S}.aws_ec2_instance, ${S}.aws_cost_by_service_daily). Single statement, ${QUERY_TIMEOUT_MS / 1000}s timeout, at most ${QUERY_ROW_CAP} rows. Add region/id quals to keep API calls small.`,
+    description: `Run one read-only SELECT against the AWS Steampipe tables (schema ${S}, e.g. ${S}.aws_vpc_endpoint, ${S}.aws_ec2_instance, ${S}.aws_cost_by_service_daily) and, when a Vercel account is configured, the vercel tables (vercel.vercel_project, vercel_deployment, vercel_domain, vercel_dns_record, vercel_team; name the columns on vercel_project, its env values are withheld). Single statement, ${QUERY_TIMEOUT_MS / 1000}s timeout, at most ${QUERY_ROW_CAP} rows. Add region/id quals to keep API calls small.`,
     inputSchema: { sql: z.string().min(1).max(20_000).describe("A single SELECT or WITH ... SELECT statement") },
     annotations: ro,
   }, ({ sql }) => steampipeQuery(sql));
@@ -490,14 +505,14 @@ export function createFactServer(): McpServer {
 
   server.registerTool("graph_systems", {
     title: "Our systems, from the knowledge graph",
-    description: "The account as a schematic: every system (an autoscaled pool, a standalone instance, an RDS cluster or instance, an ElastiCache group, a NAT gateway) with its archetype, member count, monthly cost at list, and what it moves (transfer and log shipping in USD/month). Start here for any question about what runs and what it costs; then graph_system for one of them.",
-    inputSchema: { kind: z.enum(["pool", "instance", "rds_cluster", "rds_instance", "cache_group", "cache_cluster", "nat", "eks_cluster", "lambda"]).optional() },
+    description: "An account as a schematic: every system (on AWS an autoscaled group, a standalone instance, a database cluster or instance, a cache group, a cluster, a function, a NAT gateway; on Vercel a project as a deployment and each store as a database, cache or storage) with its generic kind and the provider's native kind, its archetype, member count, monthly cost at list, and what it moves (transfer and log shipping in USD/month). Defaults to the AWS account; pass account for another one (the Vercel team id). Start here for any question about what runs and what it costs; then graph_system for one of them.",
+    inputSchema: { kind: z.enum(["instance", "autoscaled_group", "cluster", "database_cluster", "database", "cache_group", "cache", "function", "gateway", "deployment", "storage"]).optional().describe("the generic kind (the provider's native kind such as pool, rds_cluster, eks_cluster, lambda, nat, vercel_project, vercel_store is accepted too)"), account: z.string().max(80).optional().describe("the account id: an AWS account id or a Vercel team id (default: the AWS account)") },
     annotations: ro,
-  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { return text({ systems: await listSystems(a.kind) }); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
+  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { return text({ account: a.account ?? undefined, systems: await listSystems(a.kind, a.account || undefined) }); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
 
   server.registerTool("graph_system", {
     title: "One system and everything linked to it",
-    description: "A system by id (pool:<name>, ec2:<instance id>, rds:<cluster>, cache:<group>, nat:<id>) or name: its archetype, the types it runs on with count and list price, the pricing overlays that cover those types (Savings Plan discount, reservations), its members with state and CPU, its traffic edges (NAT to the internet with GB/day and USD/month), the log groups it ships to, and the recommendations on its members with their verdict once verified. This is the graph walk that explains a system's cost.",
+    description: "A system by id (pool:<name>, ec2:<instance id>, rds:<cluster>, cache:<group>, eks:<cluster>, lambda:<name>, nat:<id>; on Vercel vercel_project:<name>, vercel_store:<name>) or name: its archetype, the types it runs on with count and list price, the pricing overlays that cover those types (Savings Plan discount, reservations), its members with state and CPU, its traffic edges (NAT to the internet with GB/day and USD/month), the log groups it ships to, and the recommendations on its members with their verdict once verified. This is the graph walk that explains a system's cost.",
     inputSchema: { id: z.string().max(200) },
     annotations: ro,
   }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror"); try { const v = await systemView(a.id); return v ? text(v) : fail(`no system ${a.id}; graph_systems lists them`); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
@@ -510,11 +525,11 @@ export function createFactServer(): McpServer {
   }, async () => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror"); try { return text(await graphBill()); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
 
   server.registerTool("graph_log_groups", {
-    title: "CloudWatch log groups and the systems that write them",
-    description: "Every log group in the knowledge graph with the system it was attributed to and how (observed from an instance's agent config, the group's tags, an AWS naming convention, or a token match on the name), the instances seen shipping to it, and the unattributed ones with the closest candidates and their monthly cost. The list to ask the team about when a group needs an owner. Refreshed by the graph sync.",
-    inputSchema: { unattributed_only: z.boolean().default(false).describe("true: only the groups no system claims, with their candidates") },
+    title: "Where logs go and who writes them",
+    description: "Every log destination in the knowledge graph for an account: on AWS the CloudWatch log groups with the system each was attributed to and how (observed from an instance's agent config, the group's tags, an AWS naming convention, or a token match on the name), the instances seen shipping to it, and the unattributed ones with the closest candidates and their monthly cost; on Vercel (pass the team id as account) the log drains with the host they deliver to, sources, sampling, the projects they cover and the metered log volume at the team's rate. The list to ask the team about when a group needs an owner. Refreshed by the graph sync.",
+    inputSchema: { unattributed_only: z.boolean().default(false).describe("true: only the groups no system claims, with their candidates"), account: z.string().max(80).optional().describe("an AWS account id or a Vercel team id (default: the AWS account)") },
     annotations: ro,
-  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { const r = await logAttributionReport(); return text(a.unattributed_only ? { ...r, groups: undefined } : r); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
+  }, async (a) => { if (!graphEnabled()) return fail("the knowledge graph needs the Neo4j mirror (Settings > Graph mirror)"); try { const r = await logAttributionReport(500, a.account || undefined); return text(a.unattributed_only ? { ...r, groups: undefined } : r); } catch (e: any) { return fail(`graph: ${errMsg(e)}`); } });
 
   server.registerTool("instance_apps", {
     title: "What runs on the instances",
@@ -665,10 +680,44 @@ export function createFactServer(): McpServer {
 
   server.registerTool("graph_query", {
     title: "Cypher over the advisor's graph mirror",
-    description: `Read-only Cypher against the Neo4j mirror of this advisor's data (a one-way copy of its database; the same facts as the other tools, but walkable). Labels are all prefixed Advisor; every node has account_id and updated_at:\n${SCHEMA_SUMMARY}\nConcept nodes (label Concept, not Advisor) hold the team's decisions and rules: a recommendation with a DECIDED_AS edge was approved, rejected, snoozed or done and the Concept's description and documentation carry the reason; Concepts named "<role> <action> rule" are generic rules that apply to any resource of that kind; the children of "AWS Operational Patterns" are the operational rules every agent run is told to respect. Example: MATCH (r:AdvisorResource {id: 'i-0123'})-[e]-(x) RETURN r, e, x. The statement must start with MATCH, OPTIONAL MATCH, WITH or CALL { }, contain no CREATE/MERGE/SET/DELETE/REMOVE/DROP/LOAD and no apoc/dbms procedure; it runs in a read transaction with a ${GRAPH_TIMEOUT_MS / 1000}s timeout and returns at most ${GRAPH_ROW_CAP} rows. When the mirror is not configured the tool says so.`,
+    description: `Read-only Cypher against the Neo4j mirror of this advisor's data (a one-way copy of its database; the same facts as the other tools, but walkable). The model is provider-neutral (docs/cloud-ontology.md): labels are prefixed Advisor (records of things that exist) or Kn (knowledge rebuilt from them), the provider's own words live in native_type and native_*:\n${SCHEMA_SUMMARY}\nConcept nodes (label Concept, not Advisor) hold the team's decisions and rules: a recommendation with a DECIDED_AS edge was approved, rejected, snoozed or done and the Concept's description and documentation carry the reason; Concepts named "<role> <action> rule" are generic rules that apply to any resource of that kind; the children of "AWS Operational Patterns" are the operational rules every agent run is told to respect. Example: MATCH (r:AdvisorResource {id: 'i-0123'})-[e]-(x) RETURN r, e, x. The statement must start with MATCH, OPTIONAL MATCH, WITH or CALL { }, contain no CREATE/MERGE/SET/DELETE/REMOVE/DROP/LOAD and no apoc/dbms procedure; it runs in a read transaction with a ${GRAPH_TIMEOUT_MS / 1000}s timeout and returns at most ${GRAPH_ROW_CAP} rows. When the mirror is not configured the tool says so.`,
     inputSchema: { cypher: z.string().min(1).max(10_000).describe("One read-only Cypher statement") },
     annotations: ro,
   }, (a) => graphQuery(a));
+
+  server.registerTool("vercel_projects", {
+    title: "Vercel projects, or one in full",
+    description: "The Vercel team's projects as the advisor last read them: framework, runtime, repository, latest production deployment and its state, every URL it serves with whether Vercel asks for authentication first (deployment protection), custom domains, firewall, Secure Compute, the stores it uses, env variable names (never values), the last 7 days of metered usage (requests, invocations, errors, bandwidth, builds) and what the project costs at the team's listed rates. With name: that project in full (last 30 deployments, domains, env names, log drains, 30-day usage with a daily series, the cost lines). Says 'not configured' when no Vercel token is saved.",
+    inputSchema: { name: z.string().max(200).optional().describe("a project name or prj_ id for the full detail; omit for the list") },
+    annotations: ro,
+  }, async (a) => {
+    const v = await import("./adapters/vercel/index.js"); const inv = await import("./adapters/vercel/inventory.js");
+    if (!v.vercelAdapter.configured()) return fail("Vercel is not configured on this advisor (no token saved under Settings > Accounts)");
+    const team = inv.vercelTeam(); const teamId = team?.id ?? v.vercelAdapter.primaryAccountId();
+    if (a.name) { const p = inv.listProjects().find((x) => x.name === a.name || x.id === a.name); if (!p) return fail(`no project ${a.name}; vercel_projects without a name lists them`); return text(v.projectDetail(p.id)); }
+    const { projectListCost } = await import("./adapters/vercel/pricing.js"); const { usageTotals } = await import("./adapters/vercel/usage.js");
+    return text({ team, read_at: team?.fetched_at ?? null, projects: inv.listProjects().map((p) => ({ id: p.id, name: p.name, framework: p.framework, node_version: p.node_version, repo: p.repo, latest_state: p.latest_state, latest_target: p.latest_target, latest_at: p.latest_at, production_url: p.production_url, protection: p.protection, firewall: p.firewall, secure_compute: p.connect.length > 0, endpoints: v.projectEndpoints(p).map((e) => ({ url: e.url, target: e.target, requires_auth: e.requires_auth, via: e.via, domain: e.domain })), stores: inv.listStores({ projectId: p.id }).map((st) => ({ id: st.id, name: st.name, product: st.product, plan: st.plan })), env_count: p.env_count, usage_7d: usageTotals(teamId, 7, p.id), list_cost: projectListCost(teamId, p.id) })) });
+  });
+
+  server.registerTool("vercel_stores", {
+    title: "Vercel stores (Neon, Redis, Blob) and their usage",
+    description: "The team's data stores provisioned through Vercel: product, plan with its price lines and quotas, region, status at Vercel and at the partner, the projects on each and the variables they get, and the numbers the store object carries: a Neon database's compute hours this billing period, a Blob store's size and objects, whether a token expired or a quota is exceeded, and what the store costs at its plan's rate at this period's pace. Filter by kind (database, cache, storage) or ask for one by name or store_ id for the full detail with the daily blob series.",
+    inputSchema: { kind: z.enum(["database", "cache", "storage"]).optional(), name: z.string().max(200).optional() },
+    annotations: ro,
+  }, async (a) => {
+    const v = await import("./adapters/vercel/index.js"); const inv = await import("./adapters/vercel/inventory.js"); const { storeListCost } = await import("./adapters/vercel/pricing.js");
+    if (!v.vercelAdapter.configured()) return fail("Vercel is not configured on this advisor (no token saved under Settings > Accounts)");
+    const teamId = inv.vercelTeam()?.id ?? v.vercelAdapter.primaryAccountId();
+    if (a.name) { const st = inv.listStores().find((x) => x.name === a.name || x.id === a.name); if (!st) return fail(`no store ${a.name}`); return text(v.storeDetail(st.id)); }
+    return text({ stores: inv.listStores({ kind: a.kind }).map((st) => ({ id: st.id, name: st.name, kind: st.kind, product: st.product, plan: st.plan, plan_lines: st.details.plan_lines, region: st.region, status: st.status, partner_status: st.details.external_status, external_id: st.details.external_id, projects: st.projects.map((p) => ({ name: p.name, environments: p.environments, variables: p.env_var_names.length })), size_gb: st.details.size_bytes != null ? Math.round((st.details.size_bytes / 1e9) * 100) / 100 : null, objects: st.details.object_count, access: st.details.access, token_expired: st.details.token_expired, quota_exceeded: st.details.quota_exceeded, metadata: st.details.metadata, usage_period: st.details.usage_period, cost_at_plan: storeListCost(teamId, st) })) });
+  });
+
+  server.registerTool("vercel_bill", {
+    title: "The Vercel team's bill, usage this period and rates",
+    description: "The subscription (plan, seats, period), the estimate for the period, the metered usage since the period started (requests, invocations, GB-hours, bandwidth, builds, blob, cron, logs) team-wide with the per-project split and a daily series, the invoices with their groups and line items (marketplace stores such as Neon bill through them), and the rates: the team's listed price per metered item, each store's marketplace plan lines, and what the last paid invoice charged per unit. The same prices are KnSystemType nodes in the graph.",
+    inputSchema: {},
+    annotations: ro,
+  }, async () => { const v = await import("./adapters/vercel/index.js"); if (!v.vercelAdapter.configured()) return fail("Vercel is not configured on this advisor"); return text(v.vercelBill()); });
 
   server.registerTool("alert_context", {
     title: "Watcher alert with its context",

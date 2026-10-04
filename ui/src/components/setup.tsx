@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, when } from "../api";
 import { Button, Card, Code, CopyButton } from "./ui";
 
@@ -9,15 +10,17 @@ import { Button, Card, Code, CopyButton } from "./ui";
  * credentials: the script only sends it the profile name / role ARN.
  */
 
-type Path = "laptop-key" | "ec2-role";
+type Path = "laptop-key" | "ec2-role" | "ec2-host" | "member-role";
 
 const PATHS: { id: Path; label: string; hint: string }[] = [
   { id: "laptop-key", label: "Laptop / server with a long-lived key", hint: "A dedicated IAM user whose only permission is assuming a read-only role. Its key is written into ~/.aws/credentials on the machine running the advisor and never into the app." },
   { id: "ec2-role", label: "EC2 host with an instance role", hint: "No secret anywhere: the host's instance role assumes the read-only role. For the swarm host; the advisor must run on that instance." },
+  { id: "ec2-host", label: "EC2 host in a member account", hint: "Production: the advisor runs on an instance in a child. Run with the child's admin credentials: creates the instance role and profile that assume the parent's read role. Then run the EC2 path in the parent with this instance role as the host (the wizard fills it in)." },
+  { id: "member-role", label: "Member account of the organisation", hint: "Run with the child's admin credentials: creates the child's read role trusting the parent's read identity, the probe documents, and registers the child under Member accounts. The parent must be set up first." },
 ];
 
 const NAME_RE = "^[A-Za-z0-9_.-]+$";
-const DEFAULTS = { user: "aws-advisor", role: "aws-advisor-read", profile: "aws-advisor", region: "us-east-1", instanceRole: "aws-advisor-host", instanceId: "", adminProfile: "" };
+const DEFAULTS = { user: "aws-advisor", role: "aws-advisor-read", profile: "aws-advisor", region: "us-east-1", instanceRole: "aws-advisor-host", instanceId: "", adminProfile: "", trustArn: "", memberName: "", hostRoleArn: "", assumeArn: "" };
 
 const Field = ({ label, hint, value, onChange, pattern, placeholder, required = true }: { label: string; hint?: string; value: string; onChange: (v: string) => void; pattern?: string; placeholder?: string; required?: boolean }) => (
   <label className="grid gap-1 text-sm">
@@ -40,11 +43,19 @@ export function SetupWizard({ aws, onSaved }: { aws: any; onSaved?: () => void }
   const [check, setCheck] = useState<any>(null);
   const [checking, setChecking] = useState(false);
   const set = (patch: Partial<typeof DEFAULTS>) => setF((x) => ({ ...x, ...patch }));
+  const [parentArn, setParentArn] = useState<string | null>(null);
+  // ?setup=member-role&memberName=… (the parent-change banner and the organisation list link here): preselect the path, also when the wizard is already on screen
+  const [search] = useSearchParams();
+  useEffect(() => { const p = search.get("setup"); if (p === "member-role" || p === "laptop-key" || p === "ec2-role" || p === "ec2-host") { setPath(p); setStep(2); setPlan(null); setSaved(null); if (search.get("memberName")) setF((x) => ({ ...x, memberName: search.get("memberName") || "" })); if (search.get("hostRoleArn")) setF((x) => ({ ...x, hostRoleArn: search.get("hostRoleArn") || "" })); } }, [search]);
+  useEffect(() => { api("/accounts").then((d) => { const arn = d?.parent_identity?.ok ? (d.parent_identity.principal_arn || d.parent_identity.arn) : null; setParentArn(arn ?? null); if (arn) setF((x) => ({ ...x, trustArn: x.trustArn || arn, assumeArn: x.assumeArn || arn })); }).catch(() => {}); }, []);
 
   const query = () => {
     const q = new URLSearchParams({ path: path!, user: f.user, role: f.role, region: f.region, advisorUrl: location.origin });
     if (path === "laptop-key") q.set("profile", f.profile);
     if (path === "ec2-role") { q.set("instanceRole", f.instanceRole); if (f.instanceId.trim()) q.set("instanceId", f.instanceId.trim()); }
+    if (path === "member-role") { q.set("trustArn", f.trustArn.trim()); if (f.memberName.trim()) q.set("memberName", f.memberName.trim()); }
+    if (path === "ec2-role" && f.hostRoleArn.trim()) q.set("hostRoleArn", f.hostRoleArn.trim());
+    if (path === "ec2-host") { q.set("assumeArn", f.assumeArn.trim()); q.set("instanceRole", f.instanceRole); if (f.instanceId.trim()) q.set("instanceId", f.instanceId.trim()); }
     if (f.adminProfile.trim()) q.set("adminProfile", f.adminProfile.trim());
     if (dryRun) q.set("dryRun", "1");
     return q.toString();
@@ -61,6 +72,16 @@ export function SetupWizard({ aws, onSaved }: { aws: any; onSaved?: () => void }
   useEffect(() => {
     if (step !== 4 || saved?.ok) return;
     const tick = async () => {
+      if (path === "ec2-host") { setSaved({ ok: true, host: true }); return; }
+      if (path === "member-role") {
+        try {
+          const d = await api("/accounts");
+          const members = (d?.accounts || []).filter((a: any) => !a.is_parent);
+          const fresh = members.find((m: any) => m.last_test?.at && since && new Date(m.last_test.at).getTime() >= since - 60_000);
+          if (fresh) { setSaved({ ok: Boolean(fresh.last_test.ok), member: fresh }); if (fresh.last_test.ok) onSaved?.(); }
+        } catch { /* retry */ }
+        return;
+      }
       try {
         const s = await api("/settings");
         const a = s.aws || {};
@@ -120,10 +141,14 @@ export function SetupWizard({ aws, onSaved }: { aws: any; onSaved?: () => void }
           <div className="text-xs text-zinc-500">{PATHS.find((p) => p.id === path)!.label}: the defaults are fine; change them only when the names are taken.</div>
           <div className="grid gap-3 md:grid-cols-2">
             {path === "laptop-key" && <Field label="IAM user" value={f.user} onChange={(v) => set({ user: v })} pattern={NAME_RE} hint={`Its key goes under [${f.user || "aws-advisor"}-user] in ~/.aws/credentials`} />}
-            <Field label="Read-only role" value={f.role} onChange={(v) => set({ role: v })} pattern={NAME_RE} hint="Gets the advisor's recommended policy" />
+            <Field label="Read-only role" value={f.role} onChange={(v) => set({ role: v })} pattern={NAME_RE} hint={path === "member-role" ? "Created in the child with the advisor's read policy; keep the parent's name so the parent may assume it (its policy allows that name in any account)" : "Gets the advisor's recommended policy"} />
+            {path === "member-role" && <Field label="Parent's read identity (trusted)" value={f.trustArn} onChange={(v) => set({ trustArn: v })} pattern="^arn:aws:iam::[0-9]{12}:(role|user)/.+$" placeholder="arn:aws:iam::123456789012:role/aws-advisor-read" hint={parentArn ? "Filled from the parent's current identity" : "The parent is not configured or not tested yet; paste its read role ARN"} />}
+            {path === "member-role" && <Field label="Name for the member (optional)" value={f.memberName} onChange={(v) => set({ memberName: v })} placeholder="staging" required={false} hint="Shown under Member accounts; the account id otherwise" />}
             {path === "laptop-key" && <Field label="AWS profile that assumes the role" value={f.profile} onChange={(v) => set({ profile: v })} pattern={NAME_RE} hint={`[profile ${f.profile || "aws-advisor"}] in ~/.aws/config; this is what the advisor is pointed at`} />}
-            {path === "ec2-role" && <Field label="Instance role" value={f.instanceRole} onChange={(v) => set({ instanceRole: v })} pattern={NAME_RE} hint="The role the EC2 host runs with; created with an instance profile when missing, or an existing one" />}
-            {path === "ec2-role" && <Field label="Instance id (optional)" value={f.instanceId} onChange={(v) => set({ instanceId: v })} pattern="^i-[0-9a-f]{8,17}$" placeholder="i-0123456789abcdef0" required={false} hint="Associates the instance profile with it (only if it has none) and sets the IMDS hop limit to 2" />}
+            {path === "ec2-role" && <Field label="Host instance role in another account (optional)" value={f.hostRoleArn} onChange={(v) => set({ hostRoleArn: v })} pattern="^arn:aws:iam::[0-9]{12}:role/.+$" placeholder="arn:aws:iam::<host account>:role/aws-advisor-host" required={false} hint="Production with the advisor on an EC2 host in a child: the read role here trusts that instance role (made by the 'EC2 host in a member account' path); nothing is created for the host in this account" />}
+            {path === "ec2-host" && <Field label="Parent's read role to assume" value={f.assumeArn} onChange={(v) => set({ assumeArn: v })} pattern="^arn:aws:iam::[0-9]{12}:role/.+$" placeholder="arn:aws:iam::<parent>:role/aws-advisor-read" hint={parentArn ? "Filled from the parent's current identity" : "Paste the parent's read role ARN"} />}
+            {((path === "ec2-role" && !f.hostRoleArn.trim()) || path === "ec2-host") && <Field label="Instance role" value={f.instanceRole} onChange={(v) => set({ instanceRole: v })} pattern={NAME_RE} hint="The role the EC2 host runs with; created with an instance profile when missing, or an existing one" />}
+            {((path === "ec2-role" && !f.hostRoleArn.trim()) || path === "ec2-host") && <Field label="Instance id (optional)" value={f.instanceId} onChange={(v) => set({ instanceId: v })} pattern="^i-[0-9a-f]{8,17}$" placeholder="i-0123456789abcdef0" required={false} hint="Associates the instance profile with it (only if it has none) and sets the IMDS hop limit to 2" />}
             <Field label="Region" value={f.region} onChange={(v) => set({ region: v })} pattern="^[a-z]{2}(-[a-z0-9]+)+$" hint="Default region for the profile and the SSM document (documents are regional)" />
             <Field label="Admin profile (optional)" value={f.adminProfile} onChange={(v) => set({ adminProfile: v })} pattern={NAME_RE} placeholder="default profile" required={false} hint="--profile for the admin aws calls, when your admin credentials are not the terminal's default" />
           </div>
@@ -175,12 +200,18 @@ export function SetupWizard({ aws, onSaved }: { aws: any; onSaved?: () => void }
           {!saved && (
             <div className="flex items-center gap-2 text-zinc-400"><span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" /> Waiting for the script… (checking every 5 s{dryRun ? "; note the command is a dry run, it will not save anything" : ""})</div>
           )}
-          {saved && saved.ok && (
+          {saved && saved.host && <div className="text-zinc-300">The instance role is made in the host's account. Two things remain: run the EC2 path in the parent with that instance role as the host (its ARN is in the script's last lines), and on the host's advisor set Settings › AWS credentials › Instance / default chain to the parent's read role with credential source Ec2InstanceMetadata.</div>}
+          {saved && saved.member && (
+            <div className={saved.ok ? "text-emerald-300" : "text-orange-300"}>
+              Member <span className="font-medium">{saved.member.name || saved.member.account_id}</span> ({saved.member.account_id}) registered; the parent {saved.ok ? "assumed its read role" : `could not assume its read role yet: ${saved.member.last_test?.error || "see Settings › Member accounts"}`}. {saved.ok ? "The next collection run includes it." : "Check the role's trust policy and the parent's AdvisorAssumeMembers statement (rerun the parent's setup script if it predates it), then Test under Member accounts."}
+            </div>
+          )}
+          {saved && !saved.member && saved.ok && (
             <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-300">
               Connected: account <span className="font-medium">{saved.meta.accountId}</span>, mode <span className="font-medium">{saved.meta.mode === "profile" ? `AWS profile ${saved.meta.profile}` : saved.meta.mode === "chain" ? `Instance / default chain${saved.meta.roleArn ? ` assuming ${saved.meta.roleArn}` : ""}` : saved.meta.label}</span>, saved {when(saved.meta.savedAt)}.
             </div>
           )}
-          {saved && !saved.ok && (
+          {saved && !saved.member && !saved.ok && (
             <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-amber-300">
               The script saved the settings ({saved.meta.label}) but the connection test did not pass yet. Look at the script's output; for the EC2 path that is expected when the advisor is not running on the instance. "Test again" in the credentials card below retries.
               <div className="mt-2"><Button type="button" variant="ghost" onClick={() => setSaved(null)}>Keep waiting</Button></div>

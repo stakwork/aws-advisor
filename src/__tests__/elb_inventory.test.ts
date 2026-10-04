@@ -57,10 +57,10 @@ test("elb inventory: rows list with their targets parsed, an instance finds the 
 
   // the graph side: the ARN is the node id, the edges follow the targets
   const node = resourceFromElb(db.prepare("select * from inventory_elb where name = 'web'").get());
-  assert.equal(node.id, "arn:lb/app/web/1"); assert.equal(node.kind, "elb"); assert.equal(node.type, "alb"); assert.equal(node.name, "web");
+  assert.equal(node.id, "arn:lb/app/web/1"); assert.equal(node.label, "AdvisorLoadBalancer"); assert.equal(node.native_type, "elb_alb"); assert.equal(node.props.kind, "application"); assert.equal(node.props.type, "alb"); assert.equal(node.name, "web");
+  assert.equal(node.props.platform_owner, "prod-env");
   const edges = elbEdges(db.prepare("select * from inventory_elb where name = 'web'").get());
   assert.deepEqual(edges.ec2_edges.map((e) => [e.target, e.health]), [["i-aaa", "healthy"], ["i-bbb", "unhealthy"]]);
-  assert.equal(edges.beanstalk_env, "prod-env");
   const fnEdges = elbEdges(db.prepare("select * from inventory_elb where name = 'tcp'").get());
   assert.equal(fnEdges.ec2_edges.length, 0); assert.equal(fnEdges.ref_edges[0].target, "arn:aws:lambda:us-east-1:1:function:hello");
   db.prepare("delete from inventory_elb").run();

@@ -34,7 +34,7 @@ test("SSM SDK AccessDeniedException carries the action in its message; a bare on
   assert.equal(issue?.action, "ssm:SendCommand");
   assert.equal(issue?.resource, "arn:aws:ssm:us-east-1::document/AWS-RunShellScript");
   // The generated fix never grants the stock document, even when the denial was about it: only the custom probe document.
-  assert.deepEqual(issue?.policy_statement.Resource, ["arn:aws:ssm:*:*:document/AwsAdvisorProbe", "arn:aws:ec2:*:*:instance/*"]);
+  assert.deepEqual(issue?.policy_statement.Resource, ["arn:aws:ssm:*:*:document/AwsAdvisorProbe*", "arn:aws:ec2:*:*:instance/*"]);
   const bare = explainPermissionError(Object.assign(new Error("Access denied"), { name: "AccessDeniedException" }), "ssm GetCommandInvocation i-0123456789abcdef0 (ssm:GetCommandInvocation)");
   assert.equal(bare?.action, "ssm:GetCommandInvocation");
 });

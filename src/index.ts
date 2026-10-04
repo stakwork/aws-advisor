@@ -19,6 +19,10 @@ import { tags } from "./routes/tags.js";
 import { accounts } from "./routes/accounts.js";
 import { passReports } from "./routes/pass_reports.js";
 import { security } from "./routes/security.js";
+import { probes } from "./routes/probes.js";
+import { clusters } from "./routes/clusters.js";
+import { vulnerabilities } from "./routes/vulnerabilities.js";
+import { vercel } from "./routes/vercel.js";
 import "./actions/index.js";
 import { ensureOperationalPatterns } from "./concepts.js";
 loadTasks();
@@ -53,6 +57,10 @@ app.use("/api", tags);
 app.use("/api", accounts);
 app.use("/api", passReports);
 app.use("/api", security);
+app.use("/api", probes);
+app.use("/api", clusters);
+app.use("/api", vulnerabilities);
+app.use("/api", vercel);
 app.use("/api", api);
 mountMcp(app, "/mcp");
 
@@ -102,5 +110,7 @@ const onListen = () => {
   // the fleet's latest probes, judged now: a disk that filled while the advisor was down alerts at once
   import("./disk_alerts.js").then((m) => { const r = m.checkAllDiskLevels(); if (r.raised) console.log(`[disk] ${r.raised} disk alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[disk] startup check failed: ${e?.message || e}`));
   import("./host_alerts.js").then((m) => { const r = m.checkAllHostLevels(); if (r.raised) console.log(`[host] ${r.raised} host alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[host] startup check failed: ${e?.message || e}`));
+  // the Vercel connection for Steampipe follows the saved token (written on save, removed with the account; here after a restart)
+  import("./adapters/vercel/steampipe.js").then((m) => { const r = m.ensureVercelConnection(); if (r !== "skipped" && r !== "unchanged") console.log(`[vercel] steampipe connection ${r}`); }).catch((e) => console.error(`[vercel] steampipe connection: ${e?.message || e}`));
 };
 if (config.bindAddr) app.listen(config.port, config.bindAddr, onListen); else app.listen(config.port, onListen);

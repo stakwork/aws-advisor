@@ -4,8 +4,11 @@ import { Badge, Button, Card } from "./ui";
 
 type Setting = { key: string; env: string; kind: string; group: string; label: string; help: string; options?: string[]; value: string; source: "setting" | "env" | "default"; default: string; env_set: boolean };
 
-/** Everything that used to be an environment variable and is not a bootstrap secret: saved here, it wins over the env. */
-export function RuntimeSettings() {
+/**
+ * Everything that used to be an environment variable and is not a bootstrap secret: saved here, it wins over the env.
+ * `groups` narrows it to the groups a Settings tab shows (every group when omitted); `title` names the card.
+ */
+export function RuntimeSettings({ groups: only, keys, exclude, title = "Settings", note }: { groups?: string[]; keys?: string[]; exclude?: string[]; title?: string; note?: string } = {}) {
   const [rows, setRows] = useState<Setting[] | null>(null);
   const [quotas, setQuotas] = useState<any[] | null>(null);
   const [edit, setEdit] = useState<Record<string, string>>({});
@@ -27,16 +30,19 @@ export function RuntimeSettings() {
     try { await api("/settings/runtime", { method: "PUT", body: JSON.stringify({ key, value }) }); setEdit((e) => { const n = { ...e }; delete n[key]; return n; }); await load(); }
     catch (e: any) { setErr((x) => ({ ...x, [key]: e.message })); } finally { setBusy(""); }
   };
-  if (!rows) return <Card title="Settings"><div className="text-sm text-zinc-500">Loading…</div></Card>;
-  const groups = [...new Set(rows.map((r) => r.group))];
+  if (!rows) return <Card title={title}><div className="text-sm text-zinc-500">Loading…</div></Card>;
+  // what this card shows: the named keys, else the named groups (minus the excluded keys), else everything
+  const shown = rows.filter((r) => (keys ? keys.includes(r.key) : !only || only.includes(r.group)) && !(exclude && exclude.includes(r.key)));
+  const groups = [...new Set(shown.map((r) => r.group))];
   return (
-    <Card title={<span>Settings <span className="font-normal text-zinc-500">· saved here they win over the environment; reset to fall back to it</span></span>}>
+    <Card title={<span>{title} <span className="font-normal text-zinc-500">· saved here they win over the environment; reset to fall back to it</span></span>}>
       <div className="space-y-4">
+        {note && <div className="text-xs text-zinc-500">{note}</div>}
         {groups.map((g) => (
           <div key={g}>
             <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">{g}{g === "Quotas" && quotas && <span className="ml-2 normal-case tracking-normal text-zinc-400">· now: {quotas.map((q) => `${q.used}/${q.limit} ${q.quota.replace(/_/g, " ")}`).join(" · ")}</span>}</div>
             <table className="w-full border-collapse text-sm">
-              <tbody>{rows.filter((r) => r.group === g).map((r) => {
+              <tbody>{shown.filter((r) => r.group === g).map((r) => {
                 const editing = r.key in edit;
                 const val = editing ? edit[r.key] : r.value;
                 const input = r.kind === "enum" ? (
@@ -69,7 +75,7 @@ export function RuntimeSettings() {
             )}
           </div>
         ))}
-        <div className="text-xs text-zinc-500">Bootstrap settings stay in the environment: port and bind address, data and config paths, the Steampipe connection, the three shared secrets (API, MCP, webhook), the public URL and the probe document. A cron change takes effect at once; a Neo4j or Jev change on the next call.</div>
+        {(!only || only.includes("Quotas")) && <div className="text-xs text-zinc-500">Bootstrap settings stay in the environment: port and bind address, data and config paths, the Steampipe connection, the three shared secrets (API, MCP, webhook), the public URL and the probe document. A cron change takes effect at once; a Neo4j or Jev change on the next call.</div>}
       </div>
     </Card>
   );

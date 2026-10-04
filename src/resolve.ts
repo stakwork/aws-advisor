@@ -142,7 +142,7 @@ export function resourceHistory(resource: { id: string | null; name: string | nu
     select i.id, i.status, i.cause, i.confidence, i.monthly_run_rate_usd, i.created_at, a.kind as alert_kind, a.resource as alert_resource
     from incidents i join alerts a on a.id = i.alert_id
     where a.resource = ? or i.fixes like ? or i.evidence like ? order by i.id desc limit 5`).all(resource.id, like, like) as any[];
-  const latest = (db.prepare("select id from runs where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  const latest = (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
   const findings = latest
     ? db.prepare("select control_id, control_title, reason from findings where run_id = ? and status = 'alarm' and (resource = ? or resource like ?) order by control_id limit 20").all(latest, resource.id, like) as any[]
     : [];

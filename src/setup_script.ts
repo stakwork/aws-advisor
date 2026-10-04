@@ -1,7 +1,7 @@
 import { PROFILE_NAME_RE } from "./aws_config.js";
 import { config } from "./config.js";
 import { policyProbeDocument, recommendedPolicy } from "./permissions.js";
-import { PROBE_VERSION, probeDocument } from "./ssm.js";
+import { PROBE_KINDS, PROBE_VERSION, type ProbeKind, probeDocument, probeDocumentName } from "./probes.js";
 
 /**
  * The one-command onboarding: a self-contained bash script that performs the README's "Onboarding" steps end to
@@ -20,8 +20,8 @@ import { PROBE_VERSION, probeDocument } from "./ssm.js";
  * renders as a human-readable plan for the Settings wizard (GET /api/setup/plan).
  */
 
-export type SetupPath = "laptop-key" | "ec2-role";
-export const SETUP_PATHS: SetupPath[] = ["laptop-key", "ec2-role"];
+export type SetupPath = "laptop-key" | "ec2-role" | "ec2-host" | "member-role";
+export const SETUP_PATHS: SetupPath[] = ["laptop-key", "ec2-role", "ec2-host", "member-role"];
 
 export interface SetupOptions {
   path: SetupPath;
@@ -40,9 +40,19 @@ export interface SetupOptions {
   advisorUrl: string;
   /** `--profile` for every admin `aws` call (never for `aws configure`, which targets the profiles it writes). */
   adminProfile?: string;
+  /** member-role: the parent's read identity (the read role's ARN) the child's role must trust. */
+  trustArn?: string;
+  /** member-role: the name the advisor shows for the child (defaults to its account id). */
+  memberName?: string;
+  /** ec2-role run in the parent when the host lives in another account: the host's instance role ARN to trust (the instance role itself is made there by ec2-host). */
+  hostRoleArn?: string;
+  /** ec2-host: the parent's read role ARN the instance role may assume. */
+  assumeArn?: string;
   /** Print the commands instead of running them. */
   dryRun: boolean;
 }
+
+export const SETUP_TRUST_ARN_RE = /^arn:aws:iam::\d{12}:(role|user)\/[\w+=,.@/-]+$/;
 
 export const SETUP_DEFAULTS = {
   userName: "aws-advisor",
@@ -93,7 +103,17 @@ export function validateSetupOptions(input: Record<string, unknown>, ctx: { advi
   if (profileName === managed || `${userName}-user` === managed) throw new Error(`"${managed}" is the profile the advisor manages itself (ADVISOR_AWS_PROFILE); pick another name`);
   if (`${userName}-user` === profileName) throw new Error(`the profile "${profileName}" collides with the key profile "${userName}-user"; pick another profile name`);
   if (path === "ec2-role" && instanceRoleName === roleName) throw new Error("the instance role and the read-only role must have different names");
-  return { path: path as SetupPath, userName, roleName, profileName, region, instanceRoleName, ...(instanceId ? { instanceId } : {}), advisorUrl, ...(adminProfile ? { adminProfile } : {}), dryRun };
+  const trustArn = pick("trustArn", "trust_arn") || undefined;
+  if (path === "member-role" && !trustArn) throw new Error("member-role needs trustArn: the parent's read identity (its read role ARN, shown under Settings › Member accounts)");
+  if (trustArn && !SETUP_TRUST_ARN_RE.test(trustArn)) throw new Error(`trustArn must be a role or user ARN, got "${trustArn}"`);
+  const hostRoleArn = pick("hostRoleArn", "host_role_arn") || undefined;
+  if (hostRoleArn && (path !== "ec2-role" || !SETUP_TRUST_ARN_RE.test(hostRoleArn) || !/:role\//.test(hostRoleArn))) throw new Error(`hostRoleArn must be the host's instance role ARN (arn:aws:iam::<host account>:role/<name>) and goes with path ec2-role, got "${hostRoleArn}"`);
+  const assumeArn = pick("assumeArn", "assume_arn") || undefined;
+  if (path === "ec2-host" && !assumeArn) throw new Error("ec2-host needs assumeArn: the parent's read role ARN the instance role will assume");
+  if (assumeArn && (!SETUP_TRUST_ARN_RE.test(assumeArn) || !/:role\//.test(assumeArn))) throw new Error(`assumeArn must be a role ARN, got "${assumeArn}"`);
+  const memberName = pick("memberName", "member_name") || undefined;
+  if (memberName && (memberName.length > 80 || /["'\\$\`]/.test(memberName))) throw new Error("memberName: at most 80 characters, no quotes, backslashes, backticks or $");
+  return { path: path as SetupPath, userName, roleName, profileName, region, instanceRoleName, ...(instanceId ? { instanceId } : {}), advisorUrl, ...(adminProfile ? { adminProfile } : {}), ...(trustArn ? { trustArn } : {}), ...(memberName ? { memberName } : {}), ...(hostRoleArn ? { hostRoleArn } : {}), ...(assumeArn ? { assumeArn } : {}), dryRun };
 }
 
 export interface SetupStep {
@@ -109,16 +129,18 @@ const ACCOUNT_PLACEHOLDER = "<ACCOUNT_ID>";
 /** What the script embeds; injectable so tests do not depend on the environment. */
 export interface SetupDocuments {
   policy: object;
-  probeDocument: object;
+  /** One SSM document per probe kind (src/probes.ts): host, docker, apps, software. */
+  probeDocuments: { kind: ProbeKind; name: string; document: object }[];
+  /** The base name the policy scopes ssm:SendCommand to (every kind's document starts with it). */
   probeDocumentName: string;
   probeVersion: string;
 }
 
 export const defaultSetupDocuments = (): SetupDocuments => ({
   policy: recommendedPolicy(ACCOUNT_PLACEHOLDER),
-  probeDocument: probeDocument(),
-  // The document the recommended policy scopes ssm:SendCommand to: PROBE_DOCUMENT, or AwsAdvisorProbe when the unsafe
-  // stock document is opted in (it is still created, so reverting the opt-in is one env change).
+  probeDocuments: PROBE_KINDS.map((kind) => ({ kind, name: probeDocumentName(kind), document: probeDocument(kind) })),
+  // The base the recommended policy scopes ssm:SendCommand to: PROBE_DOCUMENT, or AwsAdvisorProbe when the unsafe
+  // stock document is opted in (the documents are still created, so reverting the opt-in is one env change).
   probeDocumentName: policyProbeDocument(),
   probeVersion: PROBE_VERSION,
 });
@@ -130,7 +152,7 @@ const sq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 function detectStep(o: SetupOptions): SetupStep {
   return {
     title: "Detect the AWS account and the admin identity",
-    detail: `aws sts get-caller-identity${o.adminProfile ? ` --profile ${o.adminProfile}` : ""}: the 12-digit account id fills the policy and the ARNs; the caller must be an admin of that account.`,
+    detail: `aws sts get-caller-identity${o.adminProfile ? ` --profile ${o.adminProfile}` : ""}: the 12-digit account id fills the policy and the ARNs; the caller must be an admin of that account${o.path === "member-role" ? " (the child: the script stops if the credentials are the parent's)" : ""}.`,
     bash: `
 for tool in aws curl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -147,6 +169,10 @@ else
   case "$ACCOUNT_ID" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) die "unexpected account id: $ACCOUNT_ID" ;; esac
 fi
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+if [ "$PATH_KIND" = member-role ] && [ "$DRY_RUN" != 1 ]; then
+  parent_account="\${PRINCIPAL_ARN#arn:aws:iam::}"; parent_account="\${parent_account%%:*}"
+  [ "$ACCOUNT_ID" != "$parent_account" ] || die "this terminal is an admin of $ACCOUNT_ID, which is the PARENT (the account behind $PRINCIPAL_ARN). The member script must run with the CHILD account's admin credentials: sign in to the child (aws sso login --profile <child admin profile>) and rerun with --profile <child admin profile>, or AWS_PROFILE set to it. Nothing was changed."
+fi
 write_documents
 note "account $ACCOUNT_ID, running as $CALLER_ARN"`,
   };
@@ -167,16 +193,16 @@ fi`,
 }
 
 function readRoleStep(o: SetupOptions): SetupStep {
-  const principal = o.path === "laptop-key" ? `user ${o.userName}` : `instance role ${o.instanceRoleName}`;
+  const principal = o.path === "laptop-key" ? `user ${o.userName}` : o.path === "ec2-role" ? (o.hostRoleArn ? `host instance role ${o.hostRoleArn} (another account)` : `instance role ${o.instanceRoleName}`) : `parent's identity ${o.trustArn}`;
   return {
     title: `Create the read-only role ${o.roleName} trusted by ${principal}`,
-    detail: `aws iam create-role with a trust policy whose principal is the ${principal}. When the role exists, the principal is added to its trust policy if missing (other principals are kept, so a laptop and an EC2 host can share the role).`,
+    detail: `aws iam create-role with a trust policy whose principal is the ${principal}; a principal created seconds earlier takes IAM a moment to resolve, so the call is retried until it does. When the role exists, the principal is added to its trust policy if missing (other principals are kept, so a laptop and an EC2 host can share the role).`,
     bash: `
 if exists iam get-role --role-name "$ROLE_NAME"; then
   note "role $ROLE_NAME exists"
   ensure_trust "$ROLE_NAME" "$PRINCIPAL_ARN" "$PRINCIPAL_SID"
 else
-  run iam create-role --role-name "$ROLE_NAME" --assume-role-policy-document "file://$WORK/trust.json" --description "aws-advisor read-only" --tags Key=app,Value=aws-advisor
+  run_when_principal_resolves iam create-role --role-name "$ROLE_NAME" --assume-role-policy-document "file://$WORK/trust.json" --description "aws-advisor read-only" --tags Key=app,Value=aws-advisor
   note "created $ROLE_ARN trusting $PRINCIPAL_ARN"
 fi`,
   };
@@ -323,11 +349,11 @@ esac`,
 
 function instanceAssumeStep(o: SetupOptions): SetupStep {
   return {
-    title: `Let ${o.instanceRoleName} assume ${o.roleName}`,
-    detail: `aws iam put-role-policy ${o.instanceRoleName} aws-advisor-assume: sts:AssumeRole on the read-only role and nothing else (put overwrites, so a rerun refreshes it).`,
+    title: `Let ${o.instanceRoleName} assume ${o.path === "ec2-host" ? `the parent's read role ${o.assumeArn}` : o.roleName}`,
+    detail: `aws iam put-role-policy ${o.instanceRoleName} aws-advisor-assume: sts:AssumeRole on ${o.path === "ec2-host" ? "the parent's read role (in its account) and nothing else; the parent's read role must trust this instance role, which ec2-role with hostRoleArn does in the parent" : "the read-only role and nothing else"} (put overwrites, so a rerun refreshes it).`,
     bash: `
 run iam put-role-policy --role-name "$INSTANCE_ROLE_NAME" --policy-name "$ASSUME_POLICY_NAME" --policy-document "file://$WORK/assume.json"
-note "inline policy $ASSUME_POLICY_NAME on $INSTANCE_ROLE_NAME: sts:AssumeRole on $ROLE_ARN"`,
+note "inline policy $ASSUME_POLICY_NAME on $INSTANCE_ROLE_NAME: sts:AssumeRole on $ASSUME_TARGET"`,
   };
 }
 
@@ -367,28 +393,32 @@ fi`,
 }
 
 function probeDocumentStep(o: SetupOptions, d: SetupDocuments): SetupStep {
+  const names = d.probeDocuments.map((p) => p.name).join(", ");
   return {
-    title: `Create the read-only SSM probe document ${d.probeDocumentName} in ${o.region}`,
-    detail: `aws ssm create-document from the embedded probe (${d.probeVersion}), or update-document when the content differs. ssm:SendCommand in the policy is granted on this document only, never on AWS-RunShellScript. SSM documents are regional: rerun with another region for instances elsewhere.`,
+    title: `Create the read-only SSM probe documents (${names}) in ${o.region}`,
+    detail: `aws ssm create-document from the embedded scripts (${d.probeVersion}: one document per probe kind, host, docker, apps, software), or update-document when the content differs. ssm:SendCommand in the policy is granted on documents named $PROBE_DOCUMENT* only, never on AWS-RunShellScript. ${o.path === "ec2-role" ? "The instance role already carries AmazonSSMManagedInstanceCore, so the host is itself probe-able." : ""}`,
     bash: `
-DOC_ARN="arn:aws:ssm:$REGION:$ACCOUNT_ID:document/$PROBE_DOCUMENT"
-if exists ssm describe-document --name "$PROBE_DOCUMENT" --region "$REGION"; then
-  current=$(query ssm get-document --name "$PROBE_DOCUMENT" --document-format JSON --region "$REGION" --query Content --output text) || die "get-document failed"
-  if [ "$(printf '%s' "$current" | squeeze)" = "$(squeeze < "$WORK/probe-document.json")" ]; then
-    note "up to date ($PROBE_VERSION): $DOC_ARN"
-  elif aws_admin ssm update-document --name "$PROBE_DOCUMENT" --content "file://$WORK/probe-document.json" --document-version '$LATEST' --document-format JSON --region "$REGION" >/dev/null 2>"$WORK/err"; then
-    latest=$(aws_admin ssm describe-document --name "$PROBE_DOCUMENT" --region "$REGION" --query Document.LatestVersion --output text)
-    aws_admin ssm update-document-default-version --name "$PROBE_DOCUMENT" --document-version "$latest" --region "$REGION" >/dev/null
-    note "updated to version $latest ($PROBE_VERSION): $DOC_ARN"
-  elif grep -q DuplicateDocumentContent "$WORK/err"; then
-    note "already up to date ($PROBE_VERSION): $DOC_ARN"
+for kind in ${d.probeDocuments.map((p) => p.kind).join(" ")}; do
+  name="$PROBE_DOCUMENT-$kind"; file="$WORK/probe-$kind.json"
+  DOC_ARN="arn:aws:ssm:$REGION:$ACCOUNT_ID:document/$name"
+  if exists ssm describe-document --name "$name" --region "$REGION"; then
+    current=$(query ssm get-document --name "$name" --document-format JSON --region "$REGION" --query Content --output text) || die "get-document $name failed"
+    if [ "$(printf '%s' "$current" | squeeze)" = "$(squeeze < "$file")" ]; then
+      note "up to date ($PROBE_VERSION $kind): $DOC_ARN"
+    elif aws_admin ssm update-document --name "$name" --content "file://$file" --document-version '$LATEST' --document-format JSON --region "$REGION" >/dev/null 2>"$WORK/err"; then
+      latest=$(aws_admin ssm describe-document --name "$name" --region "$REGION" --query Document.LatestVersion --output text)
+      aws_admin ssm update-document-default-version --name "$name" --document-version "$latest" --region "$REGION" >/dev/null
+      note "updated to version $latest ($PROBE_VERSION $kind): $DOC_ARN"
+    elif grep -q DuplicateDocumentContent "$WORK/err"; then
+      note "already up to date ($PROBE_VERSION $kind): $DOC_ARN"
+    else
+      die "update-document $name failed: $(cat "$WORK/err")"
+    fi
   else
-    die "update-document failed: $(cat "$WORK/err")"
+    run ssm create-document --name "$name" --document-type Command --document-format JSON --content "file://$file" --region "$REGION" --tags Key=app,Value=aws-advisor
+    note "created $DOC_ARN ($PROBE_VERSION $kind)"
   fi
-else
-  run ssm create-document --name "$PROBE_DOCUMENT" --document-type Command --document-format JSON --content "file://$WORK/probe-document.json" --region "$REGION" --tags Key=app,Value=aws-advisor
-  note "created $DOC_ARN ($PROBE_VERSION)"
-fi`,
+done`,
   };
 }
 
@@ -456,7 +486,46 @@ fi`,
 }
 
 /** The ordered steps for the options (the plan and the script share them). */
+/** Who the read role trusts: the key's user, the host's instance role, or (member path) the parent's read identity. */
+const principalArnOf = (o: SetupOptions): string => (o.path === "laptop-key" ? `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:user/${o.userName}` : o.path === "ec2-role" ? (o.hostRoleArn || `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:role/${o.instanceRoleName}`) : o.path === "ec2-host" ? `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:role/${o.instanceRoleName}` : o.trustArn || "");
+const principalSidOf = (o: SetupOptions): string => (o.path === "laptop-key" ? "AdvisorUser" : o.path === "ec2-role" || o.path === "ec2-host" ? "AdvisorHost" : "AdvisorParent");
+/** What the instance role may assume: the read role in this account, or (ec2-host) the parent's read role in its account. */
+const assumeTargetOf = (o: SetupOptions): string => (o.path === "ec2-host" && o.assumeArn ? o.assumeArn : `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:role/${o.roleName}`);
+
+/** member-role: tells the advisor about the child (POST /api/accounts), which rewrites its Steampipe connections and tests the role from the parent. */
+function registerMemberStep(o: SetupOptions): SetupStep {
+  return {
+    title: `Register this account with the advisor (${o.advisorUrl}) as a member and test the role from the parent`,
+    detail: `POST /api/accounts { account_id, name, role_arn }: the advisor adds the child under Settings › Member accounts, rewrites its Steampipe connections and assumes the role from the parent once (sts:GetCallerIdentity). Needs the parent's read identity to be allowed sts:AssumeRole on the role (the parent's policy statement AdvisorAssumeMembers; rerun the parent's setup script if it predates it).`,
+    bash: `
+NAME_JSON=$(printf '%s' "\${MEMBER_NAME:-$ACCOUNT_ID}" | sed 's/"/\\"/g')
+BODY='{"account_id":"'"$ACCOUNT_ID"'","name":"'"$NAME_JSON"'","role_arn":"'"$ROLE_ARN"'"}'
+note "member: account $ACCOUNT_ID, read role $ROLE_ARN, trusting $PRINCIPAL_ARN"
+if [ "$DRY_RUN" = 1 ]; then
+  printf '    + %s\\n' "curl -fsS -X POST '$ADVISOR_URL/api/accounts' -H 'content-type: application/json' $TOKEN_HINT-d '$BODY'"
+else
+  advisor_reachable || die "the advisor at $ADVISOR_URL does not answer. Start it, or add the member by hand under Settings › Member accounts: account $ACCOUNT_ID, read role $ROLE_ARN."
+  resp=$(advisor_call POST /api/accounts "$BODY") || die "POST $ADVISOR_URL/api/accounts failed: $resp"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$resp" | python3 -c '
+import json, sys
+r = json.load(sys.stdin); t = r.get("test") or {}
+print("    saved as member", (r.get("saved") or {}).get("account_id", "?"), "|", "role assumed from the parent: ok" if t.get("ok") else "role test failed: " + str(t.get("error") or t))
+sys.exit(0 if t.get("ok") else 2)' || warn "the member is saved but the parent could not assume its role yet: check the trust policy (the parent identity above) and the parent policy statement AdvisorAssumeMembers, then Settings › Member accounts › Test"
+  else
+    note "$resp"
+  fi
+  ADVISOR_OK=1
+fi`,
+  };
+}
+
 export function setupSteps(o: SetupOptions, d: SetupDocuments = defaultSetupDocuments()): SetupStep[] {
+  if (o.path === "member-role") return [detectStep(o), readRoleStep(o), rolePolicyStep(o), probeDocumentStep(o, d), registerMemberStep(o)];
+  // the host account: only the instance role, allowed to assume the parent's read role; the parent side is ec2-role with hostRoleArn
+  if (o.path === "ec2-host") return [detectStep(o), instanceRoleStep(o), ssmCoreStep(o), instanceAssumeStep(o), ...(o.instanceId ? [associateStep(o), hopLimitStep(o)] : [])];
+  // the parent, with the host elsewhere: the read role trusts the host's instance role across accounts; nothing to create for the host here
+  if (o.path === "ec2-role" && o.hostRoleArn) return [detectStep(o), readRoleStep(o), rolePolicyStep(o), probeDocumentStep(o, d), advisorSettingsStep(o), permissionCheckStep(o)];
   if (o.path === "laptop-key") {
     return [detectStep(o), userStep(o), readRoleStep(o), rolePolicyStep(o), userPolicyStep(o), accessKeyStep(o), profileStep(o), verifyStep(o), probeDocumentStep(o, d), advisorSettingsStep(o), permissionCheckStep(o)];
   }
@@ -475,9 +544,9 @@ export function renderSetupPlan(o: SetupOptions, d: SetupDocuments = defaultSetu
 // ---- the script ---------------------------------------------------------------------------------------------------
 
 function embeddedDocuments(o: SetupOptions, d: SetupDocuments): string {
-  const principalArn = o.path === "laptop-key" ? `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:user/${o.userName}` : `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:role/${o.instanceRoleName}`;
-  const trust = { Version: "2012-10-17", Statement: [{ Sid: o.path === "laptop-key" ? "AdvisorUser" : "AdvisorHost", Effect: "Allow", Principal: { AWS: principalArn }, Action: "sts:AssumeRole" }] };
-  const assume = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole", Resource: `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:role/${o.roleName}` }] };
+  const principalArn = principalArnOf(o);
+  const trust = { Version: "2012-10-17", Statement: [{ Sid: principalSidOf(o), Effect: "Allow", Principal: { AWS: principalArn }, Action: "sts:AssumeRole" }] };
+  const assume = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole", Resource: assumeTargetOf(o) }] };
   const ec2Trust = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Principal: { Service: "ec2.amazonaws.com" }, Action: "sts:AssumeRole" }] };
   const heredoc = (name: string, obj: object) => `${name}=$(cat <<'JSON'\n${JSON.stringify(obj, null, 2)}\nJSON\n)`;
   return [
@@ -489,10 +558,10 @@ function embeddedDocuments(o: SetupOptions, d: SetupDocuments): string {
     "",
     "# The assume-only policy: the single permission the key (or the instance role) holds.",
     heredoc("ASSUME_JSON", assume),
-    ...(o.path === "ec2-role" ? ["", "# Trust policy of the instance role: EC2 itself.", heredoc("EC2_TRUST_JSON", ec2Trust)] : []),
+    ...(o.path === "ec2-role" || o.path === "ec2-host" ? ["", "# Trust policy of the instance role: EC2 itself.", heredoc("EC2_TRUST_JSON", ec2Trust)] : []),
     "",
-    `# The SSM Command document that embeds the fixed probe script (GET /api/probe/document, ${d.probeVersion}).`,
-    heredoc("PROBE_DOCUMENT_JSON", d.probeDocument),
+    `# The SSM Command documents, one per probe kind, each embedding its read-only script (GET /api/probes/<kind>/document, ${d.probeVersion}).`,
+    ...d.probeDocuments.flatMap((p) => [heredoc(`PROBE_DOCUMENT_JSON_${p.kind.toUpperCase()}`, p.document)]),
   ].join("\n");
 }
 
@@ -530,6 +599,20 @@ run() {
   if aws_admin "$@" >/dev/null 2>"$WORK/err"; then return 0; fi
   die "$(fmt_admin "$@") failed: $(cat "$WORK/err")"
 }
+# run_when_principal_resolves <aws args>: like run, but a MalformedPolicyDocument "Invalid principal" answer is IAM not
+# having propagated a user or role created seconds ago; wait and retry for up to two minutes before giving up.
+run_when_principal_resolves() {
+  if [ "$DRY_RUN" = 1 ]; then printf '    + %s\\n' "$(fmt_admin "$@")"; return 0; fi
+  local attempt=0
+  while :; do
+    if aws_admin "$@" >/dev/null 2>"$WORK/err"; then return 0; fi
+    if grep -q "Invalid principal" "$WORK/err" && [ "$attempt" -lt 24 ]; then
+      attempt=$((attempt + 1)); [ "$attempt" -eq 1 ] && note "the principal is not visible to IAM yet (it was just created); waiting for it to propagate..."
+      sleep 5; continue
+    fi
+    die "$(fmt_admin "$@") failed: $(cat "$WORK/err")"
+  done
+}
 # A read-only call whose output the script needs. Dry run: printed (to stderr, so it is not captured), outputs nothing.
 query() {
   if [ "$DRY_RUN" = 1 ]; then printf '    + (query) %s\\n' "$(fmt_admin "$@")" >&2; return 0; fi
@@ -558,9 +641,12 @@ write_documents() {
   printf '%s\\n' "$TRUST_JSON" | sed "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" > "$WORK/trust.json"
   printf '%s\\n' "$ASSUME_JSON" | sed "s/<ACCOUNT_ID>/$ACCOUNT_ID/g" > "$WORK/assume.json"
   [ -z "\${EC2_TRUST_JSON:-}" ] || printf '%s\\n' "$EC2_TRUST_JSON" > "$WORK/ec2-trust.json"
-  printf '%s\\n' "$PROBE_DOCUMENT_JSON" > "$WORK/probe-document.json"
+  printf '%s\\n' "$PROBE_DOCUMENT_JSON_HOST" > "$WORK/probe-host.json"
+  printf '%s\\n' "$PROBE_DOCUMENT_JSON_DOCKER" > "$WORK/probe-docker.json"
+  printf '%s\\n' "$PROBE_DOCUMENT_JSON_APPS" > "$WORK/probe-apps.json"
+  printf '%s\\n' "$PROBE_DOCUMENT_JSON_SOFTWARE" > "$WORK/probe-software.json"
   PRINCIPAL_ARN=$(printf '%s' "$PRINCIPAL_ARN" | sed "s/<ACCOUNT_ID>/$ACCOUNT_ID/g")
-  [ "$DRY_RUN" = 1 ] && note "documents written to $WORK (policy.json, trust.json, assume.json, probe-document.json); kept after the dry run for inspection"
+  [ "$DRY_RUN" = 1 ] && note "documents written to $WORK (policy.json, trust.json, assume.json, probe-host.json, probe-docker.json, probe-apps.json, probe-software.json); kept after the dry run for inspection"
   true
 }
 
@@ -590,7 +676,7 @@ st.append({"Sid": sid, "Effect": "Allow", "Principal": {"AWS": principal}, "Acti
 doc["Statement"] = st
 json.dump(doc, sys.stdout, indent=2)
 ' "$principal" "$sid" > "$WORK/trust-$role.json"
-  run iam update-assume-role-policy --role-name "$role" --policy-document "file://$WORK/trust-$role.json"
+  run_when_principal_resolves iam update-assume-role-policy --role-name "$role" --policy-document "file://$WORK/trust-$role.json"
   note "added $principal to the trust policy of $role (existing principals kept)"
 }
 
@@ -654,9 +740,9 @@ export function renderSetupScript(o: SetupOptions, d: SetupDocuments = defaultSe
   const steps = setupSteps(o, d);
   const plan = steps.map((s, i) => `#   ${i + 1}. ${s.title}`).join("\n");
   const sourceProfile = `${o.userName}-user`;
-  const principalArn = o.path === "laptop-key" ? `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:user/${o.userName}` : `arn:aws:iam::${ACCOUNT_PLACEHOLDER}:role/${o.instanceRoleName}`;
+  const principalArn = principalArnOf(o);
   const header = `#!/usr/bin/env bash
-# aws-advisor setup (${o.path === "laptop-key" ? "laptop / server with a long-lived key" : "EC2 host with an instance role"}), generated by ${o.advisorUrl} on ${new Date().toISOString().slice(0, 10)}.
+# aws-advisor setup (${o.path === "laptop-key" ? "laptop / server with a long-lived key" : o.path === "ec2-role" ? (o.hostRoleArn ? "parent side for an EC2 host in another account" : "EC2 host with an instance role") : o.path === "ec2-host" ? "EC2 host in a member account: the instance role that assumes the parent's read role" : "member account: the child's read role, trusting the parent"}), generated by ${o.advisorUrl} on ${new Date().toISOString().slice(0, 10)}.
 #
 # Runs the README's onboarding end to end with the admin credentials of THIS terminal (the advisor never gets
 # them): it only ever receives the profile name / role ARN through its API. Every step checks what exists and
@@ -685,7 +771,9 @@ PROBE_DOCUMENT=${sq(d.probeDocumentName)}
 PROBE_VERSION=${sq(d.probeVersion)}
 ASSUME_POLICY_NAME=${sq(o.path === "laptop-key" ? `${o.userName}-assume` : "aws-advisor-assume")}
 PRINCIPAL_ARN=${sq(principalArn)}
-PRINCIPAL_SID=${sq(o.path === "laptop-key" ? "AdvisorUser" : "AdvisorHost")}
+ASSUME_TARGET=${sq(assumeTargetOf(o))}
+PRINCIPAL_SID=${sq(principalSidOf(o))}
+MEMBER_NAME=${sq(o.memberName || "")}
 SSM_CORE_POLICY='arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
 TOTAL_STEPS=${steps.length}
 DRY_RUN=${o.dryRun ? 1 : 0}
@@ -721,7 +809,24 @@ trap cleanup EXIT
 `;
 
   const body = steps.map((s) => `step ${sq(s.title)}${s.bash.replace(/^\n/, "\n")}`).join("\n\n");
-  const footer = o.path === "laptop-key"
+  const footer = o.path === "member-role" ? `
+printf '\\n'
+if [ "$DRY_RUN" = 1 ]; then
+  printf '%s\\n' "Dry run complete: nothing was changed. Run the script without --dry-run (or fetch it without dryRun=1) to apply."
+else
+  printf '%s\\n' "Done. Account $ACCOUNT_ID is a member: its read role $ROLE_ARN trusts $PRINCIPAL_ARN, and the advisor at $ADVISOR_URL lists it under Member accounts. A role created seconds ago can fail its first test (IAM propagation); Settings > Member accounts > Test repeats it."
+  printf '%s\\n' "The next collection run reads this account with its own account id on every row. An actuator role (the executor acting here) is a separate, manual step: the actuator policy on the Auto-actions page, trusting the same parent identity."
+fi
+` : o.path === "ec2-host" ? `
+printf '\\n'
+if [ "$DRY_RUN" = 1 ]; then
+  printf '%s\\n' "Dry run complete: nothing was changed. Run the script without --dry-run (or fetch it without dryRun=1) to apply."
+else
+  printf '%s\\n' "Done. Instance role arn:aws:iam::$ACCOUNT_ID:role/$INSTANCE_ROLE_NAME may assume the parent's read role $ASSUME_TARGET; the parent's read role must trust it (run the EC2 path in the parent with hostRoleArn=arn:aws:iam::$ACCOUNT_ID:role/$INSTANCE_ROLE_NAME if not done yet)."
+  printf '%s\\n' "On the host: Settings > AWS credentials > Instance / default chain, role $ASSUME_TARGET, credential source Ec2InstanceMetadata. The parent then reaches every registered member, this account included, through the members' own read roles."
+  [ -n "$INSTANCE_ID" ] || printf '%s\\n' "To attach the instance profile to an instance and set its IMDS hop limit, rerun with instanceId=i-... or: aws ec2 associate-iam-instance-profile --instance-id i-... --iam-instance-profile Name=$INSTANCE_ROLE_NAME; aws ec2 modify-instance-metadata-options --instance-id i-... --http-put-response-hop-limit 2"
+fi
+` : o.path === "laptop-key"
     ? `
 printf '\\n'
 if [ "$DRY_RUN" = 1 ]; then
@@ -755,6 +860,12 @@ export function setupQuery(o: SetupOptions, extra: Record<string, string | undef
   if (o.path === "ec2-role" && o.instanceRoleName !== SETUP_DEFAULTS.instanceRoleName) q.set("instanceRole", o.instanceRoleName);
   if (o.path === "ec2-role" && o.instanceId) q.set("instanceId", o.instanceId);
   if (o.adminProfile) q.set("adminProfile", o.adminProfile);
+  if (o.path === "member-role" && o.trustArn) q.set("trustArn", o.trustArn);
+  if (o.path === "ec2-role" && o.hostRoleArn) q.set("hostRoleArn", o.hostRoleArn);
+  if (o.path === "ec2-host" && o.assumeArn) q.set("assumeArn", o.assumeArn);
+  if (o.path === "ec2-host" && o.instanceRoleName !== SETUP_DEFAULTS.instanceRoleName) q.set("instanceRole", o.instanceRoleName);
+  if (o.path === "ec2-host" && o.instanceId) q.set("instanceId", o.instanceId);
+  if (o.path === "member-role" && o.memberName) q.set("memberName", o.memberName);
   if (o.dryRun) q.set("dryRun", "1");
   for (const [k, v] of Object.entries(extra)) if (v) q.set(k, v);
   return q.toString();

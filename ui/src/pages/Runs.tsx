@@ -13,7 +13,7 @@ export default function Runs() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-zinc-100">Runs</h1>
+        <div><h1 className="text-xl font-semibold text-zinc-100">Runs</h1><div className="text-sm text-zinc-500">A collection run reads every AWS account the advisor reaches (the parent and its members) in one pass; its rows carry each account's id, so the other pages scope while the run list does not.</div></div>
         <Button onClick={start} disabled={runs.some((r) => r.status === "running")}>Start run</Button>
       </div>
       {err && <div className="text-sm text-red-300">{err}</div>}

@@ -74,7 +74,7 @@ export function buildObserveBrief(day: string): { text: string; facts: BriefFact
   const acked = allAlerts.filter((a) => a.acknowledged && a.kind !== "instance_state");
   const spend = spendSummary();
   const pools = poolSummary();
-  const latestRun = db.prepare("select id, finished_at from runs where status = 'completed' order by id desc limit 1").get() as { id: number; finished_at: string } | undefined;
+  const latestRun = db.prepare("select id, finished_at from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number; finished_at: string } | undefined;
   const changes = latestRun ? changeSummaryText(latestRun.id) : "";
   const openRecs = db.prepare("select count(*) as n, coalesce(sum(est_monthly_saving), 0) as saving from recommendations where status = 'open'").get() as { n: number; saving: number };
   const decided = db.prepare("select id, title, status, decided_at from recommendations where datetime(decided_at) > datetime('now', '-1 day') order by decided_at desc limit 20").all() as any[];
