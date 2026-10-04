@@ -3071,6 +3071,11 @@ points at localhost; `on` forces it, `off` never), a few seconds during which qu
 `steampipe_reload`; the connection test that follows retries through the restart. With a remote service, the response
 says to restart it yourself.
 
+**Which account the credentials resolve to is read from the parent's connection only.** The connection test and the
+credential gate select `account_id` from `aws_account`; over the aggregator that is one row per account in no fixed
+order, and a run once recorded a member as the parent. Both read `<schema>_p` once members exist (`parentSchema` in
+`src/steampipe.ts`), the connection that carries the parent's own credentials.
+
 **Cost Explorer is read from the parent's connection only.** The aggregator runs every query once per connection,
 and a member's role sees its own spend through Cost Explorer too, so a sum over `aws_cost_*` through the aggregator
 counts every member twice (the parent's organisation view already has a row per linked account). The query layer

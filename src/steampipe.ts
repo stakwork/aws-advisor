@@ -20,12 +20,20 @@ const memberIds = (): string[] => {
 };
 
 /**
- * The connection Cost Explorer is read through: the parent's own (`<schema>_p`) once members are registered, the schema
- * itself otherwise. The aggregator runs a query once per connection, and a member's role sees its own spend through Cost
- * Explorer too, so a sum over `aws_cost_*` through the aggregator counts every member twice (the parent's organisation
- * view already carries a row per linked account). Savings Plans and reservations are not routed: each account owns its own.
+ * The parent's own connection: `<schema>_p` once members are registered (the schema itself is then an aggregator that
+ * answers once per account), the schema itself otherwise. What must come from the parent alone reads through it: which
+ * account the credentials resolve to (`aws_account` over the aggregator is one row per member, in no particular order)
+ * and Cost Explorer.
  */
-export const billingSchema = (): string => (memberIds().length ? parentConnectionName(S) : S);
+export const parentSchema = (): string => (memberIds().length ? parentConnectionName(S) : S);
+
+/**
+ * The connection Cost Explorer is read through: the parent's. The aggregator runs a query once per connection, and a
+ * member's role sees its own spend through Cost Explorer too, so a sum over `aws_cost_*` through the aggregator counts
+ * every member twice (the parent's organisation view already carries a row per linked account). Savings Plans and
+ * reservations are not routed: each account owns its own.
+ */
+export const billingSchema = parentSchema;
 
 /** Rewrites `<schema>.aws_cost_*` references to the billing connection. Pure given the two schemas; a no-op when they are the same. */
 export function routeBillingTables(sql: string, schema = S, billing = billingSchema()): string {
@@ -244,7 +252,8 @@ export async function testConnection(timeoutMs = 45_000): Promise<{ ok: boolean;
   let lastError: unknown = "";
   while (Date.now() < deadline) {
     try {
-      const rows = await query<{ account_id: string }>(`select account_id from ${S}.aws_account`);
+      // the parent's connection: over the aggregator this is one row per account and the first could be a member's
+      const rows = await query<{ account_id: string }>(`select account_id from ${parentSchema()}.aws_account`);
       if (rows[0]?.account_id) return { ok: true, accountId: rows[0].account_id };
       lastError = "query returned no rows";
     } catch (e: any) {

@@ -5,7 +5,7 @@
  * automatically the moment a check succeeds again.
  */
 import { db } from "./db.js";
-import { S, query } from "./steampipe.js";
+import { S, parentSchema, query } from "./steampipe.js";
 
 export interface GateResult { ok: boolean; accountId?: string; error?: string; kind?: "credentials" | "steampipe" }
 
@@ -14,7 +14,8 @@ const AUTH_RE = /ExpiredToken|InvalidClientTokenId|SignatureDoesNotMatch|Unrecog
 export async function credentialGate(context: string): Promise<GateResult> {
   let result: GateResult;
   try {
-    const rows = await query<{ account_id: string }>(`select account_id from ${S}.aws_account`);
+    // the parent's connection (src/steampipe.ts parentSchema): over the aggregator the first row could be a member's
+    const rows = await query<{ account_id: string }>(`select account_id from ${parentSchema()}.aws_account`);
     result = rows[0]?.account_id ? { ok: true, accountId: rows[0].account_id } : { ok: false, error: "aws_account returned no rows", kind: "credentials" };
   } catch (e: any) {
     const msg = String(e?.message || e);
