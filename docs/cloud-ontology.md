@@ -583,6 +583,29 @@ An IAM Identity Center user is `kind: user` with `native_type: sso_user`: `human
 `policies` are the permission set names, `accounts` the account ids reached, `assignments` the `<account>
 <permission set> (direct|group x)` lines, `last_used_at` the last portal sign-in seen in CloudTrail (90 days back
 at most), `activity` the last stored write per account. It hangs off the management account that owns the directory.
+Its `mfa` is true and `mfa_type` set once a sign-in with a second factor is seen (CloudTrail's CredentialType); null
+until then (context-aware MFA does not ask a trusted browser, so a registered device can stay unseen). `enabled` is
+false for a user disabled in the directory (ListUsers' UserStatus), and its state is then `stopped`.
+`directory_changes` lists what was done to the user in the directory (`<date> <what> by <who>`: MFA device removed or
+registered, disabled, password changed, added to or removed from a group), from the sso-directory and identitystore
+CloudTrail events, kept a year. The MFA devices themselves are not exposed by any public API.
+
+The root user of each account is `kind: user` with `native_type: root_user`, id `arn:aws:iam::<account>:root`: `human`
+and `admin` always true, `mfa` from the account summary, `mfa_type` `app` when a virtual device is assigned to the root
+ARN, otherwise `passkey_or_hardware` (narrowed to `passkey` or `hardware` once a sign-in names the device),
+`credentials` the root access keys, `password_last_used` and `key_last_used` from the credential report,
+`centralized_root_access` and `root_sessions` (members only) when the organisation manages member roots centrally.
+
+Every human identity (root, IAM user, Identity Center user) carries what it was seen signing in or calling with
+(src/sign_ins.ts, 90 days of CloudTrail sign-ins plus the stored write events):
+
+| property | meaning |
+|---|---|
+| `sign_in_clients` | one line per client: `<client> on <platform> · <channel> · <factors> · <n>× · last <date> · <account>` |
+| `platforms` | where it runs: `macOS`, `iOS`, `Windows`, `Linux`, `Android`, `CloudShell`, `AWS Lambda`, … |
+| `channels` | `console` (a browser or the mobile app) \| `portal` (Identity Center sign-in) \| `cli` \| `sdk` \| `iac` |
+| `factors` | `password`, `app` (authenticator app), `passkey` (passkey or security key), `hardware` (hardware token), `sso`, `federated`, `access_key`, `session`, `console_session` |
+| `mfa_type` | the strongest second factor registered (IAM users' devices) or seen |
 
 `AdvisorPolicy`: `name`, `managed` (provider-managed), `admin`, `wildcard_actions`, `wildcard_resources`, `attached`.
 
@@ -1304,6 +1327,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `RUNS_AS` | resource → AdvisorIdentity | the identity it acts with |
 | `GRANTED` | AdvisorIdentity → AdvisorPolicy | permissions |
 | `CAN_ASSUME` | AdvisorIdentity → AdvisorIdentity | trust |
+| `SAME_PERSON` | AdvisorIdentity → AdvisorIdentity | one person behind both (an IAM user and an Identity Center user whose name, email local part or display name match); `matched_by` lists the keys |
 | `CREATED` | AdvisorIdentity → resource | from the audit trail |
 | `ENCRYPTS` | AdvisorSecret (key) → storage, database, messaging | the key that encrypts a volume, bucket, file system, vault, database or topic |
 | `RUNS` | resource → AdvisorApp, AdvisorContainer | a program or a Docker container running on it (edge carries the per-instance facts) |

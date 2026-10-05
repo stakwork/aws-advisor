@@ -2,6 +2,7 @@
  * IAM users: who can act in the account with a long-lived identity. Refreshed with the inventory from the
  * Steampipe tables aws_iam_user and aws_iam_access_key: name, when it was created and last signed in, whether it
  * has console access and MFA, its groups and policies (names only), whether any of them is administrative, and
+ * the kind of each MFA device (authenticator app, passkey or security key, hardware token), and
  * its access keys with status, age and last use (the key id is kept masked to its last four characters; the
  * secret never exists here). One row per user per account, so a member's users carry the member's account id.
  * In the graph each user is an AdvisorIdentity {kind: user} (docs/cloud-ontology.md §AdvisorIdentity).
@@ -10,6 +11,7 @@ import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 import { accountWhere, type AccountScope } from "./scope.js";
+import { mfaTypeOf } from "./sign_in_facts.js";
 
 db.exec(`create table if not exists inventory_iam_user (
   arn text primary key, name text not null, user_id text, account_id text, path text, created text, password_last_used text,
@@ -18,12 +20,13 @@ db.exec(`create table if not exists inventory_iam_user (
   first_seen text not null, last_seen text not null, gone integer not null default 0
 )`);
 addColumn("inventory_iam_user", "permissions_boundary", "text");
+addColumn("inventory_iam_user", "mfa_types", "text");
 db.exec("create index if not exists inventory_iam_user_name on inventory_iam_user(name)");
 
 export interface AccessKeyRow { id: string; status: string | null; created: string | null; last_used: string | null; service: string | null; region: string | null; age_days: number | null }
 export interface IamUserRow {
   arn: string; name: string; user_id: string | null; account_id: string | null; path: string | null; created: string | null; password_last_used: string | null;
-  console_access: boolean; mfa_enabled: boolean; groups: string[]; attached_policies: string[]; inline_policies: string[]; admin: boolean; permissions_boundary: string | null;
+  console_access: boolean; mfa_enabled: boolean; mfa_types: ("app" | "passkey" | "hardware")[]; groups: string[]; attached_policies: string[]; inline_policies: string[]; admin: boolean; permissions_boundary: string | null;
   access_keys: AccessKeyRow[]; keys_active: number; oldest_key_days: number | null; last_used: string | null; tags: Record<string, string>; first_seen: string; last_seen: string; gone: boolean;
 }
 
@@ -56,12 +59,12 @@ export function iamUserFrom(u: any, keys: any[], now = Date.now()): Omit<IamUser
   const groups = arr(u.groups).map((g) => String(g?.GroupName ?? g?.group_name ?? g?.name ?? g));
   return {
     arn: String(u.arn), name: String(u.name), user_id: u.user_id ?? null, account_id: u.account_id ? String(u.account_id) : null, path: u.path ?? null, created: iso(u.create_date), password_last_used: iso(u.password_last_used),
-    console_access: Boolean(obj(u.login_profile)), mfa_enabled: Boolean(u.mfa_enabled), groups, attached_policies: attached.map(policyName), inline_policies: inline.map((p) => String(p?.PolicyName ?? p?.policy_name ?? "inline")), admin: isAdmin(attached, inline), permissions_boundary: u.permissions_boundary_arn ? policyName(String(u.permissions_boundary_arn)) : null,
+    console_access: Boolean(obj(u.login_profile)), mfa_enabled: Boolean(u.mfa_enabled), mfa_types: [...new Set(arr(u.mfa_devices).map((d) => mfaTypeOf(d?.SerialNumber ?? d?.serial_number ?? d)).filter((t): t is "app" | "passkey" | "hardware" => t != null))], groups, attached_policies: attached.map(policyName), inline_policies: inline.map((p) => String(p?.PolicyName ?? p?.policy_name ?? "inline")), admin: isAdmin(attached, inline), permissions_boundary: u.permissions_boundary_arn ? policyName(String(u.permissions_boundary_arn)) : null,
     access_keys, keys_active: active.length, oldest_key_days: active.length ? Math.max(...active.map((k) => k.age_days ?? 0)) : null, last_used: lastUsed, tags: obj(u.tags) ?? {},
   };
 }
 
-const USERS_SQL = `select arn, name, user_id, account_id, path, create_date, password_last_used, mfa_enabled, login_profile, groups, attached_policy_arns, inline_policies, permissions_boundary_arn, tags from ${S}.aws_iam_user`;
+const USERS_SQL = `select arn, name, user_id, account_id, path, create_date, password_last_used, mfa_enabled, mfa_devices, login_profile, groups, attached_policy_arns, inline_policies, permissions_boundary_arn, tags from ${S}.aws_iam_user`;
 const KEYS_SQL = `select access_key_id, user_name, account_id, status, create_date, access_key_last_used_date, access_key_last_used_service, access_key_last_used_region from ${S}.aws_iam_access_key`;
 
 export async function refreshIamInventory(onError: (m: string) => void, onLog: (l: string) => void = () => {}): Promise<{ users: number; gone: number }> {
@@ -71,15 +74,15 @@ export async function refreshIamInventory(onError: (m: string) => void, onLog: (
   const now = new Date().toISOString();
   const byUser = new Map<string, any[]>();
   for (const k of keys) { const id = `${k.account_id ?? ""}/${k.user_name}`; byUser.set(id, [...(byUser.get(id) ?? []), k]); }
-  const up = db.prepare(`insert into inventory_iam_user(arn, name, user_id, account_id, path, created, password_last_used, console_access, mfa_enabled, groups, attached_policies, inline_policies, admin, permissions_boundary, access_keys, keys_active, oldest_key_days, last_used, tags, first_seen, last_seen, gone)
-    values (@arn, @name, @user_id, @account_id, @path, @created, @password_last_used, @console_access, @mfa_enabled, @groups, @attached_policies, @inline_policies, @admin, @permissions_boundary, @access_keys, @keys_active, @oldest_key_days, @last_used, @tags, @now, @now, 0)
-    on conflict(arn) do update set name = excluded.name, user_id = excluded.user_id, account_id = excluded.account_id, path = excluded.path, created = excluded.created, password_last_used = excluded.password_last_used, console_access = excluded.console_access, mfa_enabled = excluded.mfa_enabled,
+  const up = db.prepare(`insert into inventory_iam_user(arn, name, user_id, account_id, path, created, password_last_used, console_access, mfa_enabled, mfa_types, groups, attached_policies, inline_policies, admin, permissions_boundary, access_keys, keys_active, oldest_key_days, last_used, tags, first_seen, last_seen, gone)
+    values (@arn, @name, @user_id, @account_id, @path, @created, @password_last_used, @console_access, @mfa_enabled, @mfa_types, @groups, @attached_policies, @inline_policies, @admin, @permissions_boundary, @access_keys, @keys_active, @oldest_key_days, @last_used, @tags, @now, @now, 0)
+    on conflict(arn) do update set name = excluded.name, user_id = excluded.user_id, account_id = excluded.account_id, path = excluded.path, created = excluded.created, password_last_used = excluded.password_last_used, console_access = excluded.console_access, mfa_enabled = excluded.mfa_enabled, mfa_types = excluded.mfa_types,
       groups = excluded.groups, attached_policies = excluded.attached_policies, inline_policies = excluded.inline_policies, admin = excluded.admin, permissions_boundary = excluded.permissions_boundary, access_keys = excluded.access_keys, keys_active = excluded.keys_active, oldest_key_days = excluded.oldest_key_days, last_used = excluded.last_used, tags = excluded.tags, last_seen = excluded.last_seen, gone = 0`);
   const seen: string[] = [];
   db.transaction(() => {
     for (const u of users) {
       const r = iamUserFrom(u, byUser.get(`${u.account_id ?? ""}/${u.name}`) ?? []);
-      up.run({ ...r, console_access: r.console_access ? 1 : 0, mfa_enabled: r.mfa_enabled ? 1 : 0, admin: r.admin ? 1 : 0, groups: JSON.stringify(r.groups), attached_policies: JSON.stringify(r.attached_policies), inline_policies: JSON.stringify(r.inline_policies), access_keys: JSON.stringify(r.access_keys), tags: JSON.stringify(r.tags), now });
+      up.run({ ...r, console_access: r.console_access ? 1 : 0, mfa_enabled: r.mfa_enabled ? 1 : 0, mfa_types: JSON.stringify(r.mfa_types), admin: r.admin ? 1 : 0, groups: JSON.stringify(r.groups), attached_policies: JSON.stringify(r.attached_policies), inline_policies: JSON.stringify(r.inline_policies), access_keys: JSON.stringify(r.access_keys), tags: JSON.stringify(r.tags), now });
       seen.push(r.arn);
     }
   })();
@@ -88,7 +91,7 @@ export async function refreshIamInventory(onError: (m: string) => void, onLog: (
   return { users: users.length, gone };
 }
 
-const parseRow = (r: any): IamUserRow => ({ ...r, console_access: Boolean(r.console_access), mfa_enabled: Boolean(r.mfa_enabled), admin: Boolean(r.admin), groups: arr(r.groups), attached_policies: arr(r.attached_policies), inline_policies: arr(r.inline_policies), access_keys: arr(r.access_keys), tags: obj(r.tags) ?? {}, gone: Boolean(r.gone) });
+const parseRow = (r: any): IamUserRow => ({ ...r, console_access: Boolean(r.console_access), mfa_enabled: Boolean(r.mfa_enabled), mfa_types: arr(r.mfa_types), clients: arr(r.clients), admin: Boolean(r.admin), groups: arr(r.groups), attached_policies: arr(r.attached_policies), inline_policies: arr(r.inline_policies), access_keys: arr(r.access_keys), tags: obj(r.tags) ?? {}, gone: Boolean(r.gone) });
 
 export function listIamUsers(f: { q?: string; sort?: string; gone?: boolean; scope?: AccountScope | null } = {}): IamUserRow[] {
   const where: string[] = []; const params: unknown[] = [];

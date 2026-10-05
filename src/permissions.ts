@@ -468,6 +468,8 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "tag:GetResources",
         "sts:GetCallerIdentity",
         "iam:SimulatePrincipalPolicy", "iam:GetUser", "iam:GetAccessKeyLastUsed", "iam:GetUserPolicy",
+        // the root user's password and key last use (src/sign_ins.ts); ViewOnlyAccess has GetAccountSummary and List* but not the credential report
+        "iam:GenerateCredentialReport", "iam:GetCredentialReport",
         "organizations:DescribeOrganization",
         // IAM Identity Center (the management account or its delegated administrator answers; elsewhere the calls return nothing and the Identities tab says so)
         "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",

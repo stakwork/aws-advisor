@@ -602,6 +602,7 @@ the MCP tools and the AWS Thrifty benchmarks:
         "tag:GetResources",
         "sts:GetCallerIdentity",
         "iam:SimulatePrincipalPolicy", "iam:GetUser", "iam:GetAccessKeyLastUsed", "iam:GetUserPolicy",
+        "iam:GenerateCredentialReport", "iam:GetCredentialReport",
         "organizations:DescribeOrganization",
         "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",
         "identitystore:ListUsers", "identitystore:ListGroups", "identitystore:ListGroupMemberships", "identitystore:DescribeUser", "identitystore:DescribeGroup",

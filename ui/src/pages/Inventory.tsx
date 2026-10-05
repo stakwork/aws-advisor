@@ -13,6 +13,7 @@ import { GroupLink, PortsPanel, SecurityGroupsPanel } from "../components/securi
 import { SoftwarePanel } from "../components/software";
 import { VercelMembers, VercelProjects } from "../components/vercel";
 import { IdentityCenter } from "../components/identityCenter";
+import { Access } from "../components/access";
 import { VercelStores } from "../components/vercelStores";
 import { WakeProfilePanel } from "../components/wakeProfile";
 import { ServicesPanel, type ServiceTab } from "../components/services";
@@ -515,6 +516,7 @@ export default function Inventory() {
 
       {tab === "deployments" && <VercelProjects />}
       {scopeProvider === "vercel" && tab === "identities" && <VercelMembers />}
+      {awsView && tab === "identities" && <Access />}
       {awsView && tab === "identities" && <IdentityCenter />}
       {scopeProvider === "vercel" && tab === "rds" && <VercelStores kind="database" />}
       {scopeProvider === "vercel" && tab === "elasticache" && <VercelStores kind="cache" />}
@@ -763,9 +765,9 @@ export default function Inventory() {
                   </Fragment>);
                   if (tab === "identities") return (<Fragment key={id}>
                     <tr className={cls}>
-                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name}</span>{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-[11px] text-zinc-500">{r.arn}</div></Td>
+                      <Td><div className="flex items-center gap-2"><span className="font-medium text-zinc-100">{r.name}</span>{!r.console_access && !r.keys_active ? <span title="no console password and no active access key" className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">no way in</span> : null}{r.gone ? <Badge>gone</Badge> : null}</div><div className="font-mono text-[11px] text-zinc-500">{r.arn}</div></Td>
                       <Td className="text-xs">{r.console_access ? <span className="text-zinc-200">yes</span> : <span className="text-zinc-500">no</span>}</Td>
-                      <Td className="text-xs">{r.mfa_enabled ? <span className="text-emerald-300">on</span> : r.console_access ? <span className="text-orange-300">off</span> : <span className="text-zinc-500">—</span>}</Td>
+                      <Td className="text-xs">{r.mfa_enabled ? <span className={(r.mfa_types || []).some((t: string) => t === "passkey" || t === "hardware") ? "text-emerald-300" : "text-amber-300"} title="registered MFA devices">{(r.mfa_types || []).map((t: string) => (t === "app" ? "app" : t === "passkey" ? "passkey" : "hardware")).join(", ") || "on"}</span> : r.console_access ? <span className="text-orange-300">off</span> : <span className="text-zinc-500">—</span>}</Td>
                       <Td className="text-xs">{r.admin ? <span className="text-orange-300">admin</span> : <span className="text-zinc-500">—</span>}</Td>
                       <Td className="max-w-xs text-xs text-zinc-400">{[...(r.groups || []).map((g: string) => `group ${g}`), ...(r.attached_policies || []), ...(r.inline_policies || []).map((p: string) => `inline ${p}`)].join(" · ") || "—"}{r.permissions_boundary ? <div className="text-zinc-500">boundary {r.permissions_boundary}</div> : null}</Td>
                       <Td className="text-xs">{r.access_keys?.length ? r.access_keys.map((k: any) => <div key={k.id} className={k.status === "Active" && (k.age_days ?? 0) > 90 ? "text-orange-300" : "text-zinc-300"}><span className="font-mono">{k.id}</span> {k.status}{k.age_days != null ? ` · ${k.age_days} d` : ""}{k.last_used ? ` · used ${day(k.last_used)}${k.service ? ` (${k.service})` : ""}` : " · never used"}</div>) : <span className="text-zinc-500">none</span>}</Td>

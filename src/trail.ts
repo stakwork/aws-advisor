@@ -20,6 +20,9 @@ db.exec(`create table if not exists trail_events (
   username text, resource_name text, resource_type text, region text, error_code text, fetched_at text not null
 )`);
 try { db.exec("alter table trail_events add column noise integer not null default 0"); } catch { /* exists */ }
+// who made the call and with what (src/sign_ins.ts folds these into each identity's clients): the user agent, the source
+// IP, the identity type and role ARN, and the key kind (AKIA long-lived, ASIA temporary) with its last four characters
+for (const c of ["user_agent", "source_ip", "identity_type", "principal_arn", "key_kind", "key_tail"]) addColumn("trail_events", c, "text");
 
 /** Machine heartbeat that CloudTrail files as writes: agents checking in, log streams being opened, Batch and EKS running their own tasks. Stored, counted, never shown as a change. */
 const NOISE_EVENTS = new Set(["UpdateInstanceInformation", "CreateLogStream", "PutLogEvents", "StartTask", "SubmitTaskStateChange", "SubmitContainerStateChange", "RegisterContainerInstance", "DeregisterContainerInstance", "AssumeRole", "AssumeRoleWithWebIdentity", "GetSessionToken", "UpdateInstanceAssociationStatus", "PutInventory", "UpdateInstanceAssociation", "CreateGrant", "Decrypt", "GenerateDataKey", "Encrypt", "SendHeartbeat", "RecordLifecycleActionHeartbeat", "PutMetricData", "PutConfigurePackageResult", "RetireGrant", "CreateNetworkInterfacePermission", "DeleteNetworkInterfacePermission", "CreatePlatformEndpoint", "SetEndpointAttributes", "DeleteEndpoint"]);
@@ -32,6 +35,13 @@ export function remarkNoise(): number {
   const rows = db.prepare("select event_id, event_name, username from trail_events").all() as { event_id: string; event_name: string; username: string | null }[];
   const set = db.prepare("update trail_events set noise = ? where event_id = ?");
   let n = 0; for (const r of rows) { const v = isNoise(r.event_name, r.username) ? 1 : 0; set.run(v, r.event_id); n += v; } return n;
+}
+
+/** Who made a call and with what, from its CloudTrail record: user agent, source IP, identity type, ARN, and the key kind and tail (never the full key id). Pure. */
+export function callerOf(detail: any): [string | null, string | null, string | null, string | null, string | null, string | null] {
+  const ui = detail?.userIdentity ?? {};
+  const key = typeof ui.accessKeyId === "string" ? ui.accessKeyId : "";
+  return [detail?.userAgent ? String(detail.userAgent).slice(0, 400) : null, detail?.sourceIPAddress ? String(detail.sourceIPAddress) : null, ui.type ? String(ui.type) : null, ui.arn ? String(ui.arn) : null, key ? key.slice(0, 4) : null, key.length > 8 ? key.slice(-4) : null];
 }
 
 export interface TrailRefreshResult { events: number; stored: number; errors: string[]; took_ms: number }
@@ -47,8 +57,8 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
   if (!gate.ok) { out.errors.push(gate.error || "credentials not working"); out.took_ms = Date.now() - t0; return out; }
   // The SDK, not Steampipe: aws_cloudtrail_lookup_event does not push the time window down to LookupEvents, so
   // even a one-hour query pages through the whole 90-day trail at the API's 2 requests per second.
-  const up = db.prepare(`insert into trail_events(event_id, event_time, event_name, event_source, username, resource_name, resource_type, region, error_code, fetched_at, noise, account_id)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?) on conflict(event_id) do nothing`);
+  const up = db.prepare(`insert into trail_events(event_id, event_time, event_name, event_source, username, resource_name, resource_type, region, error_code, fetched_at, noise, account_id, user_agent, source_ip, identity_type, principal_arn, key_kind, key_tail)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?) on conflict(event_id) do nothing`);
   const StartTime = new Date(Date.now() - Math.max(1, Math.min(168, hours)) * 3600_000);
   const own = config.advisorAwsProfile.replace(/-managed$/, "");
   // every account the advisor reaches: the parent with its own credentials, each enabled member through its read role; the trail is per account
@@ -72,7 +82,7 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
           if (OWN_EVENTS.has(ev.EventName) && (!ev.Username || ev.Username.includes(own))) continue;
           let detail: any = {}; try { detail = ev.CloudTrailEvent ? JSON.parse(ev.CloudTrailEvent) : {}; } catch { /* keep going */ }
           const r0 = ev.Resources?.[0];
-          const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0, target.account_id);
+          const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0, target.account_id, ...callerOf(detail));
           if (res2.changes) out.stored++;
         }
         if (pages === 0) noteSuccess(["cloudtrail:LookupEvents"], `cloudtrail ${region}`);

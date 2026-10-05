@@ -158,6 +158,24 @@ export async function mirrorDeployments(elbRows: any[], account: string, stamp: 
   return rows.map((e) => e.id);
 }
 
+/**
+ * One person behind several identities (an IAM user and an Identity Center user of the same name or email, src/sign_ins.ts
+ * listPeople): SAME_PERSON from the first identity of the group to each other one, with the keys that matched. Edges
+ * not written on this pass are removed, so a rename or a deleted user drops its match.
+ */
+const SAME_PERSON_CYPHER = `
+UNWIND $rows AS row
+MATCH (a:AdvisorResource {id: row.from}) MATCH (b:AdvisorResource {id: row.to})
+MERGE (a)-[r:SAME_PERSON]->(b) SET r.matched_by = row.matched_by, r.updated_at = $now`;
+
+export async function mirrorSamePerson(stamp: string): Promise<void> {
+  const { listActors, listPeople } = await import("../../sign_ins.js");
+  const rows = listPeople(listActors(null)).filter((p) => p.identities.length > 1)
+    .flatMap((p) => p.identities.slice(1).map((i) => ({ from: p.identities[0].id, to: i.id, matched_by: p.matched_by })));
+  for (const batch of chunks(rows)) await write(SAME_PERSON_CYPHER, { rows: batch, now: stamp });
+  await write("MATCH ()-[r:SAME_PERSON]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
+}
+
 /** Everything above, in order; returns the ids of the nodes written here beyond the resources (the deployments), so the core keeps them. */
 export async function mirrorAwsEdges(account: string, stamp: string): Promise<string[]> {
   const elbRows = rowsOf("select * from inventory_elb");
@@ -170,6 +188,7 @@ export async function mirrorAwsEdges(account: string, stamp: string): Promise<st
   for (const batch of chunks(dbEndpoints)) await write(DB_ENDPOINT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   for (const batch of chunks(ebsRows.map((r) => ({ id: String(r.volume_id), instance_id: r.gone ? null : str(r.instance_id), device: str(r.device) })))) await write(VOLUME_CYPHER, { rows: batch, now: stamp });
   await mirrorDnsLinks(recordRows, account, stamp);
+  await mirrorSamePerson(stamp);
   // the platform services' own edges (certificates, keys, topics, file systems, backups, workgroups, stacks, web ACLs)
   await (await import("../../graph_services.js")).mirrorServiceLinks(account, stamp);
   return mirrorDeployments(elbRows, account, stamp);

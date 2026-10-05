@@ -1,5 +1,6 @@
 import { config } from "../../config.js";
 import { AWS, type GenericState, type ResourceLabel, type ResourceNode, type TelemetryKind } from "../types.js";
+import { clientLine, iamUserMfa, strongestMfa, type ClientUse } from "../../sign_in_facts.js";
 
 /**
  * The AWS adapter's mapping of its storage (the inventory_* tables Steampipe fills) onto the generic model of
@@ -298,13 +299,37 @@ export function resourceFromService(row: any, roles: RoleMap = new Map()): Resou
   }, observed);
 }
 
+/**
+ * What an identity was seen signing in or calling with (src/sign_ins.ts): one line per client, the platforms, the
+ * channels and the factors, and the strongest second factor seen.
+ */
+function clientProps(raw: unknown): { sign_in_clients: string[]; platforms: string[]; channels: string[]; factors: string[] } {
+  const clients: ClientUse[] = safeJson(raw) || [];
+  return { sign_in_clients: clients.map(clientLine), platforms: [...new Set(clients.map((c) => c.platform).filter((p): p is string => Boolean(p)))], channels: [...new Set(clients.map((c) => c.channel))], factors: [...new Set(clients.flatMap((c) => c.factors))] };
+}
+
+/** The root user of an account as an AdvisorIdentity {native_type: root_user}: a person, administrator of everything, MFA and its kind, root keys, last sign-in. */
+export function resourceFromRootUser(row: any): ResourceNode {
+  const clients: ClientUse[] = safeJson(row.clients) || [];
+  const seen = strongestMfa(clients);
+  const kind = row.mfa_kind === "passkey_or_hardware" && (seen === "passkey" || seen === "hardware") ? seen : str(row.mfa_kind);
+  const lastSignIn = [...clients.filter((c) => (c.via || []).includes("sign-in")).map((c) => c.last_at), str(row.password_last_used)].filter(Boolean).sort().pop() ?? null;
+  return base(String(row.arn), "AdvisorIdentity", "root_user", row, "root", Boolean(row.gone) ? "terminated" : "available", null, new Map(), {
+    kind: "user", human: true, admin: true, mfa: bool(row.mfa_enabled), mfa_type: row.mfa_enabled ? kind : null, credentials: num(row.access_keys) ?? 0, signing_certificates: num(row.signing_certs),
+    last_used_at: lastSignIn, password_last_used: str(row.password_last_used), key_last_used: str(row.key_last_used), centralized_root_access: bool(row.centralized), root_sessions: bool(row.root_sessions),
+    ...clientProps(row.clients),
+  }, [apiObserved(row)]);
+}
+
 /** An IAM user as an AdvisorIdentity {kind: user}: human when it has console access, with MFA, admin, credentials and last use as the ontology names them. */
 /** An Identity Center user as an AdvisorIdentity {kind: user, native_type: sso_user}: always a person, MFA unknown to the API, admin through an administrative permission set, last_used_at the last portal sign-in. */
 export function resourceFromSsoUser(row: any): ResourceNode {
   const assignments: any[] = safeJson(row.assignments) || [];
   const activity = safeJson(row.activity) || {};
-  return base(String(row.user_id), "AdvisorIdentity", "sso_user", row, str(row.user_name), Boolean(row.gone) ? "terminated" : "available", null, new Map(), {
-    kind: "user", human: true, mfa: null, admin: Boolean(row.admin), credentials: 0, credential_age_days: null, last_used_at: str(row.last_sign_in), display_name: str(row.display_name), email: str(row.email), identity_provider: str(row.idp),
+  const seen = strongestMfa(safeJson(row.clients) || []);
+  return base(String(row.user_id), "AdvisorIdentity", "sso_user", row, str(row.user_name), Boolean(row.gone) ? "terminated" : row.status === "DISABLED" ? "disabled" : "available", null, new Map(), {
+    kind: "user", human: true, enabled: row.status == null ? null : row.status !== "DISABLED", mfa: seen ? true : null, mfa_type: seen, ...clientProps(row.clients),
+    directory_changes: ((safeJson(row.changes) || []) as any[]).map((c) => `${String(c.event_time).slice(0, 10)} ${c.what}${c.by ? ` by ${c.by}` : ""}${c.failed ? " (failed)" : ""}`), admin: Boolean(row.admin), credentials: 0, credential_age_days: null, last_used_at: str(row.last_sign_in), display_name: str(row.display_name), email: str(row.email), identity_provider: str(row.idp),
     groups: safeJson(row.groups) || [], policies: [...new Set(assignments.map((a) => String(a.permission_set)))], accounts: [...new Set(assignments.map((a) => String(a.account_id)))], assignments: assignments.map((a) => `${a.account_id} ${a.permission_set} (${a.via})`),
     applications: safeJson(row.applications) || [], sign_ins_30d: num(row.sign_ins_30d), failed_sign_ins_30d: num(row.failed_30d), activity: Object.entries(activity).map(([acct, t]) => `${acct} ${String(t).slice(0, 16)}`), identity_store_id: str(row.identity_store_id),
   }, [apiObserved(row)]);
@@ -312,8 +337,9 @@ export function resourceFromSsoUser(row: any): ResourceNode {
 
 export function resourceFromIamUser(row: any): ResourceNode {
   const keys = safeJson(row.access_keys) || [];
+  const mfa = iamUserMfa(safeJson(row.mfa_types) || [], Boolean(row.mfa_enabled), safeJson(row.clients) || []);
   return base(String(row.arn), "AdvisorIdentity", "iam_user", row, str(row.name), Boolean(row.gone) ? "terminated" : "available", null, new Map(), {
-    kind: "user", human: Boolean(row.console_access), console_access: Boolean(row.console_access), mfa: Boolean(row.mfa_enabled), admin: Boolean(row.admin), credentials: Number(row.keys_active || 0), credential_age_days: num(row.oldest_key_days),
+    kind: "user", human: Boolean(row.console_access), console_access: Boolean(row.console_access), mfa: Boolean(row.mfa_enabled), mfa_type: mfa.mfa === "none" ? null : mfa.mfa, mfa_devices: safeJson(row.mfa_types) || [], ...clientProps(row.clients), admin: Boolean(row.admin), credentials: Number(row.keys_active || 0), credential_age_days: num(row.oldest_key_days),
     last_used_at: str(row.last_used), password_last_used: str(row.password_last_used), groups: safeJson(row.groups) || [], policies: [...(safeJson(row.attached_policies) || []), ...(safeJson(row.inline_policies) || [])], permissions_boundary: str(row.permissions_boundary),
     access_keys: keys.map((k: any) => `${k.id} ${k.status}${k.age_days != null ? ` ${k.age_days}d` : ""}${k.last_used ? ` used ${String(k.last_used).slice(0, 10)}` : " never used"}`), created_at: str(row.created), user_id: str(row.user_id),
   }, [apiObserved(row)]);

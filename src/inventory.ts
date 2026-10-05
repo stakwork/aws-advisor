@@ -14,6 +14,7 @@ import { refreshRoute53Inventory, route53Summary } from "./route53_inventory.js"
 import { elbSummary, refreshElbInventory } from "./elb_inventory.js";
 import { refreshIamInventory } from "./iam_inventory.js";
 import { refreshSsoInventory } from "./sso_inventory.js";
+import { refreshSignIns } from "./sign_ins.js";
 import { refreshServiceInventory, serviceSummary } from "./service_inventory.js";
 
 /**
@@ -434,6 +435,8 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   await refreshIamInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   // Identity Center from the parent's credentials: a few dozen calls and the home region's sign-in events; after the trail so the per-account activity reads the stored writes
   try { await refreshSsoInventory((m) => errors.push(m), (l) => console.log(`[identity-center] ${l}`)); } catch (e: any) { errors.push(`Identity Center: ${e?.message || e}`); }
+  // root posture per account and the sign-in fingerprints (device, client, factor), folded onto the IAM and Identity Center rows just written
+  try { await refreshSignIns((m) => errors.push(m), (l) => console.log(`[sign-ins] ${l}`)); } catch (e: any) { errors.push(`sign-ins: ${e?.message || e}`); }
   // the buckets too (the storage metrics are a few CloudWatch calls per region and account), so an account registered
   // today shows its buckets after this refresh rather than after the next nightly job
   let s3 = 0;

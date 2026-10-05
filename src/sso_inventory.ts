@@ -6,8 +6,8 @@
  * what the public API does not say and CloudTrail does: the last sign-in and the sign-ins of the last 30 days
  * (sso.amazonaws.com events in the home region, 90 days back at most), the last activity per account from the
  * stored write events (an SSO session is named after the user), and when each permission set's role was last used
- * in each account (aws_iam_role, the AWSReservedSSO_* roles). MFA devices and the enabled flag are not exposed by
- * any API; the rows say so by leaving them out. One row per user; a permission set row per set. In the graph each
+ * in each account (aws_iam_role, the AWSReservedSSO_* roles). The user's status (ENABLED or DISABLED) comes with
+ * ListUsers; MFA devices are not exposed by any API (src/sign_ins.ts reads the factors from the sign-ins). One row per user; a permission set row per set. In the graph each
  * user is an AdvisorIdentity {kind: user, native_type: sso_user} (docs/cloud-ontology.md §AdvisorIdentity).
  */
 import { IdentitystoreClient, ListGroupMembershipsCommand, ListGroupsCommand, ListUsersCommand } from "@aws-sdk/client-identitystore";
@@ -35,6 +35,7 @@ db.exec(`create table if not exists inventory_sso_permission_set (
   first_seen text not null, last_seen text not null, gone integer not null default 0
 )`);
 addColumn("inventory_sso_user", "created", "text");
+addColumn("inventory_sso_user", "status", "text");
 db.exec("create index if not exists inventory_sso_user_name on inventory_sso_user(user_name)");
 
 const META = "sso_meta";
@@ -45,7 +46,7 @@ const MAX_SIGN_IN_PAGES = 200;
 
 export interface SsoAssignment { account_id: string; permission_set: string; permission_set_arn: string; via: string }
 export interface SsoUserRow {
-  user_id: string; identity_store_id: string; instance_arn: string | null; account_id: string | null; user_name: string; display_name: string | null; email: string | null; idp: string | null; created: string | null;
+  user_id: string; identity_store_id: string; instance_arn: string | null; account_id: string | null; user_name: string; display_name: string | null; email: string | null; idp: string | null; created: string | null; status: "ENABLED" | "DISABLED" | null;
   groups: string[]; assignments: SsoAssignment[]; accounts: number; permission_sets: number; applications: string[]; admin: boolean;
   last_sign_in: string | null; sign_ins_30d: number; failed_30d: number; activity: Record<string, string>; first_seen: string; last_seen: string; gone: boolean;
 }
@@ -268,15 +269,15 @@ export async function refreshSsoInventory(onError: (m: string) => void = () => {
       const assignments = userAssignments(directOf.get(uid) ?? [], gs, groupAssign, setName);
       const f = signInFacts.get(uid) ?? { last_sign_in: null, sign_ins_30d: 0, failed_30d: 0 };
       const email = (u.Emails ?? []).find((e: any) => e.Primary)?.Value ?? u.Emails?.[0]?.Value ?? null;
-      return { user_id: uid, identity_store_id: inst.identity_store_id, instance_arn: inst.arn, account_id: inst.owner_account_id, user_name: String(u.UserName || uid), display_name: u.DisplayName ?? (u.Name ? [u.Name.GivenName, u.Name.FamilyName].filter(Boolean).join(" ") || null : null), email, idp: u.ExternalIds?.[0]?.Issuer ?? null, created: null,
+      return { user_id: uid, identity_store_id: inst.identity_store_id, instance_arn: inst.arn, account_id: inst.owner_account_id, user_name: String(u.UserName || uid), display_name: u.DisplayName ?? (u.Name ? [u.Name.GivenName, u.Name.FamilyName].filter(Boolean).join(" ") || null : null), email, idp: u.ExternalIds?.[0]?.Issuer ?? null, created: null, status: u.UserStatus ? String(u.UserStatus) : null,
         groups: JSON.stringify(gs), assignments: JSON.stringify(assignments), accounts: new Set(assignments.map((a) => a.account_id)).size, permission_sets: new Set(assignments.map((a) => a.permission_set_arn)).size, applications: JSON.stringify([...(appsOf.get(uid) ?? [])].sort()),
         admin: assignments.some((a) => setAdmin.get(a.permission_set_arn)) ? 1 : 0, last_sign_in: f.last_sign_in, sign_ins_30d: f.sign_ins_30d, failed_30d: f.failed_30d, activity: JSON.stringify(activity.get(String(u.UserName || "")) ?? {}), now };
     });
     const usersPerSet = new Map<string, number>();
     for (const r of userRows) for (const arn of new Set((JSON.parse(r.assignments) as SsoAssignment[]).map((a) => a.permission_set_arn))) usersPerSet.set(arn, (usersPerSet.get(arn) ?? 0) + 1);
-    const upUser = db.prepare(`insert into inventory_sso_user(user_id, identity_store_id, instance_arn, account_id, user_name, display_name, email, idp, created, groups, assignments, accounts, permission_sets, applications, admin, last_sign_in, sign_ins_30d, failed_30d, activity, first_seen, last_seen, gone)
-      values (@user_id, @identity_store_id, @instance_arn, @account_id, @user_name, @display_name, @email, @idp, @created, @groups, @assignments, @accounts, @permission_sets, @applications, @admin, @last_sign_in, @sign_ins_30d, @failed_30d, @activity, @now, @now, 0)
-      on conflict(user_id) do update set identity_store_id = excluded.identity_store_id, instance_arn = excluded.instance_arn, account_id = excluded.account_id, user_name = excluded.user_name, display_name = excluded.display_name, email = excluded.email, idp = excluded.idp, groups = excluded.groups, assignments = excluded.assignments,
+    const upUser = db.prepare(`insert into inventory_sso_user(user_id, identity_store_id, instance_arn, account_id, user_name, display_name, email, idp, created, status, groups, assignments, accounts, permission_sets, applications, admin, last_sign_in, sign_ins_30d, failed_30d, activity, first_seen, last_seen, gone)
+      values (@user_id, @identity_store_id, @instance_arn, @account_id, @user_name, @display_name, @email, @idp, @created, @status, @groups, @assignments, @accounts, @permission_sets, @applications, @admin, @last_sign_in, @sign_ins_30d, @failed_30d, @activity, @now, @now, 0)
+      on conflict(user_id) do update set identity_store_id = excluded.identity_store_id, instance_arn = excluded.instance_arn, account_id = excluded.account_id, user_name = excluded.user_name, display_name = excluded.display_name, email = excluded.email, idp = excluded.idp, status = coalesce(excluded.status, inventory_sso_user.status), groups = excluded.groups, assignments = excluded.assignments,
         accounts = excluded.accounts, permission_sets = excluded.permission_sets, applications = excluded.applications, admin = excluded.admin, last_sign_in = coalesce(excluded.last_sign_in, inventory_sso_user.last_sign_in), sign_ins_30d = excluded.sign_ins_30d, failed_30d = excluded.failed_30d, activity = excluded.activity, last_seen = excluded.last_seen, gone = 0`);
     const upSet = db.prepare(`insert into inventory_sso_permission_set(arn, instance_arn, account_id, name, description, session_duration, created, managed_policies, customer_managed, inline_policy, boundary, admin, accounts, last_used, users, first_seen, last_seen, gone)
       values (@arn, @instance_arn, @account_id, @name, @description, @session_duration, @created, @managed_policies, @customer_managed, @inline_policy, @boundary, @admin, @accounts, @last_used, @users, @now, @now, 0)
@@ -299,7 +300,7 @@ export function listSsoUsers(f: { q?: string; sort?: string; gone?: boolean; sco
   const where: string[] = []; const params: unknown[] = [];
   if (!f.gone) where.push("gone = 0");
   if (f.q) { where.push("(user_name like ? or display_name like ? or email like ?)"); params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`); }
-  const order = f.sort === "last_sign_in" ? "order by last_sign_in desc nulls last" : f.sort === "accounts" ? "order by accounts desc, user_name" : f.sort === "sign_ins" ? "order by sign_ins_30d desc, user_name" : "order by admin desc, last_sign_in desc nulls last, user_name";
+  const order = f.sort === "last_sign_in" ? "order by (coalesce(status, '') = 'DISABLED'), last_sign_in desc nulls last" : f.sort === "accounts" ? "order by (coalesce(status, '') = 'DISABLED'), accounts desc, user_name" : f.sort === "sign_ins" ? "order by (coalesce(status, '') = 'DISABLED'), sign_ins_30d desc, user_name" : "order by (coalesce(status, '') = 'DISABLED'), admin desc, last_sign_in desc nulls last, user_name";
   const rows = (db.prepare(`select * from inventory_sso_user ${where.length ? `where ${where.join(" and ")}` : ""} ${order} limit 2000`).all(...params) as any[]).map(parseUser);
   return f.scope && !f.scope.primary ? rows.filter((r) => r.assignments.some((a) => a.account_id === f.scope!.id)) : rows;
 }
@@ -309,13 +310,13 @@ export function listSsoPermissionSets(f: { gone?: boolean; scope?: AccountScope 
   return f.scope && !f.scope.primary ? rows.filter((r) => r.accounts.includes(f.scope!.id)) : rows;
 }
 
-export interface SsoSummary { configured: boolean; users: number; admins: number; never_signed_in: number; stale_90d: number; external: number; groups: number; permission_sets: number; admin_sets: number; accounts: number; sign_ins_30d: number; failed_30d: number; read_at: string | null; region: string | null; owner_account_id: string | null; errors: string[]; notes: string[] }
+export interface SsoSummary { configured: boolean; users: number; disabled: number; admins: number; never_signed_in: number; stale_90d: number; external: number; groups: number; permission_sets: number; admin_sets: number; accounts: number; sign_ins_30d: number; failed_30d: number; read_at: string | null; region: string | null; owner_account_id: string | null; errors: string[]; notes: string[] }
 
 export function ssoSummary(scope?: AccountScope | null): SsoSummary {
-  const m = ssoMeta(); const users = listSsoUsers({ scope }); const sets = listSsoPermissionSets({ scope });
+  const m = ssoMeta(); const all = listSsoUsers({ scope }); const users = all.filter((u) => u.status !== "DISABLED"); const sets = listSsoPermissionSets({ scope });
   const stale = (t: string | null) => !t || Date.now() - Date.parse(t) > 90 * 86_400_000;
   return {
-    configured: m.configured, users: users.length, admins: users.filter((u) => u.admin).length, never_signed_in: users.filter((u) => !u.last_sign_in).length, stale_90d: users.filter((u) => u.last_sign_in && stale(u.last_sign_in)).length,
+    configured: m.configured, users: users.length, disabled: all.length - users.length, admins: users.filter((u) => u.admin).length, never_signed_in: users.filter((u) => !u.last_sign_in).length, stale_90d: users.filter((u) => u.last_sign_in && stale(u.last_sign_in)).length,
     external: users.filter((u) => u.idp).length, groups: new Set(users.flatMap((u) => u.groups)).size, permission_sets: sets.length, admin_sets: sets.filter((s) => s.admin).length,
     accounts: new Set(users.flatMap((u) => u.assignments.map((a) => a.account_id))).size, sign_ins_30d: users.reduce((n, u) => n + u.sign_ins_30d, 0), failed_30d: users.reduce((n, u) => n + u.failed_30d, 0),
     read_at: m.read_at, region: m.region, owner_account_id: m.owner_account_id, errors: m.errors, notes: m.notes,
