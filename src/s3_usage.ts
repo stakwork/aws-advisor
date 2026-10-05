@@ -15,7 +15,7 @@ import { CloudWatchClient, GetMetricDataCommand } from "@aws-sdk/client-cloudwat
 import { GetBucketLifecycleConfigurationCommand, ListMultipartUploadsCommand, ListObjectVersionsCommand, ListObjectsV2Command, S3Client, type LifecycleRule } from "@aws-sdk/client-s3";
 import { db } from "./db.js";
 import { config } from "./config.js";
-import { sdkCredentials } from "./steampipe.js";
+import { accountCredentials } from "./accounts.js";
 import { describeError } from "./permissions.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
@@ -89,8 +89,9 @@ const ruleSummary = (r: LifecycleRule) => ({
 /** The full read of one bucket. Throws on the listing; the optional parts (versions, multipart, lifecycle, metrics) degrade to null. */
 export async function analyseBucket(bucket: string, opts: { region?: string; onLog?: (l: string) => void } = {}): Promise<S3Usage> {
   const log = opts.onLog || (() => {});
-  const inv = db.prepare("select region, versioning, total_gb, standard_gb, objects from inventory_s3 where name = ?").get(bucket) as { region: string | null; versioning: number | null; total_gb: number | null; standard_gb: number | null; objects: number | null } | undefined;
-  const creds = sdkCredentials();
+  const inv = db.prepare("select region, versioning, total_gb, standard_gb, objects, account_id from inventory_s3 where name = ?").get(bucket) as { region: string | null; versioning: number | null; total_gb: number | null; standard_gb: number | null; objects: number | null; account_id: string | null } | undefined;
+  // the bucket's own account: a member's bucket is read through the member's role, never with the parent's credentials
+  const creds = accountCredentials(inv?.account_id ?? null);
   const region = opts.region || inv?.region || creds.region;
   const s3 = new S3Client({ region, credentials: creds.provider });
   const cw = new CloudWatchClient({ region, credentials: creds.provider });
@@ -233,16 +234,20 @@ export interface S3UsagePassResult { candidates: number; analysed: string[]; ski
 /** Every bucket at or above the threshold not analysed in the last six days, largest first, at most `limit` per pass. */
 export async function s3UsagePass(onLog: (l: string) => void = () => {}, limit = 15): Promise<S3UsagePassResult> {
   const t0 = Date.now();
-  const rows = db.prepare(`select i.name from inventory_s3 i left join s3_usage u on u.bucket = i.name
-    where i.gone = 0 and i.total_gb >= ? and (u.collected_at is null or datetime(u.collected_at) < datetime('now', '-6 days')) order by i.total_gb desc`).all(config.actS3MinGb) as { name: string }[];
+  const rows = db.prepare(`select i.name, i.account_id from inventory_s3 i left join s3_usage u on u.bucket = i.name
+    where i.gone = 0 and i.total_gb >= ? and (u.collected_at is null or datetime(u.collected_at) < datetime('now', '-6 days')) order by i.total_gb desc`).all(config.actS3MinGb) as { name: string; account_id: string | null }[];
   const out: S3UsagePassResult = { candidates: rows.length, analysed: [], skipped: Math.max(0, rows.length - limit), failed: [], took_ms: 0 };
+  // a denial is per account: the rest of that account's buckets wait for the policy, the other accounts go on
+  const denied = new Set<string>();
   for (const r of rows.slice(0, limit)) {
+    const acct = r.account_id ?? "";
+    if (denied.has(acct)) { out.skipped++; continue; }
     try { await refreshS3Usage(r.name, onLog); out.analysed.push(r.name); }
     catch (e) {
-      const message = describeError(e, `s3 usage ${r.name} (s3:ListBucket)`, 200);
+      const message = describeError(e, `s3 usage ${r.name}${acct ? ` account ${acct}` : ""} (s3:ListBucket)`, 200);
       out.failed.push({ bucket: r.name, message });
       db.prepare("insert into s3_usage(bucket, region, collected_at, json, error) values (?, null, datetime('now'), '{}', ?) on conflict(bucket) do update set error = excluded.error").run(r.name, message);
-      if (/AccessDenied|not authorized|NoSdkCredentials/i.test(message)) { out.skipped += rows.length - out.analysed.length - out.failed.length; break; }
+      if (/AccessDenied|not authorized|NoSdkCredentials/i.test(message)) denied.add(acct);
     }
   }
   out.took_ms = Date.now() - t0;

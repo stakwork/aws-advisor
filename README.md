@@ -721,6 +721,25 @@ statements of everything missing; `GET /api/permissions` returns the recorded is
 the last check, `recommended_policy` and `probe_document`; `GET /api/probe/document` the SSM document JSON. A
 check that finds a capability `ok` clears earlier issues for its actions.
 
+### Updating the read policy from the page
+
+Every new collector needs actions the read roles do not have yet, and the advisor's identities hold no IAM write
+right by design: neither the read role nor the actuator may widen what it is allowed to do. So the update is a ledger
+row a person applies with their own credentials (`src/actions/read_policy.ts`, kind `read_policy`; Settings ›
+Permissions › "Apply it with your own credentials"). **Propose the full policy** (or **the fix only**, the current
+document plus the permissions recorded as missing) reads each account's current inline policy with the advisor's
+credentials (`iam:ListRolePolicies`, `iam:GetRolePolicy`), compares it action by action with the policy wanted (a
+wildcard such as `ec2:Describe*` counts as covering what it matches) and records one row per account that lacks
+something: the parent's read identity and every enabled member's read role (`POST /api/permissions/propose`). The row
+names the missing actions and the document's size; it is applied with **run as me** (temporary credentials, previewed
+first as one `PutRolePolicy` of the whole document inline on the role under the setup script's policy name, the role's
+own name), recorded with who did it, and read back with the advisor's credentials. Revert puts the previous document
+back or removes the policy when there was none. A role's inline policy holds 10,240 characters and an IAM user's 2,048,
+so a document that would not fit is refused before IAM refuses it (the recommended policy is about 4,300 characters:
+it fits a role, not a user; the setup script puts the advisor on a role for this reason too). The kind is made only of
+person-only actions, so the actuator never has the capability and the executor pass never touches these rows. When the
+advisor may not read its own policy yet, the row says so and writes the whole document.
+
 ## repo2graph integration
 
 The advisor never calls an LLM itself; reasoning is delegated to the swarm's repo2graph node

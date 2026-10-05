@@ -69,7 +69,7 @@ addColumn("actions", "revived_at", "text");
 
 export type ActionKind = "acu_window" | "snapshot_archive" | "ebs_iops_trim" | "log_retention" | "s3_request_metrics" | "aurora_storage" | "s3_lifecycle" | "ebs_gp3_migrate" | "ecr_lifecycle" | "swarm_park"
   | "eip_release" | "vpc_gateway_endpoint" | "kms_key_retire" | "dynamodb_capacity_mode" | "snapshot_delete" | "idle_load_balancer" | "schedule_hours" | "ebs_throughput_trim" | "cpu_credit_spec" | "efs_lifecycle" | "alarm_cleanup" | "log_retention_tune" | "s3_multipart_abort" | "lambda_memory" | "beanstalk_scale" | "usage_schedule" | "consent_tag" | "beanstalk_pressure"
-  | "ec2_hibernate_migrate";
+  | "ec2_hibernate_migrate" | "read_policy";
 /** proposed: planned, nothing done (a dry-run row, or waiting for apply); applied: the call succeeded, read-back pending or inconclusive; verified: read back; failed; refused: the pre-check said no at apply time; reverted; stale: the proposal no longer applies. */
 export type ActionStatus = "proposed" | "applied" | "verified" | "failed" | "refused" | "reverted" | "stale";
 
@@ -332,6 +332,8 @@ export function computeCapabilities(sim: Simulation | Set<string> | null, learne
   for (const [kind, n0] of Object.entries(needs)) {
     // what a person does with their own credentials is not the actuator's to have
     const n = { apply: n0.apply.filter((a) => !PERSON_ONLY_ACTIONS.has(a)), revert: n0.revert.filter((a) => !PERSON_ONLY_ACTIONS.has(a)) };
+    // a kind made only of person-only actions (the read policy update) is never the actuator's: the page offers "run as me" and nothing else
+    if (n0.apply.length && !n.apply.length) { out[kind] = { apply: false, revert: false, missing: [...new Set([...n0.apply, ...n0.revert])], unproven: [], source: "learned" }; continue; }
     const missing = (list: string[]) => list.filter((a) => Boolean(learned[a]) || (s ? s.explicit.has(a) : false));
     const unproven = (list: string[]) => (s ? list.filter((a) => !s.allowed.has(a) && !s.explicit.has(a) && !learned[a]) : []);
     const ma = missing(n.apply), mr = missing(n.revert), ua = unproven(n.apply), ur = unproven(n.revert);

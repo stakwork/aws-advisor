@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { db } from "./db.js";
+import { db, addColumn } from "./db.js";
 
 /**
  * Permission diagnostics. Every place the app catches an AWS error runs it through
@@ -40,6 +40,8 @@ export interface PermissionIssueRow {
   action: string;
   service: string;
   contexts: string[];
+  /** The accounts the denial was seen in (from the identity ARN, the member's connection name or an "account <id>" in the context); empty when none was named. */
+  accounts: string[];
   first_seen: string;
   last_seen: string;
   count: number;
@@ -56,6 +58,15 @@ create table if not exists permission_issues (
   count integer not null default 1,
   last_message text
 );`);
+
+addColumn("permission_issues", "accounts", "text");
+
+/** The 12-digit account ids a denial names: the caller's identity ARN, a member's Steampipe connection (advisor_<id>), or "account <id>" / "member <id>" in the context. Pure. */
+export function accountsIn(text: string): string[] {
+  const out = new Set<string>();
+  for (const re of [/arn:aws:(?:sts|iam)::(\d{12}):/g, /\badvisor_(\d{12})\b/g, /\b(?:account|member)\s+(\d{12})\b/gi]) for (const m of text.matchAll(re)) out.add(m[1]);
+  return [...out];
+}
 
 export const AWS_RUN_SHELL_SCRIPT = "AWS-RunShellScript";
 export const EC2_ANY_INSTANCE = "arn:aws:ec2:*:*:instance/*";
@@ -166,7 +177,7 @@ export const TABLE_ACTIONS: Record<string, string> = {
 
 /** Service names as the AWS SDK prints them in "operation error <Service>: <Operation>" -> IAM prefix. */
 const SDK_SERVICE_PREFIX: Record<string, string> = {
-  ec2: "ec2", rds: "rds", elasticache: "elasticache", cloudwatch: "cloudwatch", "cloudwatch logs": "logs",
+  ec2: "ec2", rds: "rds", elasticache: "elasticache", cloudwatch: "cloudwatch", "cloudwatch logs": "logs", sns: "sns", sqs: "sqs",
   "cost explorer": "ce", pricing: "pricing", ssm: "ssm", s3: "s3", lambda: "lambda", ecr: "ecr", ecs: "ecs", eks: "eks",
   dynamodb: "dynamodb", "secrets manager": "secretsmanager", cloudtrail: "cloudtrail", cloudfront: "cloudfront",
   "route 53": "route53", route53: "route53", redshift: "redshift", emr: "elasticmapreduce", "api gateway": "apigateway",
@@ -265,6 +276,8 @@ export function explainPermissionError(err: unknown, context: string): Permissio
     if (service) action = SERVICE_READ_ACTION[service];
   }
   if (!action) action = "unknown";
+  // IAM reads the service prefix case-insensitively; the policy and the issue list keep it lowercase so one action is one row
+  if (action !== "unknown") action = action.replace(/^[^:]+/, (s) => s.toLowerCase());
 
   const service = action === "unknown" ? "unknown" : action.split(":")[0];
   const res = message.match(/on resource:?\s+(arn:[^\s,;)]+)/i);
@@ -285,27 +298,29 @@ export const remedyFor = (issue: PermissionIssue) =>
     : `Missing IAM permission ${issue.action}; add it to the advisor's policy (see Settings > Permissions).`;
 
 const upsertIssue = db.prepare(`
-  insert into permission_issues(action, service, contexts, first_seen, last_seen, count, last_message)
-  values (?, ?, ?, datetime('now'), datetime('now'), 1, ?)
-  on conflict(action) do update set service = excluded.service, contexts = ?, last_seen = datetime('now'), count = count + 1, last_message = excluded.last_message`);
-const selectContexts = db.prepare("select contexts from permission_issues where action = ?");
+  insert into permission_issues(action, service, contexts, first_seen, last_seen, count, last_message, accounts)
+  values (?, ?, ?, datetime('now'), datetime('now'), 1, ?, ?)
+  on conflict(action) do update set service = excluded.service, contexts = ?, last_seen = datetime('now'), count = count + 1, last_message = excluded.last_message, accounts = excluded.accounts`);
+const selectContexts = db.prepare("select contexts, accounts from permission_issues where action = ?");
 
 /** Records (or bumps) an issue; the contexts list keeps the last 20 distinct places it was seen. */
 export function recordPermissionIssue(issue: PermissionIssue): PermissionIssue {
-  const prev = selectContexts.get(issue.action) as { contexts: string } | undefined;
-  let contexts: string[] = [];
+  const prev = selectContexts.get(issue.action) as { contexts: string; accounts: string | null } | undefined;
+  let contexts: string[] = []; let accounts: string[] = [];
   try { contexts = prev ? (JSON.parse(prev.contexts) as string[]) : []; } catch { contexts = []; }
+  try { accounts = prev?.accounts ? (JSON.parse(prev.accounts) as string[]) : []; } catch { accounts = []; }
   contexts = [...contexts.filter((c) => c !== issue.context), issue.context].slice(-20);
+  accounts = [...new Set([...accounts, ...accountsIn(`${issue.context} ${issue.message}`)])].slice(-10);
   const json = JSON.stringify(contexts);
-  upsertIssue.run(issue.action, issue.service, json, issue.message, json);
+  upsertIssue.run(issue.action, issue.service, json, issue.message, JSON.stringify(accounts), json);
   openIssues.add(issue.action);
   console.warn(`[permissions] ${issue.context}: ${remedyFor(issue)}`);
   return issue;
 }
 
 export function listPermissionIssues(): PermissionIssueRow[] {
-  const rows = db.prepare("select action, service, contexts, first_seen, last_seen, count, last_message from permission_issues order by last_seen desc, action").all() as (Omit<PermissionIssueRow, "contexts"> & { contexts: string })[];
-  return rows.map((r) => { let c: string[] = []; try { c = JSON.parse(r.contexts); } catch { /* keep empty */ } return { ...r, contexts: c }; });
+  const rows = db.prepare("select action, service, contexts, first_seen, last_seen, count, last_message, accounts from permission_issues order by last_seen desc, action").all() as (Omit<PermissionIssueRow, "contexts" | "accounts"> & { contexts: string; accounts: string | null })[];
+  return rows.map((r) => { let c: string[] = []; let a: string[] = []; try { c = JSON.parse(r.contexts); } catch { /* keep empty */ } try { a = r.accounts ? JSON.parse(r.accounts) : []; } catch { /* keep empty */ } return { ...r, contexts: c, accounts: a }; });
 }
 
 /** Drops issues for actions a check just proved are granted. */
@@ -432,6 +447,10 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",
         "identitystore:ListUsers", "identitystore:ListGroups", "identitystore:ListGroupMemberships", "identitystore:DescribeUser", "identitystore:DescribeGroup",
         "iam:ListRoles", "iam:GetRole",
+        // the advisor reads its own inline policy to say what is missing before a person updates it (src/actions/read_policy.ts)
+        "iam:ListRolePolicies", "iam:GetRolePolicy", "iam:ListUserPolicies",
+        // the foundational security benchmark's SNS controls (topic encryption, delivery logging, subscriptions)
+        "sns:ListTopics", "sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:ListSubscriptions", "sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes",
         // User Notifications (the console bell): the AWS-managed feed and the account's own configurations
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent",
       ],
@@ -480,7 +499,7 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
 /** Actions a module declares that only a person's own credentials perform ("Run as me"): never in the actuator policy, never counted as its gap. */
 /** Actions the actuator holds only through an instance's Auto-park grant (src/autopark_grant.ts), never in the static policy: the right is scoped to that instance's own records. */
 export const GRANT_ONLY_ACTIONS: ReadonlySet<string> = new Set(["route53:ChangeResourceRecordSets"]);
-export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy"]);
+export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy"]);
 
 export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
   acu_window: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
@@ -513,6 +532,8 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   usage_schedule: { apply: ["ec2:CreateTags"], revert: ["ec2:DeleteTags"] },
   // UpdateTagsForResource is the API; the IAM actions it checks are AddTags (TagsToAdd) and RemoveTags (TagsToRemove).
   // the AdvisorAutoPark and advisor:hibernate switches are done with a person's credentials ("Run as me"; PERSON_ONLY_ACTIONS are never the actuator's) ("Run as me"): the tag, and for Auto-park the grant on the actuator role
+  // the advisor's own read policy, brought up to date from Settings › Permissions with a person's credentials (src/actions/read_policy.ts): never the actuator's
+  read_policy: { apply: ["iam:PutRolePolicy", "iam:PutUserPolicy"], revert: ["iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy"] },
   consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags", ...PERSON_ONLY_ACTIONS], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", ...PERSON_ONLY_ACTIONS] },
   // A staged relaunch: apply, the stages (advance) and the cut-over (step) are all checked as apply.
   ec2_hibernate_migrate: { apply: ["ec2:CreateImage", "ec2:StopInstances", "ec2:RunInstances", "ec2:CreateTags", "iam:PassRole", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"],

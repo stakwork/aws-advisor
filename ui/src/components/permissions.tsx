@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, when } from "../api";
 import { Badge, Button, Card, Code, CopyButton, Td, Th } from "./ui";
+import { RunAsMe } from "./consent";
 
 /**
  * Settings > Permissions: what the advisor's credentials should be, the capability check, the missing
@@ -16,6 +17,17 @@ export function PermissionsCard() {
   const [account, setAccount] = useState("");
   const [err, setErr] = useState("");
   const [showFull, setShowFull] = useState(false);
+  const [proposing, setProposing] = useState(false);
+  const [proposeMsg, setProposeMsg] = useState<{ text: string; err?: boolean } | null>(null);
+  const propose = async (fixOnly: boolean) => {
+    setProposing(true); setProposeMsg(null);
+    try {
+      const r = await api("/permissions/propose", { method: "POST", body: JSON.stringify({ fix_only: fixOnly, by: "the Permissions page" }) });
+      const n = (st: string) => r.results.filter((x: any) => x.status === st).length;
+      setProposeMsg({ text: `${n("proposed")} row${n("proposed") === 1 ? "" : "s"} proposed${n("up_to_date") ? `, ${n("up_to_date")} account${n("up_to_date") === 1 ? "" : "s"} already up to date` : ""}${n("refused") ? `, ${n("refused")} refused` : ""}${n("error") ? `, ${n("error")} could not be read` : ""}${r.results.filter((x: any) => x.status === "refused" || x.status === "error").map((x: any) => ` · ${x.name}: ${x.detail}`).join("")}`, err: n("refused") + n("error") > 0 && n("proposed") === 0 });
+      load();
+    } catch (e: any) { setProposeMsg({ text: e.message, err: true }); } finally { setProposing(false); }
+  };
 
   const load = (acct = account) => api(`/permissions${acct ? `?account=${acct}` : ""}`).then((d) => { setP(d); setCheck(d.last_check || null); }).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [account]);
@@ -29,7 +41,8 @@ export function PermissionsCard() {
   };
 
   if (!p) return <Card title="Permissions"><div className="text-sm text-zinc-500">{err || "Loading…"}</div></Card>;
-  const issues: any[] = p.issues || [];
+  // a member selected above narrows the list to the denials seen there (and those no account was named for)
+  const issues: any[] = (p.issues || []).filter((i: any) => !account || !(i.accounts || []).length || i.accounts.includes(account));
   const counts = (check?.results || []).reduce((acc: Record<string, number>, r: any) => ({ ...acc, [r.status]: (acc[r.status] || 0) + 1 }), {} as Record<string, number>);
   const fixPolicy = JSON.stringify(p.policy, null, 2);
   const fullPolicy = JSON.stringify(p.recommended_policy, null, 2);
@@ -89,7 +102,7 @@ export function PermissionsCard() {
         </div>
       )}
 
-      <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Missing permissions seen anywhere in the app</div>
+      <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Missing permissions seen anywhere in the app{account ? " · this member and unattributed" : ""}</div>
       {check?.reverified?.length > 0 && <ul className="mb-2 space-y-0.5 text-xs">{check.reverified.map((r: any) => <li key={r.action}><span className={r.status === "ok" ? "text-emerald-300" : r.status === "missing" ? "text-red-300" : "text-amber-300"}>{r.status}</span> <span className="font-mono text-zinc-300">{r.action}</span> <span className="text-zinc-500">{r.message}</span></li>)}</ul>}
       {issues.length === 0 ? <div className="mb-4 text-sm text-zinc-500">None recorded. Run a check, a collection, the watcher or a probe: any denial lands here with the action it needs, and leaves once the same call works again or a check proves it.</div> : (
         <div className="mb-4 overflow-auto rounded border border-zinc-800">
@@ -100,7 +113,7 @@ export function PermissionsCard() {
                 <tr key={i.action} className="border-t border-zinc-800">
                   <Td className="break-words font-mono text-xs">{i.action}</Td>
                   <Td className="text-xs text-zinc-400">{i.count}x · first {when(i.first_seen)} · last {when(i.last_seen)}</Td>
-                  <Td className="break-words text-xs text-zinc-400">{(i.contexts || []).slice(-5).join("; ")}</Td>
+                  <Td className="break-words text-xs text-zinc-400">{(i.accounts || []).length ? <div className="text-zinc-300">account {i.accounts.map((a: string) => (p.accounts || []).find((x: any) => x.account_id === a)?.name || a).join(", ")}</div> : null}{(i.contexts || []).slice(-5).join("; ")}</Td>
                   <Td className="break-words text-xs text-zinc-500"><span title={i.last_message || ""}>{String(i.last_message || "").slice(0, 160)}</span></Td>
                   <Td className="text-right text-xs"><button type="button" className="text-zinc-500 hover:text-zinc-200" title="Remove this entry; it comes back if the call is denied again" onClick={() => dismiss(i.action)}>dismiss</button></Td>
                 </tr>
@@ -119,6 +132,35 @@ export function PermissionsCard() {
       </div>
       <Code>{issues.length && !showFull ? fixPolicy : fullPolicy}</Code>
       <p className="mt-2 text-xs text-zinc-500">Attach it with <code className="text-zinc-300">aws iam put-user-policy --user-name aws-advisor --policy-name aws-advisor --policy-document file://policy.json</code> (or the role equivalent). The AWS managed <code className="text-zinc-300">ReadOnlyAccess</code> plus the Cost Explorer, pricing and SSM statements is an acceptable shortcut.</p>
+
+      <div className="mt-4 rounded border border-zinc-800 p-3">
+        <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Apply it with your own credentials</div>
+        <p className="text-sm text-zinc-400">
+          The advisor's identities hold no IAM write right, so they can never widen their own permissions. Instead, one ledger row per account whose read policy lacks something is proposed here
+          (the parent's read identity, each member's read role), and you apply each with temporary credentials of your own, previewed first: a single <code className="text-zinc-200">PutRolePolicy</code> of the whole document inline on the role,
+          under the setup script's policy name. The row records who did it; Revert puts the previous document back.
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button type="button" onClick={() => propose(false)} disabled={proposing}>{proposing ? "Reading the policies…" : "Propose the full policy"}</Button>
+          {issues.length > 0 && <Button type="button" variant="ghost" onClick={() => propose(true)} disabled={proposing}>Propose the fix only</Button>}
+          {proposeMsg && <span className={`text-xs ${proposeMsg.err ? "text-red-300" : "text-zinc-400"}`}>{proposeMsg.text}</span>}
+        </div>
+        {(p.policy_rows || []).length > 0 && (
+          <table className="mt-3 w-full table-fixed">
+            <thead><tr><Th className="w-56">Account · identity</Th><Th className="w-24">Status</Th><Th>What</Th><Th className="w-44">Run</Th></tr></thead>
+            <tbody>
+              {(p.policy_rows || []).map((r: any) => (
+                <tr key={r.id} className="border-t border-zinc-800 align-top">
+                  <Td className="text-xs"><div className="text-zinc-200">{r.resource_name || r.resource}</div><div className="text-zinc-500">{r.account_id || p.account_id || "parent"}{r.facts?.fix_only ? " · fix only" : " · full policy"}</div></Td>
+                  <Td><Badge>{r.status}</Badge></Td>
+                  <Td className="break-words text-xs text-zinc-400">{r.title}{(r.facts?.missing || []).length ? <div className="mt-0.5 font-mono text-[11px] text-zinc-500">{(r.facts.missing as string[]).slice(0, 10).join(", ")}{r.facts.missing.length > 10 ? ` +${r.facts.missing.length - 10}` : ""}</div> : null}{r.error ? <div className="text-red-300">{r.error}</div> : r.result ? <div className="text-zinc-500">{r.result}</div> : null}</Td>
+                  <Td className="text-xs">{r.status === "proposed" || r.status === "failed" ? <RunAsMe actionId={r.id} onDone={() => load()} /> : r.status === "applied" || r.status === "verified" ? <RunAsMe actionId={r.id} verb="revert" onDone={() => load()} /> : <span className="text-zinc-600">—</span>}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </Card>
   );
 }

@@ -14,6 +14,7 @@ import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } 
 import { getRunChanges } from "../changes.js";
 import { listIamUsers, iamSummary } from "../iam_inventory.js";
 import { ssoSummary } from "../sso_inventory.js";
+import { proposeReadPolicyUpdates } from "../actions/read_policy.js";
 import { ACCOUNT_TARGET_RE, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
 import { postRejectionLearning } from "../learnings.js";
 import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
@@ -34,7 +35,7 @@ import { latestProfile, listProfiles, usageProfilePass, whyNoProfile } from "../
 import { decidedOffHours, latestReview, scheduleFor, usageReviewPass } from "../usage_review.js";
 import { investigateUsage, latestInvestigation, usageInvestigationPass } from "../usage_agent.js";
 import { beanstalkConsent, consentErrorStatus, manualPower, normaliseConsent, requestConsent, requestScaleBand } from "../consent.js";
-import { dispatchActionNotifications } from "../executor.js";
+import { dispatchActionNotifications, listActions } from "../executor.js";
 import { domainsByResource, domainsFor, listRoute53, listRoute53Zones, refreshRoute53Inventory } from "../route53_inventory.js";
 import { syncDecisionConceptInBackground } from "../concepts.js";
 import { incidentForAlert, investigateAlert, listAlerts, listIncidents } from "../investigate.js";
@@ -112,7 +113,15 @@ api.get("/permissions", (req, res) => {
     accounts,
     recommended_policy: recommendedPolicy(accountId || credentialsMeta()?.accountId || "*"),
     probe_document: probeDocumentInfo(), probe_documents: probeDocumentsInfo(),
+    // the ledger rows that update the read policy itself (src/actions/read_policy.ts): open ones wait for "Run as me"
+    policy_rows: listActions({ kind: "read_policy", page_size: 50 }).actions.filter((r) => r.status !== "stale"),
   });
+});
+// One ledger row per account whose read policy lacks something (src/actions/read_policy.ts); body.fix_only wants the recorded fixes alone. Nothing is written: each row is applied with "Run as me".
+api.post("/permissions/propose", async (req, res) => {
+  if (!hasConnectionFile()) return res.status(400).json({ error: "AWS credentials are not configured" });
+  try { res.json(await proposeReadPolicyUpdates({ fixOnly: req.body?.fix_only === true, by: typeof req.body?.by === "string" && req.body.by.trim() ? req.body.by.trim().slice(0, 80) : "a person" })); }
+  catch (e: any) { res.status(502).json({ error: e?.message || String(e) }); }
 });
 
 // One cheap probe per capability; body.instance_id (an SSM-online Linux instance) also runs the real SSM probe once.
