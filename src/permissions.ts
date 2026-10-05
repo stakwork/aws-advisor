@@ -421,7 +421,7 @@ export function policyForIssues(issues: { action: string; service?: string }[]):
  * by AWS, with no data reads (no s3:GetObject, no table rows, no log events). New collectors that only list and
  * describe need nothing added here.
  */
-export const VIEW_ONLY_POLICY_ARN = "arn:aws:iam::aws:policy/ViewOnlyAccess";
+export const VIEW_ONLY_POLICY_ARN = "arn:aws:iam::aws:policy/job-function/ViewOnlyAccess";
 
 /**
  * The inline read-only policy the advisor needs on top of ViewOnlyAccess (kept in step with the README's "IAM

@@ -32,5 +32,5 @@ test("explainPermissionError: the SDK's 'operation error SNS: ListTopics' names 
   // ViewOnlyAccess (attached next to the inline policy) grants sns:List*; the inline policy carries only the Get
   assert.ok(actions.has("sns:GetTopicAttributes"));
   for (const a of ["sns:ListTopics", "sns:ListSubscriptions"]) assert.ok(!actions.has(a), a);
-  assert.equal(perms.VIEW_ONLY_POLICY_ARN, "arn:aws:iam::aws:policy/ViewOnlyAccess");
+  assert.equal(perms.VIEW_ONLY_POLICY_ARN, "arn:aws:iam::aws:policy/job-function/ViewOnlyAccess");
 });

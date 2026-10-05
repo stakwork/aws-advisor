@@ -131,7 +131,7 @@ export function PermissionsCard() {
         </div>
       </div>
       <Code>{issues.length && !showFull ? fixPolicy : fullPolicy}</Code>
-      <p className="mt-2 text-xs text-zinc-500">This goes inline next to the AWS managed <code className="text-zinc-300">ViewOnlyAccess</code>, which covers every list and describe call (and new ones as AWS adds them) without reading any data; the document above holds only what that policy leaves out. Put it on the role with <code className="text-zinc-300">aws iam put-role-policy --role-name aws-advisor-read --policy-name aws-advisor-read --policy-document file://policy.json</code> and <code className="text-zinc-300">aws iam attach-role-policy --role-name aws-advisor-read --policy-arn {p.managed_policies?.[0] ?? "arn:aws:iam::aws:policy/ViewOnlyAccess"}</code>.</p>
+      <p className="mt-2 text-xs text-zinc-500">This goes inline next to the AWS managed <code className="text-zinc-300">ViewOnlyAccess</code>, which covers every list and describe call (and new ones as AWS adds them) without reading any data; the document above holds only what that policy leaves out. Put it on the role with <code className="text-zinc-300">aws iam put-role-policy --role-name aws-advisor-read --policy-name aws-advisor-read --policy-document file://policy.json</code> and <code className="text-zinc-300">aws iam attach-role-policy --role-name aws-advisor-read --policy-arn {p.managed_policies?.[0] ?? "arn:aws:iam::aws:policy/job-function/ViewOnlyAccess"}</code>.</p>
 
       <div className="mt-4 rounded border border-zinc-800 p-3">
         <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Apply it with your own credentials</div>

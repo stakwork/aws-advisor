@@ -552,7 +552,7 @@ and the advisor must see the same files: same user, or the same mounts). `STEAMP
 
 Two policies go on the advisor's read role (the setup script puts both there):
 
-- the AWS-managed **`ViewOnlyAccess`** (`arn:aws:iam::aws:policy/ViewOnlyAccess`): every list and describe call,
+- the AWS-managed **`ViewOnlyAccess`** (`arn:aws:iam::aws:policy/job-function/ViewOnlyAccess`): every list and describe call,
   kept current by AWS as services ship, and no data reads (no S3 objects, table rows or log events). A new
   collector that only lists and describes needs nothing added.
 - the inline policy below, which holds only what `ViewOnlyAccess` leaves out: cost and pricing data, Logs Insights
@@ -704,7 +704,7 @@ you just want keys to paste into the **Access keys** tab:
 aws iam create-user --user-name aws-advisor
 aws iam create-policy --policy-name aws-advisor-read --policy-document file://policy.json --query Policy.Arn --output text
 aws iam attach-user-policy --user-name aws-advisor --policy-arn <the ARN printed above>
-aws iam attach-user-policy --user-name aws-advisor --policy-arn arn:aws:iam::aws:policy/ViewOnlyAccess
+aws iam attach-user-policy --user-name aws-advisor --policy-arn arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
 aws iam create-access-key --user-name aws-advisor          # paste AccessKeyId and SecretAccessKey into Settings
 for k in host docker apps software; do curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/$k/document > probe-$k.json; aws ssm create-document --name AwsAdvisorProbe-$k --document-type Command --document-format JSON --content file://probe-$k.json; done
 ```
