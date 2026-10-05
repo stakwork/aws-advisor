@@ -6,7 +6,7 @@ import { Badge, Card, Stat, Td, Th } from "./ui";
 /**
  * Overview › Accounts: the general view across every account the advisor is pointed at, one row each, with the
  * numbers a person wants before choosing one to look at (the sidebar's "Looking at" sets the scope every page
- * then uses): resources and their list cost, last month's bill, what the last run and scan flagged, open
+ * then uses): resources, last month's bill, what the last run and scan flagged, open
  * recommendations and alerts, the vulnerability verdicts that matter, probe coverage.
  */
 export function AccountsOverview() {
@@ -25,7 +25,7 @@ export function AccountsOverview() {
   return (
     <Card title={<span>Accounts <span className="font-normal text-zinc-500">· {rows.length}{all.length > rows.length ? ` of ${all.length}` : ""} across {new Set(rows.map((r) => r.provider)).size} provider{new Set(rows.map((r) => r.provider)).size === 1 ? "" : "s"}; {scope === "all" ? "every page shows all of them" : `the pages are scoped to ${scope}${all.length > rows.length ? "; pick \"all accounts\" for every provider" : ""}`} · <Link className="underline" to="/settings?tab=accounts">manage</Link></span></span>}>
       <table className="w-full border-collapse text-sm">
-        <thead><tr><Th>Account</Th><Th>Resources</Th><Th className="text-right">List / month</Th><Th className="text-right">Last full month</Th><Th className="text-right">Findings</Th><Th className="text-right">Security</Th><Th className="text-right">Vulnerable</Th><Th className="text-right">Open recs</Th><Th className="text-right">Alerts</Th><Th>Probes</Th><Th></Th></tr></thead>
+        <thead><tr><Th>Account</Th><Th>Resources</Th><Th className="text-right">Last full month</Th><Th className="text-right">Findings</Th><Th className="text-right">Security</Th><Th className="text-right">Vulnerable</Th><Th className="text-right">Open recs</Th><Th className="text-right">Alerts</Th><Th>Probes</Th><Th></Th></tr></thead>
         <tbody>
           {rows.map((a) => (
             <tr key={a.id} className={`border-t border-zinc-800 ${scope === a.id ? "bg-zinc-900/50" : ""}`}>
@@ -37,7 +37,6 @@ export function AccountsOverview() {
               <Td className="text-xs text-zinc-300">
                 {a.resources.ec2_running}/{a.resources.ec2_total} EC2 · {a.resources.rds} RDS · {a.resources.lambda} λ{a.resources.dynamodb ? ` · ${a.resources.dynamodb} tables` : ""} · {a.resources.elb} LB · {a.resources.s3} S3 · {a.resources.ebs_gb} GB EBS{a.resources.clusters ? ` · ${a.resources.clusters} clusters` : ""}
               </Td>
-              <Td className="text-right">{usd(a.monthly_list_usd)}</Td>
               <Td className="text-right">{a.spend.usd != null ? <span title={a.spend.month}>{usd(a.spend.usd)}</span> : <span className="text-zinc-600">—</span>}</Td>
               <Td className="text-right">{a.findings_alarms}</Td>
               <Td className="text-right"><span className={tone(a.security.critical, 1, 1)}>{a.security.critical} crit</span> <span className="text-zinc-500">· {a.security.high} high</span></Td>

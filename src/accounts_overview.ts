@@ -15,7 +15,6 @@ const require_vercel = () => vercelInventory;
 
 export interface AccountOverview extends AccountRecord {
   resources: { ec2_running: number; ec2_total: number; rds: number; lambda: number; dynamodb: number; elb: number; s3: number; ebs_gb: number; clusters: number };
-  monthly_list_usd: number;
   spend: { month: string | null; usd: number | null };
   findings_alarms: number;
   security: { critical: number; high: number; scan_at: string | null };
@@ -39,12 +38,10 @@ export async function accountsOverview(): Promise<AccountOverview[]> {
   const key = (acct: unknown) => (String(acct || "") || primary);
   const byAcct = <T,>(init: () => T) => { const m = new Map<string, T>(); return { get: (a: unknown) => { const k = key(a); if (!m.has(k)) m.set(k, init()); return m.get(k)!; } }; };
 
-  const res = byAcct(() => ({ ec2_running: 0, ec2_total: 0, rds: 0, lambda: 0, dynamodb: 0, elb: 0, s3: 0, ebs_gb: 0, clusters: 0, list: 0 }));
-  for (const r of rows("select account_id, count(*) as total, coalesce(sum(state = 'running'), 0) as running, coalesce(sum(monthly_usd), 0) as usd from inventory_ec2 where gone = 0 group by account_id")) { const x = res.get(r.account_id); x.ec2_total += n(r.total); x.ec2_running += n(r.running); x.list += n(r.usd); }
-  for (const [t, col] of [["inventory_rds", "rds"], ["inventory_lambda", "lambda"], ["inventory_dynamodb", "dynamodb"], ["inventory_elb", "elb"], ["inventory_s3", "s3"]] as const) for (const r of rows(`select account_id, count(*) as c, coalesce(sum(monthly_usd), 0) as usd from ${t} where gone = 0 group by account_id`)) { const x = res.get(r.account_id); (x as any)[col] += n(r.c); x.list += n(r.usd); }
-  // the platform services (keys, web ACLs, file systems, vaults, topics, workgroups) add to the list price; they are not counted as resources here
-  for (const r of rows("select account_id, coalesce(sum(monthly_usd), 0) as usd from inventory_service where gone = 0 group by account_id")) res.get(r.account_id).list += n(r.usd);
-  for (const r of rows("select account_id, coalesce(sum(size_gb), 0) as gb, coalesce(sum(monthly_usd), 0) as usd from inventory_ebs where gone = 0 group by account_id")) { const x = res.get(r.account_id); x.ebs_gb += n(r.gb); x.list += n(r.usd); }
+  const res = byAcct(() => ({ ec2_running: 0, ec2_total: 0, rds: 0, lambda: 0, dynamodb: 0, elb: 0, s3: 0, ebs_gb: 0, clusters: 0 }));
+  for (const r of rows("select account_id, count(*) as total, coalesce(sum(state = 'running'), 0) as running from inventory_ec2 where gone = 0 group by account_id")) { const x = res.get(r.account_id); x.ec2_total += n(r.total); x.ec2_running += n(r.running); }
+  for (const [t, col] of [["inventory_rds", "rds"], ["inventory_lambda", "lambda"], ["inventory_dynamodb", "dynamodb"], ["inventory_elb", "elb"], ["inventory_s3", "s3"]] as const) for (const r of rows(`select account_id, count(*) as c from ${t} where gone = 0 group by account_id`)) { const x = res.get(r.account_id); (x as any)[col] += n(r.c); }
+  for (const r of rows("select account_id, coalesce(sum(size_gb), 0) as gb from inventory_ebs where gone = 0 group by account_id")) { const x = res.get(r.account_id); x.ebs_gb += n(r.gb); }
   for (const r of rows("select account_id, count(*) as c from inventory_cluster where gone = 0 group by account_id")) res.get(r.account_id).clusters += n(r.c);
 
   const latestRun = rows("select id, finished_at from runs where provider = 'aws' and status = 'completed' order by id desc limit 1")[0];
@@ -80,7 +77,7 @@ export async function accountsOverview(): Promise<AccountOverview[]> {
 
   return accounts.map((a) => {
     const r = res.get(a.id); const s = sec.get(a.id); const v = vulns.get(a.id); const p = probes.get(a.id); const rc = recs.get(a.id);
-    return { ...a, resources: { ec2_running: r.ec2_running, ec2_total: r.ec2_total, rds: r.rds, lambda: r.lambda, dynamodb: r.dynamodb, elb: r.elb, s3: r.s3, ebs_gb: Math.round(r.ebs_gb), clusters: r.clusters }, monthly_list_usd: Math.round(r.list), spend: spendOf(a.id, a.provider),
+    return { ...a, resources: { ec2_running: r.ec2_running, ec2_total: r.ec2_total, rds: r.rds, lambda: r.lambda, dynamodb: r.dynamodb, elb: r.elb, s3: r.s3, ebs_gb: Math.round(r.ebs_gb), clusters: r.clusters }, spend: spendOf(a.id, a.provider),
       findings_alarms: alarms.get(a.id).n, security: { critical: s.critical, high: s.high, scan_at: scan?.finished_at ?? null }, recommendations: { open: rc.open, saving_usd_month: Math.round(rc.saving) }, alerts_open: alerts.get(a.id).n,
       vulnerabilities: { critical: v.critical, exposed: v.exposed, boxes: v.boxes.size }, probes: { ssm_online: p.ssm_online, probed_24h: p.probed_24h }, last_collected_at: a.parent_id ? collectedAt : (latestRun?.finished_at ?? collectedAt) };
   });
