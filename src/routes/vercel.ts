@@ -3,7 +3,7 @@ import { authMiddleware } from "../auth.js";
 import { VercelClient } from "../adapters/vercel/client.js";
 import { vercelAdapter, vercelClient, projectEndpoints, vercelOverview, projectDetail, vercelBill, storeDetail, partnersConfigured } from "../adapters/vercel/index.js";
 import { vercelRates } from "../adapters/vercel/pricing.js";
-import { listDeployments, listDomains, listEnvNames, listProjects, listStores, vercelTeam, wipeVercel } from "../adapters/vercel/inventory.js";
+import { listDeployments, listDomains, listEnvNames, listProjects, listStores, teamExtras, vercelTeam, wipeVercel } from "../adapters/vercel/inventory.js";
 import { setRuntimeSetting } from "../runtime_settings.js";
 import { ensureVercelConnection } from "../adapters/vercel/steampipe.js";
 import { config } from "../config.js";
@@ -56,7 +56,7 @@ vercel.get("/vercel/changes", async (req, res) => {
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
   res.json({ configured: true, team_id: team, summary: changesSummary(team, days), changes: listChanges(team, { days, kind: typeof req.query.kind === "string" ? req.query.kind : undefined }) });
 });
-vercel.get("/vercel/members", (_req, res) => { if (!vercelAdapter.configured()) return res.json({ configured: false, members: [], read_at: null }); const { teamExtras } = require("../adapters/vercel/inventory.js") as typeof import("../adapters/vercel/inventory.js"); const x = teamExtras(vercelTeam()?.id ?? vercelAdapter.primaryAccountId()); res.json({ configured: true, members: x.members, read_at: x.read_at }); });
+vercel.get("/vercel/members", (_req, res) => { if (!vercelAdapter.configured()) return res.json({ configured: false, members: [], read_at: null }); const x = teamExtras(vercelTeam()?.id ?? vercelAdapter.primaryAccountId()); res.json({ configured: true, members: x.members, read_at: x.read_at }); });
 vercel.get("/vercel/partners", (_req, res) => { const stores = listStores(); res.json({ configured: partnersConfigured(), stores: stores.filter((s) => s.partner).map((s) => ({ id: s.id, name: s.name, product: s.product, read_at: s.partner!.read_at, error: s.partner!.error })) }); });
 
 vercel.delete("/accounts/vercel", async (_req, res) => {

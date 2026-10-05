@@ -12,6 +12,7 @@ import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 import { GroupLink, PortsPanel, SecurityGroupsPanel } from "../components/securityGroups";
 import { SoftwarePanel } from "../components/software";
 import { VercelMembers, VercelProjects } from "../components/vercel";
+import { IdentityCenter } from "../components/identityCenter";
 import { VercelStores } from "../components/vercelStores";
 import { WakeProfilePanel } from "../components/wakeProfile";
 
@@ -232,7 +233,7 @@ import { metricLabel } from "./Knowledge";
 const TABS = ["ec2", "rds", "elasticache", "lambda", "dynamodb", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags"] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", dynamodb: "Tables", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities" };
-const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", dynamodb: "DynamoDB", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · Vercel team members" };
+const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", dynamodb: "DynamoDB", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · IAM Identity Center · Vercel team members" };
 /** Which providers each tab draws from; a tab shows when the scope's provider (or, for all accounts, any configured provider) is among them. */
 const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], dynamodb: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] };
 const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" };
@@ -484,6 +485,7 @@ export default function Inventory() {
 
       {tab === "deployments" && <VercelProjects />}
       {scopeProvider === "vercel" && tab === "identities" && <VercelMembers />}
+      {awsView && tab === "identities" && <IdentityCenter />}
       {scopeProvider === "vercel" && tab === "rds" && <VercelStores kind="database" />}
       {scopeProvider === "vercel" && tab === "elasticache" && <VercelStores kind="cache" />}
       {scopeProvider === "vercel" && tab === "s3" && <VercelStores kind="storage" />}

@@ -478,6 +478,12 @@ Who can act: IAM users and roles, service accounts, team members, API tokens.
 | `credential_age_days` | the oldest active credential |
 | `trust` | (roles) who may assume it, summarised: `same_account` \| `cross_account` \| `service` \| `federated` \| `public` |
 
+An IAM Identity Center user is `kind: user` with `native_type: sso_user`: `human` is always true, `mfa` is null
+(no API exposes it), `admin` means an administrative permission set is assigned directly or through a group,
+`policies` are the permission set names, `accounts` the account ids reached, `assignments` the `<account>
+<permission set> (direct|group x)` lines, `last_used_at` the last portal sign-in seen in CloudTrail (90 days back
+at most), `activity` the last stored write per account. It hangs off the management account that owns the directory.
+
 `AdvisorPolicy`: `name`, `managed` (provider-managed), `admin`, `wildcard_actions`, `wildcard_resources`, `attached`.
 
 Edges: `GRANTED` (identity → policy); `CAN_ASSUME` (identity → identity); `RUNS_AS` (resource → identity);
@@ -940,6 +946,26 @@ One hour an autoscaled group spent pinned at its ceiling under load.
 | `note` | what the check saw, in words (the members' CPU, the memory reported, the desired and maximum sizes) |
 
 Edges in: `PRESSURED_AT` from the pool; `ANSWERED` from the action that raised the ceiling.
+
+### AdvisorNotification
+
+One thing the provider told the account through its own notification channel (AWS User Notifications, the console
+bell). Keyed by the event's ARN; kept 90 days.
+
+| property | meaning |
+|---|---|
+| `feed` | `managed` (the provider's own feed every account gets: health, announcements, billing, security) \| `configured` (the account's own notification configurations, where a hub is registered) |
+| `source` | the originating service (`health`, `billing`, `cloudwatch`, ...) |
+| `event_type` | the source's event type |
+| `headline` | the message's headline |
+| `notification_type` | `ALERT` \| `WARNING` \| `ANNOUNCEMENT` \| `INFORMATIONAL` |
+| `event_status` | `HEALTHY` \| `UNHEALTHY` |
+| `origin_region` / `regions` | where the event happened; for an aggregate, every region folded in |
+| `related_account` | the account the event is about (an organisation's aggregate names a member) |
+| `created_at` | when the notification was raised |
+| `aggregation` / `event_count` | whether it is an aggregate and how many events it folds |
+
+Edges out: `IN_ACCOUNT` → the account that received it.
 
 ---
 

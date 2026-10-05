@@ -14,6 +14,7 @@ import { runReview } from "./review.js";
 import { dispatchObservation } from "./observe.js";
 import { refreshLogs } from "./logs.js";
 import { refreshTrail } from "./trail.js";
+import { refreshCloudNotifications } from "./cloud_notifications.js";
 import { runVerifications } from "./verify.js";
 import { refreshCommitments } from "./commitments.js";
 import { refreshS3Inventory } from "./s3_inventory.js";
@@ -138,6 +139,7 @@ export const JOBS: Record<string, { label: string; run: () => Promise<string> }>
     const out: string[] = [];
     try { await refreshLogs((l) => console.log(`[logs] ${l}`)); out.push("logs"); mirrorKnowledgeInBackground("logs refresh"); } catch (e: any) { console.error(`[logs] failed: ${e?.message || e}`); out.push(`logs failed: ${e?.message || e}`); }
     try { await refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`)); out.push("cloudtrail"); } catch (e: any) { console.error(`[cloudtrail] failed: ${e?.message || e}`); out.push(`cloudtrail failed: ${e?.message || e}`); }
+    try { const r = await refreshCloudNotifications(undefined, (l) => console.log(`[notifications] ${l}`)); out.push(`notifications ${r.events}`); } catch (e: any) { console.error(`[notifications] failed: ${e?.message || e}`); out.push(`notifications failed: ${e?.message || e}`); }
     try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
     try { const r = await s3UsagePass((l) => console.log(`[s3-usage] ${l}`)); out.push(`s3 usage ${r.analysed.length}/${r.candidates}`); } catch (e: any) { console.error(`[s3-usage] failed: ${e?.message || e}`); out.push(`s3 usage failed: ${e?.message || e}`); }
     try { const r = await usageProfilePass((l) => console.log(`[usage] ${l}`)); out.push(`usage profiles ${r.profiled}, ${r.recommendations} schedule recommendation(s)`); } catch (e: any) { console.error(`[usage] failed: ${e?.message || e}`); out.push(`usage failed: ${e?.message || e}`); }

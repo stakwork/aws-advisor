@@ -1864,6 +1864,35 @@ each is an `AdvisorIdentity {kind: user}` with the ontology's `human`, `mfa`, `a
 `credential_age_days` and `last_used_at`. Under the Vercel scope the same tab lists the team's members with role and
 MFA.
 
+IAM Identity Center sits on the same tab (`src/sso_inventory.ts`, `GET /api/inventory/sso`, `POST
+/api/inventory/sso/refresh`; refreshed with the nightly inventory). The directory lives in the organisation's
+management account or its delegated administrator, in one home region, so it is read through the SDK with the
+parent's credentials: the instance (the saved home region first, then every enabled region until one answers),
+every user and group of the identity store, each permission set with its managed, customer-managed and inline
+policies, boundary and session duration, who is assigned where (`ListAccountAssignmentsForPrincipal` once per user
+and once per group, folded so each row says `direct` or `group <name>`), and the applications. What no Identity
+Center API says comes from elsewhere: the last sign-in and the sign-ins and failures of the last 30 days from the
+home region's CloudTrail (`sso.amazonaws.com` events, 90 days back at most), the last write per account from the
+stored trail (an SSO session is named after the user), and when each permission set's `AWSReservedSSO_*` role was
+last used in each account (`aws_iam_role`, so `iam:ListRoles` and `iam:GetRole`). MFA devices and the enabled flag
+are exposed by no API and the panel says so. A permission set is administrative by the same rule as an IAM user
+(AdministratorAccess or an inline Allow * on *), and a user is an administrator when one such set is assigned to
+them. Under a member account's scope the panel keeps the users with an assignment there. In the graph each user is
+an `AdvisorIdentity {kind: user, native_type: sso_user}` IN_ACCOUNT of the management account, with `human: true`,
+`mfa: null`, `admin`, `policies` (permission set names), `accounts`, `assignments`, `last_used_at` and the sign-in
+counts.
+
+What AWS itself tells the account is on the Changes page (`src/cloud_notifications.ts`, `GET
+/api/cloud-notifications?days=`, `POST /api/cloud-notifications/refresh`; refreshed with the daily logs job). User
+Notifications, the bell in the console, has two feeds, both read through the SDK against us-east-1 per account like
+the trail: the AWS-managed notifications every account gets without setup (Health events, service announcements,
+billing and security notices; `ListManagedNotificationEvents`) and the events the account's own notification
+configurations deliver, which exist only where a notification hub is registered (`ListNotificationEvents`; without a
+hub the panel notes it). Each row keeps the source, event type, headline, kind (alert, warning, announcement,
+informational), health, origin region, related account and aggregation count; rows are kept 90 days and the panel
+groups them by source and account. In the graph each is an `AdvisorNotification` IN_ACCOUNT of the account that
+received it.
+
 Accounts are nodes with their hierarchy. Every account the advisor is pointed at is an `AdvisorAccount` with its
 name, how it is reached (in words, never a secret), whether it is enabled and may be acted in, its last credential
 test and its role: `management` for an AWS parent other accounts are members of, `member` for a child, `standalone`

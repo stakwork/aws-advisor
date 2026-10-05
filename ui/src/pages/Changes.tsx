@@ -1,5 +1,6 @@
 import { useScopeInfo } from "../scope";
 import { VercelChanges } from "../components/vercel";
+import { CloudNotifications } from "../components/cloudNotifications";
 import { useEffect, useState } from "react";
 import { api, when } from "../api";
 import { Badge, Button, Card, Empty, Td, Th } from "../components/ui";
@@ -34,7 +35,7 @@ function AwsChanges() {
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold text-zinc-100">Changes and logs</h1>
-      <p className="max-w-3xl text-sm text-zinc-400">Who changed what in the account, from CloudTrail write events, with machine heartbeat (agents checking in, log streams opening, Batch and EKS running their tasks) counted but left out. Below, what CloudWatch Logs ingests and stores, priced at list. Both feed the agent's morning observation.</p>
+      <p className="max-w-3xl text-sm text-zinc-400">Who changed what in the account, from CloudTrail write events, with machine heartbeat (agents checking in, log streams opening, Batch and EKS running their tasks) counted but left out. Below, what CloudWatch Logs ingests and stores, priced at list. Between them, what AWS itself told the account through User Notifications (the console bell). All three feed the agent's morning observation.</p>
       {msg && <div className="text-xs text-zinc-500">{msg}</div>}
       <Card title={<span className="flex flex-wrap items-center justify-between gap-2"><span>Changes · CloudTrail <span className="font-normal text-zinc-500">(per account: the parent with its own credentials, each member through its read role)</span> {trail?.last_fetch ? <span className="font-normal text-zinc-500">· collected {when(trail.last_fetch)} · {trail.events} events, {trail.noise.toLocaleString()} heartbeats hidden</span> : null}</span>
         <span className="flex items-center gap-1 text-xs">{HOURS.map((h) => <button key={h} onClick={() => setHours(h)} className={`rounded border px-1.5 py-0.5 ${h === hours ? "border-zinc-400 text-zinc-100" : "border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}>{h === 168 ? "7d" : `${h}h`}</button>)}<Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => refresh("trail")} disabled={busy !== ""}>{busy === "trail" ? "Collecting (3-4 min)…" : "Collect now"}</Button></span></span>}>
@@ -57,6 +58,7 @@ function AwsChanges() {
           </div>
         )}
       </Card>
+      <CloudNotifications />
       <Card title={<span className="flex flex-wrap items-center justify-between gap-2"><span>CloudWatch Logs {logs?.refreshed_at ? <span className="font-normal text-zinc-500">· {logs.total_gb_day != null ? `${logs.total_gb_day.toFixed(1)} GB/day ingested ≈ ${Math.round(logs.total_gb_day * 30 * 0.5)} USD/month` : "ingestion unknown"} · {logs.total_stored_gb.toFixed(0)} GB stored · {logs.no_retention} groups never expire</span> : null}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => refresh("logs")} disabled={busy !== ""}>{busy === "logs" ? "Collecting…" : "Collect now"}</Button></span>}>
         {!logs ? <Empty>Loading…</Empty> : !logs.refreshed_at ? <Empty>Not collected yet; Collect now reads every log group and 14 days of ingestion for the biggest ones.</Empty> : (
           <table className="w-full border-collapse text-sm">

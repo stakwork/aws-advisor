@@ -17,6 +17,7 @@ export function resourceAccountIndex(primary: string): { of: (resource: string |
   for (const r of rows("select name as id, account_id from inventory_s3")) put(r.id, r.account_id);
   for (const r of rows("select volume_id as id, account_id from inventory_ebs")) put(r.id, r.account_id);
   for (const r of rows("select arn as id, account_id from inventory_iam_user")) put(r.id, r.account_id);
+  for (const r of rows("select user_id as id, account_id from inventory_sso_user")) put(r.id, r.account_id);
   // what the watcher, the review and the rules name besides instances: pools, clusters, filters, networks, gateways, log groups, functions by name
   for (const r of rows("select pool as id, account_id from inventory_ec2 where pool is not null and pool <> '' group by pool, account_id")) put(r.id, r.account_id);
   for (const r of rows("select arn as id, account_id from inventory_cluster")) put(r.id, r.account_id);

@@ -13,6 +13,7 @@ import { listAccounts, memberConnections } from "../accounts.js";
 import { dispatchToAgent, handleAgentResult, openAgentEvents, pollAgentResult } from "../agent.js";
 import { getRunChanges } from "../changes.js";
 import { listIamUsers, iamSummary } from "../iam_inventory.js";
+import { ssoSummary } from "../sso_inventory.js";
 import { ACCOUNT_TARGET_RE, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
 import { postRejectionLearning } from "../learnings.js";
 import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
@@ -676,7 +677,7 @@ api.post("/inventory/refresh", async (_req, res) => {
   catch (e: any) { res.status(502).json({ error: e.message }); }
 });
 
-api.get("/inventory/summary", (req, res) => { const scope = accountScope(req.query as any); res.json({ ...inventorySummary(scope), iam: iamSummary(scope) }); });
+api.get("/inventory/summary", (req, res) => { const scope = accountScope(req.query as any); res.json({ ...inventorySummary(scope), iam: iamSummary(scope), sso: ssoSummary(scope) }); });
 
 api.get("/inventory/ec2", (req, res) => {
   res.json(withDomains(listEc2({ scope: accountScope(req.query as any), state: str(req.query.state), ssm: str(req.query.ssm), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["ec2", "instance_id"]));

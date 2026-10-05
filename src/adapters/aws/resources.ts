@@ -246,6 +246,17 @@ export function guessedType(resource: string): string | null {
 }
 
 /** An IAM user as an AdvisorIdentity {kind: user}: human when it has console access, with MFA, admin, credentials and last use as the ontology names them. */
+/** An Identity Center user as an AdvisorIdentity {kind: user, native_type: sso_user}: always a person, MFA unknown to the API, admin through an administrative permission set, last_used_at the last portal sign-in. */
+export function resourceFromSsoUser(row: any): ResourceNode {
+  const assignments: any[] = safeJson(row.assignments) || [];
+  const activity = safeJson(row.activity) || {};
+  return base(String(row.user_id), "AdvisorIdentity", "sso_user", row, str(row.user_name), Boolean(row.gone) ? "terminated" : "available", null, new Map(), {
+    kind: "user", human: true, mfa: null, admin: Boolean(row.admin), credentials: 0, credential_age_days: null, last_used_at: str(row.last_sign_in), display_name: str(row.display_name), email: str(row.email), identity_provider: str(row.idp),
+    groups: safeJson(row.groups) || [], policies: [...new Set(assignments.map((a) => String(a.permission_set)))], accounts: [...new Set(assignments.map((a) => String(a.account_id)))], assignments: assignments.map((a) => `${a.account_id} ${a.permission_set} (${a.via})`),
+    applications: safeJson(row.applications) || [], sign_ins_30d: num(row.sign_ins_30d), failed_sign_ins_30d: num(row.failed_30d), activity: Object.entries(activity).map(([acct, t]) => `${acct} ${String(t).slice(0, 16)}`), identity_store_id: str(row.identity_store_id),
+  }, [apiObserved(row)]);
+}
+
 export function resourceFromIamUser(row: any): ResourceNode {
   const keys = safeJson(row.access_keys) || [];
   return base(String(row.arn), "AdvisorIdentity", "iam_user", row, str(row.name), Boolean(row.gone) ? "terminated" : "available", null, new Map(), {

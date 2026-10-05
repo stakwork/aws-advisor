@@ -4,7 +4,7 @@ import { db } from "../../db.js";
 import { credentialsMeta, hasConnectionFile } from "../../steampipe.js";
 import { AWS, type AccountRecord, type ProviderAdapter, type ResourceNode } from "../types.js";
 import { resourceAccountIndex } from "../../resource_index.js";
-import { TELEMETRY, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRds, resourceFromS3, resourceFromZone, type RoleMap } from "./resources.js";
+import { TELEMETRY, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromZone, type RoleMap } from "./resources.js";
 
 /**
  * The AWS adapter: Steampipe and the SDK behind the generic model. Credentials and the parent/member registry are
@@ -38,6 +38,7 @@ const AWS_LAYERS: ProviderAdapter["layers"] = [
     { name: "capacity patterns", mirror: async () => (await import("../../graph_mirror.js")).mirrorCapacityPatterns() },
     { name: "network", mirror: async () => (await import("../../graph_network.js")).mirrorNetwork() },
     { name: "clusters", mirror: async () => (await import("../../graph_clusters.js")).mirrorClusters() },
+    { name: "notifications", mirror: async () => (await import("../../graph_mirror.js")).mirrorCloudNotifications() },
     { name: "software", mirror: async () => (await import("../../graph_software.js")).mirrorSoftware() },
 ];
 
@@ -98,5 +99,6 @@ function rawResources(account: string, roles: ReturnType<typeof roleMap>): Resou
       ...rows("select * from inventory_route53_zone").map(resourceFromZone),
       ...rows("select * from inventory_route53_record").map(resourceFromDnsRecord),
       ...rows("select * from inventory_iam_user").map(resourceFromIamUser),
+      ...rows("select * from inventory_sso_user").map(resourceFromSsoUser),
     ];
 }

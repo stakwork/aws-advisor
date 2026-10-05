@@ -75,6 +75,7 @@ export const probeDocumentArn = (accountId = "*") => `arn:aws:ssm:*:${accountId}
 /** Steampipe table -> the IAM action its List/Describe call needs (only the tables this app and its benchmarks use). */
 export const TABLE_ACTIONS: Record<string, string> = {
   aws_account: "iam:ListAccountAliases",
+  aws_iam_role: "iam:ListRoles",
   aws_region: "ec2:DescribeRegions",
   aws_ec2_instance: "ec2:DescribeInstances",
   aws_ec2_instance_metric_cpu_utilization_daily: "cloudwatch:GetMetricStatistics",
@@ -427,6 +428,12 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "sts:GetCallerIdentity",
         "iam:ListAccountAliases", "iam:SimulatePrincipalPolicy", "iam:ListUsers", "iam:GetUser", "iam:ListAccessKeys", "iam:GetAccessKeyLastUsed", "iam:ListGroupsForUser", "iam:ListAttachedUserPolicies", "iam:ListUserPolicies", "iam:GetUserPolicy", "iam:GetLoginProfile", "iam:ListMFADevices", "iam:ListUserTags",
         "organizations:DescribeOrganization", "organizations:ListAccounts",
+        // IAM Identity Center (the management account or its delegated administrator answers; elsewhere the calls return nothing and the Identities tab says so)
+        "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",
+        "identitystore:ListUsers", "identitystore:ListGroups", "identitystore:ListGroupMemberships", "identitystore:DescribeUser", "identitystore:DescribeGroup",
+        "iam:ListRoles", "iam:GetRole",
+        // User Notifications (the console bell): the AWS-managed feed and the account's own configurations
+        "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent",
       ],
       Resource: "*",
     },

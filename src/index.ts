@@ -23,6 +23,8 @@ import { probes } from "./routes/probes.js";
 import { clusters } from "./routes/clusters.js";
 import { vulnerabilities } from "./routes/vulnerabilities.js";
 import { vercel } from "./routes/vercel.js";
+import { identityCenter } from "./routes/identity_center.js";
+import { cloudNotifications } from "./routes/cloud_notifications.js";
 import "./actions/index.js";
 import { ensureOperationalPatterns } from "./concepts.js";
 loadTasks();
@@ -61,6 +63,8 @@ app.use("/api", probes);
 app.use("/api", clusters);
 app.use("/api", vulnerabilities);
 app.use("/api", vercel);
+app.use("/api", identityCenter);
+app.use("/api", cloudNotifications);
 app.use("/api", api);
 mountMcp(app, "/mcp");
 
