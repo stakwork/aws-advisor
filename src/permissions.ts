@@ -173,6 +173,24 @@ export const TABLE_ACTIONS: Record<string, string> = {
   aws_api_gateway_domain_name: "apigateway:GET",
   aws_api_gatewayv2_domain_name: "apigateway:GET",
   aws_tagging_resource: "tag:GetResources",
+  // the platform services inventory (src/services/)
+  aws_acm_certificate: "acm:ListCertificates",
+  aws_athena_workgroup: "athena:ListWorkGroups",
+  aws_backup_vault: "backup:ListBackupVaults",
+  aws_backup_plan: "backup:ListBackupPlans",
+  aws_backup_selection: "backup:ListBackupSelections",
+  aws_backup_protected_resource: "backup:ListProtectedResources",
+  aws_backup_recovery_point: "backup:ListRecoveryPointsByBackupVault",
+  aws_cloudformation_stack: "cloudformation:ListStacks",
+  aws_cloudformation_stack_resource: "cloudformation:ListStackResources",
+  aws_guardduty_detector: "guardduty:ListDetectors",
+  aws_guardduty_finding: "guardduty:ListFindings",
+  aws_kms_key: "kms:ListKeys",
+  aws_wafv2_web_acl: "wafv2:ListWebACLs",
+  aws_sns_topic: "sns:ListTopics",
+  aws_sns_topic_subscription: "sns:ListSubscriptions",
+  aws_efs_file_system: "elasticfilesystem:DescribeFileSystems",
+  aws_efs_mount_target: "elasticfilesystem:DescribeMountTargets",
 };
 
 /** Service names as the AWS SDK prints them in "operation error <Service>: <Operation>" -> IAM prefix. */
@@ -184,6 +202,7 @@ const SDK_SERVICE_PREFIX: Record<string, string> = {
   apigateway: "apigateway", savingsplans: "savingsplans", "savings plans": "savingsplans", sts: "sts", iam: "iam",
   "resource groups tagging api": "tag", "elastic load balancing v2": "elasticloadbalancing", "elastic load balancing": "elasticloadbalancing",
   "application auto scaling": "application-autoscaling",
+  acm: "acm", athena: "athena", backup: "backup", cloudformation: "cloudformation", guardduty: "guardduty", kms: "kms", wafv2: "wafv2", efs: "elasticfilesystem",
 };
 
 /** Thrifty benchmark name -> the service whose read actions it needs, for a benchmark that fails before naming a table. */
@@ -201,6 +220,8 @@ const SERVICE_READ_ACTION: Record<string, string> = {
   cloudtrail: "cloudtrail:DescribeTrails", cloudfront: "cloudfront:List*", route53: "route53:List*", redshift: "redshift:Describe*",
   elasticmapreduce: "elasticmapreduce:List*", apigateway: "apigateway:GET", savingsplans: "savingsplans:DescribeSavingsPlans", sts: "sts:GetCallerIdentity",
   iam: "iam:ListAccountAliases", tag: "tag:GetResources", elasticloadbalancing: "elasticloadbalancing:Describe*", "application-autoscaling": "application-autoscaling:Describe*",
+  acm: "acm:ListCertificates", athena: "athena:ListWorkGroups", backup: "backup:List*", cloudformation: "cloudformation:ListStacks", guardduty: "guardduty:ListDetectors",
+  kms: "kms:ListKeys", wafv2: "wafv2:ListWebACLs", elasticfilesystem: "elasticfilesystem:DescribeFileSystems", sns: "sns:ListTopics",
 };
 
 const PERMISSION_PATTERNS = [
@@ -415,7 +436,7 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks", "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
         "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
         "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
-        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags",
+        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
         "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization", "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
@@ -451,6 +472,13 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "iam:ListRolePolicies", "iam:GetRolePolicy", "iam:ListUserPolicies",
         // the foundational security benchmark's SNS controls (topic encryption, delivery logging, subscriptions)
         "sns:ListTopics", "sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:ListSubscriptions", "sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes",
+        // the platform services inventory (src/services/): certificates, workgroups, backups, stacks, web ACLs, threat detection
+        "acm:ListCertificates", "acm:DescribeCertificate", "acm:ListTagsForCertificate",
+        "athena:ListWorkGroups", "athena:GetWorkGroup",
+        "backup:ListBackupVaults", "backup:DescribeBackupVault", "backup:ListBackupPlans", "backup:GetBackupPlan", "backup:ListBackupSelections", "backup:GetBackupSelection", "backup:ListProtectedResources", "backup:ListRecoveryPointsByBackupVault", "backup:ListTags",
+        "cloudformation:ListStacks", "cloudformation:DescribeStacks", "cloudformation:ListStackResources", "cloudformation:DescribeStackResources",
+        "wafv2:ListWebACLs", "wafv2:GetWebACL", "wafv2:ListResourcesForWebACL", "wafv2:GetLoggingConfiguration", "wafv2:ListTagsForResource",
+        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
         // User Notifications (the console bell): the AWS-managed feed and the account's own configurations
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent",
       ],

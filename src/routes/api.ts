@@ -28,6 +28,7 @@ import { quotaStatus } from "../quota.js";
 import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refreshInventory } from "../inventory.js";
 import { listLambda } from "../lambda_inventory.js";
 import { listDynamodb } from "../dynamodb_inventory.js";
+import { SERVICE_TABS, listServices, listThreatFindings, type ServiceTab } from "../service_inventory.js";
 import { listEbs } from "../ebs_inventory.js";
 import { listS3, refreshS3Inventory } from "../s3_inventory.js";
 import { elbsForInstance, listElb } from "../elb_inventory.js";
@@ -722,6 +723,13 @@ api.post("/inventory/rds/:id/load/refresh", async (req, res) => {
   finally { loadInFlight.delete(id); }
 });
 api.get("/inventory/elasticache", (req, res) => res.json(withDomains(listElasticache({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["elasticache", "cache_cluster_id"], ["elasticache_group", "replication_group"])));
+// the platform services, one generic kind per tab (src/service_inventory.ts); `type` narrows a tab with two kinds (backups: backup_vault | backup_plan)
+api.get("/inventory/services/:tab", (req, res) => {
+  const tab = String(req.params.tab) as ServiceTab;
+  if (!(tab in SERVICE_TABS)) { res.status(404).json({ error: `unknown kind ${tab}` }); return; }
+  res.json(listServices(tab, { scope: accountScope(req.query as any), q: str(req.query.q), gone: flag(req.query.gone), type: str(req.query.type) }));
+});
+api.get("/inventory/threat-findings", (req, res) => res.json(listThreatFindings({ scope: accountScope(req.query as any), q: str(req.query.q), gone: flag(req.query.gone), archived: flag(req.query.archived), detector: str(req.query.detector) })));
 api.get("/inventory/dynamodb", (req, res) => res.json(listDynamodb({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) })));
 api.get("/inventory/lambda", (req, res) => res.json(withDomains(listLambda({ scope: accountScope(req.query as any), q: str(req.query.q), sort: str(req.query.sort), gone: flag(req.query.gone) }), ["lambda", "name"])));
 // Load balancers with their targets resolved; the Route 53 records that lead to each (kinds alb/nlb/clb from the resolver, lb when only an interface named it).

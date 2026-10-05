@@ -42,6 +42,8 @@ export async function accountsOverview(): Promise<AccountOverview[]> {
   const res = byAcct(() => ({ ec2_running: 0, ec2_total: 0, rds: 0, lambda: 0, dynamodb: 0, elb: 0, s3: 0, ebs_gb: 0, clusters: 0, list: 0 }));
   for (const r of rows("select account_id, count(*) as total, coalesce(sum(state = 'running'), 0) as running, coalesce(sum(monthly_usd), 0) as usd from inventory_ec2 where gone = 0 group by account_id")) { const x = res.get(r.account_id); x.ec2_total += n(r.total); x.ec2_running += n(r.running); x.list += n(r.usd); }
   for (const [t, col] of [["inventory_rds", "rds"], ["inventory_lambda", "lambda"], ["inventory_dynamodb", "dynamodb"], ["inventory_elb", "elb"], ["inventory_s3", "s3"]] as const) for (const r of rows(`select account_id, count(*) as c, coalesce(sum(monthly_usd), 0) as usd from ${t} where gone = 0 group by account_id`)) { const x = res.get(r.account_id); (x as any)[col] += n(r.c); x.list += n(r.usd); }
+  // the platform services (keys, web ACLs, file systems, vaults, topics, workgroups) add to the list price; they are not counted as resources here
+  for (const r of rows("select account_id, coalesce(sum(monthly_usd), 0) as usd from inventory_service where gone = 0 group by account_id")) res.get(r.account_id).list += n(r.usd);
   for (const r of rows("select account_id, coalesce(sum(size_gb), 0) as gb, coalesce(sum(monthly_usd), 0) as usd from inventory_ebs where gone = 0 group by account_id")) { const x = res.get(r.account_id); x.ebs_gb += n(r.gb); x.list += n(r.usd); }
   for (const r of rows("select account_id, count(*) as c from inventory_cluster where gone = 0 group by account_id")) res.get(r.account_id).clusters += n(r.c);
 

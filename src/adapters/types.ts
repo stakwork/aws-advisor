@@ -9,7 +9,8 @@
 export const AWS = "aws";
 export type ProviderId = "aws" | "gcp" | "azure" | "vercel" | "cloudflare";
 
-export const RESOURCE_LABELS = ["AdvisorCompute", "AdvisorDatabase", "AdvisorCache", "AdvisorLoadBalancer", "AdvisorFunction", "AdvisorStorage", "AdvisorDeployment", "AdvisorDnsZone", "AdvisorDnsRecord", "AdvisorIdentity"] as const;
+export const RESOURCE_LABELS = ["AdvisorCompute", "AdvisorDatabase", "AdvisorCache", "AdvisorLoadBalancer", "AdvisorFunction", "AdvisorStorage", "AdvisorDeployment", "AdvisorDnsZone", "AdvisorDnsRecord", "AdvisorIdentity",
+  "AdvisorCertificate", "AdvisorMessaging", "AdvisorSecret", "AdvisorAnalytics", "AdvisorStack", "AdvisorBackupPlan", "AdvisorDetector", "AdvisorFilter"] as const;
 export type ResourceLabel = (typeof RESOURCE_LABELS)[number];
 export type GenericState = "running" | "stopped" | "pending" | "terminated" | "available" | "degraded" | "unknown";
 export type TelemetryKind = "api" | "metrics" | "probe" | "logs" | "audit" | "bill";

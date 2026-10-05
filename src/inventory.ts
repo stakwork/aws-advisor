@@ -14,6 +14,7 @@ import { refreshRoute53Inventory, route53Summary } from "./route53_inventory.js"
 import { elbSummary, refreshElbInventory } from "./elb_inventory.js";
 import { refreshIamInventory } from "./iam_inventory.js";
 import { refreshSsoInventory } from "./sso_inventory.js";
+import { refreshServiceInventory, serviceSummary } from "./service_inventory.js";
 
 /**
  * Inventory: a snapshot of EC2 instances (with their SSM status, EBS, CPU, latest probe and list price),
@@ -27,7 +28,7 @@ export interface RefreshResult {
   refreshed_at: string;
   ec2: number;
   rds: number;
-  elasticache: number; lambda: number; ebs: number; elb: number; s3?: number; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
+  elasticache: number; lambda: number; ebs: number; elb: number; s3?: number; services?: Record<string, number>; route53: { zones: number; records: number; linked: number; unmatched: number } | null;
   clusters?: { total: number; eks: number; ecs: number; readable: number; nodes: number; workloads: number };
   prices_fetched: number;
   errors: string[];
@@ -437,11 +438,16 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   // today shows its buckets after this refresh rather than after the next nightly job
   let s3 = 0;
   try { const r = await refreshS3Inventory((l) => console.log(`[inventory] ${l}`)); s3 = r.buckets; errors.push(...r.errors); } catch (e: any) { errors.push(`S3 buckets: ${e?.message || e}`); }
+  // certificates, topics, keys, file systems, backups, workgroups, web ACLs, stacks and detectors (src/services/): after the
+  // balancers, buckets and functions, so their links land on rows this refresh wrote
+  let services: Record<string, number> = {};
+  try { services = await refreshServiceInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`), primaryAccountIdOf()); console.log(`[inventory] services: ${Object.entries(services).map(([k, v]) => `${v} ${k}`).join(", ") || "none"}`); }
+  catch (e: any) { errors.push(`services: ${e?.message || e}`); }
   // last, so the DNS links read the EC2, RDS, S3 and Lambda rows just written
   let route53: RefreshResult["route53"] = null;
   if (opts.dns) { const r53 = await refreshRoute53Inventory(); errors.push(...r53.errors); route53 = { zones: r53.zones, records: r53.records, linked: r53.linked, unmatched: r53.unmatched }; }
   if (ec2Rows || rdsRows || cacheRows) setSetting("inventory_refreshed_at", now);
-  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, elb, s3, route53, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
+  return { refreshed_at: now, ec2, rds, elasticache, lambda, ebs: ebsVolumes, elb, s3, services, route53, prices_fetched: fetched, errors, took_ms: Date.now() - t0 };
 }
 
 export const inventoryRefreshedAt = () => getSetting("inventory_refreshed_at");
@@ -602,5 +608,5 @@ export function inventorySummary(scope?: AccountScope | null) {
     from inventory_elasticache where gone = 0`).get() as Record<string, number>;
   const cacheGone = (scopedStmt(scope, "select count(*) as n from inventory_elasticache where gone = 1").get() as { n: number }).n;
   const r1 = (o: Record<string, number>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 100) / 100 : v]));
-  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(scope), dynamodb: dynamodbSummary(scope), ebs: ebsSummary(scope), elb: elbSummary(scope), s3: s3Summary(scope), route53: route53Summary(scope), clusters: (() => { try { return clusterSummary(scope); } catch { return undefined; } })() };
+  return { refreshed_at: inventoryRefreshedAt(), ec2: { ...r1(ec2), gone: ec2Gone }, rds: { ...r1(rds), gone: rdsGone }, elasticache: { ...r1(cache), gone: cacheGone }, lambda: lambdaSummary(scope), dynamodb: dynamodbSummary(scope), ebs: ebsSummary(scope), elb: elbSummary(scope), s3: s3Summary(scope), route53: route53Summary(scope), services: serviceSummary(scope), clusters: (() => { try { return clusterSummary(scope); } catch { return undefined; } })() };
 }

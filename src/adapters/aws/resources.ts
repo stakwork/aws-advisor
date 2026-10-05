@@ -26,7 +26,16 @@ export function genericState(nativeType: string, state: string | null | undefine
     if (s === "terminated" || s === "shutting-down") return "terminated";
     return "unknown";
   }
-  if (/^(available|active|in-use|issued|insync|ok)$/.test(s)) return "available";
+  if (nativeType === "cloudformation_stack") {
+    if (/_in_progress$/.test(s)) return "pending";
+    if (s === "delete_complete") return "terminated";
+    if (/_failed$/.test(s) || s === "rollback_complete" || s === "import_rollback_complete") return "degraded";
+    return /_complete$/.test(s) ? "available" : "unknown";
+  }
+  if (nativeType === "kms_key") return s === "enabled" ? "available" : s === "disabled" || s === "pendingdeletion" || s === "pendingreplicadeletion" ? "stopped" : s === "unavailable" ? "degraded" : /^(creating|updating|pendingimport)$/.test(s) ? "pending" : "unknown";
+  if (nativeType === "acm_certificate") return s === "issued" ? "available" : s === "pending_validation" ? "pending" : /^(expired|revoked|failed|validation_timed_out)$/.test(s) ? "degraded" : s === "inactive" ? "stopped" : "unknown";
+  if (/^(available|active|in-use|issued|insync|ok|enabled)$/.test(s)) return "available";
+  if (s === "disabled") return "stopped";
   if (/^(stopped|stopping)$/.test(s)) return "stopped";
   if (/^(creating|modifying|provisioning|pending|backing-up|starting|rebooting|upgrading|renaming|configuring-enhanced-monitoring|snapshotting|maintenance|resetting-master-credentials)$/.test(s)) return "pending";
   if (/^(deleting|deleted|terminated)$/.test(s)) return "terminated";
@@ -235,7 +244,20 @@ export function guessedType(resource: string): string | null {
     if (svc === "dynamodb") return "database";
     if (svc === "ecr") return "repository";
     if (svc === "elasticfilesystem") return "file_system";
-    if (svc === "kms") return "key";
+    if (svc === "kms") return /:alias\//.test(r) ? "key_alias" : "key";
+    if (svc === "acm") return "certificate";
+    if (svc === "sns") return "topic";
+    if (svc === "sqs") return "queue";
+    if (svc === "firehose") return "stream";
+    if (svc === "backup") return /:backup-plan:/.test(r) ? "backup_plan" : "backup_vault";
+    if (svc === "athena") return "workgroup";
+    if (svc === "cloudformation") return "stack";
+    if (svc === "wafv2") return "web_acl";
+    if (svc === "guardduty") return "detector";
+    if (svc === "cloudfront") return "cdn_distribution";
+    if (svc === "apigateway") return "api";
+    if (svc === "iam") return "identity";
+    if (svc === "eks" || svc === "ecs") return "cluster";
     if (svc === "cloudwatch") return "alarm";
     if (svc === "logs") return "log_group";
     if (svc === "elasticloadbalancing") return "load_balancer";
@@ -243,6 +265,37 @@ export function guessedType(resource: string): string | null {
     return svc;
   }
   return null;
+}
+
+/** The generic label each platform service row lands on (src/service_inventory.ts); WAF is a filter the provider bills. */
+export const SERVICE_LABEL: Record<string, ResourceLabel> = {
+  acm_certificate: "AdvisorCertificate", sns_topic: "AdvisorMessaging", kms_key: "AdvisorSecret", efs_file_system: "AdvisorStorage", backup_vault: "AdvisorStorage", backup_plan: "AdvisorBackupPlan",
+  athena_workgroup: "AdvisorAnalytics", cloudformation_stack: "AdvisorStack", wafv2_web_acl: "AdvisorFilter", guardduty_detector: "AdvisorDetector",
+};
+
+/** Neo4j holds primitives and lists of primitives only: a nested object or list of objects becomes its JSON text. Pure. */
+export function flatProps(props: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || typeof v !== "object") out[k] = v ?? null;
+    else if (Array.isArray(v)) out[k] = v.every((x) => x == null || typeof x !== "object") ? v.filter((x) => x != null) : JSON.stringify(v);
+    else out[k] = JSON.stringify(v);
+  }
+  return out;
+}
+
+/** A platform service row (certificate, topic, key, file system, vault, plan, workgroup, stack, web ACL, detector) as its generic node; the collector already wrote the props in the ontology's words. */
+export function resourceFromService(row: any, roles: RoleMap = new Map()): ResourceNode | null {
+  const label = SERVICE_LABEL[String(row.native_type)];
+  if (!label) return null;
+  const props = safeJson(row.props) || {};
+  const observed: ResourceNode["observed"] = [apiObserved(row)];
+  const metric = props.messages_30d ?? props.requests_30d ?? props.scanned_gb_30d;
+  if (metric != null) observed.push({ kind: "metrics", status: "ok", last_at: str(row.last_seen), detail: props.messages_30d != null ? "publishes over 30 days" : props.requests_30d != null ? "requests over 30 days" : "bytes scanned over 30 days" });
+  const tags = safeJson(row.tags);
+  return base(String(row.id), label, String(row.native_type), row, str(row.name), str(row.state), str(row.region) || null, roles, {
+    ...flatProps(props), created_at: str(row.created), tags: tags && Object.keys(tags).length ? JSON.stringify(tags) : null,
+  }, observed);
 }
 
 /** An IAM user as an AdvisorIdentity {kind: user}: human when it has console access, with MFA, admin, credentials and last use as the ontology names them. */

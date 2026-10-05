@@ -385,6 +385,11 @@ Queues, topics and streams: SQS, SNS, Kinesis, Pub/Sub, Service Bus, Vercel Queu
 | `messages_30d` | throughput |
 | `dlq` | has a dead-letter queue |
 | `encrypted` | messages are encrypted at rest with a provider or customer key |
+| `subscriptions` / `pending` / `protocols` | (topics) confirmed and pending subscribers, counted by protocol (`lambda 2`, `email 1`); people's addresses are never stored |
+| `fifo` | ordered, exactly-once delivery |
+
+Edges: `DELIVERS_TO {protocol}` → the functions, queues and streams a topic delivers to (a ref when not inventoried);
+`ENCRYPTS` ← the key. An SNS topic is `native_type: sns_topic`, priced on publishes.
 
 ### AdvisorStorage
 
@@ -403,6 +408,35 @@ Buckets, file systems, block volumes and snapshots.
 | `attached_to` | (block) the compute it is attached to (→ `STORES_ON` from the compute) |
 | `device` | (block) device name |
 | `parent` | (snapshot) the volume it was taken from |
+
+A file system (EFS, Filestore, Azure Files) adds `standard_gb` / `ia_gb` / `archive_gb` (size by storage class),
+`class: regional | one_zone`, `performance_mode`, `throughput_mode`, `provisioned_mibps`, `mount_targets`,
+`automatic_backups`; edges `IN_NETWORK`, `IN_SEGMENT` (one per mount target's subnet) and `GUARDED_BY` the filters on
+its mount targets, `ENCRYPTS` ← its key.
+
+A backup store (`kind: backup`: an AWS Backup vault, a Recovery Services vault, a GCP backup vault) adds
+`recovery_points`, `size_gb` with `warm_gb` / `cold_gb`, `by_type` (`RDS 12`), `oldest_at` / `newest_at`, `locked`,
+`min_retention_days` / `max_retention_days`, `protected_resources`; edges `BACKED_UP_TO {last_backup_at,
+resource_type}` ← every resource whose latest backup landed in it, `ENCRYPTS` ← its key, `STORES_IN` ← the plans that
+target it.
+
+### AdvisorBackupPlan
+
+A schedule and retention policy that decides what is backed up and for how long: AWS Backup plans, Azure Backup
+policies, GCP backup plans. Not a store (that is `AdvisorStorage {kind: backup}`) and not a resource that costs anything.
+
+| property | meaning |
+|---|---|
+| `rules` / `schedules` | how many rules, each as one line: name, schedule expression, retention, cold storage, copies |
+| `retention_days` / `keeps_forever` | the longest retention; a rule without one keeps backups forever (a cost finding) |
+| `cold_after_days` / `copies` | lifecycle to cold storage; copies to another vault or region |
+| `vaults` | the stores its rules target |
+| `selections` / `selects_all` / `selected_by_arn` | what it covers in words (by ARN, by tag, every supported resource) |
+| `last_run_at` | the last time it ran |
+
+Edges: `STORES_IN` → `AdvisorStorage {kind: backup}`; `PROTECTS` → the resources a selection names by ARN. Tag and
+wildcard selections stay words: what they match is decided by the provider at backup time, and the store's
+`BACKED_UP_TO` edges say what actually got backed up.
 
 ### AdvisorLoadBalancer
 
@@ -459,7 +493,73 @@ deployment, Vercel). A `dangling` record is a finding in itself (subdomain takeo
 | `in_use` | something references it |
 | `key_algorithm` | `RSA-2048`, `EC-P256` |
 
-Edges: `SECURES` → `AdvisorEndpoint` (a TLS listener).
+Also `origin` (`issued` \| `imported` \| `private`), `days_left`, `used_by` (how many things use it), `wildcard`,
+`renewal_eligible`. Edges: `SECURES` → `AdvisorEndpoint` (a TLS listener) or, when the provider names only the
+resource that terminates TLS (ACM's `InUseBy`: a balancer, a distribution, an API), → that resource. An unused
+certificate is `in_use: false`; an expiring one is `days_left` ≤ 30.
+
+### AdvisorAnalytics
+
+A query engine or warehouse that runs analysts' queries over data it does not own: Athena workgroups, BigQuery
+reservations and datasets, Synapse serverless pools, Snowflake warehouses.
+
+| property | meaning |
+|---|---|
+| `kind` | `query_engine` (query in place) \| `warehouse` (owns its storage) |
+| `engine` / `engine_version` | `athena 3`, `bigquery`, `synapse` |
+| `scanned_gb_30d` / `metrics_published` | bytes scanned over 30 days, when the engine publishes them (needs telemetry `metrics`) |
+| `scan_limit_gb` | the per-query cutoff; none means a single query can scan everything |
+| `enforce_config` | the group's settings override the client's |
+| `output_location` / `output_encrypted` | where results land and whether they are encrypted |
+
+Edges: `WRITES_TO` → the bucket results go to. Athena is `native_type: athena_workgroup`, priced by bytes scanned.
+
+### AdvisorStack
+
+A unit of infrastructure as code: a CloudFormation stack, a Terraform workspace, a Pulumi stack, an ARM or Bicep
+deployment, a Deployment Manager deployment. What created a resource, and what drifts from its template.
+
+| property | meaning |
+|---|---|
+| `tool` | `cloudformation` \| `terraform` \| `pulumi` \| `arm` \| `deployment_manager` |
+| `resources` / `mapped_resources` / `resource_types` | how many resources it holds, how many the graph has a node for, the counts by type |
+| `failed_resources` | resources in a failed state |
+| `drift` | `in_sync` \| `drifted` \| `unknown` (never checked) |
+| `termination_protection` / `nested` / `root_id` | deletion protection; a stack inside another |
+| `status_reason` / `updated_at` | why it is in its state; the last update |
+
+The generic `state` folds the tool's status: `*_COMPLETE` is `available` (an update rolled back is still a working
+stack), `*_IN_PROGRESS` `pending`, `*_FAILED` and a rolled-back create `degraded`. Edges: `MANAGES {logical_id,
+resource_type}` → the resources and network nodes it created (never a ref: what the graph has no node for stays a
+count); `PART_OF` → the parent stack.
+
+### AdvisorDetector / AdvisorThreatFinding
+
+A provider's managed threat detection (GuardDuty, Security Command Center, Defender for Cloud) and what it found.
+Distinct from `AdvisorControl` (a compliance check the advisor runs): a finding here is the provider's own judgement
+of activity it observed.
+
+`AdvisorDetector` (a resource, one per region or project where it runs):
+
+| property | meaning |
+|---|---|
+| `kind` / `engine` | `threat_detection`; `guardduty`, `scc`, `defender` |
+| `enabled` | it is running |
+| `protections_on` / `protections_off` | the data sources it analyses (S3 data events, EKS audit logs, RDS logins, runtime, malware scans) |
+| `publishing_frequency` / `administrator` | how often findings are exported; the account that administers it |
+| `findings_open` / `findings_critical` / `findings_high` / `last_finding_at` | what it currently reports |
+
+`AdvisorThreatFinding` (an event, not a resource; kept as long as the provider keeps it, 90 days for GuardDuty):
+
+| property | meaning |
+|---|---|
+| `type` / `title` / `description` | the provider's finding type (`UnauthorizedAccess:EC2/SSHBruteForce`) and its words |
+| `severity` / `native_severity` | `low` \| `medium` \| `high` \| `critical` (GuardDuty: below 4, 7, 9, from 9); the provider's score |
+| `resource_type` / `resource` / `resource_name` | what it is about |
+| `count` / `first_seen_at` / `last_seen_at` | how often and when the activity was seen |
+| `archived` | a person dismissed it in the provider |
+
+Edges: `REPORTED_BY` → `AdvisorDetector`; `ABOUT` → the resource (or a ref); `IN_ACCOUNT`.
 
 ### AdvisorIdentity / AdvisorPolicy
 
@@ -500,9 +600,12 @@ Secrets, parameters, environment variables, keys. Never the value.
 | `rotation_enabled` / `last_rotated_at` | whether automatic rotation is configured and when the value last changed; an old, unrotated credential is a finding |
 | `scope` | (env vars) `production` \| `preview` \| `development` \| `all` |
 | `sensitive` | the provider marks it sensitive |
-| `state` | (keys) `enabled` \| `disabled` \| `pending_deletion` |
+| `key_state` | (keys) `enabled` \| `disabled` \| `pending_deletion` \| `pending_import` \| `unavailable`; the generic `state` folds it (`pending_deletion` and `disabled` are `stopped`) |
+| `managed` | (keys) the provider manages it (an AWS-managed key: free, rotated by AWS); false for the account's own |
+| `usage` / `spec` / `origin` / `aliases` / `multi_region` / `deletion_at` | (keys) what it does, its algorithm, where its material came from, its names, and when a scheduled deletion lands |
 
-Edges: `USES_SECRET` ← resources; `ENCRYPTS` (key → storage, database).
+Edges: `USES_SECRET` ← resources; `ENCRYPTS` (key → storage, database, messaging). A KMS key is `native_type:
+kms_key`; a reference by alias or key id is resolved to the key's ARN, an alias the advisor did not read stays a ref.
 
 ### AdvisorImage
 
@@ -690,6 +793,14 @@ Anything that allows or denies traffic or access.
 
 Edges: `IN_NETWORK`; `HAS_RULE` → `AdvisorFilterRule`; `WEARS` ← interfaces; `GUARDED_BY` ← segments, resources,
 deployments, endpoints.
+
+A web application firewall (`kind: web_acl`: AWS WAF, Cloud Armor, Azure WAF, Cloudflare WAF) is a filter in front of
+HTTP rather than a packet filter, and the provider bills it, so it is also an `AdvisorResource` with a `monthly_usd`.
+It carries `default_action` (`allow` \| `block`), `rules` and `rule_list` (one line per rule in priority order: a
+managed group, a rate limit, a custom statement, and what it does), `managed_groups`, `rate_limits`, `attached`,
+`edge` (attached to the CDN rather than a regional balancer), `logging`, `requests_30d` / `blocked_30d`. Its rules
+stay lines rather than `AdvisorFilterRule` nodes: they match requests, not ports and sources. Edges: `GUARDED_BY` ←
+the balancers and APIs it is attached to.
 
 ### AdvisorFilterRule
 
@@ -1152,7 +1263,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `OBSERVED_BY` | resource → AdvisorTelemetry | which sources cover it, with status and last report |
 | `HAS_ROLE` | resource → KnArchetype | the judged workload role; the same node a system reaches with `IS_A` |
 | `IN_POOL` | AdvisorCompute → AdvisorNodePool | member of an autoscaled group |
-| `PART_OF` | AdvisorNodePool → AdvisorCluster; AdvisorFunction → AdvisorDeployment; AdvisorApp → AdvisorDeployment (an observed container that belongs to a workload); KnSystem → KnSystem | containment |
+| `PART_OF` | AdvisorNodePool → AdvisorCluster; AdvisorFunction → AdvisorDeployment; AdvisorApp → AdvisorDeployment (an observed container that belongs to a workload); AdvisorStack → AdvisorStack (nested); KnSystem → KnSystem | containment |
 | `RUNS_IN` | AdvisorDeployment → AdvisorCluster | the platform hosting the workload |
 | `SCHEDULED_ON` | AdvisorDeployment → AdvisorCompute | the nodes a workload's pods or tasks run on (`pods`) |
 | `FRONTED_BY` | AdvisorEndpoint → AdvisorLoadBalancer \| AdvisorResourceRef | the balancer an Ingress or LoadBalancer Service created for a workload's endpoint |
@@ -1168,7 +1279,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `GRANTED` | AdvisorIdentity → AdvisorPolicy | permissions |
 | `CAN_ASSUME` | AdvisorIdentity → AdvisorIdentity | trust |
 | `CREATED` | AdvisorIdentity → resource | from the audit trail |
-| `ENCRYPTS` | AdvisorSecret (key) → storage, database | the key that encrypts a volume, bucket or database |
+| `ENCRYPTS` | AdvisorSecret (key) → storage, database, messaging | the key that encrypts a volume, bucket, file system, vault, database or topic |
 | `RUNS` | resource → AdvisorApp | a program running on it (edge carries the per-instance facts) |
 | `PROVIDED_BY` | AdvisorApp → AdvisorPackage | the package the program comes from |
 | `INSTALLED_ON` | AdvisorPackage → compute, deployment, function, image | installed software |
@@ -1179,7 +1290,13 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `EXPOSES` | resource → AdvisorEndpoint | something listening on it |
 | `SERVES` | AdvisorApp → AdvisorEndpoint; AdvisorDomain → AdvisorDeployment | what is behind it |
 | `FORWARDS_TO` | AdvisorEndpoint → AdvisorEndpoint | a listener to its targets |
-| `SECURES` | AdvisorCertificate → AdvisorEndpoint | TLS |
+| `SECURES` | AdvisorCertificate → AdvisorEndpoint, or the resource that terminates TLS | TLS |
+| `DELIVERS_TO {protocol}` | AdvisorMessaging → function, queue, stream | a topic's subscribers |
+| `MANAGES {logical_id, resource_type}` | AdvisorStack → resource, network node | infrastructure as code: what the stack created |
+| `PROTECTS` / `STORES_IN` | AdvisorBackupPlan → resource; → AdvisorStorage (backup) | what a plan names, where it stores |
+| `BACKED_UP_TO {last_backup_at}` | resource → AdvisorStorage (backup) | where its latest backup is |
+| `WRITES_TO` | AdvisorAnalytics → AdvisorStorage | where query results land |
+| `REPORTED_BY` | AdvisorThreatFinding → AdvisorDetector | the detector that found it |
 | `POINTS_TO` | AdvisorDnsRecord → endpoint, balancer, compute, deployment, storage, public IP | where a name resolves |
 | `IN_ZONE` / `DNS_OF` | record → zone; domain → zone | a record belongs to a zone; a domain is served by a zone |
 | `IN_NETWORK` | segments, filters, interfaces, gateways, resources → AdvisorNetwork | lives inside the network boundary |
@@ -1190,7 +1307,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `ATTACHED_TO` | AdvisorInterface → resource | the instance, database, balancer or function the interface belongs to |
 | `ASSIGNED` | AdvisorPublicIp → interface, gateway, balancer | the static address is mapped to it |
 | `WEARS` | AdvisorInterface → AdvisorFilter | the groups on the interface |
-| `GUARDED_BY` | segment, resource, deployment, endpoint → AdvisorFilter | a filter that applies |
+| `GUARDED_BY` | segment, resource, deployment, endpoint → AdvisorFilter | a filter that applies (a security group, an ACL, a web ACL) |
 | `HAS_RULE` | AdvisorFilter → AdvisorFilterRule | the rules that make up the filter |
 | `FROM` | AdvisorFilterRule → AdvisorSource, AdvisorFilter | the rule's source |
 | `REACHABLE_FROM` | AdvisorEndpoint → source, filter, network | **verdict**: who can reach it, through what |
@@ -1200,7 +1317,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `DECIDED_AS` | AdvisorRecommendation → Concept | the recorded decision |
 | `PROPOSED_IN` / `FROM_INCIDENT` / `FROM_SCAN` | recommendation → run, incident, scan | where it came from |
 | `INVESTIGATES` | AdvisorIncident → AdvisorAlert | the alert the agent investigated |
-| `ABOUT` | AdvisorAlert → resource, ref | the resource the alert concerns |
+| `ABOUT` | AdvisorAlert, AdvisorThreatFinding → resource, ref | the resource the alert or finding concerns |
 | `CAUSED_BY` | AdvisorAlert → AdvisorAction | the advisor's own change caused it |
 | `FLAGGED` / `SECURITY_FLAGGED` | AdvisorControl → resource | current alarms |
 | `HAS_PLAYBOOK` | AdvisorControl → KnPlaybook | derived guidance for the control |
@@ -1296,12 +1413,16 @@ verdict edges still exist.
 | Database | RDS, Aurora | Cloud SQL | SQL, Cosmos | Postgres | D1 |
 | Cache | ElastiCache | Memorystore | Cache for Redis | KV | KV |
 | Messaging | SQS, SNS, Kinesis | Pub/Sub | Service Bus | Queues | Queues |
-| Storage | S3, EFS, EBS, snapshots | GCS, PD | Blob, Disk | Blob | R2 |
+| Storage | S3, EFS, EBS, snapshots, Backup vaults | GCS, PD, Filestore, backup vaults | Blob, Disk, Files, Recovery Services vaults | Blob | R2 |
 | LoadBalancer | ALB, NLB, GWLB, CLB | GLB | LB, Front Door | edge (implicit) | edge (implicit) |
 | Domain / Zone / Record | Route 53 | Cloud DNS | Azure DNS | domains | zones |
 | Certificate | ACM | managed certs | Key Vault certs | automatic | universal SSL |
 | Identity / Policy | IAM | IAM | Entra | members, tokens | members, tokens |
-| Secret | Secrets Manager, SSM, KMS | Secret Manager | Key Vault | env vars | secrets |
+| Secret | Secrets Manager, SSM, KMS | Secret Manager, Cloud KMS | Key Vault | env vars | secrets |
+| Analytics | Athena workgroup | BigQuery | Synapse | | |
+| Stack | CloudFormation stack | Deployment Manager, Terraform | ARM / Bicep deployment, Terraform | | |
+| BackupPlan | AWS Backup plan | Backup and DR plan | Backup policy | | |
+| Detector / ThreatFinding | GuardDuty | Security Command Center | Defender for Cloud | | |
 | Image | AMI, ECR image | image, Artifact Registry | image, ACR | | |
 | Network | VPC | network | VNet | project (flat) | zone (flat) |
 | Segment | subnet | subnet | subnet | | |
@@ -1323,7 +1444,12 @@ Everything below is in SQLite today and only needs mirroring in the generic shap
 - The exposure code (`src/instance_apps.ts`) that already produces `allowed_by`, `blocked_by`, `nacl_note` per port.
 
 Not collected yet: subnets as objects, route tables, internet and NAT gateways as network objects, EIPs, egress rules,
-peering and transit attachments, VPC endpoints, certificates, IAM, secrets, images and packages. Nor the workloads
+peering and transit attachments, VPC endpoints, certificates, IAM, secrets, images and packages.
+
+- **Platform services (2026-10-05).** Certificates (ACM), messaging (SNS), keys (KMS), file systems (EFS), backups
+  (Backup vaults and plans), analytics (Athena), stacks (CloudFormation), web ACLs (WAF) and threat detection
+  (GuardDuty, with its findings) in one table, `inventory_service`, one collector per service in `src/services/`,
+  mirrored as the generic nodes above with their edges (`src/graph_services.ts`). Nor the workloads
 inside clusters: EKS and ECS are seen as nodes (EC2) and processes (probe), never as Deployments or services, so
 `AdvisorDeployment` on AWS today means Beanstalk environments only; reading the Kubernetes API (through the probe
 or the cluster endpoint) and ECS services is new collection.

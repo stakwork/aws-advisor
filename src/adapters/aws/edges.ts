@@ -170,5 +170,7 @@ export async function mirrorAwsEdges(account: string, stamp: string): Promise<st
   for (const batch of chunks(dbEndpoints)) await write(DB_ENDPOINT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   for (const batch of chunks(ebsRows.map((r) => ({ id: String(r.volume_id), instance_id: r.gone ? null : str(r.instance_id), device: str(r.device) })))) await write(VOLUME_CYPHER, { rows: batch, now: stamp });
   await mirrorDnsLinks(recordRows, account, stamp);
+  // the platform services' own edges (certificates, keys, topics, file systems, backups, workgroups, stacks, web ACLs)
+  await (await import("../../graph_services.js")).mirrorServiceLinks(account, stamp);
   return mirrorDeployments(elbRows, account, stamp);
 }

@@ -15,6 +15,7 @@ import { VercelMembers, VercelProjects } from "../components/vercel";
 import { IdentityCenter } from "../components/identityCenter";
 import { VercelStores } from "../components/vercelStores";
 import { WakeProfilePanel } from "../components/wakeProfile";
+import { ServicesPanel, type ServiceTab } from "../components/services";
 
 /** Probe 1.4: the use signals beyond CPU, memory and disk, and the one line they add up to. `last_lines` is text from the box: shown, never interpreted. */
 /** One chip per matched use-signal kind; click marks it noise for this image (or lifts the rule), so the count stops fooling the last-use line. */
@@ -230,13 +231,29 @@ import { metricLabel } from "./Knowledge";
  * sidebar looks at: an AWS account has the AWS kinds, a Vercel team its deployments; "all accounts" shows every tab
  * that has a configured provider behind it.
  */
-const TABS = ["ec2", "rds", "elasticache", "lambda", "dynamodb", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags"] as const;
+const TABS = ["ec2", "rds", "elasticache", "lambda", "dynamodb", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags",
+  "certificates", "messaging", "keys", "files", "backups", "analytics", "stacks", "threats"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", dynamodb: "Tables", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities" };
-const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", dynamodb: "DynamoDB", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · IAM Identity Center · Vercel team members" };
+const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", dynamodb: "Tables", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities",
+  certificates: "Certificates", messaging: "Messaging", keys: "Keys", files: "File systems", backups: "Backups", analytics: "Analytics", stacks: "Stacks", threats: "Threat detection" };
+const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", dynamodb: "DynamoDB", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · IAM Identity Center · Vercel team members" ,
+  certificates: "ACM", messaging: "SNS", keys: "KMS", files: "EFS", backups: "AWS Backup vaults and plans", analytics: "Athena workgroups", stacks: "CloudFormation", threats: "GuardDuty" };
 /** Which providers each tab draws from; a tab shows when the scope's provider (or, for all accounts, any configured provider) is among them. */
-const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], dynamodb: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] };
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" };
+const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], dynamodb: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] , certificates: ["aws"], messaging: ["aws"], keys: ["aws"], files: ["aws"], backups: ["aws"], analytics: ["aws"], stacks: ["aws"], threats: ["aws"] };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" , certificates: "id", messaging: "id", keys: "id", files: "id", backups: "id", analytics: "id", stacks: "id", threats: "id" };
+
+/** The platform-service tabs: rendered by ServicesPanel from /inventory/services/:tab, not by the table below. */
+const SERVICE_TABS: readonly Tab[] = ["certificates", "messaging", "keys", "files", "backups", "analytics", "stacks", "threats"];
+const isServiceTab = (t: Tab): t is Tab & ServiceTab => SERVICE_TABS.includes(t);
+/** The tabs grouped in sections: the top row picks a section, the second row its kinds; the URL keeps the kind (?tab=), so links stay as they were. */
+const SECTIONS: { id: string; label: string; tabs: Tab[] }[] = [
+  { id: "compute", label: "Compute", tabs: ["ec2", "lambda", "deployments", "clusters"] },
+  { id: "data", label: "Data", tabs: ["rds", "dynamodb", "elasticache", "s3", "ebs", "files", "backups", "analytics", "messaging"] },
+  { id: "network", label: "Network", tabs: ["elb", "route53", "sg", "certificates"] },
+  { id: "security", label: "Security", tabs: ["identities", "keys", "threats"] },
+  { id: "operations", label: "Operations", tabs: ["stacks", "tags"] },
+];
+const sectionOf = (t: Tab) => SECTIONS.find((x) => x.tabs.includes(t)) ?? SECTIONS[0];
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(Number(v))}%`);
 const bytes = (b: number | null | undefined) => (b == null ? "—" : Number(b) >= 1e12 ? `${(Number(b) / 1e12).toFixed(2)} TB` : Number(b) >= 1e9 ? `${(Number(b) / 1e9).toFixed(1)} GB` : `${Math.round(Number(b) / 1e6)} MB`);
@@ -393,7 +410,7 @@ export default function Inventory() {
     setRows(null);
     // The Tags tab is its own report (src/tag_hygiene.ts): nothing to fetch here.
     // So is Security groups (src/security_groups.ts): its panel fetches its own rows.
-    if (tab === "tags" || tab === "sg" || tab === "clusters" || tab === "deployments" || scopeProvider === "vercel") { setRows([]); return Promise.resolve(); }
+    if (tab === "tags" || tab === "sg" || tab === "clusters" || tab === "deployments" || isServiceTab(tab) || scopeProvider === "vercel") { setRows([]); return Promise.resolve(); }
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (tab === "ebs" && state) qs.set("state", state);
@@ -474,13 +491,26 @@ export default function Inventory() {
       {usageMsg && <div className="text-sm text-zinc-400">{usageMsg}</div>}
       {err && <div className="text-sm text-red-300">{err}</div>}
 
-      <div className="flex gap-1 border-b border-zinc-800">
-        {visibleTabs.map((t) => (
-          <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} title={TAB_NATIVE[t]} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
-            {TAB_LABEL[t]}{awsView && tabCount(s, t) != null && <span className="ml-1 text-xs text-zinc-500">{tabCount(s, t)}</span>}
-          </button>
-        ))}
-        <span className="ml-auto self-center pr-1 text-[11px] text-zinc-600">{TAB_NATIVE[tab]}</span>
+      <div className="space-y-1">
+        <div className="flex flex-wrap gap-1">
+          {SECTIONS.filter((x) => x.tabs.some((t) => visibleTabs.includes(t))).map((x) => {
+            const first = x.tabs.find((t) => visibleTabs.includes(t))!;
+            const count = awsView ? x.tabs.filter((t) => visibleTabs.includes(t)).reduce((a, t) => a + (tabCount(s, t) ?? 0), 0) : 0;
+            return (
+              <button key={x.id} onClick={() => sectionOf(tab).id !== x.id && set({ tab: first, id: null, sort: null, state: null })} className={`rounded px-3 py-1 text-sm ${sectionOf(tab).id === x.id ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"}`}>
+                {x.label}{count > 0 && <span className="ml-1 text-xs text-zinc-500">{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap gap-1 border-b border-zinc-800">
+          {sectionOf(tab).tabs.filter((t) => visibleTabs.includes(t)).map((t) => (
+            <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} title={TAB_NATIVE[t]} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
+              {TAB_LABEL[t]}{awsView && tabCount(s, t) != null && <span className="ml-1 text-xs text-zinc-500">{tabCount(s, t)}</span>}
+            </button>
+          ))}
+          <span className="ml-auto self-center pr-1 text-[11px] text-zinc-600">{TAB_NATIVE[tab]}</span>
+        </div>
       </div>
 
       {tab === "deployments" && <VercelProjects />}
@@ -491,6 +521,7 @@ export default function Inventory() {
       {scopeProvider === "vercel" && tab === "s3" && <VercelStores kind="storage" />}
       {tab === "tags" && <TagsPanel />}
       {tab === "sg" && <SecurityGroupsPanel selected={selectedId} onSelect={(id) => set({ id })} />}
+      {awsView && tab === "sg" && <ServicesPanel tab="waf" summary={s?.services?.waf} selected={selectedId} onSelect={(id) => set({ id })} q="" gone={false} />}
       {tab === "clusters" && <ClustersPanel selected={selectedId} onSelect={(id) => set({ id })} />}
 
       {tab === "ec2" && inv && (
@@ -613,10 +644,12 @@ export default function Inventory() {
         )}
         <form onSubmit={(e) => { e.preventDefault(); set({ q }); }}><input placeholder={tab === "ec2" ? "search name, id, type or IP" : tab === "route53" ? "search name, target or resource" : "search"} value={q} onChange={(e) => setQ(e.target.value)} className="w-64" /></form>
         <label className="flex items-center gap-1 text-sm text-zinc-400"><input type="checkbox" checked={gone} onChange={(e) => set({ gone: e.target.checked ? "1" : null })} /> include gone</label>
-        {rows && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
+        {rows && !isServiceTab(tab) && <span className="text-sm text-zinc-500">{rows.length} rows</span>}
       </div>}
 
-      {awsView && tab !== "tags" && tab !== "sg" && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
+      {awsView && isServiceTab(tab) && <ServicesPanel tab={tab} summary={s?.services?.[tab]} selected={selectedId} onSelect={(id) => set({ id })} q={params.get("q") || ""} gone={gone} />}
+
+      {awsView && tab !== "tags" && tab !== "sg" && !isServiceTab(tab) && <div ref={tableRef} style={!rows ? { minHeight: tableHeight.current } : undefined}>
         {!rows ? <Empty>Loading…</Empty> : rows.length === 0 ? <Empty>{s?.refreshed_at ? "Nothing matches." : "No snapshot yet."}</Empty> : (
           <div className="min-w-0 overflow-x-auto self-start">
             <table className="w-full border-collapse overflow-hidden rounded-lg border border-zinc-800">
@@ -843,9 +876,10 @@ export default function Inventory() {
 }
 
 /** The count next to a tab's label: the summary's total for the kind; the identities tab counts IAM users (the summary keeps them under iam). */
-const tabCount = (s: any, t: Tab): number | null => { const v = t === "identities" ? s?.iam?.users : s?.[t]?.total; return typeof v === "number" ? v : null; };
+const tabCount = (s: any, t: Tab): number | null => { const v = t === "identities" ? s?.iam?.users : SERVICE_TABS.includes(t) ? s?.services?.[t]?.total : s?.[t]?.total; return typeof v === "number" ? v : null; };
 
-const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, dynamodb: 9, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5 };
+const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, dynamodb: 9, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5,
+  certificates: 8, messaging: 9, keys: 8, files: 9, backups: 8, analytics: 8, stacks: 8, threats: 7 };
 
 /** What a balancer fronts, in one line: the instances (linked), Lambda targets, the Beanstalk environment, ASGs and ECS services. */
 function ElbFronts({ r }: { r: any }) {

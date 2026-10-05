@@ -569,7 +569,7 @@ The complete minimal read-only policy the app needs (the same document is served
         "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks", "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
         "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
         "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
-        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags",
+        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
         "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization",
         "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
@@ -594,6 +594,13 @@ The complete minimal read-only policy the app needs (the same document is served
         "elasticmapreduce:List*", "elasticmapreduce:Describe*",
         "apigateway:GET",
         "tag:GetResources",
+        "acm:ListCertificates", "acm:DescribeCertificate", "acm:ListTagsForCertificate",
+        "athena:ListWorkGroups", "athena:GetWorkGroup",
+        "backup:ListBackupVaults", "backup:DescribeBackupVault", "backup:ListBackupPlans", "backup:GetBackupPlan", "backup:ListBackupSelections", "backup:GetBackupSelection", "backup:ListProtectedResources", "backup:ListRecoveryPointsByBackupVault", "backup:ListTags",
+        "cloudformation:ListStacks", "cloudformation:DescribeStacks", "cloudformation:ListStackResources", "cloudformation:DescribeStackResources",
+        "wafv2:ListWebACLs", "wafv2:GetWebACL", "wafv2:ListResourcesForWebACL", "wafv2:GetLoggingConfiguration", "wafv2:ListTagsForResource",
+        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
+        "sns:ListTopics", "sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:ListSubscriptions",
         "sts:GetCallerIdentity",
         "iam:ListAccountAliases"
       ],
@@ -735,7 +742,7 @@ names the missing actions and the document's size; it is applied with **run as m
 first as one `PutRolePolicy` of the whole document inline on the role under the setup script's policy name, the role's
 own name), recorded with who did it, and read back with the advisor's credentials. Revert puts the previous document
 back or removes the policy when there was none. A role's inline policy holds 10,240 characters and an IAM user's 2,048,
-so a document that would not fit is refused before IAM refuses it (the recommended policy is about 4,300 characters:
+so a document that would not fit is refused before IAM refuses it (the recommended policy is about 5,300 characters:
 it fits a role, not a user; the setup script puts the advisor on a role for this reason too). The kind is made only of
 person-only actions, so the actuator never has the capability and the executor pass never touches these rows. When the
 advisor may not read its own policy yet, the row says so and writes the whole document.
@@ -1426,6 +1433,11 @@ the chart says so; another change on the same lines moves it too.
 ## Inventory
 
 The Inventory page is meant to replace the console for "what do we run, and which of it can we actually manage".
+Its tabs are the generic kinds of `docs/cloud-ontology.md`, grouped in sections: **Compute** (Compute, Functions,
+Deployments, Clusters), **Data** (Databases, Tables, Caches, Object storage, Volumes, File systems, Backups, Analytics,
+Messaging), **Network** (Load balancers, DNS, Filters, Certificates), **Security** (Identities, Keys, Threat detection)
+and **Operations** (Stacks, Tags). The top row picks a section, the second its kinds; `?tab=` keeps the kind, so links
+from other pages land where they did.
 `src/inventory.ts` snapshots three kinds of resource with a handful of schema-qualified Steampipe queries (Lambda, load
 balancers, EBS, S3 and Route 53 have modules of their own, below):
 
@@ -1483,6 +1495,36 @@ before reservations and the free tier). Table names are unique per account and r
 region, name). The account overview counts tables and adds them to the list price; the Thrifty `dynamodb` benchmark
 and the capacity-mode action (`src/actions/dynamodb_capacity_mode.ts`) keep reading the tables live for their own
 verdicts.
+
+### Platform services: certificates, messaging, keys, file systems, backups, analytics, stacks, web ACLs, threat detection
+
+`src/service_inventory.ts` and one collector per service in `src/services/` (refreshed with the rest of the inventory,
+after the balancers, buckets and functions so the links land on rows just written). Every service shares one table,
+`inventory_service`, keyed by `(native_type, id)` (the ARN): a row is the generic node already in the ontology's words
+(`props`), its edges to other nodes (`links`), and a list price. A collector selects only the columns the plugin has,
+and a per-row call the role may not make (tags, rotation status, a web ACL's associations) drops just those columns
+and reports the denial, so one missing permission never loses the rows. A type is marked gone only when its collector
+read it completely, and only in accounts the refresh saw at all (as `markGone` does for instances).
+
+| tab | AWS | graph node | priced at list | edges |
+|---|---|---|---|---|
+| Certificates | ACM | `AdvisorCertificate` | public and imported free; private CA not priced | `SECURES` → what terminates TLS with it |
+| Messaging | SNS topics | `AdvisorMessaging {kind: topic}` | 0.50 USD per million publishes (30 days of `NumberOfMessagesPublished`) | `DELIVERS_TO` → functions, queues, streams; `ENCRYPTS` ← key |
+| Keys | KMS | `AdvisorSecret {kind: kms_key}` | 1 USD per key of the account's own; AWS-managed free | `ENCRYPTS` → file systems, topics, vaults |
+| File systems | EFS | `AdvisorStorage {kind: file}` | storage by class (Standard, IA, Archive, One Zone) plus provisioned throughput | `IN_NETWORK`, `IN_SEGMENT`, `GUARDED_BY` (mount targets); `ENCRYPTS` ← key |
+| Backups | Backup vaults and plans | `AdvisorStorage {kind: backup}`, `AdvisorBackupPlan` | vaults by stored GB per resource type, warm and cold; plans free | `BACKED_UP_TO` ← each resource backed up; plan `STORES_IN` → vault, `PROTECTS` → resources named by ARN |
+| Analytics | Athena workgroups | `AdvisorAnalytics {kind: query_engine}` | 5 USD per TB scanned (`ProcessedBytes`, when the workgroup publishes metrics) | `WRITES_TO` → results bucket |
+| Stacks | CloudFormation | `AdvisorStack {tool: cloudformation}` | free | `MANAGES` → resources and network nodes it created; `PART_OF` → parent stack |
+| Filters | WAF web ACLs | `AdvisorFilter {kind: web_acl}` (also an `AdvisorResource`) | 5 USD per ACL, 1 USD per rule, 0.60 USD per million requests | `GUARDED_BY` ← balancers, APIs it protects |
+| Threat detection | GuardDuty | `AdvisorDetector`, `AdvisorThreatFinding` | not priced (billed by events analysed) | finding `REPORTED_BY` → detector, `ABOUT` → resource |
+
+E-mail, SMS and HTTP subscribers of a topic are counted by protocol, never stored. GuardDuty findings live in
+`threat_findings` (90 days, like GuardDuty keeps them) and are mirrored by the `threat findings` layer. The account
+overview adds the services' list price to the account's total. Endpoints: `GET /api/inventory/services/:tab`
+(`certificates`, `messaging`, `keys`, `files`, `backups`, `analytics`, `stacks`, `threats`, `waf`; `q`, `gone`, `type`),
+`GET /api/inventory/threat-findings` (`q`, `gone`, `archived`, `detector`); the summary carries `services` per tab.
+Reading them needs the ACM, Athena, Backup, CloudFormation, WAF and GuardDuty read actions of the recommended policy;
+an older read role gets them from Settings › Permissions.
 
 ### Lambda
 
