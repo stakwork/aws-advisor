@@ -32,6 +32,7 @@ const accessWords = (): string => {
 };
 
 const AWS_LAYERS: ProviderAdapter["layers"] = [
+    { name: "containers", mirror: async () => (await import("../../graph_containers.js")).mirrorContainers() },
     { name: "apps and ports", mirror: async () => (await import("../../graph_mirror.js")).mirrorApps() },
     { name: "status checks", mirror: async () => (await import("../../graph_mirror.js")).mirrorStatusChecks() },
     { name: "usage profiles", mirror: async () => (await import("../../graph_mirror.js")).mirrorUsageProfiles() },
@@ -50,7 +51,7 @@ export const awsAdapter: ProviderAdapter = {
   capabilities: { probes: true, metrics: true, executor: true, compliance: true, cost: true, bill: true, findings: true, changes: true, alerts: true, clusters: true, software: true, network: true },
   sections: [{ id: "access", label: "Access" }, { id: "permissions", label: "Permissions" }, { id: "probes", label: "Probes" }, { id: "benchmarks", label: "Benchmarks" }, { id: "members", label: "Member accounts" }],
   storage: ["inventory_ec2", "inventory_rds", "inventory_elasticache", "inventory_elb", "inventory_lambda", "inventory_dynamodb", "inventory_s3", "inventory_ebs", "inventory_route53_zone", "inventory_route53_record", "inventory_route53_link", "inventory_service", "threat_findings", "inventory_subnet", "inventory_route_table", "inventory_gateway", "inventory_eip", "inventory_eni", "inventory_cluster",
-    "sg_ingress", "sg_egress", "instance_metrics", "instance_apps", "instance_ports", "instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes", "cluster_workloads", "cluster_services", "cluster_ingresses", "cluster_network_policies", "alas_advisories", "alas_packages", "status_checks", "capacity_patterns"],
+    "sg_ingress", "sg_egress", "instance_metrics", "instance_apps", "instance_ports", "instance_containers", "instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes", "cluster_workloads", "cluster_services", "cluster_ingresses", "cluster_network_policies", "alas_advisories", "alas_packages", "status_checks", "capacity_patterns"],
   telemetry: TELEMETRY,
   configured: () => hasConnectionFile(),
   primaryAccountId: () => {

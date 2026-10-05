@@ -6,6 +6,8 @@ import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, defaultProbeScript, probeDocum
 import { probeDocumentStatus } from "../probes_status.js";
 import { probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
 import { softwareOn, softwareSummary, wherePackage } from "../software_inventory.js";
+import { containersOn, whereImage } from "../container_inventory.js";
+import { appEvents } from "../instance_apps.js";
 
 /**
  * Settings > Probes: what each probe collects, its script (default or edited), its SSM document and whether the
@@ -73,6 +75,18 @@ probes.post("/probes/:kind/pass", async (req, res) => {
   const kind = String(req.params.kind);
   if (!isKind(kind)) return res.status(404).json({ error: `no probe kind ${kind}` });
   try { res.json(await probePass(kind)); } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- the containers (src/container_inventory.ts) ------------------------------------------------------------------
+probes.get("/containers/where", (req, res) => {
+  const q = String(req.query.image || "").trim();
+  if (!q || q.length > 300) return res.status(400).json({ error: "image is required" });
+  res.json({ image: q, where: whereImage(q) });
+});
+probes.get("/instances/:id/containers", (req, res) => {
+  const id = String(req.params.id);
+  if (!/^i-[0-9a-f]{8,17}$/.test(id)) return res.status(400).json({ error: "an EC2 instance id is expected" });
+  res.json({ instance_id: id, containers: containersOn(id, req.query.gone === "1"), events: appEvents({ instance_id: id, limit: 200 }).filter((e) => e.user === "container") });
 });
 
 // ---- the software inventory (src/software_inventory.ts) ------------------------------------------------------------

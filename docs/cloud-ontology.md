@@ -641,6 +641,32 @@ the probe reads it: `sshd -V`, `nginx -v`, `redis-server --version`), `first_see
 
 Edges: `SERVES` → `AdvisorEndpoint`; `PROVIDED_BY` → `AdvisorPackage`.
 
+### AdvisorContainer
+
+A Docker container on a plain box (the docker probe's `docker inspect`, 2.1 on). Keyed
+`container:<instance>:<name>`, so a redeploy or a recreate changes the node rather than adding one; a container that
+leaves stays with `gone: true`. Not an `AdvisorResource`: it costs nothing on its own. Workloads on a cluster are
+`AdvisorDeployment`s, not containers.
+
+| property | meaning |
+|---|---|
+| `container_id` / `image` / `image_id` | the container's id now, the image reference it was started from, and the image id it resolved to (a re-pushed tag shows as a new image id) |
+| `state` / `health` / `exit_code` / `oom_killed` | `running` \| `exited` \| `restarting` \| `paused` \| `created` \| `dead`; the health check's verdict when one is defined; the last exit |
+| `created_at` / `started_at` / `finished_at` / `restarts` / `restart_policy` | its lifecycle |
+| `entrypoint` / `user` / `privileged` / `network_mode` / `networks` | what it starts (the program, never the arguments), as whom, and on which networks |
+| `ports` / `mounts` | `8080->80/tcp` (published) or `80/tcp` (exposed only); `volume data:/var/lib/x`, ` (ro)` when read-only |
+| `source_url` / `revision` / `image_version` | the repository and commit the image was built from (`org.opencontainers.image.source` and `.revision`, or the older `org.label-schema.vcs-url` and `.vcs-ref`): the way from a running container to its code |
+| `compose_project` / `compose_service` / `compose_dir` | the compose project that started it |
+| `cpu_pct` / `mem_bytes` | at the last probe |
+
+The environment, the command arguments and every other label are never read: they hold secrets.
+
+Edges: `RUNS {first_seen, last_seen, gone}` ← compute; `BUILT_FROM {image_id, revision}` → `AdvisorImage` (the
+image node also takes `source_url`, `revision`, `version`, `title`, `built_at` from the labels); `SERVES` →
+`AdvisorEndpoint` (the ports it publishes); `SHIPS_LOGS_TO` → `KnLogGroup` (its awslogs log driver). Its changes
+(appeared, gone, returned, redeployed with the image and revision before and after, recreated, restarted, stopped,
+started) are instance app events with user `container`.
+
 ### AdvisorPackage
 
 An installed software component with a version. The vulnerability layer matches against these.
@@ -1270,7 +1296,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `IN_CLUSTER` | AdvisorFilter (network_policy) → AdvisorCluster | the cluster a NetworkPolicy lives in |
 | `RUNS_ON_POOL` | AdvisorDeployment → AdvisorNodePool | the pool a deployment scales or is pinned to |
 | `BACKED_BY` | AdvisorDeployment → AdvisorLoadBalancer | the balancer in front of it |
-| `BUILT_FROM` | compute, deployment, function → AdvisorImage | the image it runs |
+| `BUILT_FROM` | compute, deployment, function, container → AdvisorImage | the image it runs |
 | `USES {environments}` | AdvisorDeployment → AdvisorDatabase, AdvisorCache, AdvisorStorage | the data stores a deployment is connected to (Vercel stores today) |
 | `RUNS_IMAGE` | compute → AdvisorImage | the container images a plain box runs (from the software probe) |
 | `STORES_ON` | AdvisorCompute → AdvisorStorage (block) | attached volume |
@@ -1280,7 +1306,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `CAN_ASSUME` | AdvisorIdentity → AdvisorIdentity | trust |
 | `CREATED` | AdvisorIdentity → resource | from the audit trail |
 | `ENCRYPTS` | AdvisorSecret (key) → storage, database, messaging | the key that encrypts a volume, bucket, file system, vault, database or topic |
-| `RUNS` | resource → AdvisorApp | a program running on it (edge carries the per-instance facts) |
+| `RUNS` | resource → AdvisorApp, AdvisorContainer | a program or a Docker container running on it (edge carries the per-instance facts) |
 | `PROVIDED_BY` | AdvisorApp → AdvisorPackage | the package the program comes from |
 | `INSTALLED_ON` | AdvisorPackage → compute, deployment, function, image | installed software |
 | `CONTAINS` | AdvisorImage → AdvisorPackage | baked in |
@@ -1288,7 +1314,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `VULNERABLE_TO` | resource → KnVulnerability | **verdict**: installed, and how reachable |
 | `ADDRESSES` | AdvisorRecommendation → KnVulnerability | a fix proposed for it |
 | `EXPOSES` | resource → AdvisorEndpoint | something listening on it |
-| `SERVES` | AdvisorApp → AdvisorEndpoint; AdvisorDomain → AdvisorDeployment | what is behind it |
+| `SERVES` | AdvisorApp, AdvisorContainer → AdvisorEndpoint; AdvisorDomain → AdvisorDeployment | what is behind it |
 | `FORWARDS_TO` | AdvisorEndpoint → AdvisorEndpoint | a listener to its targets |
 | `SECURES` | AdvisorCertificate → AdvisorEndpoint, or the resource that terminates TLS | TLS |
 | `DELIVERS_TO {protocol}` | AdvisorMessaging → function, queue, stream | a topic's subscribers |

@@ -41,7 +41,7 @@ try { db.exec("alter table sg_ingress add column description text"); } catch { /
 export type AppKind = "app" | "infra";
 export interface AppRow { name: string; user: string; kind: AppKind; command: string; count: number; cpu_pct: number; rss_bytes: number; oldest_seconds: number }
 export interface StoredApp extends AppRow { instance_id: string; first_seen: string; last_seen: string; probes: number; gone: boolean }
-export type AppEvent = "appeared" | "disappeared" | "returned";
+export type AppEvent = "appeared" | "disappeared" | "returned" | "port_opened" | "port_closed" | import("./container_inventory.js").ContainerEvent;
 export interface StoredAppEvent { id: number; instance_id: string; name: string; user: string; event: AppEvent; at: string; details: Record<string, unknown> | null }
 
 /** The kernel's comm field is 15 characters, so daemon names arrive cut ("amazon-ssm-agen"); the patterns match the cut form. */

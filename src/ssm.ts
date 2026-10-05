@@ -30,6 +30,18 @@ export interface ProbeDisk { mount: string; filesystem: string; device?: string 
 export interface ProbeProcess { pid: number; cpu_pct: number; mem_pct: number; rss_bytes: number; command: string }
 export interface ProbeContainer { name: string; image: string; state: string; running_for: string; cpu_pct: number | null; mem_bytes: number; mem_pct: number | null; /** Cumulative since the container started (probe 1.4); the difference between probes is its traffic. */ net_rx_bytes?: number | null; net_tx_bytes?: number | null }
 
+/** Probe docker 2.1: what one container is, from `docker inspect`. Labels are a fixed list (image source and revision, compose project and service); the environment and arguments are never read. */
+export interface ProbeContainerDetail {
+  id: string; name: string; created: string | null; image: string; image_id: string | null; state: string; health: string | null; exit_code: number | null; oom_killed: boolean;
+  started_at: string | null; finished_at: string | null; restarts: number; restart_policy: string | null; privileged: boolean; network_mode: string | null; user: string | null;
+  /** The program it starts (the entrypoint or the command's first word), no arguments. */
+  entrypoint: string | null; networks: string[];
+  ports: { container_port: number; proto: string; host_ip: string | null; host_port: number | null }[];
+  mounts: { type: string; name: string | null; source: string | null; destination: string; rw: boolean }[];
+  /** The repository the image is built from and the commit (OCI labels, or the older label-schema ones), its version and build date; the compose project, service, directory and files. */
+  labels: { source: string | null; revision: string | null; version: string | null; built: string | null; title: string | null; compose_project: string | null; compose_service: string | null; compose_dir: string | null; compose_files: string[] };
+}
+
 /** Probe 1.4: what the last 24 h of a running container's log say about use. `last_lines` is untrusted text shown only in the UI. */
 export interface ProbeContainerActivity {
   name: string; started_at: string | null; restarts: number; log_lines: number; last_log_at: string | null; errors: number; warns: number;
@@ -73,6 +85,8 @@ export interface ProbeResult {
   /** Present from probe 1.2: Docker daemon state and the containers on the box (running and stopped, up to 40). */
   docker?: { available: boolean; running: number; total: number };
   containers?: ProbeContainer[];
+  /** Present from probe docker 2.1: each container's identity, image, health and wiring (up to 40). */
+  container_details?: ProbeContainerDetail[];
   /** Present from probe 1.4: the use signals beyond CPU, memory and disk. */
   activity?: ProbeActivity;
   /** Present from probe 1.6: where the box's log agents ship to, and what runs on it (kernel threads excluded). */
@@ -175,6 +189,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
       cpu_pct: c.cpu_pct == null ? null : Number(c.cpu_pct), mem_bytes: Number(c.mem_bytes || 0), mem_pct: c.mem_pct == null ? null : Number(c.mem_pct),
       net_rx_bytes: c.net_rx_bytes == null ? null : Number(c.net_rx_bytes), net_tx_bytes: c.net_tx_bytes == null ? null : Number(c.net_tx_bytes),
     })) : undefined,
+    container_details: Array.isArray(raw.container_details) ? raw.container_details.filter((c: any) => c && typeof c.name === "string" && c.name).slice(0, 60).map(parseContainerDetail) : undefined,
     activity: raw.activity && typeof raw.activity === "object" ? parseActivity(raw.activity) : undefined,
     log_shipping: Array.isArray(raw.log_shipping) ? raw.log_shipping.filter((s: any) => s && typeof s.group === "string" && s.group).slice(0, 200).map((s: any): ProbeLogShipping => ({
       group: String(s.group).slice(0, 512), via: String(s.via || "unknown").slice(0, 120), source: s.source == null ? null : String(s.source).slice(0, 200) })) : undefined,
@@ -209,6 +224,34 @@ export function parseClfDate(raw: unknown): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 const int = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n) : 0; };
+
+const text = (v: unknown, max: number): string | null => (v == null || v === "" ? null : String(v).slice(0, max));
+/** Docker's zero time (a container never started or never stopped) is no time. */
+const dockerTime = (v: unknown): string | null => { const s = iso(v); return s && !s.startsWith("0001-") ? s : null; };
+
+/** One `docker inspect` line, tolerant: the name loses its leading slash, ports become one row per published binding (or one unpublished row), labels fall back to the label-schema names. */
+export function parseContainerDetail(c: any): ProbeContainerDetail {
+  const l = c.labels && typeof c.labels === "object" ? c.labels : {};
+  const ports: ProbeContainerDetail["ports"] = [];
+  if (c.ports && typeof c.ports === "object") for (const [k, binds] of Object.entries(c.ports)) {
+    const m = /^(\d+)\/(tcp|udp|sctp)$/.exec(k); if (!m) continue;
+    const list = Array.isArray(binds) ? binds : [];
+    if (!list.length) ports.push({ container_port: Number(m[1]), proto: m[2], host_ip: null, host_port: null });
+    // the same host port bound on 0.0.0.0 and :: is one publication
+    for (const b of list as any[]) { const hp = b?.HostPort ? int(b.HostPort) || null : null; if (!ports.some((p) => p.container_port === Number(m[1]) && p.proto === m[2] && p.host_port === hp)) ports.push({ container_port: Number(m[1]), proto: m[2], host_ip: text(b?.HostIp, 45), host_port: hp }); }
+  }
+  return {
+    id: String(c.id ?? "").slice(0, 64), name: String(c.name).replace(/^\//, "").slice(0, 120), created: dockerTime(c.created), image: String(c.image ?? "").slice(0, 300), image_id: text(c.image_id, 100),
+    state: String(c.state ?? "").slice(0, 20), health: text(c.health, 20), exit_code: c.exit_code == null ? null : int(c.exit_code), oom_killed: c.oom_killed === true,
+    started_at: dockerTime(c.started_at), finished_at: dockerTime(c.finished_at), restarts: Math.max(0, int(c.restarts)), restart_policy: text(c.restart_policy, 30),
+    privileged: c.privileged === true, network_mode: text(c.network_mode, 120), user: text(c.user, 64), entrypoint: text(c.entrypoint, 200),
+    networks: String(c.networks ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 20).map((s) => s.slice(0, 120)),
+    ports: ports.slice(0, 60),
+    mounts: (Array.isArray(c.mounts) ? c.mounts : []).filter((m: any) => m && m.destination).slice(0, 40).map((m: any) => ({ type: String(m.type ?? "").slice(0, 20), name: text(m.name, 200), source: text(m.source, 300), destination: String(m.destination).slice(0, 300), rw: m.rw !== false })),
+    labels: { source: text(l.source, 300) ?? text(l.vcs_url, 300), revision: text(l.revision, 80) ?? text(l.vcs_ref, 80), version: text(l.version, 80), built: text(l.built, 40), title: text(l.title, 120),
+      compose_project: text(l.compose_project, 120), compose_service: text(l.compose_service, 120), compose_dir: text(l.compose_dir, 300), compose_files: String(l.compose_files ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 10).map((s) => s.slice(0, 300)) },
+  };
+}
 
 /** Tolerant: a missing or malformed part becomes null or zero; the probe never fails on the activity section alone. */
 export function parseActivity(a: any): ProbeActivity {
@@ -499,6 +542,15 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
   }
   if (kinds.includes("docker")) {
     try { recordContainerSamples(instanceId, collectedAt, data); } catch (e: any) { console.error(`[probe] container samples not recorded for ${instanceId}: ${e?.message || e}`); }
+    // docker 2.1: what each container is and what changed, then the graph's AdvisorContainer nodes
+    void (async () => {
+      try {
+        const { recordContainers } = await import("./container_inventory.js");
+        const r = recordContainers(instanceId, collectedAt, data);
+        if (r?.events.length) console.log(`[probe] ${instanceId} containers: ${r.containers}, ${r.events.slice(0, 6).map((e) => `${e.name} ${e.event.replace("container_", "")}`).join(", ")}${r.events.length > 6 ? ", ..." : ""}`);
+        if (r) import("./graph_containers.js").then((m) => m.mirrorContainersInBackground([instanceId])).catch(() => { /* graph off */ });
+      } catch (e: any) { console.error(`[probe] containers not recorded for ${instanceId}: ${e?.message || e}`); }
+    })();
   }
   if (kinds.includes("apps")) {
     // probe 1.6 / 1.8: what runs here and what listens go to the apps and ports tables, then to the graph with their reachability verdicts

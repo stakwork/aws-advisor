@@ -61,6 +61,12 @@ const rows = (sql: string, ...params: unknown[]): any[] => { try { return db.pre
 const SOURCE_KIND: Record<string, string> = { deb: "dpkg", rpm: "rpm", apk: "apk" };
 export const packageId = (ecosystem: string, name: string, version: string) => `pkg:${ecosystem}:${name}:${version}`;
 
+/** An image reference's node id, repository and tag (latest when none is named; none when pinned by digest). */
+export function imageRef(image: string): { id: string; repository: string; tag: string | null } {
+  const noDigest = image.split("@")[0]; const idx = noDigest.lastIndexOf(":"); const hasTag = idx > noDigest.lastIndexOf("/");
+  return { id: `image:${image}`, repository: hasTag ? noDigest.slice(0, idx) : noDigest, tag: image.includes("@") ? null : hasTag ? noDigest.slice(idx + 1) : "latest" };
+}
+
 export interface SoftwareGraphCounts { packages: number; installed: number; images: number; provides: number; vulnerabilities: number; verdicts: number; took_ms: number }
 
 /** Everything the software probe knows about the given boxes (or all), then the vulnerability knowledge and verdicts. */
@@ -92,8 +98,8 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
 
   // the container images the box runs
   const imgRows = rows(`select instance_id, image, image_id, digest, created, platform, first_seen, last_seen, gone from instance_images where 1=1${where}`, ...args).map((i) => {
-    const image = String(i.image); const noDigest = image.split("@")[0]; const idx = noDigest.lastIndexOf(":"); const hasTag = idx > noDigest.lastIndexOf("/");
-    return { instance_id: i.instance_id, id: `image:${image}`, image, repository: hasTag ? noDigest.slice(0, idx) : noDigest, tag: image.includes("@") ? null : hasTag ? noDigest.slice(idx + 1) : "latest", digest: i.digest ?? null, created: i.created ?? null, platform: i.platform ?? null, image_id: i.image_id ?? null, first_seen: i.first_seen, last_seen: i.last_seen, gone: Boolean(i.gone) };
+    const image = String(i.image);
+    return { instance_id: i.instance_id, ...imageRef(image), image, digest: i.digest ?? null, created: i.created ?? null, platform: i.platform ?? null, image_id: i.image_id ?? null, first_seen: i.first_seen, last_seen: i.last_seen, gone: Boolean(i.gone) };
   });
   for (const b of chunks(imgRows)) await w(IMAGE_CYPHER, b);
 

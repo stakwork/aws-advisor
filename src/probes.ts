@@ -45,7 +45,7 @@ export interface ProbeDef {
 
 export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   host: { kind: "host", title: "Host", what: "memory, swap, load, CPUs, uptime, disks and the top processes: the hourly statistics behind the disk, memory and load alerts and the utilisation charts", version: "2.0", sections: ["cpus", "uptime_seconds", "memory", "load", "disks", "top_cpu", "top_mem"], timeout_seconds: 60, cron_key: "probeCron", scope_key: "probeScope", takes_signals: false },
-  docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.0", sections: ["docker", "containers", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
+  docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
   software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, and the images behind the running containers: the inventory a CVE is matched against", version: "1.0", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
 };
@@ -109,6 +109,14 @@ const DOCKER_BODY = [
   "  containers=\"[$clist]\"",
   "  running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' '); total=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')",
   "  docker_json=\"{\\\"available\\\":true,\\\"running\\\":${running:-0},\\\"total\\\":${total:-0}}\"",
+  "fi",
+  "# ---- container details (probe docker 2.1): what each container is, from docker inspect: its id, image reference and image id, state, health, exit",
+  "# ---- code, restart count and policy, the program it starts, its networks, published ports and mounts, and a fixed list of labels (the image source",
+  "# ---- repository and revision, the compose project and service). Never the environment, the command arguments or any other label: those hold secrets.",
+  "cdetail=\"\"",
+  "if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then",
+  "  cids=$(docker ps -aq 2>/dev/null | head -n 40)",
+  String.raw`  [ -n "$cids" ] && cdetail=$(docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Config.Image}},"image_id":{{json .Image}},"state":{{json .State.Status}},"health":"{{with index .State "Health"}}{{index . "Status"}}{{- end}}","exit_code":{{json .State.ExitCode}},"oom_killed":{{json .State.OOMKilled}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"restarts":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy.Name}},"privileged":{{json .HostConfig.Privileged}},"network_mode":{{json .HostConfig.NetworkMode}},"user":{{json .Config.User}},"entrypoint":{{json .Path}},"networks":"{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{- end}}","ports":{{json .NetworkSettings.Ports}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{- end}}{"type":{{json $m.Type}},"name":{{json (index $m "Name")}},"source":{{json $m.Source}},"destination":{{json $m.Destination}},"rw":{{json $m.RW}}}{{- end}}],"labels":{"source":{{json (index .Config.Labels "org.opencontainers.image.source")}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"version":{{json (index .Config.Labels "org.opencontainers.image.version")}},"built":{{json (index .Config.Labels "org.opencontainers.image.created")}},"title":{{json (index .Config.Labels "org.opencontainers.image.title")}},"vcs_url":{{json (index .Config.Labels "org.label-schema.vcs-url")}},"vcs_ref":{{json (index .Config.Labels "org.label-schema.vcs-ref")}},"compose_project":{{json (index .Config.Labels "com.docker.compose.project")}},"compose_service":{{json (index .Config.Labels "com.docker.compose.service")}},"compose_dir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"compose_files":{{json (index .Config.Labels "com.docker.compose.project.config_files")}}}}' $cids 2>/dev/null | tr -cd '\12\40-\176' | grep '^{' | paste -sd, -)`,
   "fi",
   "# ---- activity (probe 1.4): is anyone actually using this box? Counts and timestamps only; log text stays on the box,",
   "# ---- except the last three lines of each container (capped, printable ASCII), shown in the UI and never sent to a model.",
@@ -184,7 +192,7 @@ const DOCKER_BODY = [
 ];
 
 const DOCKER_OUT = [
-  "out=$(printf '{\"probe\":\"aws-advisor/docker/2\",\"kind\":\"docker\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"docker\":%s,\"containers\":%s,\"activity\":%s}' \"$hn\" \"$now\" \"$docker_json\" \"$containers\" \"$activity\")",
+  "out=$(printf '{\"probe\":\"aws-advisor/docker/3\",\"kind\":\"docker\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"docker\":%s,\"containers\":%s,\"container_details\":[%s],\"activity\":%s}' \"$hn\" \"$now\" \"$docker_json\" \"$containers\" \"$cdetail\" \"$activity\")",
 ];
 
 const APPS_BODY = [

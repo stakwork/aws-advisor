@@ -256,7 +256,11 @@ WITH DISTINCT g, row
 OPTIONAL MATCH (s:KnSystem {id: row.owner})
 FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | MERGE (s)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
 FOREACH (_ IN CASE WHEN s IS NULL THEN [1] ELSE [] END | MERGE (a:AdvisorAccount {id: row.account_id}) MERGE (a)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
-FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE (r)-[e:SHIPS_LOGS_TO]->(g) SET e.via = o.via, e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed')`, { rows: lg, provider: PROVIDER, now });
+FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE (r)-[e:SHIPS_LOGS_TO]->(g) SET e.via = o.via, e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed')
+WITH g, row
+UNWIND [o IN row.observed WHERE o.via STARTS WITH 'docker:'] AS o
+MATCH (c:AdvisorContainer {id: 'container:' + o.instance_id + ':' + substring(o.via, 7)})
+MERGE (c)-[e:SHIPS_LOGS_TO]->(g) SET e.via = 'log driver', e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed'`, { rows: lg, provider: PROVIDER, now });
     traffic += lg.length;
   }
   // ---- decisions with an outcome
