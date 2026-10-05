@@ -57,6 +57,18 @@ list), `pool` (EC2: the autoscaling pool name).
 | `AdvisorImage` | `container_image` | `image:<reference>` | `name`, `kind: container`, `repository`, `tag`, `digest`, `created_at`, `platform`; the images workloads are built from (`BUILT_FROM`) and boxes run containers of (`RUNS_IMAGE`, from the software probe); packages inside an image are not read yet |
 | `AdvisorDnsZone` | `route53_zone` | zone id | `private`, `records`, `linked`, `external`, `unmatched`, `queries_30d`, `comment` |
 | `AdvisorDnsRecord` | `route53_record` | the record id | `fqdn`, `type`, `ttl`, `values`, `alias`, `alias_target`, `routing`, `link_state` (`resource` \| `external` \| `dangling` \| `none` \| `unknown`), `native_link_state`, `summary`, `zone_id` |
+| `AdvisorDatabase` | `dynamodb_table` | ARN | `engine: dynamodb`, `kind: key_value`, `serverless: true`, `type` (`on-demand` or `provisioned N RCU / M WCU`), `billing_mode`, `read_capacity`, `write_capacity`, `indexes`, `storage_gb`, `items`, `point_in_time_recovery`, `backup_retention_days` (35 or 0), `streams`, `reads_30d`, `writes_30d` |
+| `AdvisorIdentity` | `iam_user` \| `sso_user` | user ARN \| Identity Center user id | `kind: user`, `human`, `mfa`, `admin`, `credentials`, `credential_age_days`, `last_used_at`, `groups`, `policies`; IAM: `console_access`, `access_keys`, `permissions_boundary`; Identity Center: `display_name`, `email`, `identity_provider`, `accounts`, `assignments`, `sign_ins_30d`, `failed_sign_ins_30d`, `activity` |
+| `AdvisorCertificate` | `acm_certificate` | ARN | `domains`, `issuer` (`acm` \| `private_ca` \| the imported issuer), `origin` (`issued` \| `imported` \| `private`), `status` (`issued` \| `expired` \| `pending` \| `revoked` \| `failed` \| `inactive`), `not_before`, `not_after`, `days_left`, `in_use`, `used_by`, `key_algorithm`, `renewal_eligible`, `wildcard` |
+| `AdvisorMessaging` | `sns_topic` | ARN | `kind: topic`, `fifo`, `display_name`, `subscriptions`, `pending`, `protocols` (`lambda 2`; addresses never stored), `encrypted`, `kms_key`, `dlq`, `messages_30d` |
+| `AdvisorSecret` | `kms_key` | ARN | `kind: kms_key`, `key_id`, `managed` (AWS-managed), `key_state` (`enabled` \| `disabled` \| `pending_deletion` \| …), `encrypted: true`, `usage`, `spec`, `origin`, `rotation_enabled`, `aliases`, `multi_region`, `deletion_at`, `description` |
+| `AdvisorStorage` | `efs_file_system` | ARN | `kind: file`, `file_system_id`, `size_gb`, `standard_gb`, `ia_gb`, `archive_gb`, `class` (`regional` \| `one_zone`), `zone`, `performance_mode`, `throughput_mode`, `provisioned_mibps`, `encrypted`, `mount_targets`, `zones`, `automatic_backups`, `vpc_id`, `security_groups` |
+| `AdvisorStorage` | `backup_vault` | ARN | `kind: backup`, `recovery_points`, `size_gb`, `warm_gb`, `cold_gb`, `by_type` (`RDS 12`), `oldest_at`, `newest_at`, `locked`, `min_retention_days`, `max_retention_days`, `encrypted: true`, `protected_resources`, `protected_types` |
+| `AdvisorBackupPlan` | `backup_plan` | ARN | `rules`, `schedules` (one line per rule), `retention_days`, `keeps_forever`, `cold_after_days`, `copies`, `vaults`, `selections` (in words), `selected_by_arn`, `selects_all`, `last_run_at`, `plan_id` |
+| `AdvisorAnalytics` | `athena_workgroup` | `arn:aws:athena:<region>:<account>:workgroup/<name>` | `kind: query_engine`, `engine: athena`, `engine_version`, `enforce_config`, `scan_limit_gb`, `output_location`, `output_encrypted`, `encryption`, `metrics_published`, `scanned_gb_30d`, `requester_pays` |
+| `AdvisorStack` | `cloudformation_stack` | stack ARN | `tool: cloudformation`, `resources`, `mapped_resources`, `resource_types` (`EC2::Instance 3`), `failed_resources`, `drift` (`in_sync` \| `drifted` \| `unknown`), `termination_protection`, `nested`, `root_id`, `status_reason`, `role_arn`, `updated_at` |
+| `AdvisorFilter` (also `AdvisorResource`) | `wafv2_web_acl` | ARN | `kind: web_acl`, `stateful: false`, `default_action` (`allow` \| `block`), `rules`, `rule_list` (one line per rule in priority order), `managed_groups`, `rate_limits`, `attached`, `native_scope`, `edge` (CloudFront scope), `capacity`, `logging`, `firewall_manager`, `requests_30d`, `blocked_30d` |
+| `AdvisorDetector` | `guardduty_detector` | ARN | `kind: threat_detection`, `engine: guardduty`, `detector_id`, `enabled`, `protections_on`, `protections_off`, `publishing_frequency`, `administrator`, `findings_open`, `findings_critical`, `findings_high`, `last_finding_at` |
 
 Tenant block (swarm costs, on an `AdvisorCompute` that is one customer's environment): `tenant: true`,
 `tenant_kind: swarm`, `cost_month_usd`, `cost_compute_usd`, `cost_storage_usd`, `cost_snapshot_usd`, `cost_ip_usd`,
@@ -80,6 +92,33 @@ filter → cluster); `FRONTED_BY` (a workload's endpoint → the balancer an Ing
 ref when it is not in the inventory). The cluster `EXPOSES` an `api` endpoint whose `REACHABLE_FROM` sources are its
 public access CIDRs with `requires_auth: true`. A resource the inventory stops listing is marked `gone`; Beanstalk
 deployments are rebuilt each sync and never marked, cluster workloads are marked when the cluster stops listing them.
+
+The platform services (`src/service_inventory.ts`, one collector per service in `src/services/`, the edges written by
+`src/graph_services.ts`; every pass drops these edge types on a service node and writes the current ones):
+`SECURES` (certificate → the balancer, distribution or API ACM says uses it); `DELIVERS_TO {protocol, raw, filtered}`
+(topic → function, queue or stream); `ENCRYPTS` (key → file system, topic, backup vault; an alias or key id is
+resolved to the key's ARN, an unread alias stays a ref); `IN_NETWORK`, `IN_SEGMENT`, `GUARDED_BY` (file system → the
+VPC, subnets and security groups of its mount targets); `BACKED_UP_TO {last_backup_at, resource_type}` (resource →
+the vault its latest backup is in); `STORES_IN` (plan → vault); `PROTECTS` (plan → the resources its selections name
+by ARN; tag and wildcard selections stay words); `WRITES_TO` (workgroup → results bucket); `MANAGES {logical_id,
+resource_type}` (stack → the resources and network nodes it created, never a ref); `PART_OF` (nested stack → parent);
+`GUARDED_BY` (balancer or API → the web ACL attached to it). A target the graph has no node for is an
+`AdvisorResourceRef` with `guessed_type` (`cdn_distribution`, `api`, `queue`, `key_alias`, …).
+
+### AdvisorThreatFinding
+
+GuardDuty's findings (`threat_findings`, kept 90 days like GuardDuty keeps them; the `threat findings` layer): `id`
+(the finding ARN), `type`, `title`, `description`, `severity` (`low` \| `medium` \| `high` \| `critical`: below 4, 7,
+9, from 9), `native_severity` (1-10), `confidence`, `resource_type`, `resource` (the instance id, bucket, function or
+cluster ARN, IAM user ARN), `resource_name`, `count`, `first_seen_at`, `last_seen_at`, `created_at`, `archived`, `gone`.
+Edges: `IN_ACCOUNT`; `REPORTED_BY` → `AdvisorDetector`; `ABOUT` → the resource, or a ref. A finding the table no longer
+holds is deleted from the graph.
+
+### AdvisorNotification
+
+What AWS told the account through User Notifications (`src/cloud_notifications.ts`, 90 days): `feed`, `source`,
+`event_type`, `headline`, `notification_type`, `event_status`, `origin_region`, `related_account`, `created_at`,
+`aggregation`, `event_count`, `regions`; `IN_ACCOUNT` the account that received it.
 
 ### AdvisorResourceRef
 
@@ -321,7 +360,9 @@ operational patterns), reached from recommendations with `DECIDED_AS`. See `docs
   status and the commands); a cluster that does not keeps its `AdvisorCluster` node with `access_status` and no workloads.
   ECS services come from the AWS API. Reachability inside a cluster stops at the balancer in front: Service and Ingress
   endpoints inherit the listener's verdict, NetworkPolicies are filters but are not yet evaluated into verdicts.
-- `AdvisorCluster`, `AdvisorMessaging`, `AdvisorCertificate`, `AdvisorIdentity`, `AdvisorPolicy`, `AdvisorSecret`.
+- `AdvisorPolicy` (an identity's `policies` are names on the node); `AdvisorSecret` beyond KMS keys (Secrets Manager,
+  SSM parameters); messaging beyond SNS (SQS, Kinesis); IAM roles as identities. Web ACL rules stay lines on the
+  filter, not `AdvisorFilterRule` nodes (they match requests, not ports and sources).
 - Telemetry edges for `logs`, `audit` and `bill` per resource (the nodes exist).
 - Upgrading an `AdvisorResourceRef` in place when its resource gets a node.
 - Findings as nodes (by design: the latest run's alarms are `FLAGGED` edges; the history stays in SQLite).
