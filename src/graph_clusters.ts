@@ -26,6 +26,8 @@ SET c += {name: row.name, kind: row.kind, version: row.version, platform_version
   authentication_mode: row.authentication_mode, access_status: row.access_status, access_error: row.access_error, nodes: row.nodes, workloads: row.workloads, namespaces: row.namespaces, vpc_id: row.vpc_id, security_groups: row.security_groups,
   provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: row.gone, last_seen: row.last_seen, updated_at: $now}
 WITH c, row
+OPTIONAL MATCH (c)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
+WITH DISTINCT c, row
 MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (c)-[:IN_ACCOUNT]->(a)
 WITH c, row
 FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (c)-[:IN_NETWORK]->(n))
@@ -49,6 +51,8 @@ SET d += {name: row.name, platform: row.platform, workload_kind: row.kind, names
   revision: row.revision, strategy: row.strategy, schedule: row.schedule, service_account: row.service_account, labels: row.labels_kv, region: row.region, created_at: row.created, pods_running: row.pods_running,
   provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.uid, gone: row.gone, last_seen: row.last_seen, updated_at: $now}
 WITH d, row
+OPTIONAL MATCH (d)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
+WITH DISTINCT d, row
 MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
 WITH d, row
 MERGE (c:AdvisorResource {id: row.cluster_arn}) MERGE (d)-[:RUNS_IN]->(c)

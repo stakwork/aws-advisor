@@ -1191,7 +1191,8 @@ export async function mirrorCloudNotifications(): Promise<{ notifications: numbe
   const stamp = now();
   for (const batch of chunks(rows)) await write(`UNWIND $rows AS row
     MERGE (n:AdvisorNotification {id: row.arn}) SET n += {feed: row.feed, source: row.source, event_type: row.event_type, headline: row.headline, notification_type: row.notification_type, event_status: row.event_status, origin_region: row.origin_region, related_account: row.related_account, created_at: row.created_at, aggregation: row.aggregation, event_count: row.event_count, regions: row.regions, configuration_arn: row.configuration_arn, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'notification_event', native_id: row.arn, updated_at: $now}
-    WITH n, row MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.native_id = coalesce(row.account_id, $account), a.kind = 'account', a.updated_at = $now
+    WITH n, row OPTIONAL MATCH (n)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
+    WITH DISTINCT n, row MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.native_id = coalesce(row.account_id, $account), a.kind = 'account', a.updated_at = $now
     MERGE (n)-[:IN_ACCOUNT]->(a)`, { rows: batch, account, provider: PROVIDER, now: stamp });
   await write("MATCH (n:AdvisorNotification {provider: $provider}) WHERE n.updated_at < $now DETACH DELETE n", { provider: PROVIDER, now: stamp });
   return { notifications: rows.length };

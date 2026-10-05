@@ -103,6 +103,8 @@ ON CREATE SET d.first_seen = $now
 SET d:AdvisorDeployment
 SET d += {name: row.name, platform: 'beanstalk', workload_kind: 'environment', state: 'available', region: row.region, environment: row.environment, gone: false, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'beanstalk_environment', native_id: row.env_id, last_seen: $now, updated_at: $now}
 WITH d, row
+OPTIONAL MATCH (d)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
+WITH DISTINCT d, row
 MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
 WITH d, row
 FOREACH (_ IN CASE WHEN row.pool_id IS NULL THEN [] ELSE [1] END |

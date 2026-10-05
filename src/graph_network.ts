@@ -135,7 +135,10 @@ UNWIND $rows AS row
 MERGE (n:AdvisorNetwork {id: row.id})
 ON CREATE SET n.first_seen = $now
 SET n += {cidr_blocks: row.cidr_blocks, ipv6_blocks: row.ipv6_blocks, default: row.default, flat: false, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'vpc', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
-WITH n, row MATCH (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) MERGE (n)-[:IN_ACCOUNT]->(a)`;
+WITH n, row
+OPTIONAL MATCH (n)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
+WITH DISTINCT n, row
+MATCH (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) MERGE (n)-[:IN_ACCOUNT]->(a)`;
 
 const SEGMENT_CYPHER = `
 UNWIND $rows AS row
