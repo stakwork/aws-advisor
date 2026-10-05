@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 
@@ -70,23 +71,40 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
     <input type={secretField ? "password" : "text"} value={v} disabled={busy} onChange={(e) => set(e.target.value)} placeholder={label} aria-label={label} autoComplete="off" spellCheck={false}
       className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-200 disabled:opacity-60" />
   );
+  const close = () => { if (!busy) { setOpen(false); setNote(null); } };
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, busy]);
+  const title = verb === "revert" ? "Undo as me" : "Run as me";
   return (
     <div className={compact ? "inline" : "mt-1"}>
-      <button type="button" className="text-sky-300 hover:underline" onClick={() => setOpen((o) => !o)} title="do this one row with temporary credentials of your own: you authorise this change, the row records who; used once, never stored">
-        {open ? "cancel" : verb === "revert" ? "undo as me" : "run as me"}
+      <button type="button" className="text-sky-300 hover:underline" onClick={() => { setNote(null); setOpen(true); }} title="do this one row with temporary credentials of your own: you authorise this change, the row records who; used once, never stored">
+        {verb === "revert" ? "undo as me" : "run as me"}
       </button>
-      {open && (
-        <div className="mt-1 max-w-xl space-y-1 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-xs">
-          <PreviewList side={preview?.[verb] ?? null} error={previewErr} verb={verb} />
-          <div className="text-zinc-400">Temporary credentials of your own, for this one call. From the console's "Command line or programmatic access", from SSO, or <span className="font-mono">aws sts get-session-token --duration-seconds 900</span>. Long-lived keys (AKIA…) are refused. Nothing is stored; the row records who.</div>
-          {field(key, setKey, "AWS_ACCESS_KEY_ID (ASIA…)")}
-          {field(secret, setSecret, "AWS_SECRET_ACCESS_KEY", true)}
-          {field(token, setToken, "AWS_SESSION_TOKEN", true)}
-          <div className="flex items-center gap-2">
-            <button type="button" disabled={busy || !key || !secret || !token} onClick={submit} className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50">{busy ? "…" : verb === "revert" ? "Undo with these" : "Apply with these"}</button>
-            {note && <span className={note.err ? "text-red-300" : "text-zinc-400"}>{note.text}</span>}
+      {open && createPortal(
+        // a dialog over the page, not a panel inside the row: the preview and three fields do not fit a table cell
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+          <div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-2xl space-y-2 rounded-lg border border-zinc-700 bg-zinc-950 p-4 text-left text-xs shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium text-zinc-100">{title} <span className="font-normal text-zinc-500">· row #{actionId}</span></div>
+              <button type="button" disabled={busy} onClick={close} aria-label="close" className="text-zinc-500 hover:text-zinc-200 disabled:opacity-50">✕</button>
+            </div>
+            <div className="max-h-[45vh] overflow-y-auto"><PreviewList side={preview?.[verb] ?? null} error={previewErr} verb={verb} /></div>
+            <div className="text-zinc-400">Temporary credentials of your own, for this one call. From the console's "Command line or programmatic access", from SSO, or <span className="font-mono">aws sts get-session-token --duration-seconds 900</span>. Long-lived keys (AKIA…) are refused. Nothing is stored; the row records who.</div>
+            {field(key, setKey, "AWS_ACCESS_KEY_ID (ASIA…)")}
+            {field(secret, setSecret, "AWS_SECRET_ACCESS_KEY", true)}
+            {field(token, setToken, "AWS_SESSION_TOKEN", true)}
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {note && <span className={`mr-auto ${note.err ? "text-red-300" : "text-zinc-400"}`}>{note.text}</span>}
+              <button type="button" disabled={busy} onClick={close} className="rounded px-2 py-0.5 text-zinc-400 hover:text-zinc-200 disabled:opacity-50">Cancel</button>
+              <button type="button" disabled={busy || !key || !secret || !token} onClick={submit} className="rounded border border-sky-600/50 bg-sky-600/10 px-3 py-1 text-sky-200 hover:bg-sky-600/20 disabled:opacity-50">{busy ? "…" : verb === "revert" ? "Undo with these" : "Apply with these"}</button>
+            </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

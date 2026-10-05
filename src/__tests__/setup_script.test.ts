@@ -172,6 +172,7 @@ test("real run, everything already exists: every step is skipped or refreshed, n
   assert.ok(r.out.includes("Done. The advisor at http://localhost:9034 uses profile aws-advisor (account 123456789012)"));
   assert.ok(!r.calls.some((c) => /^iam create-(user|role|access-key)/.test(c) || /^ssm create-document/.test(c)), `no create call: ${r.calls.join(" | ")}`);
   assert.ok(r.calls.includes("iam put-role-policy --role-name aws-advisor-read --policy-name aws-advisor-read --policy-document file://" + r.calls.find((c) => c.startsWith("iam put-role-policy"))!.split("file://")[1]));
+  assert.ok(r.calls.includes("iam attach-role-policy --role-name aws-advisor-read --policy-arn arn:aws:iam::aws:policy/ViewOnlyAccess"), "ViewOnlyAccess goes on the read role next to the inline policy");
   assert.ok(r.calls.includes("iam delete-user-policy --user-name aws-advisor --policy-name aws-advisor-read"));
   assert.ok(r.calls.some((c) => c.startsWith("curl") && c.includes("-X PUT http://localhost:9034/api/settings/aws")));
   assert.ok(r.calls.some((c) => c.startsWith("curl") && c.includes("-X POST http://localhost:9034/api/permissions/check")));
@@ -230,7 +231,7 @@ test("the plan has the expected steps per path and names the probe document", ()
     "Detect the AWS account and the admin identity",
     "Create the IAM user aws-advisor",
     "Create the read-only role aws-advisor-read trusted by user aws-advisor",
-    "Put the read-only policy on aws-advisor-read",
+    "Put the read-only policy on aws-advisor-read and attach ViewOnlyAccess",
     "Leave aws-advisor with exactly one permission: assuming aws-advisor-read",
     "Create an access key for aws-advisor and store it under [aws-advisor-user]",
     "Write the [profile aws-advisor] that assumes the role",

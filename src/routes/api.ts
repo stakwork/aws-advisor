@@ -18,7 +18,7 @@ import { proposeReadPolicyUpdates } from "../actions/read_policy.js";
 import { ACCOUNT_TARGET_RE, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
 import { postRejectionLearning } from "../learnings.js";
 import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
-import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy } from "../permissions.js";
+import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy, VIEW_ONLY_POLICY_ARN } from "../permissions.js";
 import { checkPermissions, lastPermissionCheck, permissionCheckSummary } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
 import { latestWatchSummary, watchOnce } from "../watcher.js";
@@ -113,6 +113,7 @@ api.get("/permissions", (req, res) => {
     account_id: accountId || credentialsMeta()?.accountId || null,
     accounts,
     recommended_policy: recommendedPolicy(accountId || credentialsMeta()?.accountId || "*"),
+    managed_policies: [VIEW_ONLY_POLICY_ARN],
     probe_document: probeDocumentInfo(), probe_documents: probeDocumentsInfo(),
     // the ledger rows that update the read policy itself (src/actions/read_policy.ts): open ones wait for "Run as me"
     policy_rows: listActions({ kind: "read_policy", page_size: 50 }).actions.filter((r) => r.status !== "stale"),

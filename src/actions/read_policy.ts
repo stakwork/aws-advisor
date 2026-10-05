@@ -8,17 +8,18 @@
  * credentials and compared, action by action, with the policy wanted (the recommended one, or the current one plus
  * the fix for the permissions recorded as missing). The document goes inline on the role under the setup script's
  * name (the role's own name), which holds 10,240 characters; an IAM user's inline policy holds 2,048, and a document
- * that would not fit is refused before IAM refuses it. Revert puts the previous document back, or removes the
- * policy when there was none.
+ * that would not fit is refused before IAM refuses it. The AWS-managed ViewOnlyAccess goes on next to it (the inline
+ * document holds only what that policy leaves out), attached by the same row when it is not there yet. Revert puts the
+ * previous document back, or removes the policy when there was none, and detaches ViewOnlyAccess when this row attached it.
  */
-import { DeleteRolePolicyCommand, DeleteUserPolicyCommand, GetRolePolicyCommand, GetUserPolicyCommand, IAMClient, ListRolePoliciesCommand, ListUserPoliciesCommand, PutRolePolicyCommand, PutUserPolicyCommand } from "@aws-sdk/client-iam";
+import { AttachRolePolicyCommand, AttachUserPolicyCommand, DeleteRolePolicyCommand, DeleteUserPolicyCommand, DetachRolePolicyCommand, DetachUserPolicyCommand, GetRolePolicyCommand, GetUserPolicyCommand, IAMClient, ListAttachedRolePoliciesCommand, ListAttachedUserPoliciesCommand, ListRolePoliciesCommand, ListUserPoliciesCommand, PutRolePolicyCommand, PutUserPolicyCommand } from "@aws-sdk/client-iam";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { config } from "../config.js";
 import type { ActionModule, ActionRow, Creds, Proposal } from "../executor.js";
 import { recordProposal } from "../executor.js";
 import { accountCredentials, listMembers } from "../accounts.js";
 import { credentialsMeta, sdkCredentials, sdkIdentity } from "../steampipe.js";
-import { listPermissionIssues, policyForIssues, recommendedPolicy, type IamPolicy, type IamStatement } from "../permissions.js";
+import { listPermissionIssues, policyForIssues, recommendedPolicy, VIEW_ONLY_POLICY_ARN, type IamPolicy, type IamStatement } from "../permissions.js";
 
 export const KIND = "read_policy" as const;
 /** IAM is global; every call goes to the one partition endpoint. */
@@ -82,7 +83,24 @@ export async function readInlinePolicy(provider: AwsCredentialIdentityProvider, 
   } finally { iam.destroy(); }
 }
 
-export interface ProposeResult { account_id: string; name: string; is_parent: boolean; target: PolicyTarget | null; status: "proposed" | "up_to_date" | "refused" | "error"; detail: string; missing: string[]; chars: number | null; row: ActionRow | null }
+/** The managed policies attached to the target, or null when the advisor may not list them. */
+export async function readAttachedPolicies(provider: AwsCredentialIdentityProvider, t: PolicyTarget): Promise<string[] | null> {
+  const iam = new IAMClient({ region: IAM_REGION, credentials: provider });
+  try {
+    const out: string[] = []; let Marker: string | undefined;
+    do {
+      const r = t.kind === "role" ? await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: t.name, Marker })) : await iam.send(new ListAttachedUserPoliciesCommand({ UserName: t.name, Marker }));
+      for (const a of r.AttachedPolicies ?? []) if (a.PolicyArn) out.push(a.PolicyArn);
+      Marker = r.IsTruncated ? r.Marker : undefined;
+    } while (Marker);
+    return out;
+  } catch (e: any) {
+    if (/AccessDenied|not authorized/i.test(String(e?.message || e))) return null;
+    throw e;
+  } finally { iam.destroy(); }
+}
+
+export interface ProposeResult { account_id: string; name: string; is_parent: boolean; target: PolicyTarget | null; status: "proposed" | "up_to_date" | "refused" | "error"; detail: string; missing: string[]; attach_view_only?: boolean; chars: number | null; row: ActionRow | null }
 
 /**
  * One row per account whose read policy lacks something: the parent's identity and every enabled member's read role.
@@ -121,26 +139,36 @@ export async function proposeReadPolicyUpdates(opts: { fixOnly?: boolean; by?: s
     const wanted = fixOnly ? mergeFix(current.document, fixFor(t.account_id)) : recommendedPolicy(t.account_id || "*");
     const missing = missingActions(current.document, wanted);
     const chars = policyChars(wanted);
-    if (!missing.length) { results.push({ ...base, status: "up_to_date", detail: `${current.policy_name ?? "the policy"} already grants everything${fixOnly ? " the fix names" : " recommended"}`, chars }); continue; }
+    // ViewOnlyAccess: attached unless it is seen to be there already (attaching twice is a no-op in IAM)
+    let attached: string[] | null = null;
+    try { attached = await readAttachedPolicies(t.provider, target); } catch (e: any) { results.push({ ...base, status: "error", detail: `could not list the attached policies: ${String(e?.message || e).slice(0, 200)}` }); continue; }
+    const attachViewOnly = !attached?.includes(VIEW_ONLY_POLICY_ARN);
+    if (!missing.length && !attachViewOnly) { results.push({ ...base, status: "up_to_date", detail: `${current.policy_name ?? "the policy"} already grants everything${fixOnly ? " the fix names" : " recommended"} and ViewOnlyAccess is attached`, chars }); continue; }
     const limit = INLINE_LIMIT[target.kind];
-    if (chars > limit) {
-      results.push({ ...base, status: "refused", detail: `the document is ${chars.toLocaleString()} characters and an inline policy on ${target.kind === "user" ? "an IAM user" : "a role"} holds ${limit.toLocaleString()}${target.kind === "user" ? "; move the advisor to a role (the setup script does) or attach the policy as a customer managed one" : ""}`, missing, chars });
+    if (missing.length && chars > limit) {
+      results.push({ ...base, status: "refused", detail: `the document is ${chars.toLocaleString()} characters and an inline policy on ${target.kind === "user" ? "an IAM user" : "a role"} holds ${limit.toLocaleString()}${target.kind === "user" ? "; move the advisor to a role (the setup script does) or attach the policy as a customer managed one" : ""}`, missing, attach_view_only: attachViewOnly, chars });
       continue;
     }
     const policyName = current.policy_name ?? target.name;
+    const verb = target.kind === "role" ? "Role" : "User";
+    const steps = [missing.length ? `one Put${verb}Policy of ${chars.toLocaleString()} characters` : "", attachViewOnly ? `Attach${verb}Policy ${VIEW_ONLY_POLICY_ARN}` : ""].filter(Boolean).join(" and ");
     const p: Proposal = {
       kind: KIND, resource: t.arn ? (target.kind === "role" ? `arn:aws:iam::${target.account_id}:role/${target.name}` : `arn:aws:iam::${target.account_id}:user/${target.name}`) : target.name, resource_name: `${target.name} (${t.is_parent ? "parent" : t.name})`,
       region: IAM_REGION, account_id: t.is_parent ? null : t.account_id,
       dedupe: `${KIND}:${target.account_id}:${target.kind}:${target.name}`,
-      title: `${target.name}: read policy ${policyName} + ${missing.length} action${missing.length === 1 ? "" : "s"}${fixOnly ? " (the recorded fixes)" : " (the recommended policy)"}`,
-      reason: `${by} asked from Settings › Permissions to bring the advisor's read policy in ${t.is_parent ? "the parent" : `member ${t.name}`} (${target.account_id}) up to date: ${missing.length} action${missing.length === 1 ? " is" : "s are"} missing${current.document ? "" : readRefused ? " (the advisor may not read its own policy yet, so the whole document is written and every action counts as missing)" : current.names.length ? ` (the current ${current.names.join(", ")} could not be read)` : " (no inline policy there yet)"}: ${missing.slice(0, 12).join(", ")}${missing.length > 12 ? `, +${missing.length - 12}` : ""}. The advisor's own identities hold no IAM write right, so this is done with your own credentials ("Run as me"), as one Put${target.kind === "role" ? "RolePolicy" : "UserPolicy"} of ${chars.toLocaleString()} characters.`,
-      before: { policy_name: current.policy_name, document: current.document }, after: { policy_name: policyName, document: wanted },
-      facts: { target_kind: target.kind, name: target.name, policy_name: policyName, account_id: target.account_id, chars, fix_only: fixOnly, missing, by, read_refused: readRefused },
-      rollback: current.document ? `Put${target.kind === "role" ? "RolePolicy" : "UserPolicy"} ${policyName} back to the previous document` : readRefused ? "none: the previous document could not be read, so there is nothing to put back (a revert is refused rather than deleting the policy)" : `Delete${target.kind === "role" ? "RolePolicy" : "UserPolicy"} ${policyName}`,
+      title: `${target.name}: ${[missing.length ? `read policy ${policyName} + ${missing.length} action${missing.length === 1 ? "" : "s"}` : "", attachViewOnly ? "attach ViewOnlyAccess" : ""].filter(Boolean).join(", ")}${fixOnly ? " (the recorded fixes)" : " (the recommended policy)"}`,
+      reason: `${by} asked from Settings › Permissions to bring the advisor's read policy in ${t.is_parent ? "the parent" : `member ${t.name}`} (${target.account_id}) up to date: ${missing.length ? `${missing.length} action${missing.length === 1 ? " is" : "s are"} missing` : "the inline policy is complete"}${attachViewOnly ? `, and the AWS-managed ViewOnlyAccess (every list and describe call, no data reads) is ${attached ? "not attached" : "not known to be attached (the advisor may not list its attached policies)"}` : ""}${!missing.length ? "" : current.document ? "" : readRefused ? " (the advisor may not read its own policy yet, so the whole document is written and every action counts as missing)" : current.names.length ? ` (the current ${current.names.join(", ")} could not be read)` : " (no inline policy there yet)"}${missing.length ? `: ${missing.slice(0, 12).join(", ")}${missing.length > 12 ? `, +${missing.length - 12}` : ""}` : ""}. The advisor's own identities hold no IAM write right, so this is done with your own credentials ("Run as me"), as ${steps}.`,
+      before: { policy_name: current.policy_name, document: current.document, attached }, after: { policy_name: policyName, document: wanted, attached: attachViewOnly ? [...(attached ?? []), VIEW_ONLY_POLICY_ARN] : attached },
+      // view_only_was_attached: false when seen absent (Revert detaches it), null when the list was not readable (Revert leaves it)
+      facts: { target_kind: target.kind, name: target.name, policy_name: policyName, account_id: target.account_id, chars, fix_only: fixOnly, missing, by, read_refused: readRefused, put_inline: missing.length > 0, attach_view_only: attachViewOnly, view_only_was_attached: attached ? !attachViewOnly : null },
+      rollback: [
+        !missing.length ? "" : current.document ? `Put${verb}Policy ${policyName} back to the previous document` : readRefused ? "the inline policy: none, the previous document could not be read, so there is nothing to put back (a revert is refused rather than deleting the policy)" : `Delete${verb}Policy ${policyName}`,
+        attachViewOnly && attached ? `Detach${verb}Policy ${VIEW_ONLY_POLICY_ARN}` : attachViewOnly ? "ViewOnlyAccess stays attached (whether it was there before could not be read)" : "",
+      ].filter(Boolean).join("; "),
       est_usd_month: null,
     };
     const row = recordProposal(p, config.actMode, "manual").row;
-    results.push({ ...base, status: "proposed", detail: `#${row.id} waits for your credentials${readRefused ? " (the current policy could not be read, so the whole document is written)" : ""}`, missing, chars, row });
+    results.push({ ...base, status: "proposed", detail: `#${row.id} waits for your credentials${readRefused && missing.length ? " (the current policy could not be read, so the whole document is written)" : ""}`, missing, attach_view_only: attachViewOnly, chars, row });
   }
   return { results, fix_only: fixOnly, issues: issues.map((i) => i.action) };
 }
@@ -160,14 +188,27 @@ async function put(provider: AwsCredentialIdentityProvider, t: { kind: "role" | 
   } finally { iam.destroy(); }
 }
 
+async function attachViewOnly(provider: AwsCredentialIdentityProvider, t: { kind: "role" | "user"; name: string }, on: boolean): Promise<string> {
+  const iam = new IAMClient({ region: IAM_REGION, credentials: provider });
+  try {
+    if (t.kind === "role") await iam.send(on ? new AttachRolePolicyCommand({ RoleName: t.name, PolicyArn: VIEW_ONLY_POLICY_ARN }) : new DetachRolePolicyCommand({ RoleName: t.name, PolicyArn: VIEW_ONLY_POLICY_ARN }));
+    else await iam.send(on ? new AttachUserPolicyCommand({ UserName: t.name, PolicyArn: VIEW_ONLY_POLICY_ARN }) : new DetachUserPolicyCommand({ UserName: t.name, PolicyArn: VIEW_ONLY_POLICY_ARN }));
+    return `${on ? "Attach" : "Detach"}${t.kind === "role" ? "Role" : "User"}Policy ViewOnlyAccess on ${t.name}`;
+  } finally { iam.destroy(); }
+}
+/** Rows recorded before ViewOnlyAccess existed carry no put_inline fact: they always put the document. */
+const putsInline = (p: Proposal) => p.facts.put_inline !== false;
+
 export const readPolicyAction: ActionModule = {
   kind: KIND,
   label: "The advisor's read policy brought up to date from Settings › Permissions, with a person's own credentials",
   async plan() { return { proposals: [], notes: ["proposed from Settings › Permissions, never planned"] }; },
   async apply(p, creds: Creds) {
     const t = factsOf(p);
-    const r = await put(creds.act(), t, (p.after.document as IamPolicy) ?? null);
-    return `${r} (+${(p.facts.missing as string[] | undefined)?.length ?? "?"} missing)`;
+    const done: string[] = [];
+    if (putsInline(p)) done.push(`${await put(creds.act(), t, (p.after.document as IamPolicy) ?? null)} (+${(p.facts.missing as string[] | undefined)?.length ?? "?"} missing)`);
+    if (p.facts.attach_view_only) done.push(await attachViewOnly(creds.act(), t, true));
+    return done.join("; ");
   },
   async verify(p, creds: Creds) {
     const t = factsOf(p);
@@ -175,12 +216,23 @@ export const readPolicyAction: ActionModule = {
     try { current = await readInlinePolicy(creds.read, { kind: t.kind, name: t.name, account_id: String(p.facts.account_id ?? "") }, t.policy_name); }
     catch (e: any) { return { ok: null, note: `the policy could not be read back with the advisor's credentials (${String(e?.message || e).slice(0, 120)}); the next permission check tells` }; }
     const missing = missingActions(current.document, p.after.document as IamPolicy);
-    return missing.length ? { ok: false, note: `${t.policy_name} still lacks ${missing.length} action${missing.length === 1 ? "" : "s"}: ${missing.slice(0, 8).join(", ")}` } : { ok: true, note: `read back: ${t.policy_name} grants every action wanted` };
+    if (missing.length) return { ok: false, note: `${t.policy_name} still lacks ${missing.length} action${missing.length === 1 ? "" : "s"}: ${missing.slice(0, 8).join(", ")}` };
+    if (p.facts.attach_view_only) {
+      let attached: string[] | null = null;
+      try { attached = await readAttachedPolicies(creds.read, { kind: t.kind, name: t.name, account_id: String(p.facts.account_id ?? "") }); } catch { /* reported below as unknown */ }
+      if (attached === null) return { ok: null, note: `read back: ${t.policy_name} grants every action wanted; whether ViewOnlyAccess is attached could not be listed` };
+      if (!attached.includes(VIEW_ONLY_POLICY_ARN)) return { ok: false, note: `${t.policy_name} grants every action wanted, but ViewOnlyAccess is not attached` };
+    }
+    return { ok: true, note: `read back: ${t.policy_name} grants every action wanted${p.facts.attach_view_only ? " and ViewOnlyAccess is attached" : ""}` };
   },
   async revert(p, creds: Creds) {
     // the previous document was never seen: deleting the policy would take the advisor's access away, not put anything back
-    if (p.before.document == null && p.facts.read_refused) throw new Error(`the policy before this change was not readable, so there is nothing to put back; a revert would delete ${String(p.facts.policy_name)} and leave the advisor without access`);
+    if (putsInline(p) && p.before.document == null && p.facts.read_refused) throw new Error(`the policy before this change was not readable, so there is nothing to put back; a revert would delete ${String(p.facts.policy_name)} and leave the advisor without access`);
     const t = { ...factsOf(p), policy_name: String(p.before.policy_name ?? p.facts.policy_name) };
-    return `${await put(creds.act(), t, (p.before.document as IamPolicy | null) ?? null)} (back to how it was)`;
+    const done: string[] = [];
+    if (putsInline(p)) done.push(`${await put(creds.act(), t, (p.before.document as IamPolicy | null) ?? null)} (back to how it was)`);
+    // detached only when it was seen absent before this row attached it
+    if (p.facts.attach_view_only && p.facts.view_only_was_attached === false) done.push(await attachViewOnly(creds.act(), t, false));
+    return done.join("; ") || "nothing to put back";
   },
 };

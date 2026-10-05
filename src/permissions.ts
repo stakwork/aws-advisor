@@ -417,7 +417,16 @@ export function policyForIssues(issues: { action: string; service?: string }[]):
 }
 
 /**
- * The complete read-only policy the advisor needs (kept in step with the README's "IAM permissions" section).
+ * The AWS-managed policy attached next to the advisor's inline one: every List/Describe call AWS ships, kept current
+ * by AWS, with no data reads (no s3:GetObject, no table rows, no log events). New collectors that only list and
+ * describe need nothing added here.
+ */
+export const VIEW_ONLY_POLICY_ARN = "arn:aws:iam::aws:policy/ViewOnlyAccess";
+
+/**
+ * The inline read-only policy the advisor needs on top of ViewOnlyAccess (kept in step with the README's "IAM
+ * permissions" section): only what that managed policy leaves out, such as cost data, Logs Insights queries, bucket
+ * settings, Identity Center and the wildcards for services whose describe calls it names one by one.
  * The SSM statements follow PROBE_DOCUMENT: a custom document gets SendCommand scoped to it, the stock
  * AWS-RunShellScript is the zero-setup fallback.
  */
@@ -429,55 +438,50 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
       Effect: "Allow",
       Action: [
         "ec2:Describe*",
-        "rds:Describe*", "rds:ListTagsForResource", "rds:DownloadDBLogFilePortion",
+        "rds:ListTagsForResource", "rds:DownloadDBLogFilePortion",
         "pi:DescribeDimensionKeys", "pi:GetResourceMetadata",
-        "elasticache:Describe*", "elasticache:ListTagsForResource",
-        "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData", "cloudwatch:ListMetrics",
-        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks", "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
-        "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
-        "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
-        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
+        "elasticache:ListTagsForResource",
+        "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
+        "cloudwatch:DescribeAlarms",
+        "kms:DescribeKey", "kms:ListAliases", "kms:GetKeyRotationStatus",
+        "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
         "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization", "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
         "support:DescribeSeverityLevels",
         "ssm:DescribeInstanceInformation",
-        "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
-        "s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads", "s3:GetMetricsConfiguration",
-        "lambda:ListFunctions", "lambda:GetFunction*", "lambda:GetPolicy", "lambda:ListTags",
-        "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
-        "ecs:Describe*", "ecs:List*",
+        "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
+        "s3:ListBucketVersions", "s3:ListBucketMultipartUploads", "s3:GetMetricsConfiguration",
+        "lambda:GetFunction*",
+        "ecr:DescribeImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
         "eks:Describe*", "eks:List*",
         "dynamodb:Describe*", "dynamodb:List*",
         "application-autoscaling:DescribeScalableTargets",
         "elasticloadbalancing:Describe*",
         "secretsmanager:ListSecrets", "secretsmanager:DescribeSecret",
-        "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
-        "cloudfront:List*", "cloudfront:Get*",
-        "route53:List*", "route53:Get*",
-        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "elasticbeanstalk:DescribeApplicationVersions",
-        "autoscaling:Describe*",
+        "cloudtrail:GetTrailStatus", "cloudtrail:ListTags",
+        "cloudfront:Get*",
+        "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource",
         "redshift:Describe*",
-        "elasticmapreduce:List*", "elasticmapreduce:Describe*",
+        "elasticmapreduce:Describe*",
         "apigateway:GET",
         "tag:GetResources",
         "sts:GetCallerIdentity",
-        "iam:ListAccountAliases", "iam:SimulatePrincipalPolicy", "iam:ListUsers", "iam:GetUser", "iam:ListAccessKeys", "iam:GetAccessKeyLastUsed", "iam:ListGroupsForUser", "iam:ListAttachedUserPolicies", "iam:ListUserPolicies", "iam:GetUserPolicy", "iam:GetLoginProfile", "iam:ListMFADevices", "iam:ListUserTags",
-        "organizations:DescribeOrganization", "organizations:ListAccounts",
+        "iam:SimulatePrincipalPolicy", "iam:GetUser", "iam:GetAccessKeyLastUsed", "iam:GetUserPolicy",
+        "organizations:DescribeOrganization",
         // IAM Identity Center (the management account or its delegated administrator answers; elsewhere the calls return nothing and the Identities tab says so)
         "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",
         "identitystore:ListUsers", "identitystore:ListGroups", "identitystore:ListGroupMemberships", "identitystore:DescribeUser", "identitystore:DescribeGroup",
-        "iam:ListRoles", "iam:GetRole",
+        "iam:GetRole",
         // the advisor reads its own inline policy to say what is missing before a person updates it (src/actions/read_policy.ts)
-        "iam:ListRolePolicies", "iam:GetRolePolicy", "iam:ListUserPolicies",
+        "iam:GetRolePolicy",
         // the foundational security benchmark's SNS controls (topic encryption, delivery logging, subscriptions)
-        "sns:ListTopics", "sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:ListSubscriptions", "sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes",
+        "sns:GetTopicAttributes",
         // the platform services inventory (src/services/): certificates, workgroups, backups, stacks, web ACLs, threat detection
-        "acm:ListCertificates", "acm:DescribeCertificate", "acm:ListTagsForCertificate",
-        "athena:ListWorkGroups", "athena:GetWorkGroup",
-        "backup:ListBackupVaults", "backup:DescribeBackupVault", "backup:ListBackupPlans", "backup:GetBackupPlan", "backup:ListBackupSelections", "backup:GetBackupSelection", "backup:ListProtectedResources", "backup:ListRecoveryPointsByBackupVault", "backup:ListTags",
-        "cloudformation:ListStacks", "cloudformation:DescribeStacks", "cloudformation:ListStackResources", "cloudformation:DescribeStackResources",
-        "wafv2:ListWebACLs", "wafv2:GetWebACL", "wafv2:ListResourcesForWebACL", "wafv2:GetLoggingConfiguration", "wafv2:ListTagsForResource",
+        "acm:DescribeCertificate", "acm:ListTagsForCertificate",
+        "athena:GetWorkGroup",
+        "cloudformation:DescribeStackResources",
+        "wafv2:GetWebACL", "wafv2:GetLoggingConfiguration",
         "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
         // User Notifications (the console bell): the AWS-managed feed and the account's own configurations
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent",
@@ -527,7 +531,7 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
 /** Actions a module declares that only a person's own credentials perform ("Run as me"): never in the actuator policy, never counted as its gap. */
 /** Actions the actuator holds only through an instance's Auto-park grant (src/autopark_grant.ts), never in the static policy: the right is scoped to that instance's own records. */
 export const GRANT_ONLY_ACTIONS: ReadonlySet<string> = new Set(["route53:ChangeResourceRecordSets"]);
-export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy"]);
+export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:AttachUserPolicy", "iam:DetachUserPolicy", "iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy"]);
 
 export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
   acu_window: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
@@ -561,7 +565,7 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   // UpdateTagsForResource is the API; the IAM actions it checks are AddTags (TagsToAdd) and RemoveTags (TagsToRemove).
   // the AdvisorAutoPark and advisor:hibernate switches are done with a person's credentials ("Run as me"; PERSON_ONLY_ACTIONS are never the actuator's) ("Run as me"): the tag, and for Auto-park the grant on the actuator role
   // the advisor's own read policy, brought up to date from Settings › Permissions with a person's credentials (src/actions/read_policy.ts): never the actuator's
-  read_policy: { apply: ["iam:PutRolePolicy", "iam:PutUserPolicy"], revert: ["iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy"] },
+  read_policy: { apply: ["iam:PutRolePolicy", "iam:PutUserPolicy", "iam:AttachRolePolicy", "iam:AttachUserPolicy"], revert: ["iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy", "iam:DetachRolePolicy", "iam:DetachUserPolicy"] },
   consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags", ...PERSON_ONLY_ACTIONS], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", ...PERSON_ONLY_ACTIONS] },
   // A staged relaunch: apply, the stages (advance) and the cut-over (step) are all checked as apply.
   ec2_hibernate_migrate: { apply: ["ec2:CreateImage", "ec2:StopInstances", "ec2:RunInstances", "ec2:CreateTags", "iam:PassRole", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"],

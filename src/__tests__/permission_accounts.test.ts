@@ -29,5 +29,8 @@ test("explainPermissionError: the SDK's 'operation error SNS: ListTopics' names 
   perms.clearPermissionIssues(["sns:ListTopics"]);
   const policy = perms.recommendedPolicy("210987654321");
   const actions = new Set(policy.Statement.flatMap((s) => s.Action));
-  for (const a of ["sns:ListTopics", "sns:GetTopicAttributes", "sns:ListSubscriptions"]) assert.ok(actions.has(a), a);
+  // ViewOnlyAccess (attached next to the inline policy) grants sns:List*; the inline policy carries only the Get
+  assert.ok(actions.has("sns:GetTopicAttributes"));
+  for (const a of ["sns:ListTopics", "sns:ListSubscriptions"]) assert.ok(!actions.has(a), a);
+  assert.equal(perms.VIEW_ONLY_POLICY_ARN, "arn:aws:iam::aws:policy/ViewOnlyAccess");
 });

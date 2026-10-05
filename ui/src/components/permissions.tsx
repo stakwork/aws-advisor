@@ -131,14 +131,14 @@ export function PermissionsCard() {
         </div>
       </div>
       <Code>{issues.length && !showFull ? fixPolicy : fullPolicy}</Code>
-      <p className="mt-2 text-xs text-zinc-500">Attach it with <code className="text-zinc-300">aws iam put-user-policy --user-name aws-advisor --policy-name aws-advisor --policy-document file://policy.json</code> (or the role equivalent). The AWS managed <code className="text-zinc-300">ReadOnlyAccess</code> plus the Cost Explorer, pricing and SSM statements is an acceptable shortcut.</p>
+      <p className="mt-2 text-xs text-zinc-500">This goes inline next to the AWS managed <code className="text-zinc-300">ViewOnlyAccess</code>, which covers every list and describe call (and new ones as AWS adds them) without reading any data; the document above holds only what that policy leaves out. Put it on the role with <code className="text-zinc-300">aws iam put-role-policy --role-name aws-advisor-read --policy-name aws-advisor-read --policy-document file://policy.json</code> and <code className="text-zinc-300">aws iam attach-role-policy --role-name aws-advisor-read --policy-arn {p.managed_policies?.[0] ?? "arn:aws:iam::aws:policy/ViewOnlyAccess"}</code>.</p>
 
       <div className="mt-4 rounded border border-zinc-800 p-3">
         <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Apply it with your own credentials</div>
         <p className="text-sm text-zinc-400">
           The advisor's identities hold no IAM write right, so they can never widen their own permissions. Instead, one ledger row per account whose read policy lacks something is proposed here
           (the parent's read identity, each member's read role), and you apply each with temporary credentials of your own, previewed first: a single <code className="text-zinc-200">PutRolePolicy</code> of the whole document inline on the role,
-          under the setup script's policy name. The row records who did it; Revert puts the previous document back.
+          under the setup script's policy name, plus <code className="text-zinc-200">AttachRolePolicy</code> of ViewOnlyAccess when it is not attached yet. The row records who did it; Revert puts the previous document back and detaches ViewOnlyAccess if the row attached it.
         </p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button type="button" onClick={() => propose(false)} disabled={proposing}>{proposing ? "Reading the policies…" : "Propose the full policy"}</Button>

@@ -550,9 +550,18 @@ and the advisor must see the same files: same user, or the same mounts). `STEAMP
 
 ### The policy
 
-The complete minimal read-only policy the app needs (the same document is served by `GET /api/permissions` as
-`recommended_policy`, with the account id filled in). It covers every table in `src/queries.ts`,
-`src/inventory.ts`, `src/watcher.ts`, `src/investigate.ts`, the MCP tools and the AWS Thrifty benchmarks:
+Two policies go on the advisor's read role (the setup script puts both there):
+
+- the AWS-managed **`ViewOnlyAccess`** (`arn:aws:iam::aws:policy/ViewOnlyAccess`): every list and describe call,
+  kept current by AWS as services ship, and no data reads (no S3 objects, table rows or log events). A new
+  collector that only lists and describes needs nothing added.
+- the inline policy below, which holds only what `ViewOnlyAccess` leaves out: cost and pricing data, Logs Insights
+  queries, bucket settings, tags, Identity Center, the probe's SSM statements, assuming member roles, and the
+  wildcards for services whose describe calls `ViewOnlyAccess` names one by one. The same document is served by
+  `GET /api/permissions` as `recommended_policy`, with the account id filled in.
+
+Together they cover every table in `src/queries.ts`, `src/inventory.ts`, `src/watcher.ts`, `src/investigate.ts`,
+the MCP tools and the AWS Thrifty benchmarks:
 
 ```json
 {
@@ -563,46 +572,48 @@ The complete minimal read-only policy the app needs (the same document is served
       "Effect": "Allow",
       "Action": [
         "ec2:Describe*",
-        "rds:Describe*", "rds:ListTagsForResource",
-        "elasticache:Describe*", "elasticache:ListTagsForResource",
-        "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData", "cloudwatch:ListMetrics",
-        "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:ListTagsForResource", "logs:DescribeQueries", "logs:DescribeSubscriptionFilters", "logs:DescribeExportTasks", "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
-        "cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource",
-        "kms:ListKeys", "kms:DescribeKey", "kms:ListAliases", "kms:ListResourceTags", "kms:GetKeyRotationStatus",
-        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
-        "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization",
-        "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
+        "rds:ListTagsForResource", "rds:DownloadDBLogFilePortion",
+        "pi:DescribeDimensionKeys", "pi:GetResourceMetadata",
+        "elasticache:ListTagsForResource",
+        "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
+        "cloudwatch:DescribeAlarms",
+        "kms:DescribeKey", "kms:ListAliases", "kms:GetKeyRotationStatus",
+        "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
+        "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization", "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
         "pricing:GetProducts",
         "support:DescribeSeverityLevels",
         "ssm:DescribeInstanceInformation",
-        "s3:ListAllMyBuckets", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
-        "lambda:ListFunctions", "lambda:GetFunction*", "lambda:GetPolicy", "lambda:ListTags",
-        "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
-        "ecs:Describe*", "ecs:List*",
+        "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
+        "s3:ListBucketVersions", "s3:ListBucketMultipartUploads", "s3:GetMetricsConfiguration",
+        "lambda:GetFunction*",
+        "ecr:DescribeImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
         "eks:Describe*", "eks:List*",
         "dynamodb:Describe*", "dynamodb:List*",
         "application-autoscaling:DescribeScalableTargets",
         "elasticloadbalancing:Describe*",
         "secretsmanager:ListSecrets", "secretsmanager:DescribeSecret",
-        "cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListTags", "cloudtrail:LookupEvents",
-        "cloudfront:List*", "cloudfront:Get*",
-        "route53:List*", "route53:Get*",
-        "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource", "elasticbeanstalk:DescribeApplicationVersions",
-        "autoscaling:Describe*",
+        "cloudtrail:GetTrailStatus", "cloudtrail:ListTags",
+        "cloudfront:Get*",
+        "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentResources", "elasticbeanstalk:ListTagsForResource",
         "redshift:Describe*",
-        "elasticmapreduce:List*", "elasticmapreduce:Describe*",
+        "elasticmapreduce:Describe*",
         "apigateway:GET",
         "tag:GetResources",
-        "acm:ListCertificates", "acm:DescribeCertificate", "acm:ListTagsForCertificate",
-        "athena:ListWorkGroups", "athena:GetWorkGroup",
-        "backup:ListBackupVaults", "backup:DescribeBackupVault", "backup:ListBackupPlans", "backup:GetBackupPlan", "backup:ListBackupSelections", "backup:GetBackupSelection", "backup:ListProtectedResources", "backup:ListRecoveryPointsByBackupVault", "backup:ListTags",
-        "cloudformation:ListStacks", "cloudformation:DescribeStacks", "cloudformation:ListStackResources", "cloudformation:DescribeStackResources",
-        "wafv2:ListWebACLs", "wafv2:GetWebACL", "wafv2:ListResourcesForWebACL", "wafv2:GetLoggingConfiguration", "wafv2:ListTagsForResource",
-        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
-        "sns:ListTopics", "sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:ListSubscriptions",
         "sts:GetCallerIdentity",
-        "iam:ListAccountAliases"
+        "iam:SimulatePrincipalPolicy", "iam:GetUser", "iam:GetAccessKeyLastUsed", "iam:GetUserPolicy",
+        "organizations:DescribeOrganization",
+        "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",
+        "identitystore:ListUsers", "identitystore:ListGroups", "identitystore:ListGroupMemberships", "identitystore:DescribeUser", "identitystore:DescribeGroup",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "sns:GetTopicAttributes",
+        "acm:DescribeCertificate", "acm:ListTagsForCertificate",
+        "athena:GetWorkGroup",
+        "cloudformation:DescribeStackResources",
+        "wafv2:GetWebACL", "wafv2:GetLoggingConfiguration",
+        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
+        "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent"
       ],
       "Resource": "*"
     },
@@ -678,21 +689,22 @@ has no fallback and waits for its document.
 afterwards: the permission check flags the setup as unsafe, and the recommended policy still names only the
 `AwsAdvisorProbe*` documents, so nothing in this document ever grants the stock one.
 
-### Shortcut
+### Why ViewOnlyAccess and not ReadOnlyAccess
 
-The AWS managed `ReadOnlyAccess` policy plus a small inline policy with the Cost Explorer (`ce:*` above),
-`pricing:GetProducts` and the three SSM statements is an acceptable shortcut; it grants more than the advisor
-uses, but nothing that writes.
+`ReadOnlyAccess` would cover nearly all of the inline list too, but it reads data: S3 objects, DynamoDB items, log events,
+Athena results. The advisor never needs those, so the role gets `ViewOnlyAccess` (metadata only) and the few reads
+on top of it are named one by one.
 
 ### Creating the user with the AWS CLI
 
-The quickest version, four commands with the policy above saved as `policy.json` (account id filled in), when
+The quickest version, five commands with the policy above saved as `policy.json` (account id filled in), when
 you just want keys to paste into the **Access keys** tab:
 
 ```
 aws iam create-user --user-name aws-advisor
 aws iam create-policy --policy-name aws-advisor-read --policy-document file://policy.json --query Policy.Arn --output text
 aws iam attach-user-policy --user-name aws-advisor --policy-arn <the ARN printed above>
+aws iam attach-user-policy --user-name aws-advisor --policy-arn arn:aws:iam::aws:policy/ViewOnlyAccess
 aws iam create-access-key --user-name aws-advisor          # paste AccessKeyId and SecretAccessKey into Settings
 for k in host docker apps software; do curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/$k/document > probe-$k.json; aws ssm create-document --name AwsAdvisorProbe-$k --document-type Command --document-format JSON --content file://probe-$k.json; done
 ```

@@ -1,6 +1,6 @@
 import { PROFILE_NAME_RE } from "./aws_config.js";
 import { config } from "./config.js";
-import { policyProbeDocument, recommendedPolicy } from "./permissions.js";
+import { policyProbeDocument, recommendedPolicy, VIEW_ONLY_POLICY_ARN } from "./permissions.js";
 import { PROBE_KINDS, PROBE_VERSION, type ProbeKind, probeDocument, probeDocumentName } from "./probes.js";
 
 /**
@@ -210,11 +210,16 @@ fi`,
 
 function rolePolicyStep(o: SetupOptions): SetupStep {
   return {
-    title: `Put the read-only policy on ${o.roleName}`,
-    detail: "aws iam put-role-policy with the advisor's recommended policy (embedded in the script, account id filled in). put-role-policy overwrites, so a rerun refreshes it.",
+    title: `Put the read-only policy on ${o.roleName} and attach ViewOnlyAccess`,
+    detail: "aws iam put-role-policy with the advisor's recommended policy (embedded in the script, account id filled in; put-role-policy overwrites, so a rerun refreshes it), then aws iam attach-role-policy with the AWS-managed ViewOnlyAccess (skipped when attached): every list and describe call, no data reads. The inline policy holds only what ViewOnlyAccess leaves out.",
     bash: `
 run iam put-role-policy --role-name "$ROLE_NAME" --policy-name "$ROLE_NAME" --policy-document "file://$WORK/policy.json"
-note "inline policy $ROLE_NAME on $ROLE_ARN is the recommended read-only policy (ssm:SendCommand only on document $PROBE_DOCUMENT)"`,
+note "inline policy $ROLE_NAME on $ROLE_ARN is the recommended read-only policy (ssm:SendCommand only on document $PROBE_DOCUMENT)"
+attached=$(query iam list-attached-role-policies --role-name "$ROLE_NAME" --query 'AttachedPolicies[].PolicyArn' --output text) || die "list-attached-role-policies failed"
+case "$attached" in
+  *"$VIEW_ONLY_POLICY"*) note "$VIEW_ONLY_POLICY already attached" ;;
+  *) run iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$VIEW_ONLY_POLICY"; note "attached $VIEW_ONLY_POLICY" ;;
+esac`,
   };
 }
 
@@ -775,6 +780,7 @@ ASSUME_TARGET=${sq(assumeTargetOf(o))}
 PRINCIPAL_SID=${sq(principalSidOf(o))}
 MEMBER_NAME=${sq(o.memberName || "")}
 SSM_CORE_POLICY='arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+VIEW_ONLY_POLICY='${VIEW_ONLY_POLICY_ARN}'
 TOTAL_STEPS=${steps.length}
 DRY_RUN=${o.dryRun ? 1 : 0}
 API_TOKEN="\${ADVISOR_API_TOKEN:-}"
