@@ -14,6 +14,7 @@ import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE, logGroupTags, observedLogShipping 
 import { getReconciliation, lastFullMonth } from "./reconcile.js";
 import { resourceAccountIndex } from "./resource_index.js";
 import { accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
+import { LINK_BY_ID } from "./graph_cypher.js";
 import { AttributionContext, ObservedShipping, attributeLogGroup } from "./log_attribution.js";
 import { LAMBDA_PRICE, lambdaFactsMap, lambdaMonthlyCost } from "./lambda_inventory.js";
 import { AWS } from "./adapters/types.js";
@@ -175,9 +176,9 @@ FOREACH (t IN row.types |
   MERGE (st:KnSystemType {id: t.id}) ON CREATE SET st.kind = t.generic_kind, st.native_kind = t.kind, st.provider = $provider, st.sku = t.sku, st.region = t.region, st.updated_at = $now
   MERGE (s)-[r:RUNS_ON]->(st) SET r.count = t.count, r.hours_month = t.hours_month, r.list_price = t.list_price, r.list_usd_month = t.list_usd_month)
 WITH s, row
-OPTIONAL MATCH (:AdvisorResource)-[m:MEMBER_OF]->(s) DELETE m
+OPTIONAL MATCH (m)-[mo:MEMBER_OF]->(s) WHERE m:AdvisorResource OR m:AdvisorGateway OR m:AdvisorResourceRef DELETE mo
 WITH DISTINCT s, row
-FOREACH (id IN row.members | MERGE (res:AdvisorResource {id: id}) MERGE (res)-[:MEMBER_OF]->(s))
+${LINK_BY_ID({ from: "s", carry: ["row"], list: "row.members", rel: "MEMBER_OF", reverse: true, namedBy: "system" })}
 FOREACH (id IN row.refs | MERGE (ref:AdvisorResource {id: id}) ON CREATE SET ref.account_id = coalesce(row.account_id, $account), ref.provider = $provider, ref.native_type = 'lambda_function', ref.native_id = id MERGE (ref)-[:MEMBER_OF]->(s))
 WITH s, row
 OPTIONAL MATCH (s)-[po:PART_OF]->() DELETE po
@@ -257,11 +258,11 @@ WITH DISTINCT g, row
 OPTIONAL MATCH (s:KnSystem {id: row.owner})
 FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | MERGE (s)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
 FOREACH (_ IN CASE WHEN s IS NULL THEN [1] ELSE [] END | MERGE (a:AdvisorAccount {id: row.account_id}) MERGE (a)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
-FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE (r)-[e:SHIPS_LOGS_TO]->(g) SET e.via = o.via, e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed')
+${LINK_BY_ID({ from: "g", carry: ["row"], list: "row.observed", id: "li.instance_id", rel: "SHIPS_LOGS_TO", reverse: true, set: "e.via = li.via, e.source = li.source, e.observed_at = li.at, e.attributed_by = 'observed'", namedBy: "log_group", guessed: "'instance'" })}
 WITH g, row
 UNWIND [o IN row.observed WHERE o.via STARTS WITH 'docker:'] AS o
 MATCH (c:AdvisorContainer {id: 'container:' + o.instance_id + ':' + substring(o.via, 7)})
-MERGE (c)-[e:SHIPS_LOGS_TO]->(g) SET e.via = 'log driver', e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed'`, { rows: lg, provider: AWS, now });
+MERGE (c)-[e:SHIPS_LOGS_TO]->(g) SET e.via = 'log driver', e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed'`, { rows: lg, account, provider: AWS, now });
     traffic += lg.length;
   }
   // ---- decisions with an outcome
@@ -337,7 +338,7 @@ export async function systemView(idOrName: string) {
     OPTIONAL MATCH (s)-[:IS_A]->(a:KnArchetype)
     OPTIONAL MATCH (s)-[ro:RUNS_ON]->(t:KnSystemType)
     OPTIONAL MATCH (o:KnPricingOverlay)-[:COVERS]->(t)
-    OPTIONAL MATCH (m:AdvisorResource)-[:MEMBER_OF]->(s)
+    OPTIONAL MATCH (m)-[:MEMBER_OF]->(s) WHERE m:AdvisorResource OR m:AdvisorGateway OR m:AdvisorResourceRef
     OPTIONAL MATCH (s)-[tr:TRANSFERS_TO]->(svc:KnDestination)
     OPTIONAL MATCH (s)-[sl:SHIPS_LOGS_TO]->(g:KnLogGroup)
     OPTIONAL MATCH (rec:AdvisorRecommendation)-[:TARGETS]->(m)

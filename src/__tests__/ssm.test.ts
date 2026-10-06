@@ -158,10 +158,13 @@ test("history: container samples are recorded per probe and daily roll-ups aggre
   for (const t of ["instance_metrics", "container_samples", "instance_daily", "container_daily"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
 });
 
-test("probe pass: an ISO-timestamped probe from earlier today does not hide the instance from the next hourly pass", async () => {
+test("probe pass: an ISO-timestamped probe from earlier today does not hide the instance from the next hourly pass", async (t) => {
   const { db } = await import("../db.js");
   const { probeTargets } = await import("../probe_pass.js");
   const iid = "i-0feedfacecafe0001";
+  // an hourly probe cron (the default is a daily 20 h); set here, not taken from a developer's .env
+  const before = process.env.PROBE_MIN_INTERVAL_HOURS; process.env.PROBE_MIN_INTERVAL_HOURS = "0.9";
+  t.after(() => { if (before === undefined) delete process.env.PROBE_MIN_INTERVAL_HOURS; else process.env.PROBE_MIN_INTERVAL_HOURS = before; });
   db.prepare("delete from inventory_ec2 where instance_id = ?").run(iid);
   db.prepare("delete from instance_metrics where instance_id = ?").run(iid);
   const cols = (db.prepare("pragma table_info(inventory_ec2)").all() as any[]).map((c) => c.name);

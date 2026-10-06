@@ -1,5 +1,6 @@
 import { db } from "./db.js";
 import { accountId, enabled, writeCypher } from "./graph_mirror.js";
+import { LINK_BY_ID } from "./graph_cypher.js";
 import { ingressRulesFor, naclVerdict, reachOf, type IngressRule, type NaclEntry, type PortReach, type ReachContext, type RuleRef } from "./instance_apps.js";
 import { vpcHasIpv6 } from "./security_groups.js";
 import { allEgressRules, eniOwner, isPublicSubnet, listEips, listEnis, listGateways, listRouteTables, listSubnets, routeTableOf, routeTarget, type EniRow, type GatewayRow, type RouteTableRow, type SubnetRow } from "./network_inventory.js";
@@ -173,8 +174,8 @@ FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorGateway'] |
   MERGE (t)-[e:ROUTES {destination: r.destination}]->(g) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)
 FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorInterface'] |
   MERGE (i:AdvisorInterface {id: r.id}) MERGE (t)-[e:ROUTES {destination: r.destination}]->(i) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)
-FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorResource'] |
-  MERGE (i:AdvisorResource {id: r.id}) MERGE (t)-[e:ROUTES {destination: r.destination}]->(i) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)`;
+WITH t, row
+${LINK_BY_ID({ from: "t", carry: ["row"], list: "[x IN row.routes WHERE x.label = 'AdvisorResource']", id: "li.id", rel: "ROUTES", key: "{destination: li.destination}", set: "e.state = li.state, e.origin = li.origin, e.updated_at = $now", namedBy: "route" })}`;
 
 const GATEWAY_CYPHER = `
 UNWIND $rows AS row
@@ -204,7 +205,8 @@ WITH DISTINCT i, row
 FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (i)-[:IN_NETWORK]->(n))
 FOREACH (_ IN CASE WHEN row.subnet_id IS NULL THEN [] ELSE [1] END | MERGE (s:AdvisorSegment {id: row.subnet_id}) MERGE (i)-[:IN_SEGMENT]->(s))
 FOREACH (sg IN row.groups | MERGE (f:AdvisorFilter {id: sg}) MERGE (i)-[:WEARS]->(f))
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [] ELSE [1] END | MERGE (r:AdvisorResource {id: row.resource_id}) MERGE (i)-[:ATTACHED_TO]->(r))
+WITH i, row
+${LINK_BY_ID({ from: "i", carry: ["row"], list: "[row.resource_id]", rel: "ATTACHED_TO", namedBy: "interface" })}
 FOREACH (_ IN CASE WHEN row.gateway_id IS NULL THEN [] ELSE [1] END | MERGE (g:AdvisorGateway {id: row.gateway_id}) MERGE (i)-[:ATTACHED_TO]->(g))`;
 
 const PUBLIC_IP_CYPHER = `

@@ -1,4 +1,5 @@
 import { enabled, neoParams, writeCypher } from "../../graph_mirror.js";
+import { LINK_BY_ID } from "../../graph_cypher.js";
 import { planLinePrice } from "./client.js";
 import { listInvoices, listProjects, listStores, teamBilling, vercelTeam, type StoreRow } from "./inventory.js";
 import { usageTotals } from "./usage.js";
@@ -146,9 +147,9 @@ OPTIONAL MATCH (s)-[ro:RUNS_ON]->() DELETE ro
 WITH DISTINCT s, row
 FOREACH (t IN row.types | MERGE (st:KnSystemType {id: t.id}) MERGE (s)-[r:RUNS_ON]->(st) SET r.count = t.count, r.hours_month = t.hours_month, r.list_price = t.list_price, r.list_usd_month = t.list_usd_month)
 WITH s, row
-OPTIONAL MATCH (:AdvisorResource)-[m:MEMBER_OF]->(s) DELETE m
+OPTIONAL MATCH (m)-[mo:MEMBER_OF]->(s) WHERE m:AdvisorResource OR m:AdvisorResourceRef DELETE mo
 WITH DISTINCT s, row
-FOREACH (id IN row.members | MERGE (res:AdvisorResource {id: id}) MERGE (res)-[:MEMBER_OF]->(s))`, neoParams({ rows: systems, now, provider: VERCEL, account }));
+${LINK_BY_ID({ from: "s", carry: ["row"], list: "row.members", rel: "MEMBER_OF", reverse: true, namedBy: "system" })}`, neoParams({ rows: systems, now, provider: VERCEL, account }));
   await writeCypher("MATCH (s:KnSystem {provider: $provider, account_id: $account}) WHERE NOT s.id IN $ids SET s.gone = true, s.updated_at = $now", { provider: VERCEL, account, ids: systems.map((s) => s.id), now });
   return { types: types.length, overlays: overlays.length, systems: systems.length };
 }

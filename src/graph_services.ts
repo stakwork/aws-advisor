@@ -1,5 +1,5 @@
 import { db } from "./db.js";
-import { REF_MERGE } from "./graph_cypher.js";
+import { LINK_BY_ID, REF_MERGE } from "./graph_cypher.js";
 import { accountId, enabled, inventoryIdsOf, writeCypher } from "./graph_mirror.js";
 import { guessedType, inventoryIdOf } from "./adapters/aws/resources.js";
 import { AWS } from "./adapters/types.js";
@@ -43,7 +43,11 @@ export function edgeGroups(rows: { id: string; account_id?: string | null; links
 }
 
 const edgeCypher = (g: EdgeGroup): string => {
-  const other = g.target === "ref" ? REF_MERGE("o", "row.other", "row.guessed_type", "service") : g.target === "resource" ? "MERGE (o:AdvisorResource {id: row.other})" : `MERGE (o:${g.target} {id: row.other})`;
+  // a resource is linked through LINK_BY_ID: the node when inventoried (or a gateway or account by that id), a ref when not, never an id-only stub
+  if (g.target === "resource") return `UNWIND $rows AS row
+MATCH (s:AdvisorResource {id: row.self})
+${LINK_BY_ID({ from: "s", carry: ["row"], list: "[row.other]", rel: g.rel, reverse: g.dir !== "out", set: "e += row.props, e.updated_at = $now", namedBy: "service", guessed: "row.guessed_type" })}`;
+  const other = g.target === "ref" ? REF_MERGE("o", "row.other", "row.guessed_type", "service") : `MERGE (o:${g.target} {id: row.other})`;
   const edge = g.dir === "out" ? `MERGE (s)-[e:${g.rel}]->(o)` : `MERGE (o)-[e:${g.rel}]->(s)`;
   return `UNWIND $rows AS row
 MATCH (s:AdvisorResource {id: row.self})

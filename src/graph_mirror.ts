@@ -69,6 +69,7 @@ export const SCHEMA_SUMMARY = [
   "Logs on a platform provider: a Vercel log drain is (:KnLogGroup {native_type: log_drain, name, host (where it delivers), status, sources: [lambda|edge|static|build|external], environments, sampling_rate, format, all_projects, ingest_gb_day (the team's metered log volume, split evenly across its enabled drains), ingest_usd_month (at the team's logDrainsVolume rate), owner (the project system when the drain lists exactly one), attributed_by}); (:KnSystem vercel_project)-[:SHIPS_LOGS_TO]->(drain) for every project it covers, (:AdvisorAccount team)-[:SHIPS_LOGS_TO]->(drain) when it covers them all, (project:AdvisorDeployment)-[:SHIPS_LOGS_TO {via: 'log drain'}]->(drain); a project with no SHIPS_LOGS_TO edge keeps no logs beyond Vercel's retention",
   "Prices as knowledge, every provider: (:KnSystemType {kind: usage|plan|database|cache|storage, source: team_billing (the team's own metered rates, dollars per unit) | marketplace_plan (a store plan's price lines, quotas as included) | invoice (what the last paid invoice charged per unit, amount over quantity) | pricing_api | pricebook, sku, list_price, price_unit, unit, note, included}); (:KnPricingOverlay {kind: plan, sku, count (seats), commitment_usd_month, included, start, end})-[:COVERS]->(:KnSystemType) the subscription and each store's plan; (:KnSystem {kind: deployment|database|cache|storage, native_kind: vercel_project|vercel_store, monthly_list_usd, usage_units})-[:RUNS_ON {count, list_price, list_usd_month}]->(:KnSystemType) a project's or store's last month priced line by line; the resource -[:MEMBER_OF]->(:KnSystem). Ask 'what does project X cost' as MATCH (s:KnSystem {name: 'X'})-[r:RUNS_ON]->(t) RETURN t.note, r.count, r.list_usd_month, s.monthly_list_usd",
   "The operational patterns, the team's decisions and the generic rules are Concepts (label Concept, in repo2graph) under the parents 'AWS Operational Patterns', 'AWS Cost Decisions' and 'AWS Cost Knowledge'",
+  "The graph describes itself the way Jarvis does: (:Schema {type: <label>, parent, domain: 'Cloud', type_description, <property>: 'string' | '?int' | '?list' ...}) per Advisor and Kn label, (:Schema)-[:CHILD_OF]->(:Schema) up to Thing (resource labels under AdvisorResource), and (:Schema)-[:<RELATIONSHIP> {<property>: '?type'}]->(:Schema) per relationship between two labels; rebuilt from the graph after every sync. Example, what can point at a database: MATCH (s:Schema)-[r]->(:Schema {type: 'AdvisorDatabase'}) WHERE s.domain = 'Cloud' RETURN s.type, type(r)",
 ].join("\n");
 
 export const enabled = () => Boolean(config.neo4jUri);
@@ -116,7 +117,7 @@ const LOG_INTERVAL_MS = 60_000;
 let lastLogAt = 0;
 let suppressed = 0;
 /** Errors from the fire-and-forget hooks are logged at most once a minute; the ones in between are counted. */
-function logError(what: string, e: unknown) {
+export function logError(what: string, e: unknown) {
   const now = Date.now();
   if (now - lastLogAt < LOG_INTERVAL_MS) { suppressed++; return; }
   const extra = suppressed ? ` (${suppressed} earlier error${suppressed === 1 ? "" : "s"} not shown)` : "";
@@ -355,11 +356,14 @@ export async function ensureSchema(): Promise<void> {
   schemaReady = true;
 }
 
-/** Removes the nodes the v1 mirror wrote under labels that no longer exist (only ever ours; nothing else is touched). */
+/** Removes the nodes the v1 mirror wrote under labels that no longer exist, and id-only resource stubs (only ever ours; nothing else is touched). */
 export async function wipeLegacy(): Promise<{ deleted: number }> {
   if (!enabled()) return { deleted: 0 };
   let deleted = 0;
   for (const label of LEGACY_LABELS) deleted += await deleteWhere(`MATCH (n:${label})`, {});
+  // resource nodes that are nothing but an id, minted by writers that merged on the id alone before LINK_BY_ID: their
+  // edges come back on the next mirror, to the real node or an AdvisorResourceRef
+  deleted += await deleteWhere("MATCH (n:AdvisorResource) WHERE n.provider IS NULL AND n.account_id IS NULL AND n.native_type IS NULL", {});
   return { deleted };
 }
 
@@ -515,7 +519,7 @@ export async function mirrorAdapter(adapter: ProviderAdapter): Promise<{ resourc
   return { resources, layers: await mirrorAdapterLayers(adapter) };
 }
 
-import { REF_MERGE } from "./graph_cypher.js";
+import { REF_MERGE, LINK_BY_ID } from "./graph_cypher.js";
 export { REF_MERGE };
 
 // ---- resources ---------------------------------------------------------------------------------------------------
@@ -583,12 +587,7 @@ WITH DISTINCT rec, row
 OPTIONAL MATCH (rec)-[d:DECIDED_AS]->(oc:Concept) WHERE row.concept_id IS NULL OR oc.id <> row.concept_id
 DELETE d
 WITH DISTINCT rec, row
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [] ELSE [1] END |
-  MERGE (res:AdvisorResource {id: row.resource_id})
-  MERGE (rec)-[:TARGETS]->(res))
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL AND row.resource IS NOT NULL THEN [1] ELSE [] END |
-  ${REF_MERGE("ref", "row.resource", "row.guessed_type", "recommendation")}
-  MERGE (rec)-[:TARGETS]->(ref))
+${LINK_BY_ID({ from: "rec", carry: ["row"], list: "[coalesce(row.resource_id, row.resource)]", rel: "TARGETS", namedBy: "recommendation", guessed: "row.guessed_type" })}
 FOREACH (_ IN CASE WHEN row.run_id IS NULL THEN [] ELSE [1] END |
   MERGE (run:AdvisorRun {id: row.run_id}) SET run.account_id = coalesce(run.account_id, $account), run.provider = $provider
   MERGE (rec)-[:PROPOSED_IN]->(run))
@@ -625,7 +624,10 @@ UNWIND $rows AS row
 MERGE (c:AdvisorControl {id: row.control_id})
 SET c.title = coalesce(row.control_title, c.title, row.control_id), c.framework = row.framework, c.category = row.category, c.provider = $provider, c.native_type = 'control', c.native_id = row.control_id, c.account_id = $account, c.updated_at = $now
 WITH c, row
-MATCH (r:AdvisorResource {id: row.resource_id})
+// a resource, or the account itself for an account-level finding (a Vercel team's)
+OPTIONAL MATCH (res:AdvisorResource {id: row.resource_id})
+OPTIONAL MATCH (acc:AdvisorAccount {id: row.resource_id})
+WITH c, row, coalesce(res, acc) AS r WHERE r IS NOT NULL
 MERGE (c)-[f:FLAGGED]->(r)
 SET f.run_id = row.run_id, f.reason = row.reason`;
 
@@ -690,7 +692,7 @@ export async function mirrorControls(runId?: number | null, opts: { provider?: s
   const provider = adapter.id; const account = opts.account ?? adapter.primaryAccountId();
   const findings = db.prepare("select control_id, control_title, resource, reason from findings where run_id = ? and status = 'alarm' and resource is not null order by id").all(runId) as any[];
   const edges = flagEdges(findings, opts.ids ?? resourceIdsOf(adapter, account), runId).map((e) => ({ ...e, ...controlFacts(e.control_id) }));
-  await write("MATCH (:AdvisorControl)-[f:FLAGGED]->(:AdvisorResource {provider: $provider}) WHERE f.run_id <> $runId DELETE f", { provider, runId });
+  await write("MATCH (:AdvisorControl)-[f:FLAGGED]->(t) WHERE (t:AdvisorResource OR t:AdvisorAccount) AND t.provider = $provider AND f.run_id <> $runId DELETE f", { provider, runId });
   const stamp = now();
   for (const batch of chunks(edges)) await write(FLAG_CYPHER, { rows: batch, account, provider, now: stamp });
   return { controls: new Set(edges.map((e) => e.control_id)).size, flagged: edges.length };
@@ -729,12 +731,7 @@ FOREACH (_ IN CASE WHEN row.cause_action_id IS NULL THEN [] ELSE [1] END |
 WITH a, row
 OPTIONAL MATCH (a)-[t:ABOUT]->() DELETE t
 WITH DISTINCT a, row
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [] ELSE [1] END |
-  MERGE (res:AdvisorResource {id: row.resource_id})
-  MERGE (a)-[:ABOUT]->(res))
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL AND row.resource IS NOT NULL THEN [1] ELSE [] END |
-  ${REF_MERGE("ref", "row.resource", "row.guessed_type", "alert")}
-  MERGE (a)-[:ABOUT]->(ref))`;
+${LINK_BY_ID({ from: "a", carry: ["row"], list: "[coalesce(row.resource_id, row.resource)]", rel: "ABOUT", namedBy: "alert", guessed: "row.guessed_type" })}`;
 
 const INCIDENT_CYPHER = `
 UNWIND $rows AS row
@@ -781,12 +778,7 @@ FOREACH (_ IN CASE WHEN row.new_resource IS NULL THEN [] ELSE [1] END |
 WITH x, row
 OPTIONAL MATCH (x)-[t:TARGETS]->() DELETE t
 WITH DISTINCT x, row
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [] ELSE [1] END |
-  MERGE (res:AdvisorResource {id: row.resource_id})
-  MERGE (x)-[:TARGETS]->(res))
-FOREACH (_ IN CASE WHEN row.resource_id IS NULL THEN [1] ELSE [] END |
-  ${REF_MERGE("ref", "row.resource", "row.guessed_type", "action")}
-  MERGE (x)-[:TARGETS]->(ref))
+${LINK_BY_ID({ from: "x", carry: ["row"], list: "[coalesce(row.resource_id, row.resource)]", rel: "TARGETS", namedBy: "action", guessed: "row.guessed_type" })}
 WITH x, row
 UNWIND (CASE WHEN size(row.recommendation_ids) = 0 THEN [null] ELSE row.recommendation_ids END) AS rid
 OPTIONAL MATCH (rec:AdvisorRecommendation {id: rid})
@@ -990,7 +982,7 @@ export async function mirrorComplianceScan(scanId: number): Promise<{ scan: numb
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
 export interface MirrorCounts {
-  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; network?: import("./graph_network.js").NetworkCounts | null; account_id: string; accounts?: { provider: string; id: string }[]; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; apps: number; took_ms: number }
+  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; schema?: import("./graph_schema.js").SchemaCounts | null; network?: import("./graph_network.js").NetworkCounts | null; account_id: string; accounts?: { provider: string; id: string }[]; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; apps: number; took_ms: number }
 
 /**
  * Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. Every mirrored
@@ -1020,8 +1012,11 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
   try { const { mirrorSwarmCosts } = await import("./swarm_costs_graph.js"); await mirrorSwarmCosts(); } catch (e) { logError("swarm costs", e); }
+  // last, so it reads everything the sync wrote
+  let schema: import("./graph_schema.js").SchemaCounts | null = null;
+  try { const { mirrorSchema } = await import("./graph_schema.js"); schema = await mirrorSchema(); } catch (e) { logError("schema", e); }
   const aws: any = layers[AWS] ?? {};
-  return { account_id: mirrored[0]?.primaryAccountId() ?? accountId(), accounts: mirrored.map((a) => ({ provider: a.id, id: a.primaryAccountId() })), knowledge, network: aws.network ?? null, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes,
+  return { schema, account_id: mirrored[0]?.primaryAccountId() ?? accountId(), accounts: mirrored.map((a) => ({ provider: a.id, id: a.primaryAccountId() })), knowledge, network: aws.network ?? null, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes,
     apps: Number(aws["apps and ports"]?.apps ?? 0), took_ms: Date.now() - t0 };
 }
 
@@ -1179,6 +1174,8 @@ export function mirrorKnowledgeInBackground(why: string): void {
     const { mirrorKnowledge } = await import("./graph_knowledge.js");
     const c = await mirrorKnowledge();
     if (c) console.log(`[graph] knowledge layer refreshed after ${reason}: ${c.systems} systems, ${c.log_groups} log groups (${c.log_groups_attributed} attributed, ${c.log_groups_observed} observed, ${c.log_groups_jev} by Jev), ${c.took_ms} ms`);
+    // the knowledge layer closes every background mirror (a run, a probe pass, the logs refresh, server start), so the schema follows it
+    (await import("./graph_schema.js")).mirrorSchemaInBackground(reason);
   };
   knowledgeInFlight = (async () => {
     let reason: string | null = why;

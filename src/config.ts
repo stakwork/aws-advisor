@@ -1,4 +1,4 @@
-import "dotenv/config";
+import { underTest } from "./load_env.js";
 import os from "node:os";
 import path from "node:path";
 import cron from "node-cron";
@@ -163,7 +163,7 @@ export const config = {
   apiToken: process.env.API_TOKEN || "",
   /** Secret repo2graph must echo back on the agent callback URL. */
   callbackSecret: process.env.CALLBACK_SECRET || "",
-  dataDir: process.env.DATA_DIR || path.resolve("data"),
+  dataDir: process.env.DATA_DIR || path.resolve(underTest ? ".test-data" : "data"),
   steampipeUrl: process.env.STEAMPIPE_DATABASE_URL || "postgres://steampipe@127.0.0.1:9193/steampipe",
   steampipeUrlExplicit: Boolean(process.env.STEAMPIPE_DATABASE_URL),
   /** Where the managed <schema>.spc connection file is written. */
