@@ -77,13 +77,28 @@ test("the EKS bearer token is a presigned sts:GetCallerIdentity URL carrying the
   assert.ok(!token.includes("="), "no padding in the token");
 });
 
-test("accessInstructions: access entries when the cluster supports them, aws-auth with a view binding otherwise", () => {
+test("accessInstructions: access entries when the cluster supports them; on CONFIG_MAP, access entries first and an append-only aws-auth route", () => {
   const api = k8s.accessInstructions({ name: "c", region: "us-east-1", authentication_mode: "API_AND_CONFIG_MAP" }, "arn:aws:iam::123456789012:user/aws-advisor");
   assert.equal(api.steps.length, 2); assert.match(api.steps[0].command, /create-access-entry/); assert.match(api.steps[1].command, /AmazonEKSViewPolicy/);
   const cm = k8s.accessInstructions({ name: "c", region: "us-east-1", authentication_mode: "CONFIG_MAP" }, "arn:aws:iam::123456789012:role/aws-advisor-read");
   assert.match(cm.steps[0].command, /authenticationMode=API_AND_CONFIG_MAP/);
-  assert.match(cm.steps[1].command, /mapRoles/); assert.match(cm.steps[1].command, /clusterrole=view/);
+  assert.ok(cm.steps.some((s) => /eksctl create iamidentitymapping/.test(s.command)), "aws-auth through eksctl, which appends");
+  assert.ok(cm.steps.some((s) => /get configmap aws-auth -o yaml >/.test(s.command)), "a backup before touching aws-auth");
+  assert.ok(cm.steps.some((s) => /clusterrole=view/.test(s.command)));
+  // a merge patch of mapRoles replaces the whole list and locks the nodes out
+  assert.ok(!cm.steps.some((s) => /kubectl[^&]*patch[^&]*aws-auth/.test(s.command)), "never patch aws-auth");
   assert.ok(!cm.steps.some((s) => /delete|edit-cluster-config --delete/.test(s.command)), "nothing destructive");
+});
+
+test("accessInstructions map the role, not the assumed-role session that changes on every refresh", () => {
+  const session = "arn:aws:sts::123456789012:assumed-role/aws-advisor-read/aws-sdk-js-1700000000000";
+  assert.equal(k8s.mappablePrincipal(session), "arn:aws:iam::123456789012:role/aws-advisor-read");
+  assert.equal(k8s.mappablePrincipal("arn:aws:iam::123456789012:user/aws-advisor"), "arn:aws:iam::123456789012:user/aws-advisor");
+  for (const mode of ["CONFIG_MAP", "API"]) {
+    const out = k8s.accessInstructions({ name: "c", region: "us-east-1", authentication_mode: mode }, session);
+    assert.ok(out.steps.every((s) => !s.command.includes("assumed-role")), mode);
+    assert.ok(out.steps.some((s) => s.command.includes("arn:aws:iam::123456789012:role/aws-advisor-read")), mode);
+  }
 });
 
 test("clusterSummary and listClusters follow the account scope: a parent looking at itself does not count a member's clusters", async () => {

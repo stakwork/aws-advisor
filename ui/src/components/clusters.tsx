@@ -23,9 +23,10 @@ function WorkloadsPanel({ cluster }: { cluster: Cluster }) {
       {cluster.kind === "eks" && cluster.access_status !== "ok" && cluster.access && (
         <div className="rounded border border-amber-900/60 bg-amber-950/20 p-3">
           <div className="text-amber-200">The advisor cannot read this cluster's workloads: {accessWord[cluster.access_status || "unknown"]}{cluster.access_error ? ` (${cluster.access_error})` : ""}.</div>
-          <div className="mt-1 text-zinc-400">It authenticates to the Kubernetes API as its own IAM identity (the one in Settings › AWS access), so the cluster has to know that identity. Authentication mode today: <span className="font-mono">{cluster.access.mode}</span>. As a cluster administrator:</div>
+          <div className="mt-1 text-zinc-400">It authenticates to the Kubernetes API as its read role in this cluster's account (the parent's from Settings › AWS access, or the member's read role), so the cluster has to know that role. Authentication mode today: <span className="font-mono">{cluster.access.mode}</span>. As a cluster administrator:</div>
           {cluster.access.steps.map((s, i) => <div key={i} className="mt-2"><div className="text-zinc-300">{i + 1}. {s.title}</div><div className="mt-1 flex items-start gap-2"><Code>{s.command}</Code><CopyButton text={s.command} /></div></div>)}
           <div className="mt-2 text-zinc-500">Read-only either way: the view policy and the view ClusterRole grant get and list, nothing else. Refresh afterwards.</div>
+          {/CONFIG_MAP/.test(cluster.access.mode) && <div className="mt-1 text-amber-300/80">Do not edit aws-auth with <span className="font-mono">kubectl patch</span>: mapRoles is a single value, so a patch replaces the whole list, node roles included, and the nodes drop out of the cluster. If that happened before, restore the backup with <span className="font-mono">kubectl apply -f</span>.</div>}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-3 text-zinc-400">
@@ -75,7 +76,7 @@ export function ClustersPanel({ selected, onSelect }: { selected: string | null;
         <Stat label="Nodes" value={s.nodes} hint="from the node groups' desired sizes and the registered container instances" />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-zinc-400">
-        <span>The advisor reads EKS through the Kubernetes API as <span className="font-mono text-zinc-300">{d.principal_arn ? short(d.principal_arn, 60) : "its IAM identity"}</span> (read-only) and ECS through the AWS API. Refreshed with every collection.</span>
+        <span>The advisor reads EKS through the Kubernetes API as its read role in the account that owns each cluster (read-only) and ECS through the AWS API. Refreshed with every collection.</span>
         <Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={refresh} disabled={busy}>{busy ? "Refreshing…" : "Refresh now"}</Button>
       </div>
       {d.clusters.length === 0 ? <Empty>No cluster in the account, or none read yet: refresh now, or wait for the next collection.</Empty> : (

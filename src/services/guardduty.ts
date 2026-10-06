@@ -57,7 +57,7 @@ export function detectorRow(d: any, findings: ThreatFinding[]): ServiceRow {
 export const guarddutyCollector: ServiceCollector = {
   name: "GuardDuty",
   async collect(ctx: CollectContext): Promise<CollectResult> {
-    const detectors = await ctx.select("aws_guardduty_detector", ["detector_id", "arn", "status", "created_at", "finding_publishing_frequency", "features", "master_account", "tags", "region", "account_id"], { required: ["detector_id"] });
+    const detectors = await ctx.select("aws_guardduty_detector", ["detector_id", "arn", "status", "created_at", "finding_publishing_frequency", "features", "master_account", "tags", "region", "account_id"], { required: ["detector_id"], optional: { GetAdministratorAccount: ["master_account"] } });
     if (!detectors) return { rows: [], complete: [], findings: null };
     const arnOf = new Map(detectors.map((d) => [`${d.account_id}|${d.region}|${d.detector_id}`, str(d.arn) || `arn:aws:guardduty:${d.region}:${d.account_id}:detector/${d.detector_id}`]));
     const detectorArn = (id: string, account: string, region: string) => arnOf.get(`${account}|${region}|${id}`) ?? `arn:aws:guardduty:${region}:${account}:detector/${id}`;

@@ -577,7 +577,7 @@ the MCP tools and the AWS Thrifty benchmarks:
         "elasticache:ListTagsForResource",
         "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
         "cloudwatch:DescribeAlarms",
-        "kms:DescribeKey", "kms:ListAliases", "kms:GetKeyRotationStatus",
+        "kms:DescribeKey", "kms:ListAliases", "kms:GetKeyRotationStatus", "kms:ListResourceTags",
         "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
         "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization", "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
@@ -611,9 +611,9 @@ the MCP tools and the AWS Thrifty benchmarks:
         "sns:GetTopicAttributes",
         "acm:DescribeCertificate", "acm:ListTagsForCertificate",
         "athena:GetWorkGroup",
-        "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeStackResources", "cloudformation:DescribeStackResource",
         "wafv2:GetWebACL", "wafv2:GetLoggingConfiguration",
-        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
+        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource", "guardduty:GetAdministratorAccount",
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent"
       ],
       "Resource": "*"

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { explainPermissionError, policyForIssues, remedyFor, statementFor, tablesIn } from "../permissions.js";
+import { describeError, explainPermissionError, policyForIssues, remedyFor, statementFor, tablesIn } from "../permissions.js";
 import { parseExport } from "../powerpipe.js";
 
 test("Steampipe AccessDenied that names the action", () => {
@@ -96,4 +96,11 @@ test("parseExport surfaces control-level errors and errored results", () => {
   ]);
   assert.equal(explainPermissionError(parsed.errors[0].message, "benchmark ec2 control aws_thrifty.control.a")?.action, "ec2:DescribeInstances");
   assert.equal(explainPermissionError(parsed.errors[1].message, "benchmark ec2 control aws_thrifty.control.b"), null);
+});
+
+test("a bare throttle answer names the read it came from and is not taken for a missing permission", () => {
+  const err = Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+  const out = describeError(err, "sign-ins parent us-east-1 (cloudtrail:LookupEvents)");
+  assert.match(out, /^sign-ins parent us-east-1 \(cloudtrail:LookupEvents\): AWS throttled the calls \(Rate exceeded\); the next refresh tries again$/);
+  assert.equal(explainPermissionError(err, "x"), null);
 });

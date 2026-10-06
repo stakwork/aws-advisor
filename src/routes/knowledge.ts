@@ -196,7 +196,7 @@ knowledge.post("/observe/run", async (req, res) => {
 knowledge.get("/logs", (req, res) => res.json(topLogGroups(Math.max(5, Math.min(200, Number(req.query.limit || 25))), accountScope(req.query as any))));
 knowledge.post("/logs/refresh", async (_req, res) => { try { const r = await refreshLogs(); mirrorKnowledgeInBackground("logs refresh (manual)"); res.json(r); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 knowledge.get("/trail", (req, res) => res.json(trailSummary(Math.max(1, Math.min(168, Number(req.query.hours || 24))), accountScope(req.query as any))));
-knowledge.post("/trail/refresh", async (req, res) => { try { res.json(await refreshTrail(Math.max(1, Math.min(168, Number(req.query.hours || 26))))); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+knowledge.post("/trail/refresh", async (req, res) => { try { res.json(await refreshTrail(Math.max(1, Math.min(168, Number(req.query.hours || 26))), undefined, false)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
 // ---- realised savings: approved recommendations checked against the bill ---------------------------------------
 knowledge.get("/verifications", (req, res) => {

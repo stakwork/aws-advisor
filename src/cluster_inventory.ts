@@ -2,6 +2,7 @@ import { db } from "./db.js";
 import { S } from "./steampipe.js";
 import { K8sError, type K8sCluster, eksToken, k8sListAll } from "./k8s_client.js";
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
+import { accountCredentials } from "./accounts.js";
 
 /**
  * Clusters and the workloads inside them (docs/cloud-ontology.md §8 step 4): EKS clusters with their Kubernetes
@@ -167,7 +168,7 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
     let access = "unknown"; let accessError: string | null = null; let workloads = 0; const namespaces = new Set<string>();
     if (cluster.endpoint) {
       try {
-        const token = await eksToken(cluster);
+        const token = await eksToken(cluster, accountCredentials(str(c.account_id)));
         const [deploys, statefuls, daemons, jobs, cronjobs, services, ingresses, policies, pods] = await Promise.all([
           k8sListAll(cluster, "/apis/apps/v1/deployments", token), k8sListAll(cluster, "/apis/apps/v1/statefulsets", token), k8sListAll(cluster, "/apis/apps/v1/daemonsets", token),
           k8sListAll(cluster, "/apis/batch/v1/jobs", token), k8sListAll(cluster, "/apis/batch/v1/cronjobs", token), k8sListAll(cluster, "/api/v1/services", token),

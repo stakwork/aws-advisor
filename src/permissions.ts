@@ -388,6 +388,8 @@ export function describeError(err: unknown, context: string, maxLen = 400): stri
     return `Steampipe service is not running (${raw.slice(0, 80)}): it restarts by itself within 30 seconds in the image; locally run \`steampipe service start\`. Its log is ~/.steampipe/logs/steampipe-<date>.log.`;
   }
   const message = raw.slice(0, maxLen);
+  // AWS's throttle answer ("Rate exceeded") carries no service or call: say which read it was, and that the next refresh retries
+  if (/Rate exceeded|Throttl|TooManyRequests|RequestLimitExceeded/i.test(`${e?.name ?? ""} ${raw}`)) return `${context}: AWS throttled the calls (${message.replace(/[.\s]+$/, "")}); the next refresh tries again`;
   const issue = explainPermissionError(err, context);
   if (!issue) return message;
   recordPermissionIssue(issue);
@@ -443,7 +445,7 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "elasticache:ListTagsForResource",
         "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery",
         "cloudwatch:DescribeAlarms",
-        "kms:DescribeKey", "kms:ListAliases", "kms:GetKeyRotationStatus",
+        "kms:DescribeKey", "kms:ListAliases", "kms:GetKeyRotationStatus", "kms:ListResourceTags",
         "elasticfilesystem:DescribeLifecycleConfiguration", "elasticfilesystem:DescribeTags", "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups", "elasticfilesystem:DescribeBackupPolicy",
         "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources", "ce:GetSavingsPlansUtilization", "ce:GetSavingsPlansCoverage", "ce:GetReservationUtilization",
         "savingsplans:DescribeSavingsPlans",
@@ -482,9 +484,9 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         // the platform services inventory (src/services/): certificates, workgroups, backups, stacks, web ACLs, threat detection
         "acm:DescribeCertificate", "acm:ListTagsForCertificate",
         "athena:GetWorkGroup",
-        "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeStackResources", "cloudformation:DescribeStackResource",
         "wafv2:GetWebACL", "wafv2:GetLoggingConfiguration",
-        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource",
+        "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource", "guardduty:GetAdministratorAccount",
         // User Notifications (the console bell): the AWS-managed feed and the account's own configurations
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent",
       ],

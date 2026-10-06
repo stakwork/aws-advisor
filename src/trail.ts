@@ -4,7 +4,7 @@
  * read_only = false) through the SDK, which needs cloudtrail:LookupEvents; when the permission is missing the job records the
  * issue (Settings > Permissions) and the brief says so. The advisor's own SSM probes are filtered out.
  */
-import { db } from "./db.js";
+import { db, getJsonSetting, setSetting } from "./db.js";
 import { accountWhere, type AccountScope } from "./scope.js";
 import { credentialsMeta } from "./steampipe.js";
 import { accountCredentials, listMembers } from "./accounts.js";
@@ -47,10 +47,18 @@ export function callerOf(detail: any): [string | null, string | null, string | n
 export interface TrailRefreshResult { events: number; stored: number; errors: string[]; took_ms: number }
 
 const OWN_EVENTS = new Set(["SendCommand", "GetCommandInvocation", "StartSession"]);
-/** 50 events per page at 2 requests per second: 400 pages is 20,000 events and about 200 s, more than a day of this account. */
+/** Pages per account and region per run: 50 events a page at 2 requests a second, 900 pages is 45,000 events and about 450 s. */
 const MAX_PAGES = 900;
+/** The read walks its window in slices this long, oldest first, so the mark moves as it goes. */
+const SLICE_MS = 3600_000;
+/** LookupEvents allows 2 calls a second per account and region and answers "Rate exceeded" past it: every CloudTrail client paces itself and retries longer than the SDK's default 3 attempts. */
+export const TRAIL_RETRY = { maxAttempts: 10, retryMode: "adaptive" } as const;
 
-export async function refreshTrail(hours = 26, onLog: (s: string) => void = () => {}): Promise<TrailRefreshResult> {
+/** Where the last complete read ended, per account and region: the scheduled read starts an hour before it (CloudTrail delivers late), never further back than `hours`. */
+const MARKS = "trail_marks";
+
+/** `fromMark`: start where the last complete read ended (the scheduler); false re-reads the whole window (a manual backfill). */
+export async function refreshTrail(hours = 26, onLog: (s: string) => void = () => {}, fromMark = true): Promise<TrailRefreshResult> {
   const t0 = Date.now();
   const out: TrailRefreshResult = { events: 0, stored: 0, errors: [], took_ms: 0 };
   const gate = await credentialGate("cloudtrail");
@@ -59,7 +67,8 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
   // even a one-hour query pages through the whole 90-day trail at the API's 2 requests per second.
   const up = db.prepare(`insert into trail_events(event_id, event_time, event_name, event_source, username, resource_name, resource_type, region, error_code, fetched_at, noise, account_id, user_agent, source_ip, identity_type, principal_arn, key_kind, key_tail)
     values (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?) on conflict(event_id) do nothing`);
-  const StartTime = new Date(Date.now() - Math.max(1, Math.min(168, hours)) * 3600_000);
+  const floor = Date.now() - Math.max(1, Math.min(168, hours)) * 3600_000;
+  const marks = getJsonSetting<Record<string, string>>(MARKS, {});
   const own = config.advisorAwsProfile.replace(/-managed$/, "");
   // every account the advisor reaches: the parent with its own credentials, each enabled member through its read role; the trail is per account
   const targets: { account_id: string | null; creds: ReturnType<typeof sdkCredentials> }[] = [];
@@ -71,28 +80,42 @@ export async function refreshTrail(hours = 26, onLog: (s: string) => void = () =
   for (const r of db.prepare("select distinct region from inventory_ec2 where gone = 0 and region is not null and coalesce(account_id, '') in (?, '')").all(target.account_id ?? "") as { region: string }[]) regions.push(r.region);
   if (!regions.length) regions.push(creds.region || "us-east-1");
   for (const region of regions) {
-    const client = new CloudTrailClient({ region, credentials: creds.provider });
+    const client = new CloudTrailClient({ region, credentials: creds.provider, ...TRAIL_RETRY });
+    const mk = `${target.account_id ?? ""}|${region}`;
+    const start = Math.max(floor, fromMark && marks[mk] ? Date.parse(marks[mk]) - 3600_000 : floor); const end = Date.now();
     try {
-      let NextToken: string | undefined; let pages = 0;
-      do {
-        const res = await client.send(new LookupEventsCommand({ StartTime, EndTime: new Date(), LookupAttributes: [{ AttributeKey: "ReadOnly", AttributeValue: "false" }], MaxResults: 50, NextToken }));
-        for (const ev of res.Events || []) {
-          out.events++;
-          if (!ev.EventId || !ev.EventName) continue;
-          if (OWN_EVENTS.has(ev.EventName) && (!ev.Username || ev.Username.includes(own))) continue;
-          let detail: any = {}; try { detail = ev.CloudTrailEvent ? JSON.parse(ev.CloudTrailEvent) : {}; } catch { /* keep going */ }
-          const r0 = ev.Resources?.[0];
-          const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0, target.account_id, ...callerOf(detail));
-          if (res2.changes) out.stored++;
-        }
-        if (pages === 0) noteSuccess(["cloudtrail:LookupEvents"], `cloudtrail ${region}`);
-        NextToken = res.NextToken; pages++;
-        if (pages >= MAX_PAGES) { out.errors.push(`${region}: stopped after ${MAX_PAGES} pages (${out.events} events); narrow the window`); break; }
-      } while (NextToken);
+      // LookupEvents answers newest first, so one read of the whole window that hits the page cap never reaches its start and
+      // the mark never moves: every run would re-read the same window. Hour slices oldest first move the mark after each one,
+      // so a capped run still makes progress and the next run continues from where it stopped.
+      let pages = 0;
+      const paused = (at: Date) => out.errors.push(`${target.account_id ?? "parent"} ${region}: paused after ${MAX_PAGES} pages at ${at.toISOString()}; the next run continues from there`);
+      slices: for (let from = start; from < end; from += SLICE_MS) {
+        const StartTime = new Date(from); const EndTime = new Date(Math.min(end, from + SLICE_MS));
+        let NextToken: string | undefined;
+        do {
+          const res = await client.send(new LookupEventsCommand({ StartTime, EndTime, LookupAttributes: [{ AttributeKey: "ReadOnly", AttributeValue: "false" }], MaxResults: 50, NextToken }));
+          for (const ev of res.Events || []) {
+            out.events++;
+            if (!ev.EventId || !ev.EventName) continue;
+            if (OWN_EVENTS.has(ev.EventName) && (!ev.Username || ev.Username.includes(own))) continue;
+            let detail: any = {}; try { detail = ev.CloudTrailEvent ? JSON.parse(ev.CloudTrailEvent) : {}; } catch { /* keep going */ }
+            const r0 = ev.Resources?.[0];
+            const res2 = up.run(ev.EventId, (ev.EventTime ?? new Date()).toISOString(), ev.EventName, ev.EventSource ?? "", ev.Username ?? null, r0?.ResourceName ?? null, r0?.ResourceType ?? null, region, detail.errorCode ?? null, isNoise(ev.EventName, ev.Username) ? 1 : 0, target.account_id, ...callerOf(detail));
+            if (res2.changes) out.stored++;
+          }
+          if (pages === 0) noteSuccess(["cloudtrail:LookupEvents"], `cloudtrail ${region}`);
+          NextToken = res.NextToken; pages++;
+          if (pages >= MAX_PAGES && NextToken) { paused(StartTime); break slices; }
+        } while (NextToken);
+        // the mark moves only past a slice read to its end: a throttled or capped slice is asked again next time
+        marks[mk] = EndTime.toISOString();
+        if (pages >= MAX_PAGES && EndTime.getTime() < end) { paused(EndTime); break; }
+      }
     } catch (e) { out.errors.push(describeError(e, `cloudtrail changes ${target.account_id ?? "parent"} ${region} (cloudtrail:LookupEvents)`)); }
     finally { client.destroy(); }
   }
   }
+  setSetting(MARKS, JSON.stringify(marks));
   db.prepare("delete from trail_events where event_time < datetime('now', '-90 days')").run();
   out.took_ms = Date.now() - t0;
   onLog(`${out.events} write events read, ${out.stored} new stored, ${out.took_ms} ms${out.errors.length ? `; ${out.errors.join("; ")}` : ""}`);

@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { getJsonSetting, setSetting } from "./db.js";
 import { AWS_RUN_SHELL_SCRIPT, PermissionIssue, clearPermissionIssues, explainPermissionError, listPermissionIssues, policyForIssues, recordPermissionIssue, remedyFor, tableForAction } from "./permissions.js";
 import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
+import { TRAIL_RETRY } from "./trail.js";
 import { ProbeError, probeDocumentInfo, probeInstance } from "./ssm.js";
 import { NoSdkCredentials, memberConnectionName, parentConnectionName } from "./aws_config.js";
 import { S, credentialsMeta, queryReadOnly, sdkCredentials, sdkIdentity } from "./steampipe.js";
@@ -229,7 +230,7 @@ async function run(opts: { instanceId?: string }, target: CheckTarget): Promise<
     if (covered.has(issue.action)) continue;
     try {
       if (issue.action === "cloudtrail:LookupEvents") {
-        const client = new CloudTrailClient({ region, credentials: creds.provider });
+        const client = new CloudTrailClient({ region, credentials: creds.provider, ...TRAIL_RETRY });
         try { await client.send(new LookupEventsCommand({ StartTime: new Date(Date.now() - 60_000), EndTime: new Date(), MaxResults: 1 })); } finally { client.destroy(); }
       } else {
         const table = tableForAction(issue.action);

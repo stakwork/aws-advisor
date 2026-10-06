@@ -21,6 +21,7 @@
  * on each AdvisorIdentity. The user agent is parsed, never shown raw in the graph; the source IP stays in the store.
  */
 import { CloudTrailClient, LookupEventsCommand, type LookupAttribute } from "@aws-sdk/client-cloudtrail";
+import { TRAIL_RETRY } from "./trail.js";
 import { GenerateCredentialReportCommand, GetAccountSummaryCommand, GetCredentialReportCommand, IAMClient, ListOrganizationsFeaturesCommand, ListVirtualMFADevicesCommand } from "@aws-sdk/client-iam";
 import { addColumn, db, getJsonSetting, setSetting } from "./db.js";
 import { credentialsMeta, sdkCredentials } from "./steampipe.js";
@@ -169,7 +170,7 @@ export async function refreshSignIns(onError: (m: string) => void = () => {}, on
     upRoot.run({ account_id: acct, arn: `arn:aws:iam::${acct}:root`, ...root, mfa_enabled: root.mfa_enabled == null ? null : root.mfa_enabled ? 1 : 0, centralized: t.is_parent ? null : centralized == null ? null : centralized ? 1 : 0, root_sessions: t.is_parent ? null : rootSessions == null ? null : rootSessions ? 1 : 0, now });
     const regions = [...new Set(["us-east-1", t.creds.region, ...(t.is_parent && sso.region ? [sso.region] : [])].filter(Boolean))];
     for (const region of regions) {
-      const client = new CloudTrailClient({ region, credentials: t.creds.provider });
+      const client = new CloudTrailClient({ region, credentials: t.creds.provider, ...TRAIL_RETRY });
       const queries: LookupAttribute[] = [{ AttributeKey: "EventSource", AttributeValue: "signin.amazonaws.com" }];
       if (t.is_parent && region === sso.region) queries.push({ AttributeKey: "EventName", AttributeValue: "GetRoleCredentials" }, { AttributeKey: "EventName", AttributeValue: "Federate" }, { AttributeKey: "EventSource", AttributeValue: "sso-directory.amazonaws.com" }, { AttributeKey: "EventSource", AttributeValue: "identitystore.amazonaws.com" });
       try {

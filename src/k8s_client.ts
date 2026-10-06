@@ -1,14 +1,15 @@
 import { createHash, createHmac } from "node:crypto";
 import https from "node:https";
 import { SignatureV4 } from "@smithy/signature-v4";
+import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { sdkCredentials } from "./steampipe.js";
 
 /**
  * A read-only Kubernetes API client for EKS clusters, authenticated the way `aws eks get-token` does: a presigned
  * sts:GetCallerIdentity URL carrying the cluster name in the `x-k8s-aws-id` header, base64url-encoded behind the
  * `k8s-aws-v1.` prefix, sent as a bearer token to the cluster endpoint over TLS pinned to the cluster's CA. The
- * advisor's own identity is what the cluster sees, so the cluster must map it (an access entry with the
- * AmazonEKSViewPolicy, or an aws-auth mapping to a view ClusterRole); `accessInstructions` prints both.
+ * advisor's identity in the cluster's own account (the parent's, or the member's read role) is what the cluster sees, so the cluster must map it (an access entry with the
+ * AmazonEKSViewPolicy, or an appended aws-auth mapping to a view ClusterRole); `accessInstructions` prints both.
  * Only GET is ever issued, and only against list endpoints the inventory needs.
  */
 
@@ -24,7 +25,8 @@ class Sha256 {
 }
 
 /** The bearer token for one cluster: valid about fifteen minutes (EKS honours 60 s of the presign plus its own window). */
-export async function eksToken(cluster: Pick<K8sCluster, "name" | "region">, creds = sdkCredentials()): Promise<string> {
+/** `creds`: the identity of the account that owns the cluster (a member cluster is read as that member's read role, so the access entry is same-account). */
+export async function eksToken(cluster: Pick<K8sCluster, "name" | "region">, creds: { provider: AwsCredentialIdentityProvider } = sdkCredentials()): Promise<string> {
   const signer = new SignatureV4({ service: "sts", region: cluster.region, credentials: creds.provider, sha256: Sha256 as any, applyChecksum: false });
   const host = `sts.${cluster.region}.amazonaws.com`;
   const presigned = await signer.presign({ method: "GET", protocol: "https:", hostname: host, path: "/", query: { Action: "GetCallerIdentity", Version: "2011-06-15" }, headers: { host, "x-k8s-aws-id": cluster.name } } as any, { expiresIn: 60, signableHeaders: new Set(["host", "x-k8s-aws-id"]) });
@@ -74,18 +76,36 @@ export async function k8sListAll(cluster: K8sCluster, path: string, token: strin
   return items;
 }
 
-/** The commands that give the advisor's identity read access to a cluster, for the two authentication modes. */
-export function accessInstructions(cluster: { name: string; region: string; authentication_mode: string | null }, principalArn: string): { mode: string; steps: { title: string; command: string }[] } {
-  const apiMode = /API/.test(String(cluster.authentication_mode || ""));
-  if (apiMode) {
-    return { mode: cluster.authentication_mode || "API", steps: [
-      { title: "Register the advisor's identity as an access entry", command: `aws eks create-access-entry --cluster-name ${cluster.name} --region ${cluster.region} --principal-arn ${principalArn} --type STANDARD` },
-      { title: "Give it the read-only view policy on the whole cluster", command: `aws eks associate-access-policy --cluster-name ${cluster.name} --region ${cluster.region} --principal-arn ${principalArn} --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy --access-scope type=cluster` },
-    ] };
-  }
-  const user = /:user\//.test(principalArn);
+/**
+ * The IAM principal a cluster has to know: an assumed-role session ARN (arn:aws:sts::<acct>:assumed-role/<role>/<session>)
+ * names a session that changes on every credential refresh, so the mapping is made for its role
+ * (arn:aws:iam::<acct>:role/<role>). The session ARN drops the role's path; aws-auth wants the ARN without it anyway.
+ */
+export function mappablePrincipal(arn: string): string {
+  const m = /^arn:(aws[\w-]*):sts::(\d{12}):assumed-role\/([^/]+)\/.+$/.exec(arn);
+  return m ? `arn:${m[1]}:iam::${m[2]}:role/${m[3]}` : arn;
+}
+
+/**
+ * The commands that give the advisor's identity read access to a cluster. Access entries first: they are separate
+ * API objects, so adding one cannot disturb anyone else's access. The aws-auth route only ever appends one mapping
+ * (eksctl reads the config map and writes it back with the entry added); a `kubectl patch` of mapRoles is never
+ * offered, because mapRoles is one string and a merge patch replaces it whole, dropping the node roles with it.
+ */
+export function accessInstructions(cluster: { name: string; region: string; authentication_mode: string | null }, principal: string): { mode: string; steps: { title: string; command: string }[] } {
+  const principalArn = mappablePrincipal(principal);
+  const at = `--cluster-name ${cluster.name} --region ${cluster.region}`;
+  const entry = [
+    { title: "Register the advisor's role as an access entry (a new, separate object: existing access is untouched)", command: `aws eks create-access-entry ${at} --principal-arn ${principalArn} --type STANDARD` },
+    { title: "Give it the read-only view policy on the whole cluster", command: `aws eks associate-access-policy ${at} --principal-arn ${principalArn} --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy --access-scope type=cluster` },
+  ];
+  if (/API/.test(String(cluster.authentication_mode || ""))) return { mode: cluster.authentication_mode || "API", steps: entry };
   return { mode: cluster.authentication_mode || "CONFIG_MAP", steps: [
-    { title: "Switch the cluster to access entries (keeps the aws-auth config map working), then register the identity", command: `aws eks update-cluster-config --name ${cluster.name} --region ${cluster.region} --access-config authenticationMode=API_AND_CONFIG_MAP && aws eks create-access-entry --cluster-name ${cluster.name} --region ${cluster.region} --principal-arn ${principalArn} --type STANDARD && aws eks associate-access-policy --cluster-name ${cluster.name} --region ${cluster.region} --principal-arn ${principalArn} --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy --access-scope type=cluster` },
-    { title: `Or, without changing the mode: map the identity in aws-auth to a read-only group and bind that group to the built-in view ClusterRole (kubectl as a cluster admin)`, command: `kubectl -n kube-system patch configmap aws-auth --type merge -p '{"data":{"${user ? "mapUsers" : "mapRoles"}":"- ${user ? "userarn" : "rolearn"}: ${principalArn}\\n  username: aws-advisor\\n  groups:\\n  - aws-advisor-view\\n"}}' && kubectl create clusterrolebinding aws-advisor-view --clusterrole=view --group=aws-advisor-view && kubectl create clusterrole aws-advisor-extra --verb=get,list --resource=nodes,namespaces,networkpolicies.networking.k8s.io,ingresses.networking.k8s.io && kubectl create clusterrolebinding aws-advisor-extra --clusterrole=aws-advisor-extra --group=aws-advisor-view` },
+    { title: "Recommended: turn on access entries alongside the aws-auth config map. Everything aws-auth grants keeps working; this cannot be switched back to CONFIG_MAP only", command: `aws eks update-cluster-config --name ${cluster.name} --region ${cluster.region} --access-config authenticationMode=API_AND_CONFIG_MAP` },
+    { title: "Wait until the update is done (the cluster stays ACTIVE throughout)", command: `aws eks wait cluster-active --name ${cluster.name} --region ${cluster.region}` },
+    ...entry,
+    { title: "Or, without changing the mode: back up aws-auth first (kubectl as a cluster admin)", command: `kubectl -n kube-system get configmap aws-auth -o yaml > aws-auth-backup-${cluster.name}.yaml` },
+    { title: "Then append the advisor's mapping with eksctl, which adds one entry and keeps every existing one (never kubectl patch mapRoles: a merge patch replaces the whole list, node roles included)", command: `eksctl create iamidentitymapping --cluster ${cluster.name} --region ${cluster.region} --arn ${principalArn} --username aws-advisor --group aws-advisor-view` },
+    { title: "And bind that group to the built-in read-only view role, plus get/list on the few cluster-wide kinds view leaves out", command: `kubectl create clusterrolebinding aws-advisor-view --clusterrole=view --group=aws-advisor-view && kubectl create clusterrole aws-advisor-extra --verb=get,list --resource=nodes,namespaces,networkpolicies.networking.k8s.io,ingresses.networking.k8s.io && kubectl create clusterrolebinding aws-advisor-extra --clusterrole=aws-advisor-extra --group=aws-advisor-view` },
   ] };
 }

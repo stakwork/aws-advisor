@@ -16,6 +16,7 @@ import {
   ListApplicationAssignmentsForPrincipalCommand, ListApplicationsCommand, ListCustomerManagedPolicyReferencesInPermissionSetCommand, ListInstancesCommand, ListManagedPoliciesInPermissionSetCommand, ListPermissionSetsCommand, SSOAdminClient,
 } from "@aws-sdk/client-sso-admin";
 import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
+import { TRAIL_RETRY } from "./trail.js";
 import { addColumn, db, getJsonSetting, setSetting } from "./db.js";
 import { S, parentSchema, query, sdkCredentials } from "./steampipe.js";
 import { describeError, noteSuccess } from "./permissions.js";
@@ -37,12 +38,19 @@ db.exec(`create table if not exists inventory_sso_permission_set (
 addColumn("inventory_sso_user", "created", "text");
 addColumn("inventory_sso_user", "status", "text");
 db.exec("create index if not exists inventory_sso_user_name on inventory_sso_user(user_name)");
+// the sso.amazonaws.com sign-in events already read, so a refresh only asks CloudTrail for what came after the last complete read
+db.exec(`create table if not exists sso_sign_in_events (
+  event_id text primary key, instance_arn text, region text, name text not null, event_time text not null, username text, detail text not null default '{}'
+);
+create index if not exists sso_sign_in_events_time on sso_sign_in_events(event_time)`);
 
 const META = "sso_meta";
 /** How far back CloudTrail answers LookupEvents, and so how far back a sign-in can be seen. */
 export const SIGN_IN_WINDOW_DAYS = 90;
 /** 50 events a page at 2 requests a second: 200 pages is 10,000 sign-in events in about 100 s. */
 const MAX_SIGN_IN_PAGES = 200;
+/** Where the last complete sign-in read ended, per instance and region; the next read starts an hour before it (CloudTrail delivers late). */
+const SIGN_IN_MARKS = "sso_sign_in_marks";
 
 export interface SsoAssignment { account_id: string; permission_set: string; permission_set_arn: string; via: string }
 export interface SsoUserRow {
@@ -166,7 +174,7 @@ export async function refreshSsoInventory(onError: (m: string) => void = () => {
   const { region } = inst;
   const sso = new SSOAdminClient({ region, credentials: creds.provider });
   const ids = new IdentitystoreClient({ region, credentials: creds.provider });
-  const trail = new CloudTrailClient({ region, credentials: creds.provider });
+  const trail = new CloudTrailClient({ region, credentials: creds.provider, ...TRAIL_RETRY });
   const now = new Date().toISOString();
   try {
     // --- the directory
@@ -228,20 +236,28 @@ export async function refreshSsoInventory(onError: (m: string) => void = () => {
     } catch (e: any) { notes.push(`applications not read: ${String(e?.message || e).slice(0, 160)}`); }
 
     // --- sign-ins from the home region's trail
-    let signIns = 0; let signInFacts = new Map<string, SignInFacts>();
+    let signIns = 0; let read = 0; let signInFacts = new Map<string, SignInFacts>();
     if (users.length) {
-      const events: SignInEvent[] = [];
+      const floor = Date.now() - SIGN_IN_WINDOW_DAYS * 86_400_000;
+      const marks = getJsonSetting<Record<string, string>>(SIGN_IN_MARKS, {}); const mk = `${inst.arn}|${region}`;
+      const ins = db.prepare("insert into sso_sign_in_events(event_id, instance_arn, region, name, event_time, username, detail) values (?, ?, ?, ?, ?, ?, ?) on conflict(event_id) do nothing");
       try {
-        let NextToken: string | undefined; let n = 0;
-        const StartTime = new Date(Date.now() - SIGN_IN_WINDOW_DAYS * 86_400_000);
+        let NextToken: string | undefined; let n = 0; let complete = true;
+        const StartTime = new Date(Math.max(floor, marks[mk] ? Date.parse(marks[mk]) - 3600_000 : floor)); const EndTime = new Date();
         do {
-          const r = await trail.send(new LookupEventsCommand({ StartTime, EndTime: new Date(), LookupAttributes: [{ AttributeKey: "EventSource", AttributeValue: "sso.amazonaws.com" }], MaxResults: 50, NextToken }));
-          for (const ev of r.Events ?? []) { if (!ev.EventName || !SIGN_IN_EVENTS.has(ev.EventName)) continue; let detail: any = {}; try { detail = ev.CloudTrailEvent ? JSON.parse(ev.CloudTrailEvent) : {}; } catch { /* keep going */ } events.push({ name: ev.EventName, time: (ev.EventTime ?? new Date()).toISOString(), username: ev.Username ?? null, detail }); }
-          NextToken = r.NextToken; if (++n >= MAX_SIGN_IN_PAGES) { notes.push(`sign-ins: stopped after ${MAX_SIGN_IN_PAGES} pages`); break; }
+          const r = await trail.send(new LookupEventsCommand({ StartTime, EndTime, LookupAttributes: [{ AttributeKey: "EventSource", AttributeValue: "sso.amazonaws.com" }], MaxResults: 50, NextToken }));
+          db.transaction(() => { for (const ev of r.Events ?? []) { if (!ev.EventId || !ev.EventName || !SIGN_IN_EVENTS.has(ev.EventName)) continue; let detail: any = {}; try { detail = ev.CloudTrailEvent ? JSON.parse(ev.CloudTrailEvent) : {}; } catch { /* keep going */ } read += ins.run(ev.EventId, inst.arn, region, ev.EventName, (ev.EventTime ?? new Date()).toISOString(), ev.Username ?? null, JSON.stringify(detail)).changes; } })();
+          NextToken = r.NextToken; if (++n >= MAX_SIGN_IN_PAGES && NextToken) { notes.push(`sign-ins: stopped after ${MAX_SIGN_IN_PAGES} pages`); complete = false; break; }
         } while (NextToken);
+        // the mark moves only after a read that reached its start: a throttled or capped read is asked again from the old mark next time
+        if (complete) { marks[mk] = EndTime.toISOString(); setSetting(SIGN_IN_MARKS, JSON.stringify(marks)); }
         noteSuccess(["cloudtrail:LookupEvents"], `identity center sign-ins ${region}`);
       } catch (e) { fail(describeError(e, `identity center sign-ins ${region} (cloudtrail:LookupEvents)`)); }
+      db.prepare("delete from sso_sign_in_events where event_time < ?").run(new Date(floor).toISOString());
+      const events: SignInEvent[] = (db.prepare("select name, event_time, username, detail from sso_sign_in_events where instance_arn = ? and event_time >= ?").all(inst.arn, new Date(floor).toISOString()) as { name: string; event_time: string; username: string | null; detail: string }[])
+        .map((r) => { let detail: any = {}; try { detail = JSON.parse(r.detail); } catch { /* keep going */ } return { name: r.name, time: r.event_time, username: r.username, detail }; });
       signIns = events.length;
+      onLog(`sign-ins: ${read} new from CloudTrail, ${events.length} in the last ${SIGN_IN_WINDOW_DAYS} days`);
       signInFacts = foldSignIns(events, users.map((u) => ({ user_id: String(u.UserId), user_name: String(u.UserName || "") })));
     }
     // --- the last write per account from the stored trail: an SSO session is named after the user

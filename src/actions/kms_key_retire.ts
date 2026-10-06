@@ -14,6 +14,7 @@
  */
 import { DescribeKeyCommand, KMSClient, ListAliasesCommand, ListKeysCommand, ListResourceTagsCommand, ScheduleKeyDeletionCommand, CancelKeyDeletionCommand, EnableKeyCommand, type KeyMetadata } from "@aws-sdk/client-kms";
 import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
+import { TRAIL_RETRY } from "../trail.js";
 import { DescribeSnapshotsCommand, DescribeVolumesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient } from "@aws-sdk/client-rds";
 import { CloudWatchLogsClient, DescribeLogGroupsCommand } from "@aws-sdk/client-cloudwatch-logs";
@@ -123,7 +124,7 @@ export const kmsKeyRetireAction: ActionModule = {
     for (const acct of creds.accounts) for (const region of regions(acct.region)) {
       const ac = credsForAccount(creds, acct.account_id);
       const kms = new KMSClient({ region, credentials: ac.read });
-      const trail = new CloudTrailClient({ region, credentials: ac.read });
+      const trail = new CloudTrailClient({ region, credentials: ac.read, ...TRAIL_RETRY });
       try {
         const ids: string[] = [];
         let marker: string | undefined;

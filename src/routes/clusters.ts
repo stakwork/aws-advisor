@@ -5,6 +5,7 @@ import { accessInstructions } from "../k8s_client.js";
 import { query } from "../steampipe.js";
 import { sdkIdentity } from "../steampipe.js";
 import { accountScope } from "../scope.js";
+import { listMembers } from "../accounts.js";
 
 /**
  * The clusters and their workloads (src/cluster_inventory.ts) for the Inventory's Clusters tab: every cluster with its
@@ -19,7 +20,10 @@ clusters.get("/inventory/clusters", async (req, res) => {
   const list = listClusters(scope);
   let principal: string | null = null;
   try { const id = await sdkIdentity(8_000); if (id.ok) principal = id.arn; } catch { principal = null; }
-  res.json({ summary: clusterSummary(scope), principal_arn: principal, clusters: list.map((c) => ({ ...c, access: c.kind === "eks" && c.access_status !== "ok" && principal ? accessInstructions({ name: c.name, region: c.region, authentication_mode: c.authentication_mode }, principal) : null })) });
+  // the cluster sees the identity of its own account: a member's cluster is read through that member's read role, the parent's through the parent's
+  const memberRole = new Map(listMembers().map((m) => [m.account_id, m.role_arn]));
+  const principalOf = (accountId: string | null) => (accountId && memberRole.get(accountId)) || principal;
+  res.json({ summary: clusterSummary(scope), principal_arn: principal, clusters: list.map((c) => { const p = principalOf(c.account_id); return { ...c, access: c.kind === "eks" && c.access_status !== "ok" && p ? accessInstructions({ name: c.name, region: c.region, authentication_mode: c.authentication_mode }, p) : null }; }) });
 });
 
 clusters.get("/inventory/clusters/:arn/workloads", (req, res) => {

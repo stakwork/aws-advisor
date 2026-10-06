@@ -19,6 +19,7 @@
  */
 import { DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { CloudTrailClient, LookupEventsCommand } from "@aws-sdk/client-cloudtrail";
+import { TRAIL_RETRY } from "./trail.js";
 import { db } from "./db.js";
 import { config } from "./config.js";
 import { executorCreds } from "./executor.js";
@@ -244,7 +245,7 @@ export async function attributeAlert(alertId: number): Promise<AlertCause | null
   if (led) Object.assign(c, { status: "found", source: "ledger", actor: "the advisor", actor_kind: "advisor", via: led.kind, action_id: led.id, action_kind: led.kind, event_time: led.at, event_name: led.event });
 
   // 3. CloudTrail, also when the ledger matched: the event adds the time and confirms the call went through
-  const ct = new CloudTrailClient({ region, credentials: acct.read });
+  const ct = new CloudTrailClient({ region, credentials: acct.read, ...TRAIL_RETRY });
   try {
     const events: { event_name: string; event_time: string; error_code: string | null; raw: any; id: string }[] = [];
     let NextToken: string | undefined; let pages = 0;
