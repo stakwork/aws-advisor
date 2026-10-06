@@ -620,7 +620,20 @@ A Vercel team member is `kind: team_member` (`native_type: team_member`, id `<te
 `role`, `admin` (an Owner), `mfa` (2FA on the Vercel account), `confirmed`, `github`, `joined_at`. The tokens of the
 account the advisor's token belongs to (the API lists only the caller's own) are AdvisorCredential nodes (`kind:
 api_token`) of that member. A member and the AWS identities
-of the same person (username, e-mail local part or GitHub login) are joined by SAME_PERSON.
+of the same person (username, e-mail local part or GitHub login) belong to one AdvisorPerson.
+
+### AdvisorPerson
+
+The person (or machine) behind one or more identities across providers: IAM users in any account, the Identity
+Center user and the Vercel team member whose name, e-mail local part or display name match (`matched_by`). One per
+group, a single identity included, so questions about people start here; root users have none.
+`(person)-[:HAS_IDENTITY {kind, matched_by}]->(identity)`.
+
+Id `person:<match key>`: the smallest match key of the Identity Center user when there is one, else of the first
+identity, so the node keeps its id when another identity joins or leaves. Properties roll up the identities: `name`,
+`email`, `machine` (no identity opens a console), `status` (`active`, `invited`, `disabled`), `admin` (any live
+identity), `mfa` (the weakest among the identities that open a console) and `mfa_weakest_kind`, `platforms`,
+`channels`, `keys`, `last_seen_at`, `identities` (count). Rebuilt every pass; a person no longer matched is removed.
 
 `AdvisorPolicy`: `name`, `managed` (provider-managed), `admin`, `wildcard_actions`, `wildcard_resources`, `attached`.
 
@@ -1373,7 +1386,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `SIGNS_IN_WITH` | AdvisorIdentity → AdvisorClient | the clients it was seen using |
 | `USED_FROM` | AdvisorCredential → AdvisorClient | which client a credential was used from |
 | `SIGNED_IN_FROM` | AdvisorIdentity → AdvisorSource (ip) | the addresses it came from |
-| `SAME_PERSON` | AdvisorIdentity → AdvisorIdentity | one person behind both (an IAM user and an Identity Center user whose name, email local part or display name match); `matched_by` lists the keys |
+| `HAS_IDENTITY` | AdvisorPerson → AdvisorIdentity | the identities one person holds across providers (name, email local part or display name match); `kind`, `matched_by` lists the keys |
 | `CREATED` | AdvisorIdentity → resource | from the audit trail |
 | `ENCRYPTS` | AdvisorSecret (key) → storage, database, messaging | the key that encrypts a volume, bucket, file system, vault, database or topic |
 | `RUNS` | resource → AdvisorApp, AdvisorContainer | a program or a Docker container running on it (edge carries the per-instance facts) |

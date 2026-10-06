@@ -104,3 +104,19 @@ test("a bare throttle answer names the read it came from and is not taken for a 
   assert.match(out, /^sign-ins parent us-east-1 \(cloudtrail:LookupEvents\): AWS throttled the calls \(Rate exceeded\); the next refresh tries again$/);
   assert.equal(explainPermissionError(err, "x"), null);
 });
+
+test("a KMS key policy denial is not a missing IAM action: no issue recorded, the remedy points at the key policy", () => {
+  const key = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555";
+  const msg = `rpc error: code = Unknown desc = advisor_p: operation error KMS: ListResourceTags, https response error StatusCode: 400, RequestID: f0f0f0f0-0000-0000-0000-000000000000, api error AccessDeniedException: User: arn:aws:sts::123456789012:assumed-role/aws-advisor-read/aws-advisor is not authorized to perform: kms:ListResourceTags on resource: ${key} because no resource-based policy allows the kms:ListResourceTags action (SQLSTATE HV000)`;
+  const issue = explainPermissionError(new Error(msg), "kms key inventory (aws_kms_key), column tags");
+  assert.equal(issue?.action, "kms:ListResourceTags");
+  assert.equal(issue?.blocked_by, "resource_policy");
+  const line = describeError(new Error(msg), "kms key inventory (aws_kms_key), column tags");
+  // the long prefix pushed the reason past 400 characters; it is kept anyway
+  assert.match(line, /because no resource-based policy allows the kms:ListResourceTags action/);
+  assert.match(line, /key's key policy keeps the advisor's role out/);
+  assert.doesNotMatch(line, /Missing IAM permission/);
+  // the identity-based variant is still a missing IAM permission
+  const iam = explainPermissionError(new Error(msg.replace("resource-based", "identity-based")), "kms key inventory (aws_kms_key)");
+  assert.equal(iam?.blocked_by, undefined);
+});

@@ -159,24 +159,6 @@ export async function mirrorDeployments(elbRows: any[], account: string, stamp: 
 }
 
 /**
- * One person behind several identities (an IAM user and an Identity Center user of the same name or email, src/sign_ins.ts
- * listPeople): SAME_PERSON from the first identity of the group to each other one, with the keys that matched. Edges
- * not written on this pass are removed, so a rename or a deleted user drops its match.
- */
-const SAME_PERSON_CYPHER = `
-UNWIND $rows AS row
-MATCH (a:AdvisorResource {id: row.from}) MATCH (b:AdvisorResource {id: row.to})
-MERGE (a)-[r:SAME_PERSON]->(b) SET r.matched_by = row.matched_by, r.updated_at = $now`;
-
-export async function mirrorSamePerson(stamp: string): Promise<void> {
-  const { listActors, listPeople } = await import("../../sign_ins.js");
-  const rows = listPeople(listActors(null)).filter((p) => p.identities.length > 1)
-    .flatMap((p) => p.identities.slice(1).map((i) => ({ from: p.identities[0].id, to: i.id, matched_by: p.matched_by })));
-  for (const batch of chunks(rows)) await write(SAME_PERSON_CYPHER, { rows: batch, now: stamp });
-  await write("MATCH ()-[r:SAME_PERSON]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
-}
-
-/**
  * Vercel OIDC federation (src/vercel_aws_links.ts): the project RUNS_AS the role whose trust names it, with the
  * environments the subject allows. Written from both adapters' passes (whichever runs second finds both nodes); a
  * link no longer in a trust policy is removed.
@@ -205,7 +187,6 @@ export async function mirrorAwsEdges(account: string, stamp: string): Promise<st
   for (const batch of chunks(dbEndpoints)) await write(DB_ENDPOINT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
   for (const batch of chunks(ebsRows.map((r) => ({ id: String(r.volume_id), instance_id: r.gone ? null : str(r.instance_id), device: str(r.device) })))) await write(VOLUME_CYPHER, { rows: batch, now: stamp });
   await mirrorDnsLinks(recordRows, account, stamp);
-  await mirrorSamePerson(stamp);
   await mirrorVercelRoleLinks(stamp);
   // credentials, clients and source addresses of every identity (src/graph_access.ts)
   await (await import("../../graph_access.js")).mirrorAccess(stamp);

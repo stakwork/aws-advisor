@@ -34,6 +34,8 @@ export interface PermissionIssue {
   message: string;
   /** One IAM statement that allows the action. */
   policy_statement: IamStatement;
+  /** "resource_policy": AWS said the resource's own policy (a KMS key policy, a bucket policy) keeps the role out, so no IAM grant fixes it. */
+  blocked_by?: "resource_policy";
 }
 
 export interface PermissionIssueRow {
@@ -228,6 +230,11 @@ const PERMISSION_PATTERNS = [
   /\bAccessDenied(?:Exception)?\b/, /\bUnauthorizedOperation\b/, /\bAuthorizationError(?:Exception)?\b/, /\bnot authorized\b/i,
   /\bexplicit deny\b/i, /\bAccess Denied\b/, /\bUnauthorizedAccess\b/, /\bForbidden\b.*\b403\b|\b403\b.*\bForbidden\b/,
 ];
+/** AWS's reason clause when the resource's own policy, not the identity's, is what denied the call. */
+const RESOURCE_POLICY_DENIAL = /because no resource-based policy allows|explicit deny in a resource-based policy/i;
+/** The "because ..." clause AWS ends a denial with: which kind of policy said no. */
+const DENIAL_REASON = /because (?:no (?:identity|resource|session|permissions boundary|service control)[\w -]*polic(?:y|ies) allows?[^.(]*|of an explicit deny[^.(]*)/i;
+
 /** Bad or expired credentials are not a missing permission; they get their own message elsewhere. */
 const CREDENTIAL_PATTERNS = [/InvalidSignature/, /UnrecognizedClient/, /ExpiredToken/, /InvalidClientTokenId/, /SignatureDoesNotMatch/, /InvalidAccessKeyId/];
 
@@ -302,10 +309,12 @@ export function explainPermissionError(err: unknown, context: string): Permissio
 
   const service = action === "unknown" ? "unknown" : action.split(":")[0];
   const res = message.match(/on resource:?\s+(arn:[^\s,;)]+)/i);
+  const resourcePolicy = RESOURCE_POLICY_DENIAL.test(message);
   return {
     action,
     service,
     ...(res ? { resource: res[1] } : {}),
+    ...(resourcePolicy ? { blocked_by: "resource_policy" as const } : {}),
     context,
     message: message.slice(0, 600),
     policy_statement: action === "unknown" ? { Sid: "AdvisorUnknownActionSeeMessage", Effect: "Allow", Action: [], Resource: "*" } : statementFor(action),
@@ -314,7 +323,9 @@ export function explainPermissionError(err: unknown, context: string): Permissio
 
 /** The one-line remedy appended to log lines and API errors. */
 export const remedyFor = (issue: PermissionIssue) =>
-  issue.action === "unknown"
+  issue.blocked_by === "resource_policy"
+    ? `The ${issue.service === "kms" ? "key's key policy" : "resource's own policy"} keeps the advisor's role out${issue.resource ? ` (${issue.resource})` : ""}; ${issue.action === "unknown" ? "the action" : issue.action} is already in the advisor's IAM policy and IAM cannot override it. Add the role to that ${issue.service === "kms" ? "key policy" : "policy"} if the advisor should read it; the rest of the refresh still lands.`
+    : issue.action === "unknown"
     ? "Missing IAM permission (the error did not name the action; see the message); add it to the advisor's policy (see Settings > Permissions)."
     : `Missing IAM permission ${issue.action}; add it to the advisor's policy (see Settings > Permissions).`;
 
@@ -387,11 +398,15 @@ export function describeError(err: unknown, context: string, maxLen = 400): stri
   if (/ECONNREFUSED [0-9.]+:9193|connect ECONNREFUSED/.test(raw) && /9193|steampipe/i.test(raw + context)) {
     return `Steampipe service is not running (${raw.slice(0, 80)}): it restarts by itself within 30 seconds in the image; locally run \`steampipe service start\`. Its log is ~/.steampipe/logs/steampipe-<date>.log.`;
   }
-  const message = raw.slice(0, maxLen);
+  // keep AWS's "because ..." clause even when the long Steampipe prefix pushes it past maxLen: it says which policy denied
+  const reason = raw.length > maxLen ? DENIAL_REASON.exec(raw)?.[0] : undefined;
+  const message = reason ? `${raw.slice(0, Math.max(0, maxLen - reason.length - 5))} ... ${reason}` : raw.slice(0, maxLen);
   // AWS's throttle answer ("Rate exceeded") carries no service or call: say which read it was, and that the next refresh retries
   if (/Rate exceeded|Throttl|TooManyRequests|RequestLimitExceeded/i.test(`${e?.name ?? ""} ${raw}`)) return `${context}: AWS throttled the calls (${message.replace(/[.\s]+$/, "")}); the next refresh tries again`;
   const issue = explainPermissionError(err, context);
   if (!issue) return message;
+  // a resource policy denial is not a missing IAM action: recording it would offer a policy fix that changes nothing
+  if (issue.blocked_by === "resource_policy") { console.warn(`[permissions] ${context}: ${remedyFor(issue)}`); return `${message.replace(/[.\s]+$/, "")}. ${remedyFor(issue)}`; }
   recordPermissionIssue(issue);
   return `${message.replace(/[.\s]+$/, "")}. ${remedyFor(issue)}`;
 }

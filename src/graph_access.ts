@@ -10,13 +10,16 @@
  *   failures, first_at, last_at, accounts, factors}]->(client) and (credential)-[:USED_FROM {events, last_at}]->(client).
  * - (:AdvisorSource {kind: ip}) a source address sign-ins and calls came from: (identity)-[:SIGNED_IN_FROM {events,
  *   failures, first_at, last_at, clients}]->(source). Two identities from one address is a shared person or office.
+ * - (:AdvisorPerson) the person (or machine) behind one or more identities across providers, matched by name, e-mail
+ *   local part or display name (sign_in_facts groupPeople): (person)-[:HAS_IDENTITY {matched_by}]->(identity). One per
+ *   group, a single identity included, so every question about people starts from it. Root users have none.
  *
  * Rebuilt on every pass from the stored inventory (src/sign_ins.ts, src/iam_inventory.ts, the Vercel extras): edges not
- * written on the pass are removed, credentials not seen are marked gone, clients and addresses left with no edge go.
+ * written on the pass are removed, credentials not seen are marked gone, clients, addresses and people left with no edge go.
  */
 import { db } from "./db.js";
-import { allFingerprints, listActors, listDirectoryChanges, type Actor } from "./sign_ins.js";
-import { actorKey, clientKey, foldIps, isPrivateIp, type ClientUse, type IpUse } from "./sign_in_facts.js";
+import { allFingerprints, listActors, listDirectoryChanges, listPeople, type Actor, type Person } from "./sign_ins.js";
+import { actorKey, clientKey, foldIps, isPrivateIp, matchKeys, type ClientUse, type IpUse } from "./sign_in_facts.js";
 import { teamExtras, vercelTeam } from "./adapters/vercel/inventory.js";
 import type { MfaDeviceRow, AccessKeyRow } from "./iam_inventory.js";
 
@@ -27,6 +30,11 @@ export interface CredentialRow {
 export interface ClientRow { id: string; client: string; platform: string | null; channel: string }
 export interface SignsInRow { identity_id: string; client_id: string; events: number; failures: number; first_at: string; last_at: string; accounts: string[]; factors: string[] }
 export interface UsedFromRow { credential_id: string; client_id: string; events: number; last_at: string }
+export interface PersonRow {
+  id: string; name: string; email: string | null; machine: boolean; status: Person["status"]; admin: boolean; mfa: Person["mfa"]; mfa_weakest_kind: string | null;
+  platforms: string[]; channels: string[]; keys: number; last_seen_at: string | null; matched_by: string[]; identities: number;
+}
+export interface HasIdentityRow { person_id: string; identity_id: string; kind: Actor["kind"]; matched_by: string[] }
 export interface IpRow { identity_id: string; ip: string; private: boolean; events: number; failures: number; first_at: string; last_at: string; clients: string[] }
 export interface AccessGraph { credentials: CredentialRow[]; clients: ClientRow[]; signs_in: SignsInRow[]; used_from: UsedFromRow[]; ips: IpRow[] }
 
@@ -95,6 +103,24 @@ export function accessGraphRows(actors: Actor[], x: AccessExtras, now = Date.now
   return { credentials, clients: [...clients.values()], signs_in: signsIn, used_from: [...usedFrom.values()], ips };
 }
 
+/**
+ * People as rows. The id is anchored on the Identity Center user when there is one, else the first identity, and is
+ * that identity's smallest match key (`person:gonzaloaune`): it stays put when an IAM user or a Vercel member joins
+ * or leaves the group, and is unique because groups sharing a key are merged. A name too short to match falls back to
+ * the identity id. Pure.
+ */
+export function personRows(people: Person[]): { persons: PersonRow[]; links: HasIdentityRow[] } {
+  const persons: PersonRow[] = []; const links: HasIdentityRow[] = [];
+  for (const p of people) {
+    const anchor = p.identities.find((i) => i.kind === "sso_user") ?? p.identities[0]; if (!anchor) continue;
+    const id = `person:${[...matchKeys(anchor)].sort()[0] ?? anchor.id}`;
+    persons.push({ id, name: p.name, email: p.email, machine: p.machine, status: p.status, admin: p.admin, mfa: p.mfa, mfa_weakest_kind: p.mfa_weakest_kind,
+      platforms: p.platforms, channels: p.channels, keys: p.keys, last_seen_at: p.last_seen_at, matched_by: p.matched_by, identities: p.identities.length });
+    for (const i of p.identities) links.push({ person_id: id, identity_id: i.id, kind: i.kind, matched_by: p.matched_by });
+  }
+  return { persons, links };
+}
+
 const rows = (sql: string, ...p: unknown[]): any[] => { try { return db.prepare(sql).all(...p) as any[]; } catch { return []; } };
 const parse = (s: unknown): any => { if (typeof s !== "string") return s ?? null; try { return JSON.parse(s); } catch { return null; } };
 
@@ -144,22 +170,40 @@ MATCH (i:AdvisorResource {id: row.identity_id})
 MERGE (s:AdvisorSource {id: 'ip:' + row.ip}) ON CREATE SET s.kind = 'ip', s.label = row.ip, s.cidr = row.ip + CASE WHEN row.ip CONTAINS ':' THEN '/128' ELSE '/32' END, s.private = row.private, s.native_type = 'source', s.native_id = 'ip:' + row.ip
 MERGE (i)-[r:SIGNED_IN_FROM]->(s) SET r += {events: row.events, failures: row.failures, first_at: row.first_at, last_at: row.last_at, clients: row.clients, updated_at: $now}`;
 
+const PERSON_CYPHER = `
+UNWIND $rows AS row
+MERGE (p:AdvisorPerson {id: row.id}) ON CREATE SET p.first_seen = $now
+SET p += {name: row.name, email: row.email, machine: row.machine, status: row.status, admin: row.admin, mfa: row.mfa, mfa_weakest_kind: row.mfa_weakest_kind,
+  platforms: row.platforms, channels: row.channels, keys: row.keys, last_seen_at: row.last_seen_at, matched_by: row.matched_by, identities: row.identities,
+  native_type: 'person', native_id: row.id, updated_at: $now}`;
+
+const HAS_IDENTITY_CYPHER = `
+UNWIND $rows AS row
+MATCH (p:AdvisorPerson {id: row.person_id}) MATCH (i:AdvisorResource {id: row.identity_id})
+MERGE (p)-[r:HAS_IDENTITY]->(i) SET r += {kind: row.kind, matched_by: row.matched_by, updated_at: $now}`;
+
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
 
 /** Writes credentials, clients and addresses for every identity, then removes what this pass did not see. */
-export async function mirrorAccess(stamp: string): Promise<{ credentials: number; clients: number; signs_in: number; used_from: number; ips: number }> {
+export async function mirrorAccess(stamp: string): Promise<{ credentials: number; clients: number; signs_in: number; used_from: number; ips: number; people: number }> {
   const { enabled, writeCypher } = await import("./graph_mirror.js");
-  const g = accessGraph();
-  if (!enabled()) return { credentials: g.credentials.length, clients: g.clients.length, signs_in: g.signs_in.length, used_from: g.used_from.length, ips: g.ips.length };
+  const g = accessGraph(); const pp = personRows(listPeople(listActors(null)));
+  const counts = { credentials: g.credentials.length, clients: g.clients.length, signs_in: g.signs_in.length, used_from: g.used_from.length, ips: g.ips.length, people: pp.persons.length };
+  if (!enabled()) return counts;
   for (const b of chunks(g.credentials)) await writeCypher(CREDENTIAL_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(g.clients)) await writeCypher(CLIENT_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(g.signs_in)) await writeCypher(SIGNS_IN_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(g.used_from)) await writeCypher(USED_FROM_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(g.ips)) await writeCypher(IP_CYPHER, { rows: b, now: stamp });
-  await writeCypher("MATCH ()-[r:HAS_CREDENTIAL|SIGNS_IN_WITH|USED_FROM|SIGNED_IN_FROM]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
+  for (const b of chunks(pp.persons)) await writeCypher(PERSON_CYPHER, { rows: b, now: stamp });
+  for (const b of chunks(pp.links)) await writeCypher(HAS_IDENTITY_CYPHER, { rows: b, now: stamp });
+  await writeCypher("MATCH ()-[r:HAS_CREDENTIAL|SIGNS_IN_WITH|USED_FROM|SIGNED_IN_FROM|HAS_IDENTITY]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
   await writeCypher("MATCH (c:AdvisorCredential) WHERE c.updated_at IS NULL OR c.updated_at <> $now SET c.gone = true", { now: stamp });
   await writeCypher("MATCH (n) WHERE (n:AdvisorClient OR (n:AdvisorSource AND n.kind = 'ip')) AND NOT (n)--() DELETE n", {});
+  await writeCypher("MATCH (p:AdvisorPerson) WHERE p.updated_at IS NULL OR p.updated_at <> $now DETACH DELETE p", { now: stamp });
+  // identities of one person were joined directly by SAME_PERSON before AdvisorPerson: remove those edges
+  await writeCypher("MATCH ()-[r:SAME_PERSON]->() DELETE r", {});
   // Vercel tokens were identities for a day before they became credentials: remove those nodes
   await writeCypher("MATCH (n:AdvisorIdentity {native_type: 'vercel_token'}) DETACH DELETE n", {});
-  return { credentials: g.credentials.length, clients: g.clients.length, signs_in: g.signs_in.length, used_from: g.used_from.length, ips: g.ips.length };
+  return counts;
 }

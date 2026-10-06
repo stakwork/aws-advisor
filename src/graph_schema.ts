@@ -66,6 +66,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorNotification: "A notification the provider sent the account (AWS User Notifications)",
   AdvisorThreatFinding: "A threat detection finding and the resource it is about",
   AdvisorCredential: "A credential an identity holds: password, access key, MFA device, passkey, API token",
+  AdvisorPerson: "The person (or machine) behind one or more identities across providers, matched by name or e-mail",
   AdvisorClient: "A client identities sign in or call with (browser, CLI, SDK, IaC tool) on a platform",
   AdvisorSource: "An address or range traffic and sign-ins come from (the internet, a CIDR, a prefix list)",
   AdvisorNetwork: "A virtual network (VPC)",

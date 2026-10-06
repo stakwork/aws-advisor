@@ -56,3 +56,21 @@ test("foldIps and isIpAddress: addresses per actor with their clients; service n
   assert.equal(f.isIpAddress("2001:db8::1"), true); assert.equal(f.isIpAddress("ec2.amazonaws.com"), false);
   assert.equal(f.isPrivateIp("10.0.0.5"), true); assert.equal(f.isPrivateIp("172.20.1.1"), true); assert.equal(f.isPrivateIp("198.51.100.7"), false);
 });
+
+test("personRows: one person across providers, keyed on the Identity Center user so a new identity keeps the id", async () => {
+  const s = await import("../sign_ins.js");
+  const sso = actor({ kind: "sso_user", id: "9067-user-0001", name: "pat.lee@example.com", display_name: "Pat Lee", email: "pat.lee@example.com", mfa: "app" });
+  const iam = actor({ kind: "iam_user", id: `arn:aws:iam::${ACCT}:user/patlee`, name: "patlee", mfa: "none", keys: 1 });
+  const bot = actor({ kind: "iam_user", id: `arn:aws:iam::${ACCT}:user/ci-deploy`, name: "ci-deploy", console: false, keys: 1 });
+  const root = actor({ kind: "root", id: `arn:aws:iam::${ACCT}:root`, name: "root" });
+  const alone = g.personRows(s.listPeople([sso as any]));
+  const r = g.personRows(s.listPeople([sso, iam, bot, root] as any[]));
+  assert.equal(r.persons.length, 2, "root users have no person");
+  const pat = r.persons.find((p) => !p.machine)!;
+  assert.equal(pat.id, alone.persons[0].id, "the IAM user joining does not move the id");
+  assert.equal(pat.id, "person:patlee");
+  assert.deepEqual([pat.identities, pat.mfa, pat.keys, pat.name], [2, "none", 1, "Pat Lee"]);
+  assert.deepEqual(r.links.filter((l) => l.person_id === pat.id).map((l) => l.kind).sort(), ["iam_user", "sso_user"]);
+  const machine = r.persons.find((p) => p.machine)!;
+  assert.deepEqual([machine.id, machine.identities], ["person:cideploy", 1]);
+});
