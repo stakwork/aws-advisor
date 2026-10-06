@@ -6,15 +6,22 @@ import { Badge, Button, Card, Empty, Stat, Td, Th } from "./ui";
 type Change = { event_id: string; event_time: string; event_name: string; what: string; target_user_id: string | null; target_name: string | null; by: string | null; failed: boolean };
 type Console = { region: string; instance: string } | null;
 type Client = { account_id: string | null; channel: string; client: string; platform: string | null; factors: string[]; events: number; failures: number; first_at: string; last_at: string; last_ip: string | null; keys: string[]; via: string[] };
+type Token = { id: string; name: string | null; origin: string | null; team_ids: string[]; expires_at: string | null; active_at: string | null; created_at: string | null };
+type Principal = { kind: string; who: string; account_id: string | null; scope: string[]; external_id: boolean; org_restricted: boolean; risk: "alarm" | "warning" | null; risk_reason: string | null };
+type Role = { arn: string; name: string; account_id: string | null; last_used: string | null; admin: boolean; policies: string[]; principals: Principal[]; trust: string | null; risk: "alarm" | "warning" | null; risk_reason: string | null; created: string | null };
+type OidcLink = { project_id: string; project_name: string; role_arn: string; role_name: string; account_id: string | null; environments: string[] };
+type StaticKey = { project_id: string; project_name: string; names: string[]; targets: string[]; created_at: string | null; edited_by: string | null; oidc_enabled: boolean; candidates: { user: string; key: string; key_created: string; hours_before: number }[] };
+type VercelAccess = { team: { id: string; name: string | null; slug: string | null; plan: string | null }; security: { saml_connected: boolean; saml_enforced: boolean; saml_provider: string | null; mfa_required: boolean | null; sensitive_env_policy: string | null } | null; tokens: Token[]; token_owner: string | null; read_at: string | null; oidc_links: OidcLink[]; static_keys: StaticKey[] } | null;
 type Identity = {
-  kind: "root" | "iam_user" | "sso_user"; id: string; name: string; email: string | null; display_name: string | null; account_id: string | null; admin: boolean; console: boolean; keys: number;
-  mfa: string; mfa_source: string | null; last_seen_at: string | null; clients: Client[]; sign_ins_90d: number | null; mfa_sign_ins_90d: number | null; status: "active" | "disabled" | "no_access"; changes: Change[];
+  role?: string | null; tokens?: Token[];
+  kind: "root" | "iam_user" | "sso_user" | "vercel_member"; id: string; name: string; email: string | null; display_name: string | null; account_id: string | null; admin: boolean; console: boolean; keys: number;
+  mfa: string; mfa_source: string | null; last_seen_at: string | null; clients: Client[]; sign_ins_90d: number | null; mfa_sign_ins_90d: number | null; status: "active" | "disabled" | "no_access" | "invited"; changes: Change[];
 };
-type Person = { key: string; name: string; email: string | null; machine: boolean; matched_by: string[]; identities: Identity[]; admin: boolean; mfa: string; platforms: string[]; channels: string[]; keys: number; last_seen_at: string | null; status: "active" | "disabled" };
+type Person = { key: string; name: string; email: string | null; machine: boolean; matched_by: string[]; identities: Identity[]; admin: boolean; mfa: string; platforms: string[]; channels: string[]; keys: number; last_seen_at: string | null; status: "active" | "disabled" | "invited"; mfa_weakest_kind: Identity["kind"] | null };
 type Data = {
   accounts: number; roots_without_mfa: number; roots_with_keys: number; roots_signed_in_90d: number; centralized: boolean | null; root_sessions: boolean | null;
   people: number; machines: number; disabled: number; people_passkey: number; people_app_only: number; people_no_mfa: number; people_unknown_mfa: number; keys_on_desktops: number;
-  platforms: { platform: string; actors: number }[]; read_at: string | null; errors: string[]; notes: string[]; roots: Identity[]; persons: Person[]; directory_changes: Change[]; identity_center_console: Console;
+  platforms: { platform: string; actors: number }[]; read_at: string | null; errors: string[]; notes: string[]; roots: Identity[]; persons: Person[]; directory_changes: Change[]; identity_center_console: Console; roles: Role[]; vercel: VercelAccess;
 };
 
 /** The Identity Center console's page for a user, where its MFA devices can be seen. */
@@ -35,7 +42,19 @@ function Changes({ changes, showTarget = false }: { changes: Change[]; showTarge
 }
 
 const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString() : "—");
-const KIND: Record<Identity["kind"], string> = { root: "root", iam_user: "IAM user", sso_user: "Identity Center" };
+const KIND: Record<Identity["kind"], string> = { root: "root", iam_user: "IAM user", sso_user: "Identity Center", vercel_member: "Vercel" };
+/** Who may assume a role, in words, for the ? next to each kind. */
+const PRINCIPAL: Record<string, { label: string; help: string }> = {
+  github_actions: { label: "GitHub Actions", help: "Workflows in the GitHub repositories the trust names get short-lived AWS credentials through OIDC, with no stored key. The repository list is what limits it: without it, any repository on GitHub could." },
+  vercel: { label: "Vercel", help: "Functions of the Vercel projects and environments the trust names assume the role through Vercel OIDC federation, with no stored key." },
+  org_account: { label: "your account", help: "Another account of this organisation (one the advisor reads) may assume the role: usually an admin or automation role." },
+  external_account: { label: "other company", help: "An AWS account outside this organisation may assume the role: a vendor or a partner. An external id in the trust guards against the confused-deputy problem." },
+  public: { label: "anyone", help: "\"*\": any AWS principal, limited only by the conditions (an organisation id, an account)." },
+  cognito: { label: "Cognito", help: "Users of a Cognito identity pool get these credentials. Guests (unauthenticated) are anyone who opens the app." },
+  gitlab: { label: "GitLab CI", help: "GitLab CI jobs through OIDC." }, terraform_cloud: { label: "Terraform Cloud", help: "Terraform Cloud runs through OIDC." }, circleci: { label: "CircleCI", help: "CircleCI jobs through OIDC." }, bitbucket: { label: "Bitbucket", help: "Bitbucket Pipelines through OIDC." },
+  oidc: { label: "OIDC issuer", help: "Tokens from another OpenID Connect issuer." }, web_identity: { label: "web identity", help: "Users signed in with Google, Amazon, Apple or Facebook." }, saml: { label: "SAML", help: "Users of a SAML identity provider." },
+  same_account: { label: "this account", help: "Users or roles of the same account." }, eks: { label: "EKS pods", help: "Pods of the account's own EKS cluster, by service account." }, identity_center: { label: "Identity Center", help: "People assigned the permission set." },
+};
 const FACTOR: Record<string, string> = { password: "password", app: "authenticator app", passkey: "passkey", hardware: "hardware token", mfa: "MFA", sso: "SSO session", federated: "federated", access_key: "access key", session: "temporary credentials", console_session: "console session" };
 const CHANNEL: Record<string, string> = { console: "console", portal: "access portal", cli: "CLI", sdk: "SDK", iac: "infrastructure as code", aws: "AWS", unknown: "?" };
 const DESKTOP = new Set(["macOS", "Windows", "Linux"]);
@@ -108,6 +127,7 @@ function Mfa({ a, long = false }: { a: Pick<Identity, "kind" | "mfa" | "mfa_sour
 
 function Status({ s }: { s: Identity["status"] | Person["status"] }) {
   if (s === "disabled") return <Badge>disabled</Badge>;
+  if (s === "invited") return <span title="invited to the team, has not accepted yet" className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">invited</span>;
   if (s === "no_access") return <span title="no console password and no active access key" className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">no way in</span>;
   return null;
 }
@@ -133,6 +153,23 @@ function ClientsTable({ clients, acct }: { clients: Client[]; acct: (id: string 
   );
 }
 
+/** The tokens of the account the advisor's Vercel token belongs to (the API lists no one else's). */
+function Tokens({ tokens }: { tokens: Token[] }) {
+  return (
+    <table className="w-full border-collapse text-xs">
+      <thead><tr className="text-zinc-500"><Th>Token</Th><Th>Scope</Th><Th>Expires</Th><Th>Last used</Th><Th>Created</Th></tr></thead>
+      <tbody>{tokens.map((t) => { const idle = t.active_at ? (Date.now() - Date.parse(t.active_at)) / 86_400_000 : Infinity; return (
+        <tr key={t.id} className="border-t border-zinc-800/60">
+          <Td className="text-zinc-200">{t.name ?? t.id}</Td>
+          <Td className="text-zinc-400">{t.team_ids.length ? "team" : <span className="text-amber-300">every team</span>}</Td>
+          <Td>{t.expires_at ? <span className="text-zinc-400">{day(t.expires_at)}</span> : <span className="text-amber-300">never</span>}</Td>
+          <Td className={idle > 90 ? "text-amber-300" : "text-zinc-400"}>{t.active_at ? day(t.active_at) : "never"}</Td>
+          <Td className="text-zinc-500">{day(t.created_at)}</Td>
+        </tr>); })}</tbody>
+    </table>
+  );
+}
+
 /** One identity inside an opened person: what it is, its way in, and its clients. */
 function IdentityBlock({ i, acct, ic }: { i: Identity; acct: (id: string | null) => string; ic: Console }) {
   const url = i.kind === "sso_user" ? consoleUserUrl(ic, i.id) : null;
@@ -150,7 +187,68 @@ function IdentityBlock({ i, acct, ic }: { i: Identity; acct: (id: string | null)
       </div>
       {i.kind === "sso_user" ? <div className="mb-2 text-xs text-zinc-500">Registered MFA devices are not exposed by any AWS API{url ? <> — <a href={url} target="_blank" rel="noreferrer" className="text-sky-300 hover:underline">see them in the Identity Center console ↗</a></> : null}.</div> : null}
       {i.changes?.length ? <div className="mb-2"><div className="mb-0.5 text-xs text-zinc-500">Directory changes</div><Changes changes={i.changes} /></div> : null}
-      <ClientsTable clients={i.clients} acct={acct} />
+      {i.kind === "vercel_member" ? <div className="text-xs">
+        <div className="mb-1 text-zinc-500">Role on the team: <span className="text-zinc-300">{i.role ?? "—"}</span>{i.mfa === "mfa" ? <span> · 2FA on the Vercel account</span> : null}. Vercel exposes no sign-in history outside Enterprise audit logs.</div>
+        {i.tokens?.length ? <Tokens tokens={i.tokens} /> : null}
+      </div> : <ClientsTable clients={i.clients} acct={acct} />}
+    </div>
+  );
+}
+
+/** Roles something outside the account may assume: other accounts, pipelines, Vercel projects, identity pools. */
+function RolesSection({ roles, links, acct, open, toggle }: { roles: Role[]; links: OidcLink[]; acct: (id: string | null) => string; open: string | null; toggle: (k: string) => void }) {
+  if (!roles.length) return null;
+  const risky = roles.filter((r) => r.risk).length;
+  return (
+    <div className="mt-6">
+      <div className="mb-2 text-sm font-medium text-zinc-200">Ways in from outside the account <span className="font-normal text-zinc-500">· {roles.length} role{roles.length === 1 ? "" : "s"} other accounts, pipelines or apps may assume{risky ? <span className="text-amber-300"> · {risky} with a wide trust</span> : null}</span></div>
+      <table className="w-full border-collapse text-sm">
+        <thead><tr><Th>Role</Th><Th>Who may assume it</Th><Th>Admin</Th><Th>Last used</Th></tr></thead>
+        <tbody>{roles.map((r) => {
+          const k = `role:${r.arn}`; const isOpen = open === k; const outside = r.principals.filter((p) => !["service", "same_account", "identity_center", "eks"].includes(p.kind));
+          const projects = links.filter((l) => l.role_arn === r.arn);
+          return (<Fragment key={r.arn}>
+            <tr onClick={() => toggle(k)} className="cursor-pointer border-t border-zinc-800 align-top hover:bg-zinc-900/60">
+              <Td><div className="flex items-center gap-2"><span className="text-zinc-500">{isOpen ? "▾" : "▸"}</span><span className="font-medium text-zinc-100">{r.name}</span>{r.risk ? <span className={`rounded px-1.5 py-0.5 text-[11px] ${r.risk === "alarm" ? "bg-red-950 text-red-300" : "bg-amber-950 text-amber-300"}`} title={r.risk_reason ?? ""}>wide trust</span> : null}</div><div className="pl-5 text-xs text-zinc-500">{acct(r.account_id)}</div></Td>
+              <Td className="text-xs"><div className="flex flex-wrap gap-1">{outside.map((p, i) => <span key={i} className={`rounded border px-1.5 py-0.5 ${p.risk ? "border-amber-700/60" : "border-zinc-700"}`}><Term label={PRINCIPAL[p.kind]?.label ?? p.kind} help={PRINCIPAL[p.kind]?.help} /><span className="text-zinc-400"> {p.kind === "github_actions" || p.kind === "vercel" ? (p.scope.length ? p.scope.slice(0, 2).join(", ") + (p.scope.length > 2 ? ` +${p.scope.length - 2}` : "") : "any") : p.kind === "org_account" ? acct(p.account_id) : p.who}</span></span>)}</div></Td>
+              <Td className="text-xs">{r.admin ? <span className="text-orange-300">admin</span> : <span className="text-zinc-500">—</span>}</Td>
+              <Td className="whitespace-nowrap text-xs text-zinc-400">{r.last_used ? day(r.last_used) : <span className="text-zinc-500">never</span>}</Td>
+            </tr>
+            {isOpen && <tr className="bg-zinc-950/40"><td colSpan={4} className="space-y-2 px-3 pb-3 pt-1 text-xs">
+              {r.risk_reason ? <div className={r.risk === "alarm" ? "text-red-300" : "text-amber-300"}>{r.risk_reason}</div> : null}
+              <div className="space-y-1">{r.principals.filter((p) => p.kind !== "service").map((p, i) => (
+                <div key={i}><Term label={PRINCIPAL[p.kind]?.label ?? p.kind} help={PRINCIPAL[p.kind]?.help} /> <span className="text-zinc-300">{p.kind === "org_account" || p.kind === "external_account" ? `${p.who}${p.account_id ? ` · ${acct(p.account_id)}` : ""}` : p.who}</span>
+                  {p.scope.length ? <div className="pl-3 font-mono text-[11px] text-zinc-400">{p.scope.map((s) => <div key={s}>{s}</div>)}</div> : null}
+                  {p.external_id ? <span className="text-zinc-500"> · external id required</span> : null}{p.org_restricted ? <span className="text-zinc-500"> · limited to the organisation</span> : null}
+                </div>))}</div>
+              {r.principals.some((p) => p.kind === "service") ? <div className="text-zinc-500">Also AWS services: {r.principals.filter((p) => p.kind === "service").map((p) => p.who).join(", ")}</div> : null}
+              {projects.length ? <div className="text-zinc-400">Assumed by Vercel project{projects.length === 1 ? "" : "s"}: {projects.map((l) => <span key={l.project_id} className="mr-2 text-zinc-200">{l.project_name} <span className="text-zinc-500">({l.environments.join(", ")})</span></span>)}</div> : null}
+              <div className="text-zinc-500">Policies: {r.policies.join(", ") || "none"}</div>
+            </td></tr>}
+          </Fragment>);
+        })}</tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The Vercel team: its sign-in guards, the advisor token owner's tokens, and how its projects reach AWS. */
+function VercelSection({ v }: { v: NonNullable<VercelAccess> }) {
+  const s = v.security;
+  return (
+    <div className="mt-6">
+      <div className="mb-2 text-sm font-medium text-zinc-200">Vercel team access <span className="font-normal text-zinc-500">· {v.team.name ?? v.team.slug ?? v.team.id}{v.team.plan ? ` · ${v.team.plan}` : ""}{v.read_at ? ` · read ${when(v.read_at)}` : ""}</span></div>
+      <div className="mb-3 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-3">
+        <div><Term label="2FA required" help="Team settings › Security › Two-factor enforcement: members must have 2FA on to stay on the team. The API names no field for it, so unknown usually means off." />: {s?.mfa_required === true ? <span className="text-emerald-300">yes</span> : s?.mfa_required === false ? <span className="text-amber-300">no</span> : <span className="text-zinc-400">not reported (likely off)</span>}</div>
+        <div><Term label="SAML SSO" help="Single sign-on through the company's identity provider; enforced means members cannot use their own Vercel login." />: {s?.saml_connected ? (s.saml_enforced ? <span className="text-emerald-300">enforced</span> : <span className="text-amber-300">connected, not enforced</span>) : <span className="text-zinc-400">not connected</span>}</div>
+        <div><Term label="New env variables" help="The team's default for new environment variables: sensitive ones can't be read back once saved." />: <span className="text-zinc-300">{s?.sensitive_env_policy ?? "—"}</span></div>
+      </div>
+      {v.tokens.length ? <div className="mb-3"><div className="mb-1 text-xs text-zinc-500">Tokens of {v.token_owner ?? "the token's owner"} (the API lists only its own)</div><Tokens tokens={v.tokens} /></div> : null}
+      <div className="text-xs">
+        <div className="mb-1 text-zinc-500"><Term label="How projects reach AWS" help="OIDC: the project assumes an AWS role with a short-lived token, nothing stored. Static key: an env variable holds a long-lived AWS access key." /></div>
+        {v.oidc_links.length ? <div className="space-y-0.5">{v.oidc_links.map((l) => <div key={`${l.project_id}${l.role_arn}`}><span className="text-zinc-200">{l.project_name}</span> <span className="text-emerald-300">OIDC</span> <span className="text-zinc-400">→ {l.role_name}</span> <span className="text-zinc-500">({l.environments.join(", ")})</span></div>)}</div> : <div className="text-zinc-600">No role trusts the team's OIDC issuer.</div>}
+        {v.static_keys.map((k) => <div key={k.project_id} className="mt-1"><span className="text-zinc-200">{k.project_name}</span> <span className="text-amber-300">static key</span> <span className="font-mono text-zinc-400">{k.names.join(", ")}</span>{k.candidates[0] ? <span className="text-zinc-500"> · likely {k.candidates[0].user}'s key <span className="font-mono">…{k.candidates[0].key.slice(-4)}</span></span> : null}</div>)}
+      </div>
     </div>
   );
 }
@@ -221,7 +319,7 @@ export function Access() {
                 <Td><div className="flex items-center gap-2"><span className="text-zinc-500">{isOpen ? "▾" : "▸"}</span><span className="font-medium text-zinc-100">{p.name}</span>{p.machine ? <Badge>machine</Badge> : null}<Status s={p.status} /></div>{p.email && p.email !== p.name ? <div className="pl-5 text-xs text-zinc-500">{p.email}</div> : null}</Td>
                 <Td className="text-xs"><div className="flex flex-wrap gap-1">{p.identities.map((i) => <span key={i.id} title={i.kind === "sso_user" ? i.name : `${i.name} · ${acct(i.account_id)}`} className={`rounded border px-1.5 py-0.5 ${i.status !== "active" ? "border-zinc-800 text-zinc-500 line-through" : "border-zinc-700 text-zinc-300"}`}>{KIND[i.kind]}{i.kind === "iam_user" ? ` · ${names[i.account_id ?? ""] || i.account_id}` : ""}</span>)}</div></Td>
                 <Td className="text-xs">{p.admin ? <span className="text-orange-300">admin</span> : <span className="text-zinc-500">—</span>}</Td>
-                <Td className="text-xs"><Mfa a={{ ...(sso ?? p.identities[0]), mfa: p.mfa, kind: sso && p.mfa === sso.mfa ? "sso_user" : p.identities[0].kind }} /></Td>
+                <Td className="text-xs">{(() => { const w = p.identities.find((i) => i.kind === p.mfa_weakest_kind) ?? sso ?? p.identities[0]; return <><Mfa a={{ ...w, mfa: p.mfa }} />{p.mfa_weakest_kind ? <div className="text-[11px] text-zinc-600">weakest: {KIND[p.mfa_weakest_kind]}</div> : null}</>; })()}</Td>
                 <Td className="text-xs text-zinc-400">{p.platforms.join(" · ") || <span className="text-zinc-600">—</span>}{p.channels.length ? <div className="text-[11px] text-zinc-600">{p.channels.map((c) => CHANNEL[c] ?? c).join(", ")}</div> : null}</Td>
                 <Td className="whitespace-nowrap text-xs text-zinc-400">{p.last_seen_at ? day(p.last_seen_at) : <span className="text-zinc-500">never</span>}</Td>
               </tr>
@@ -234,6 +332,8 @@ export function Access() {
         </table>
         {disabled.length ? <button onClick={() => setShowDisabled(!showDisabled)} className="mt-2 text-xs text-zinc-400 hover:text-zinc-200">{showDisabled ? "▾ Hide" : "▸ Show"} {disabled.length} disabled</button> : null}
       </>)}
+      <RolesSection roles={Array.isArray(d.roles) ? d.roles : []} links={d.vercel?.oidc_links ?? []} acct={acct} open={open} toggle={toggle} />
+      {d.vercel ? <VercelSection v={d.vercel} /> : null}
       {d.directory_changes?.length ? <div className="mt-4">
         <button onClick={() => setShowChanges(!showChanges)} className="text-xs text-zinc-400 hover:text-zinc-200">{showChanges ? "▾" : "▸"} Identity Center directory changes · {d.directory_changes.length}{(() => { const n = d.directory_changes.filter((c) => c.event_name === "DeleteMfaDeviceForUser" && !c.failed).length; return n ? <span className="text-amber-300"> · {n} MFA device{n === 1 ? "" : "s"} removed</span> : null; })()}</button>
         {showChanges && <div className="mt-2"><Changes changes={d.directory_changes} showTarget /></div>}

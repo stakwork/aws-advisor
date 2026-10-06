@@ -33,8 +33,8 @@ test("projectFrom, deploymentFrom and envFrom fold the API's shapes; an env valu
   assert.deepEqual(p.connect.map((c) => [c.env, c.security_group, c.subnets.length, c.dc]), [["production", "sg-0123456789abcdef0", 2, "iad1"], ["preview", "sg-0123456789abcdef0", 2, "iad1"]], "Secure Compute attachments per environment");
   const d = client.deploymentFrom({ uid: "dpl_1", projectId: "prj_abc123", name: "web", url: "web-abc.vercel.app", readyState: "READY", target: "production", createdAt: 1759300000000, meta: { githubCommitRef: "main", githubCommitSha: "0123456789abcdef0123" } });
   assert.equal(d.url, "https://web-abc.vercel.app"); assert.equal(d.branch, "main"); assert.equal(d.commit, "0123456789ab");
-  const e = client.envFrom("prj_abc123", { id: "env1", key: "DATABASE_URL", value: "postgres://secret", target: ["production", "preview"], type: "encrypted", updatedAt: 1759300000000 });
-  assert.deepEqual(e, { project_id: "prj_abc123", key: "DATABASE_URL", targets: ["production", "preview"], type: "encrypted", updated_at: "2025-10-01T06:26:40.000Z" });
+  const e = client.envFrom("prj_abc123", { id: "env1", key: "DATABASE_URL", value: "postgres://secret", target: ["production", "preview"], type: "encrypted", updatedAt: 1759300000000, createdAt: 1759200000000, lastEditedByDisplayName: "Pat Example" });
+  assert.deepEqual(e, { project_id: "prj_abc123", key: "DATABASE_URL", targets: ["production", "preview"], type: "encrypted", updated_at: "2025-10-01T06:26:40.000Z", created_at: "2025-09-30T02:40:00.000Z", edited_by: "Pat Example" });
   assert.ok(!JSON.stringify(e).includes("secret"));
 });
 

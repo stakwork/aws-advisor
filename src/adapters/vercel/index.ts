@@ -53,12 +53,31 @@ export function resourceFromProject(p: ProjectRow, teamId: string, usage?: Map<s
     props: { platform: "vercel", framework: p.framework, runtime: p.node_version ? `node ${p.node_version}` : null, repo: p.repo, git_provider: p.git_provider, production_url: p.production_url, latest_deployment: p.latest_id, latest_url: p.latest_url, latest_target: p.latest_target, deployed_at: p.latest_at,
       protection_sso: p.protection.sso, protection_password: p.protection.password, protection_trusted_ips: p.protection.trusted_ips, protection_production: prod.requires_auth, protection_previews: prev.requires_auth, firewall_enabled: p.firewall?.enabled ?? null, firewall_rules: p.firewall?.rules ?? null, env_vars: p.env_count, team_id: teamId, environment: "production",
       usage_requests_7d: u?.requests ?? null, usage_invocations_7d: u?.invocations ?? null, usage_bandwidth_out_gb_7d: u?.bandwidth_out_gb ?? null, usage_gb_hours_7d: u?.gb_hours ?? null, usage_builds_7d: u?.builds ?? null,
-      secure_compute: p.connect.length > 0, secure_compute_security_groups: [...new Set(p.connect.map((c) => c.security_group).filter((x): x is string => Boolean(x)))], secure_compute_subnets: [...new Set(p.connect.flatMap((c) => c.subnets))] },
+      secure_compute: p.connect.length > 0, secure_compute_security_groups: [...new Set(p.connect.map((c) => c.security_group).filter((x): x is string => Boolean(x)))], secure_compute_subnets: [...new Set(p.connect.flatMap((c) => c.subnets))], oidc_federation: p.oidc?.enabled ?? null, oidc_issuer_mode: p.oidc?.issuer_mode ?? null },
     observed: [{ kind: "api", status: p.gone ? "stale" : "ok", last_at: p.last_seen, detail: "vercel REST API" }],
   };
 }
 
 /** A store as the generic model: a database (Neon, ...), a cache (Redis, KV) or object storage (Blob), with the plan and the projects on it. */
+/** The graph id of a team member: the same `<team>/member/<username>` the member findings name. */
+export const memberNodeId = (teamId: string, m: { username: string | null; uid: string }) => `${teamId}/member/${m.username ?? m.uid}`;
+
+/**
+ * A team member as an AdvisorIdentity {kind: team_member}: a person, MFA on the Vercel account, admin when an Owner, the
+ * role, the GitHub login, when they joined. Their 2FA and the tokens of the member whose token the advisor uses are
+ * AdvisorCredential nodes (src/graph_access.ts), not identities: a token is something a member holds, not an actor.
+ */
+export function identitiesOfTeam(teamId: string, extras: ReturnType<typeof teamExtras>): ResourceNode[] {
+  const now = extras.read_at; const obs = [{ kind: "api" as const, status: "ok" as const, last_at: now, detail: "vercel REST API" }];
+  const node = (id: string, name: string, native_type: string, state: "available" | "pending" | "stopped", props: Record<string, unknown>): ResourceNode => ({ id, label: "AdvisorIdentity", native_type, name, state, native_state: state, region: null, role: null, role_confidence: null, protected_prob: null, monthly_usd: null, gone: false, first_seen: now, last_seen: now, pool: null, pool_kind: null, props, observed: obs });
+  const owner = extras.token_owner;
+  const members = extras.members.map((m) => node(memberNodeId(teamId, m), m.username ?? m.uid, "team_member", m.confirmed ? "available" : "pending", {
+    kind: "team_member", human: true, platform: "vercel", team_id: teamId, role: m.role, admin: /owner/i.test(m.role ?? ""), mfa: m.mfa, confirmed: m.confirmed, github: m.github, joined_at: m.joined_at, joined_from: m.joined_from ?? null, access_groups: m.access_groups ?? 0,
+    credentials: owner && owner.uid === m.uid ? extras.tokens.length : null,
+  }));
+  return members;
+}
+
 export function resourceFromStore(st: StoreRow, teamId: string): ResourceNode {
   const label = st.kind === "database" ? "AdvisorDatabase" : st.kind === "cache" ? "AdvisorCache" : "AdvisorStorage";
   const engine = st.product_slug === "neon" ? "postgres" : st.product_slug;
@@ -141,7 +160,7 @@ export const vercelAdapter: ProviderAdapter = {
     // exact per-project numbers where they were read, the breakdown estimate otherwise
     const usage = new Map(usageByProject(account, 7).map((u) => [u.project_id, u]));
     for (const p of listProjects(true)) { const t = usageTotals(account, 7, p.id); if (t.requests || t.invocations || t.builds) usage.set(p.id, { project_id: p.id, name: p.name, requests: t.requests, invocations: t.invocations, bandwidth_out_gb: t.bandwidth_out_gb, gb_hours: t.gb_hours, builds: t.builds }); }
-    return [...listProjects(true).map((p) => resourceFromProject(p, account, usage)), ...listStores({ includeGone: true }).map((st) => resourceFromStore(st, account))]; },
+    return [...listProjects(true).map((p) => resourceFromProject(p, account, usage)), ...listStores({ includeGone: true }).map((st) => resourceFromStore(st, account)), ...identitiesOfTeam(account, teamExtras(account))]; },
   layers: [
     { name: "vercel endpoints and runtimes", mirror: async () => (await import("./graph.js")).mirrorVercel() },
     { name: "vercel pricing knowledge and systems", mirror: async () => (await import("./pricing.js")).mirrorVercelPricing() },

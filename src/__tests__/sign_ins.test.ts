@@ -29,6 +29,7 @@ test("parseUserAgent: browsers, the CLI, SDKs, infrastructure tools, AWS itself"
   assert.equal(f.parseUserAgent("console.amazonaws.com").channel, "console");
   assert.equal(f.parseUserAgent("AWS Internal").channel, "aws");
   assert.equal(f.parseUserAgent("ec2.amazonaws.com").channel, "aws");
+  assert.equal(f.parseUserAgent("Jersey/${project.version} (HttpUrlConnection 17.0.20.1)").channel, "aws", "the access portal federating into the console");
   assert.equal(f.parseUserAgent(null).channel, "unknown");
 });
 

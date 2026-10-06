@@ -607,7 +607,49 @@ Every human identity (root, IAM user, Identity Center user) carries what it was 
 | `factors` | `password`, `app` (authenticator app), `passkey` (passkey or security key), `hardware` (hardware token), `sso`, `federated`, `access_key`, `session`, `console_session` |
 | `mfa_type` | the strongest second factor registered (IAM users' devices) or seen |
 
+An IAM role is `kind: role` with `native_type: iam_role` when something besides an AWS service may assume it:
+`trusted_by` has one line per principal (`<kind>: <who> [<scope>]`), the kinds being `github_actions` (the scope is the
+repositories), `vercel` (projects and environments), `org_account` (an account of the organisation),
+`external_account` (anyone else's; `(external id)` when one is required), `public` (`*`), `cognito` (an identity
+pool's users; guests are anyone), `eks` (the cluster's service accounts), `oidc`, `saml`, `web_identity`;
+`trust_risk` is `alarm` or `warning` where the trust is wider than it looks (no subject on an OIDC issuer, a
+wildcard subject, an external account without an external id, `*` without an organisation condition, Cognito guests)
+and `trust_risk_reason` says why. A Vercel project the role's trust names RUNS_AS it (`via: vercel_oidc`).
+
+A Vercel team member is `kind: team_member` (`native_type: team_member`, id `<team>/member/<username>`): `human`,
+`role`, `admin` (an Owner), `mfa` (2FA on the Vercel account), `confirmed`, `github`, `joined_at`. The tokens of the
+account the advisor's token belongs to (the API lists only the caller's own) are AdvisorCredential nodes (`kind:
+api_token`) of that member. A member and the AWS identities
+of the same person (username, e-mail local part or GitHub login) are joined by SAME_PERSON.
+
 `AdvisorPolicy`: `name`, `managed` (provider-managed), `admin`, `wildcard_actions`, `wildcard_resources`, `attached`.
+
+### AdvisorCredential / AdvisorClient
+
+What an identity proves itself with, and what it signs in from (src/graph_access.ts, rebuilt every pass).
+
+`AdvisorCredential`, (identity)-[:HAS_CREDENTIAL]->(credential):
+
+| property | meaning |
+|---|---|
+| `kind` | `password` \| `access_key` \| `mfa_app` (authenticator app) \| `passkey` (passkey or security key) \| `hardware_token` \| `mfa` (type unknown) \| `api_token` |
+| `provider` | `aws` \| `vercel` |
+| `state` | `active` \| `inactive` \| `removed` \| `expired` |
+| `observed` | true when the credential is inferred from sign-ins (an Identity Center factor: its devices cannot be listed) |
+| `created_at` / `last_used_at` / `expires_at` | its lifecycle; a token with no `expires_at` never expires |
+| `removed_at` / `removed_by` | an MFA device a directory event removed |
+
+Ids: an IAM MFA device is its serial; an access key `<user arn>#key:<masked id>`; a password `<identity>#password`; an
+Identity Center factor `<user id>#factor:<app|passkey|hardware>`, a removed device `<user id>#mfa:<device id>`; a
+Vercel token `<team>/token/<id>`, a member's 2FA `<member>#2fa`. Never a secret.
+
+`AdvisorClient`: a client on a platform through a channel (`client`, `platform`, `channel`, `label`), shared by every
+identity that uses it; it is not a device (CloudTrail names none). (identity)-[:SIGNS_IN_WITH {events, failures,
+first_at, last_at, accounts, factors}]->(client); (credential)-[:USED_FROM {events, last_at}]->(client).
+
+A source address is an `AdvisorSource {kind: ip}` (id `ip:<address>`, `private` for RFC 1918 and similar ranges):
+(identity)-[:SIGNED_IN_FROM {events, failures, first_at, last_at, clients}]->(source). Two identities from one address
+are the same person or a shared office.
 
 Edges: `GRANTED` (identity → policy); `CAN_ASSUME` (identity → identity); `RUNS_AS` (resource → identity);
 `CREATED` (identity → resource, from the audit trail when available).
@@ -1327,6 +1369,10 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `RUNS_AS` | resource → AdvisorIdentity | the identity it acts with |
 | `GRANTED` | AdvisorIdentity → AdvisorPolicy | permissions |
 | `CAN_ASSUME` | AdvisorIdentity → AdvisorIdentity | trust |
+| `HAS_CREDENTIAL` | AdvisorIdentity → AdvisorCredential | what it proves itself with |
+| `SIGNS_IN_WITH` | AdvisorIdentity → AdvisorClient | the clients it was seen using |
+| `USED_FROM` | AdvisorCredential → AdvisorClient | which client a credential was used from |
+| `SIGNED_IN_FROM` | AdvisorIdentity → AdvisorSource (ip) | the addresses it came from |
 | `SAME_PERSON` | AdvisorIdentity → AdvisorIdentity | one person behind both (an IAM user and an Identity Center user whose name, email local part or display name match); `matched_by` lists the keys |
 | `CREATED` | AdvisorIdentity → resource | from the audit trail |
 | `ENCRYPTS` | AdvisorSecret (key) → storage, database, messaging | the key that encrypts a volume, bucket, file system, vault, database or topic |

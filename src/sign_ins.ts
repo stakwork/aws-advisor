@@ -30,6 +30,9 @@ import { ssoMeta } from "./sso_inventory.js";
 import "./iam_inventory.js";
 import { actorKey, directoryChange, foldClients, groupPeople, workflowMfa, type DirectoryChange, signInFromEvent, signInFromWrite, strongestMfa, iamUserMfa, rootFromCredentialReport, type ClientUse, type SignIn } from "./sign_in_facts.js";
 import { accountWhere, type AccountScope } from "./scope.js";
+import { teamExtras, vercelTeam } from "./adapters/vercel/inventory.js";
+import { memberNodeId } from "./adapters/vercel/index.js";
+import type { VercelToken } from "./adapters/vercel/client.js";
 
 export * from "./sign_in_facts.js";
 
@@ -45,6 +48,7 @@ db.exec(`create table if not exists directory_changes (
   event_id text primary key, event_time text not null, event_name text not null, what text not null, target_user_id text, target_name text, by text, failed integer not null default 0, fetched_at text not null
 )`);
 addColumn("inventory_sso_user", "changes", "text");
+addColumn("directory_changes", "device_id", "text");
 db.exec(`create table if not exists inventory_root_user (
   account_id text primary key, arn text not null, mfa_enabled integer, mfa_kind text, access_keys integer, signing_certs integer,
   password_last_used text, key_last_used text, report_at text, centralized integer, root_sessions integer, clients text not null default '[]',
@@ -54,8 +58,8 @@ addColumn("inventory_iam_user", "clients", "text");
 addColumn("inventory_sso_user", "clients", "text");
 
 const META = "sign_in_meta";
-/** v2: events gained the Identity Center workflow id; a new key reads the 90 days again once. */
-const MARKS = "sign_in_marks_v2";
+/** A new key reads the 90 days again once: v2 when events gained the Identity Center workflow id, v3 when directory changes gained the device id. */
+const MARKS = "sign_in_marks_v3";
 /** How far back CloudTrail answers LookupEvents. */
 export const WINDOW_DAYS = 90;
 /** 50 events a page at 2 requests a second: 100 pages is 5,000 events in about 50 s per query. */
@@ -135,8 +139,9 @@ export async function refreshSignIns(onError: (m: string) => void = () => {}, on
   const ins = db.prepare(`insert into sign_in_events(event_id, account_id, region, event_time, event_name, source, actor_type, actor, actor_id, channel, client, platform, factor, failed, source_ip, target, workflow, fetched_at)
     values (@event_id, @account_id, @region, @event_time, @event_name, @source, @actor_type, @actor, @actor_id, @channel, @client, @platform, @factor, @failed, @source_ip, @target, @workflow, datetime('now'))
     on conflict(event_id) do update set channel = excluded.channel, workflow = coalesce(excluded.workflow, sign_in_events.workflow)`);
-  const insChange = db.prepare(`insert into directory_changes(event_id, event_time, event_name, what, target_user_id, target_name, by, failed, fetched_at)
-    values (@event_id, @event_time, @event_name, @what, @target_user_id, @target_name, @by, @failed, datetime('now')) on conflict(event_id) do update set target_name = coalesce(excluded.target_name, directory_changes.target_name)`);
+  const insChange = db.prepare(`insert into directory_changes(event_id, event_time, event_name, what, target_user_id, target_name, by, failed, device_id, fetched_at)
+    values (@event_id, @event_time, @event_name, @what, @target_user_id, @target_name, @by, @failed, @device_id, datetime('now'))
+    on conflict(event_id) do update set target_name = coalesce(excluded.target_name, directory_changes.target_name), device_id = coalesce(excluded.device_id, directory_changes.device_id)`);
   let read = 0; let stored = 0; let centralized: boolean | null = null; let rootSessions: boolean | null = null;
   const now = new Date().toISOString();
   const upRoot = db.prepare(`insert into inventory_root_user(account_id, arn, mfa_enabled, mfa_kind, access_keys, signing_certs, password_last_used, key_last_used, report_at, centralized, root_sessions, first_seen, last_seen, gone)
@@ -175,7 +180,7 @@ export async function refreshSignIns(onError: (m: string) => void = () => {}, on
           read += evs.length;
           db.transaction(() => {
             for (const ev of evs) {
-              if (/directory|identitystore/.test(String(q.AttributeValue))) { const c = directoryChange(ev, ssoNames); if (c) stored += insChange.run({ ...c, failed: c.failed ? 1 : 0 }).changes; continue; }
+              if (/directory|identitystore/.test(String(q.AttributeValue))) { const c = directoryChange(ev, ssoNames); if (c) stored += insChange.run({ ...c, failed: c.failed ? 1 : 0, device_id: c.device_id ?? null }).changes; continue; }
               const s = signInFromEvent({ ...ev, region, account_id: t.account_id }, ssoNames); if (s) stored += ins.run({ ...s, failed: s.failed ? 1 : 0, workflow: s.workflow ?? null }).changes;
             }
           })();
@@ -247,13 +252,15 @@ export function listRootUsers(scope?: AccountScope | null): RootRow[] {
 
 /** A person or key that can get in, with its MFA and what it was seen using. */
 export interface Actor {
-  kind: "root" | "iam_user" | "sso_user"; id: string; name: string; email: string | null; display_name: string | null; account_id: string | null; admin: boolean; console: boolean; keys: number;
+  kind: "root" | "iam_user" | "sso_user" | "vercel_member"; id: string; name: string; email: string | null; display_name: string | null; account_id: string | null; admin: boolean; console: boolean; keys: number;
   mfa: "passkey" | "hardware" | "app" | "mfa" | "passkey_or_hardware" | "none" | "unknown"; mfa_source: "device" | "sign-in" | "account" | null;
   last_seen_at: string | null; clients: ClientUse[];
   /** Identity Center: sign-ins in the window and how many asked for a second factor (context-aware MFA skips a trusted browser) */
   sign_ins_90d: number | null; mfa_sign_ins_90d: number | null;
   /** disabled: Identity Center says so; no_access: an IAM user with neither a console password nor an active key */
-  status: "active" | "disabled" | "no_access";
+  status: "active" | "disabled" | "no_access" | "invited";
+  /** Vercel: the member's role on the team, and the tokens when the advisor's token is theirs (the API lists only the caller's) */
+  role?: string | null; tokens?: VercelToken[];
   /** Identity Center: changes to this user in the directory (MFA device removed, disabled, password reset…), newest first */
   changes: DirectoryChange[];
 }
@@ -279,6 +286,17 @@ export function listActors(scope?: AccountScope | null): Actor[] {
       ...(() => { const w = workflowMfa((flows.get(String(u.user_name).toLowerCase()) ?? []) as any); return { sign_ins_90d: w.sign_ins, mfa_sign_ins_90d: w.with_mfa }; })(),
       status: u.status === "DISABLED" ? "disabled" : "active", changes: (arr(u.changes) as DirectoryChange[]).sort((x, y) => y.event_time.localeCompare(x.event_time)) });
   }
+  // the Vercel team's members: under every-account scope or the team's own; matched to the AWS identities by username, e-mail local part or GitHub login
+  const team = vercelTeam();
+  if (team && (!scope || scope.id === team.id)) {
+    const x = teamExtras(team.id);
+    for (const m of x.members) {
+      const own = x.token_owner?.uid === m.uid;
+      out.push({ kind: "vercel_member", id: memberNodeId(team.id, m), name: m.username ?? m.uid, email: m.email_key ?? null, display_name: m.github ?? null, account_id: team.id, admin: /owner/i.test(m.role ?? ""), console: true,
+        keys: own ? x.tokens.length : 0, mfa: m.mfa === true ? "mfa" : m.mfa === false ? "none" : "unknown", mfa_source: m.mfa == null ? null : "account", last_seen_at: null, clients: [], sign_ins_90d: null, mfa_sign_ins_90d: null,
+        status: m.confirmed ? "active" : "invited", changes: [], role: m.role, tokens: own ? x.tokens : undefined });
+    }
+  }
   return out;
 }
 
@@ -289,8 +307,10 @@ const MFA_RANK: Record<string, number> = { none: 0, unknown: 1, mfa: 2, app: 3, 
 export interface Person {
   key: string; name: string; email: string | null; machine: boolean; matched_by: string[]; identities: Actor[];
   admin: boolean; mfa: Actor["mfa"]; platforms: string[]; channels: string[]; keys: number; last_seen_at: string | null;
-  /** active when any identity still opens a way in; disabled when every one is disabled or has no way in */
-  status: "active" | "disabled";
+  /** which identity the weakest MFA belongs to, when the person has more than one */
+  mfa_weakest_kind: Actor["kind"] | null;
+  /** active when any identity still opens a way in; invited when the only ones are pending invitations; disabled otherwise */
+  status: "active" | "disabled" | "invited";
 }
 
 /** The non-root identities as people, admins and the weakest MFA first; machines (no console anywhere) last. */
@@ -299,11 +319,13 @@ export function listPeople(actors: Actor[]): Person[] {
     const ids = g.identities; const sso = ids.find((i) => i.kind === "sso_user");
     const live = ids.filter((i) => i.status === "active");
     const gate = live.filter((i) => i.console); const pool = gate.length ? gate : live.length ? live : ids;
-    const mfa = pool.map((i) => i.mfa).sort((a, b) => (MFA_RANK[a] ?? 9) - (MFA_RANK[b] ?? 9))[0] ?? "unknown";
+    const weakest = [...pool].sort((a, b) => (MFA_RANK[a.mfa] ?? 9) - (MFA_RANK[b.mfa] ?? 9))[0];
+    const mfa = weakest?.mfa ?? "unknown";
     const clients = ids.flatMap((i) => i.clients);
     return {
       key: g.key, name: sso?.display_name || sso?.name || ids[0].name, email: sso?.email ?? null, machine: g.machine, matched_by: g.matched_by, identities: ids,
-      status: live.length ? "active" as const : "disabled" as const, admin: live.some((i) => i.admin), mfa, platforms: [...new Set(clients.map((c) => c.platform).filter((p): p is string => Boolean(p)))], channels: [...new Set(clients.map((c) => c.channel))],
+      mfa_weakest_kind: ids.length > 1 && weakest ? weakest.kind : null,
+      status: live.length ? "active" as const : ids.some((i) => i.status === "invited") ? "invited" as const : "disabled" as const, admin: live.some((i) => i.admin), mfa, platforms: [...new Set(clients.map((c) => c.platform).filter((p): p is string => Boolean(p)))], channels: [...new Set(clients.map((c) => c.channel))],
       keys: ids.reduce((n, i) => n + i.keys, 0), last_seen_at: ids.map((i) => i.last_seen_at).filter((t): t is string => Boolean(t)).sort().pop() ?? null,
     };
   }).sort((a, b) => Number(a.status === "disabled") - Number(b.status === "disabled") || Number(a.machine) - Number(b.machine) || Number(b.admin) - Number(a.admin) || (MFA_RANK[a.mfa] ?? 9) - (MFA_RANK[b.mfa] ?? 9) || String(b.last_seen_at ?? "").localeCompare(String(a.last_seen_at ?? "")));

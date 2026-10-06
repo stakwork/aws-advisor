@@ -308,6 +308,21 @@ function clientProps(raw: unknown): { sign_in_clients: string[]; platforms: stri
   return { sign_in_clients: clients.map(clientLine), platforms: [...new Set(clients.map((c) => c.platform).filter((p): p is string => Boolean(p)))], channels: [...new Set(clients.map((c) => c.channel))], factors: [...new Set(clients.flatMap((c) => c.factors))] };
 }
 
+/**
+ * An IAM role as an AdvisorIdentity {kind: role}: who may assume it (`trust` in the ontology's words, `trusted_by` one
+ * line per principal with what its conditions narrow it to), whether it is administrative, when it was last used, and
+ * the widest-trust risk the collector raised (src/role_trust.ts).
+ */
+export function resourceFromRole(row: any): ResourceNode {
+  const ps: any[] = safeJson(row.principals) || [];
+  return base(String(row.arn), "AdvisorIdentity", "iam_role", row, str(row.name), Boolean(row.gone) ? "terminated" : "available", null, new Map(), {
+    kind: "role", human: false, trust: str(row.trust), admin: Boolean(row.admin), last_used_at: str(row.last_used), last_used_region: str(row.last_used_region), policies: safeJson(row.policies) || [], path: str(row.path), description: str(row.description), created_at: str(row.created),
+    trusted_by: ps.filter((p) => p.kind !== "service").map((p) => `${p.kind}: ${p.who}${p.scope?.length ? ` [${p.scope.join(", ")}]` : ""}${p.external_id ? " (external id)" : ""}`),
+    trusted_services: ps.filter((p) => p.kind === "service").map((p) => String(p.who)), trust_kinds: [...new Set(ps.map((p) => String(p.kind)))],
+    trust_risk: str(row.risk), trust_risk_reason: str(row.risk_reason), max_session_hours: num(row.max_session_hours),
+  }, [apiObserved(row)]);
+}
+
 /** The root user of an account as an AdvisorIdentity {native_type: root_user}: a person, administrator of everything, MFA and its kind, root keys, last sign-in. */
 export function resourceFromRootUser(row: any): ResourceNode {
   const clients: ClientUse[] = safeJson(row.clients) || [];

@@ -98,6 +98,13 @@ export const CONTROL_SOURCES: Record<string, string[]> = {
   "query.stopped_instance_ebs": ["https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Stop_Start.html", "https://aws.amazon.com/ebs/pricing/"],
   "rule.aurora_storage_tier": ["https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.StorageReliability.html", "https://aws.amazon.com/rds/aurora/pricing/"],
   "rule.enable_flow_logs": ["https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html", "https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs-s3.html"],
+  // who can get in (src/identity_rules.ts)
+  "rule.identity_central_root_access": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/id_root-enable-root-access.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_root-user.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/root-user-best-practices.html"],
+  "rule.identity_center_mfa": ["https://docs.aws.amazon.com/singlesignon/latest/userguide/mfa-configure.html", "https://docs.aws.amazon.com/singlesignon/latest/userguide/mfa-types.html", "https://docs.aws.amazon.com/singlesignon/latest/userguide/how-to-configure-mfa-device-enforcement.html"],
+  "rule.identity_key_on_laptop": ["https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"],
+  "rule.identity_mfa_device_removed": ["https://docs.aws.amazon.com/singlesignon/latest/userguide/how-to-register-device.html", "https://docs.aws.amazon.com/singlesignon/latest/userguide/mfa-configure.html"],
+  "rule.identity_role_wide_trust": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html", "https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services", "https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_common-scenarios_third-party.html", "https://docs.aws.amazon.com/cognito/latest/developerguide/identity-pools.html"],
+  "rule.identity_unused_outside_role": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_last-accessed.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html"],
 };
 
 /** The playbook for a control id (Thrifty control, `query.*` control or `rule.*` id), or null. */
@@ -173,6 +180,12 @@ export const RULE_CONTROL: Record<string, string> = {
   idle_instance: "query.idle_instances",
   aurora_storage_tier: "rule.aurora_storage_tier",
   enable_flow_logs: "rule.enable_flow_logs",
+  identity_central_root_access: "rule.identity_central_root_access",
+  identity_center_mfa: "rule.identity_center_mfa",
+  identity_key_on_laptop: "rule.identity_key_on_laptop",
+  identity_mfa_device_removed: "rule.identity_mfa_device_removed",
+  identity_role_wide_trust: "rule.identity_role_wide_trust",
+  identity_unused_outside_role: "rule.identity_unused_outside_role",
   review_s3_lifecycle: "aws_thrifty.control.buckets_with_no_lifecycle",
 };
 

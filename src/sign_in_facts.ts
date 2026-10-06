@@ -30,7 +30,9 @@ export function parseUserAgent(ua: string | null | undefined): ClientInfo {
   const s = String(ua || "").trim();
   if (!s) return { client: "unknown", platform: null, channel: "unknown" };
   if (/^(console|signin)\.amazonaws\.com$/i.test(s)) return { client: "AWS console", platform: null, channel: "console" };
-  if (s === "AWS Internal" || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.amazonaws\.com$/i.test(s) || /^aws-internal\//i.test(s)) return { client: "AWS service", platform: null, channel: "aws" };
+  // AWS acting for someone: a service name, "AWS Internal", or the access portal's backend federating a person into the
+  // console (GetSigninToken, a Java Jersey client whose version placeholder was never filled in)
+  if (s === "AWS Internal" || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.amazonaws\.com$/i.test(s) || /^aws-internal\//i.test(s) || /^Jersey\/\$\{project\.version\}/.test(s)) return { client: "AWS service", platform: null, channel: "aws" };
   const env = /exec-env\/([A-Za-z0-9_.-]+)/.exec(s)?.[1] ?? "";
   const os = (/\bos\/([A-Za-z0-9_]+)/.exec(s)?.[1] ?? "").toLowerCase();
   const platform = /CloudShell/i.test(env) ? "CloudShell" : /^AWS_Lambda/i.test(env) ? "AWS Lambda" : /^AWS_ECS/i.test(env) ? "AWS ECS" : /^AWS_EC2|^EC2/i.test(env) ? "AWS EC2"
@@ -170,6 +172,31 @@ export function foldClients(events: SignIn[]): Map<string, ClientUse[]> {
   return out;
 }
 
+/** A source address worth a node: an IPv4 or IPv6 literal (CloudTrail also writes service names such as `ec2.amazonaws.com` there). Pure. */
+export const isIpAddress = (s: string | null | undefined): s is string => Boolean(s) && (/^\d{1,3}(\.\d{1,3}){3}$/.test(s!) || /^[0-9a-f:]+$/i.test(s!) && s!.includes(":"));
+/** Private, shared and loopback ranges (RFC 1918, RFC 6598, loopback, link-local, IPv6 ULA). Pure. */
+export const isPrivateIp = (ip: string) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|127\.|169\.254\.)/.test(ip) || /^(fc|fd|fe80|::1$)/i.test(ip);
+
+/** Where an actor came from: one entry per source address, with the clients seen from it. Pure. */
+export interface IpUse { ip: string; events: number; failures: number; first_at: string; last_at: string; clients: string[]; accounts: string[] }
+export const clientKey = (c: { client: string; platform: string | null; channel: string }) => `${c.client}|${c.platform ?? "-"}|${c.channel}`;
+export function foldIps(events: SignIn[]): Map<string, IpUse[]> {
+  const by = new Map<string, Map<string, IpUse>>();
+  for (const e of events) {
+    if (!isIpAddress(e.source_ip)) continue;
+    const ak = actorKey(e.actor_type, e.actor, e.account_id);
+    const m = by.get(ak) ?? new Map<string, IpUse>(); by.set(ak, m);
+    const u = m.get(e.source_ip) ?? { ip: e.source_ip, events: 0, failures: 0, first_at: e.event_time, last_at: e.event_time, clients: [], accounts: [] };
+    u.events++; if (e.failed) u.failures++;
+    if (e.event_time < u.first_at) u.first_at = e.event_time; if (e.event_time > u.last_at) u.last_at = e.event_time;
+    const ck = clientKey(e); if (!u.clients.includes(ck)) u.clients.push(ck);
+    if (e.account_id && !u.accounts.includes(e.account_id)) u.accounts.push(e.account_id);
+    m.set(e.source_ip, u);
+  }
+  const out = new Map<string, IpUse[]>(); for (const [k, m] of by) out.set(k, [...m.values()].sort((a, b) => b.last_at.localeCompare(a.last_at)));
+  return out;
+}
+
 /** The strongest second factor seen: a passkey beats a hardware token beats an app; null when none was seen. Pure. */
 export function strongestMfa(clients: ClientUse[]): "passkey" | "hardware" | "app" | "mfa" | null {
   const f = new Set(clients.flatMap((c) => c.factors));
@@ -211,7 +238,7 @@ export const DIRECTORY_CHANGE_WORDS: Record<string, string> = {
   AddMemberToGroup: "added to a group", RemoveMemberFromGroup: "removed from a group", CreateGroup: "group created", DeleteGroup: "group deleted",
   CreateGroupMembership: "added to a group", DeleteGroupMembership: "removed from a group",
 };
-export interface DirectoryChange { event_id: string; event_time: string; event_name: string; what: string; target_user_id: string | null; target_name: string | null; by: string | null; failed: boolean }
+export interface DirectoryChange { event_id: string; event_time: string; event_name: string; what: string; target_user_id: string | null; target_name: string | null; by: string | null; failed: boolean; device_id?: string | null }
 
 /**
  * An Identity Center directory event (sso-directory or identitystore) as a change to a user: what happened, to whom
@@ -225,7 +252,8 @@ export function directoryChange(ev: { id: string; name: string; time: string; de
   const arn = String(d.userIdentity?.arn ?? "");
   const by = SSO_ROLE.exec(arn)?.[1] ?? (d.userIdentity?.type === "Root" ? "root" : arn ? lastSegment(arn) : d.userIdentity?.userName ?? null);
   const what = DIRECTORY_CHANGE_WORDS[ev.name] ?? ev.name.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
-  return { event_id: ev.id, event_time: ev.time, event_name: ev.name, what, target_user_id: target, target_name: target ? names.get(target) ?? null : null, by: by ? String(by) : null, failed: Boolean(d.errorCode) };
+  const device = rp.deviceId ?? rp.mfaDeviceId ?? d.responseElements?.deviceId ?? null;
+  return { event_id: ev.id, event_time: ev.time, event_name: ev.name, what, target_user_id: target, target_name: target ? names.get(target) ?? null : null, by: by ? String(by) : null, failed: Boolean(d.errorCode), device_id: device ? String(device) : null };
 }
 
 /** What the person matching needs of an identity. */

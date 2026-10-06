@@ -15,6 +15,7 @@ import { elbSummary, refreshElbInventory } from "./elb_inventory.js";
 import { refreshIamInventory } from "./iam_inventory.js";
 import { refreshSsoInventory } from "./sso_inventory.js";
 import { refreshSignIns } from "./sign_ins.js";
+import { refreshRoleTrust } from "./role_trust.js";
 import { refreshServiceInventory, serviceSummary } from "./service_inventory.js";
 
 /**
@@ -433,6 +434,8 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   // after EC2, so instance and IP targets resolve against the rows just written
   const elb = await refreshElbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   await refreshIamInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
+  // the roles and who may assume them (GitHub Actions, Vercel, other accounts, Cognito guests…): the non-human ways in
+  try { await refreshRoleTrust((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`)); } catch (e: any) { errors.push(`IAM roles: ${e?.message || e}`); }
   // Identity Center from the parent's credentials: a few dozen calls and the home region's sign-in events; after the trail so the per-account activity reads the stored writes
   try { await refreshSsoInventory((m) => errors.push(m), (l) => console.log(`[identity-center] ${l}`)); } catch (e: any) { errors.push(`Identity Center: ${e?.message || e}`); }
   // root posture per account and the sign-in fingerprints (device, client, factor), folded onto the IAM and Identity Center rows just written

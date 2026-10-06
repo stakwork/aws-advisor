@@ -8,7 +8,15 @@ export const VERCEL_API = "https://api.vercel.com";
 
 export interface VercelClientOptions { token: string; teamId?: string | null; fetchImpl?: typeof fetch; base?: string }
 
-export interface VercelTeam { id: string; slug: string | null; name: string | null; plan: string | null; personal: boolean; billing?: VercelTeamBilling | null }
+export interface VercelTeam { id: string; slug: string | null; name: string | null; plan: string | null; personal: boolean; billing?: VercelTeamBilling | null; security?: VercelTeamSecurity | null }
+/**
+ * How the team guards sign-in: SAML single sign-on (connected, enforced), a team-wide MFA requirement when the API
+ * names one (null when the team object carries no such field), the default for new env variables, and the role of the
+ * token's owner on the team.
+ */
+export interface VercelTeamSecurity { saml_connected: boolean; saml_enforced: boolean; saml_provider: string | null; directory_sync: boolean; mfa_required: boolean | null; sensitive_env_policy: string | null; token_owner_role: string | null }
+/** A token of the account the advisor's token belongs to (the API lists only the caller's own): never the secret. */
+export interface VercelToken { id: string; name: string | null; type: string | null; origin: string | null; team_ids: string[]; expires_at: string | null; active_at: string | null; created_at: string | null }
 /** What the team object says about its subscription: the plan and its period, the seats and their price, the status, and the metered rates. */
 export interface VercelTeamBilling { plan: string | null; status: string | null; currency: string | null; period_start: string | null; period_end: string | null; seats: number | null; seat_usd: number | null; rates: { item: string; usd: number; quantity: number | null; unit: string }[] }
 
@@ -27,6 +35,8 @@ export function rateUnit(item: string): string {
 }
 export interface VercelInvoice { id: string; number: string | null; status: string | null; total: number | null; subtotal: number | null; tax: number | null; currency: string | null; created_at: string | null; issued_at: string | null; paid_at: string | null; period_start: string | null; period_end: string | null; source: string | null; hosted_url: string | null; pdf_url: string | null; groups: { id: string; name: string; total: number | null }[]; line_items: { title: string; amount: number; quantity: number | null; group: string | null; unit_usd: number | null }[] }
 export interface VercelProject {
+  /** Vercel OIDC federation: the project's functions get a token to assume a cloud role instead of holding static keys */
+  oidc?: { enabled: boolean; issuer_mode: string | null } | null;
   id: string; name: string; framework: string | null; node_version: string | null; created_at: string | null; updated_at: string | null;
   repo: string | null; git_provider: string | null; production_url: string | null;
   latest: { id: string; url: string | null; state: string | null; target: string | null; created_at: string | null } | null;
@@ -38,10 +48,11 @@ export interface VercelProject {
 }
 export interface VercelDeployment { id: string; project_id: string | null; name: string | null; url: string | null; state: string | null; target: string | null; created_at: string | null; ready_at: string | null; source: string | null; branch: string | null; commit: string | null }
 export interface VercelDomain { project_id: string; name: string; apex: string | null; verified: boolean; redirect: string | null; branch: string | null; created_at: string | null }
-export interface VercelEnv { project_id: string; key: string; targets: string[]; type: string | null; updated_at: string | null }
+export interface VercelEnv { project_id: string; key: string; targets: string[]; type: string | null; updated_at: string | null; created_at?: string | null; edited_by?: string | null }
 export interface VercelFirewall { project_id: string; enabled: boolean; rules: number; ips: number; version: string | null }
 /** A storage store the team provisioned: a marketplace integration (Neon, Redis, ...) or Vercel's own (blob, KV, edge config), with the projects it is connected to. */
-export interface VercelMember { uid: string; username: string | null; role: string | null; confirmed: boolean; mfa: boolean | null; github: string | null; joined_at: string | null }
+/** A team member; `email_key` is the e-mail's local part reduced to letters and digits, kept to match the person across providers (the address itself is not kept). */
+export interface VercelMember { uid: string; username: string | null; role: string | null; confirmed: boolean; mfa: boolean | null; github: string | null; joined_at: string | null; email_key?: string | null; access_groups?: number; joined_from?: string | null }
 export interface VercelLogDrain { id: string; name: string | null; status: string | null; sources: string[]; environments: string[]; sampling_rate: number | null; format: string | null; host: string | null; project_ids: string[]; created_at: string | null; created_from: string | null }
 export interface VercelStore { id: string; name: string; type: string; kind: "database" | "cache" | "storage" | "other"; product: string | null; product_slug: string | null; status: string | null; plan: string | null; region: string | null; created_at: string | null; projects: { project_id: string; name: string | null; environments: string[]; env_var_names: string[]; env_var_prefix: string | null }[]; details: VercelStoreDetails }
 /**
@@ -92,7 +103,7 @@ export class VercelClient {
 
   /** The team the token is scoped to, or the personal account when no team id is set. */
   async whoami(): Promise<VercelTeam> {
-    if (this.teamId) { const t = await this.get<any>(`/v2/teams/${encodeURIComponent(this.teamId)}`); return { id: String(t.id), slug: str(t.slug), name: str(t.name), plan: str(t.billing?.plan ?? t.plan), personal: false, billing: teamBillingFrom(t.billing) }; }
+    if (this.teamId) { const t = await this.get<any>(`/v2/teams/${encodeURIComponent(this.teamId)}`); return { id: String(t.id), slug: str(t.slug), name: str(t.name), plan: str(t.billing?.plan ?? t.plan), personal: false, billing: teamBillingFrom(t.billing), security: teamSecurityFrom(t) }; }
     const u = await this.get<any>("/v2/user"); const user = u.user ?? u;
     return { id: String(user.id ?? user.uid), slug: str(user.username), name: str(user.name ?? user.username), plan: str(user.billing?.plan), personal: true };
   }
@@ -108,6 +119,10 @@ export class VercelClient {
     try { return usageDaysFrom(await this.get("/v2/usage", { type, from: from.toISOString(), to: to.toISOString(), projectId })); } catch { return []; }
   }
   /** The team's members with their role and whether MFA is on (no e-mail addresses are kept). */
+  /** Who the token belongs to (its user id and username): the owner of the tokens tokens() lists. */
+  async owner(): Promise<{ uid: string; username: string | null } | null> { try { const u = await this.get<any>("/v2/user"); const x = u.user ?? u; return x?.id || x?.uid ? { uid: String(x.id ?? x.uid), username: str(x.username) } : null; } catch { return null; } }
+  /** The caller's own tokens (the API lists no one else's): name, scope, expiry, last activity. */
+  async tokens(): Promise<VercelToken[]> { try { const r = await this.get<any>("/v5/user/tokens"); return (Array.isArray(r?.tokens) ? r.tokens : []).map(tokenFrom); } catch { return []; } }
   async members(): Promise<VercelMember[]> { if (!this.teamId) return []; try { const r = await this.get<any>(`/v1/teams/${encodeURIComponent(this.teamId)}/members`, { limit: 100 }); return (Array.isArray(r?.members) ? r.members : Array.isArray(r) ? r : []).map(memberFrom); } catch { return []; } }
   /** Where the team's logs are drained to: the drain's name, sources, environments, sampling and the projects it covers (the destination URL is kept as its host only). */
   async logDrains(): Promise<VercelLogDrain[]> { try { const r = await this.get<any>("/v1/log-drains"); return (Array.isArray(r) ? r : Array.isArray(r?.drains) ? r.drains : []).map(logDrainFrom); } catch { return []; } }
@@ -130,11 +145,25 @@ export function projectFrom(p: any): VercelProject {
     latest: latest ? { id: String(latest.id ?? latest.uid), url: latest.url ? `https://${latest.url}` : null, state: str(latest.readyState ?? latest.state), target: str(latest.target), created_at: iso(latest.createdAt ?? latest.created) } : null,
     protection: { sso: str(p.ssoProtection?.deploymentType), password: str(p.passwordProtection?.deploymentType), trusted_ips: str(p.trustedIps?.deploymentType), bypass_automation: Boolean(p.protectionBypass && Object.keys(p.protectionBypass).length) },
     live: Boolean(p.live ?? true),
+    oidc: p.oidcTokenConfig ? { enabled: Boolean(p.oidcTokenConfig.enabled), issuer_mode: str(p.oidcTokenConfig.issuerMode) } : null,
     connect: (Array.isArray(p.connectConfigurations) ? p.connectConfigurations : []).filter((c: any) => c && c.connectConfigurationId).map((c: any) => ({ id: String(c.connectConfigurationId), dc: str(c.dc), env: String(c.envId ?? "production"), security_group: str(c.aws?.securityGroupId), subnets: Array.isArray(c.aws?.subnetIds) ? c.aws.subnetIds.map(String) : [], passive: Boolean(c.passive), builds: Boolean(c.buildsEnabled) })),
   };
 }
 
-export const memberFrom = (m: any): VercelMember => ({ uid: String(m.uid ?? m.id), username: str(m.username), role: str(m.role ?? (Array.isArray(m.teamRoles) ? m.teamRoles[0] : null)), confirmed: Boolean(m.confirmed), mfa: typeof m.mfaEnabled === "boolean" ? m.mfaEnabled : null, github: str(m.github?.login), joined_at: iso(m.createdAt) });
+export const memberFrom = (m: any): VercelMember => ({ uid: String(m.uid ?? m.id), username: str(m.username), role: str(m.role ?? (Array.isArray(m.teamRoles) ? m.teamRoles[0] : null)), confirmed: Boolean(m.confirmed), mfa: typeof m.mfaEnabled === "boolean" ? m.mfaEnabled : null, github: str(m.github?.login), joined_at: iso(m.createdAt),
+  email_key: typeof m.email === "string" ? (m.email.toLowerCase().split("@")[0].replace(/[^a-z0-9]/g, "") || null) : null, access_groups: Array.isArray(m.accessGroups) ? m.accessGroups.length : 0, joined_from: str(m.joinedFrom?.origin) });
+export const tokenFrom = (t: any): VercelToken => ({ id: String(t.id), name: str(t.name), type: str(t.type), origin: str(t.origin), team_ids: Array.isArray(t.scopes) ? [...new Set(t.scopes.map((s: any) => s?.teamId).filter(Boolean).map(String))] as string[] : [], expires_at: iso(t.expiresAt), active_at: iso(t.activeAt), created_at: iso(t.createdAt) });
+/** The team's sign-in guards from the team object; a field the plan does not return reads as off (SAML) or unknown (MFA). Pure. */
+export function teamSecurityFrom(t: any): VercelTeamSecurity {
+  const saml = t?.saml ?? null;
+  const mfaKey = Object.keys(t ?? {}).find((k) => /^(mfa|twoFactor|enforceMfa|mfaRequired|requireMfa)/i.test(k));
+  const mfaVal = mfaKey ? t[mfaKey] : undefined;
+  return {
+    saml_connected: Boolean(saml?.connection), saml_enforced: Boolean(saml?.enforced), saml_provider: str(saml?.connection?.type ?? saml?.connection?.provider), directory_sync: Boolean(saml?.directory),
+    mfa_required: typeof mfaVal === "boolean" ? mfaVal : typeof mfaVal?.enforced === "boolean" ? mfaVal.enforced : typeof mfaVal?.required === "boolean" ? mfaVal.required : null,
+    sensitive_env_policy: str(t?.sensitiveEnvironmentVariablePolicy), token_owner_role: str(t?.membership?.role),
+  };
+}
 export const logDrainFrom = (d: any): VercelLogDrain => { let host: string | null = null; try { if (d.url) host = new URL(String(d.url)).host; } catch { /* not a URL */ } return { id: String(d.id), name: str(d.name), status: str(d.status), sources: Array.isArray(d.sources) ? d.sources.map(String) : [], environments: Array.isArray(d.environments) ? d.environments.map(String) : [], sampling_rate: money(d.samplingRate), format: str(d.deliveryFormat), host, project_ids: Array.isArray(d.projectIds) ? d.projectIds.map(String) : [], created_at: iso(d.createdAt), created_from: str(d.createdFrom) }; };
 
 export function deploymentFrom(d: any): VercelDeployment {
@@ -201,7 +230,7 @@ export function planLinePrice(value: string): { usd: number; unit: string } | nu
 }
 
 /** Names, targets and types only: the value never leaves the API response. */
-export const envFrom = (projectId: string, e: any): VercelEnv => ({ project_id: projectId, key: String(e.key), targets: Array.isArray(e.target) ? e.target.map(String) : e.target ? [String(e.target)] : [], type: str(e.type), updated_at: iso(e.updatedAt) });
+export const envFrom = (projectId: string, e: any): VercelEnv => ({ project_id: projectId, key: String(e.key), targets: Array.isArray(e.target) ? e.target.map(String) : e.target ? [String(e.target)] : [], type: str(e.type), updated_at: iso(e.updatedAt), created_at: iso(e.createdAt), edited_by: str(e.lastEditedByDisplayName) });
 
 /**
  * Whether a deployment URL asks for authentication before serving, from the project's protection settings: Vercel

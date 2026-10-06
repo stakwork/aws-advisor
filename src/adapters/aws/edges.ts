@@ -176,6 +176,23 @@ export async function mirrorSamePerson(stamp: string): Promise<void> {
   await write("MATCH ()-[r:SAME_PERSON]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
 }
 
+/**
+ * Vercel OIDC federation (src/vercel_aws_links.ts): the project RUNS_AS the role whose trust names it, with the
+ * environments the subject allows. Written from both adapters' passes (whichever runs second finds both nodes); a
+ * link no longer in a trust policy is removed.
+ */
+const VERCEL_RUNS_AS_CYPHER = `
+UNWIND $rows AS row
+MATCH (d:AdvisorResource {id: row.project_id}) MATCH (r:AdvisorResource {id: row.role_arn})
+MERGE (d)-[x:RUNS_AS]->(r) SET x.via = 'vercel_oidc', x.environments = row.environments, x.subjects = row.subjects, x.updated_at = $now`;
+
+export async function mirrorVercelRoleLinks(stamp: string): Promise<void> {
+  const { oidcLinks } = await import("../../vercel_aws_links.js");
+  const rows = oidcLinks();
+  for (const batch of chunks(rows)) await write(VERCEL_RUNS_AS_CYPHER, { rows: batch, now: stamp });
+  await write("MATCH ()-[x:RUNS_AS]->() WHERE x.via = 'vercel_oidc' AND (x.updated_at IS NULL OR x.updated_at <> $now) DELETE x", { now: stamp });
+}
+
 /** Everything above, in order; returns the ids of the nodes written here beyond the resources (the deployments), so the core keeps them. */
 export async function mirrorAwsEdges(account: string, stamp: string): Promise<string[]> {
   const elbRows = rowsOf("select * from inventory_elb");
@@ -189,6 +206,9 @@ export async function mirrorAwsEdges(account: string, stamp: string): Promise<st
   for (const batch of chunks(ebsRows.map((r) => ({ id: String(r.volume_id), instance_id: r.gone ? null : str(r.instance_id), device: str(r.device) })))) await write(VOLUME_CYPHER, { rows: batch, now: stamp });
   await mirrorDnsLinks(recordRows, account, stamp);
   await mirrorSamePerson(stamp);
+  await mirrorVercelRoleLinks(stamp);
+  // credentials, clients and source addresses of every identity (src/graph_access.ts)
+  await (await import("../../graph_access.js")).mirrorAccess(stamp);
   // the platform services' own edges (certificates, keys, topics, file systems, backups, workgroups, stacks, web ACLs)
   await (await import("../../graph_services.js")).mirrorServiceLinks(account, stamp);
   return mirrorDeployments(elbRows, account, stamp);

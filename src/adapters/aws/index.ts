@@ -4,7 +4,7 @@ import { db } from "../../db.js";
 import { credentialsMeta, hasConnectionFile } from "../../steampipe.js";
 import { AWS, type AccountRecord, type ProviderAdapter, type ResourceNode } from "../types.js";
 import { resourceAccountIndex } from "../../resource_index.js";
-import { TELEMETRY, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRootUser, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromService, resourceFromZone, type RoleMap } from "./resources.js";
+import { TELEMETRY, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRole, resourceFromRootUser, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromService, resourceFromZone, type RoleMap } from "./resources.js";
 
 /**
  * The AWS adapter: Steampipe and the SDK behind the generic model. Credentials and the parent/member registry are
@@ -103,6 +103,8 @@ function rawResources(account: string, roles: ReturnType<typeof roleMap>): Resou
       ...rows("select * from inventory_iam_user").map(resourceFromIamUser),
       ...rows("select * from inventory_sso_user").map(resourceFromSsoUser),
       ...rows("select * from inventory_root_user").map(resourceFromRootUser),
+      // roles a person, another account, a pipeline or a pod may assume; service-linked and pure service roles stay out of the graph
+      ...rows("select * from inventory_iam_role where coalesce(path, '') not like '/aws-service-role/%' and coalesce(trust, 'service') not in ('service', 'none')").map(resourceFromRole),
       ...rows("select * from inventory_service").map((r) => resourceFromService(r, roles)).filter((n): n is ResourceNode => n != null),
     ];
 }

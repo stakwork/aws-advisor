@@ -151,7 +151,10 @@ async function execute(runId: number) {
     // VPCs whose NAT gateway alerted in the last 7 days and that have no flow logs (see src/flowlogs.ts).
     const flowLogRecs = await flowLogRecommendations({ onError: (m) => log(runId, `  flow logs: ${m}`) });
     if (flowLogRecs.length) log(runId, `Flow logs: ${flowLogRecs.length} VPC${flowLogRecs.length === 1 ? "" : "s"} with NAT alerts and no flow log`);
-    const open = upsertRecommendations(runId, [...recs, ...flowLogRecs], "rules");
+    // who can get in: from the sign-ins, roles and directory changes the previous inventory refresh stored (src/identity_rules.ts)
+    let identityRecs: RecInput[] = [];
+    try { identityRecs = (await import("./identity_rules.js")).identityRecommendations(); if (identityRecs.length) log(runId, `Identity: ${identityRecs.length} recommendation${identityRecs.length === 1 ? "" : "s"} (sign-in, keys, role trust)`); } catch (e: any) { log(runId, `  identity: ${e?.message || e}`); }
+    const open = upsertRecommendations(runId, [...recs, ...flowLogRecs, ...identityRecs], "rules");
 
     log(runId, "Inventory refresh…");
     try {

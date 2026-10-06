@@ -1,4 +1,4 @@
-import { db } from "../../db.js";
+import { addColumn, db } from "../../db.js";
 import { refreshUsage } from "./usage.js";
 import type { NeonClient, PartnerRecord, RedisCloudClient } from "./partners.js";
 
@@ -22,7 +22,7 @@ export async function readPartners(stores: VercelStore[], clients: PartnerClient
   }
   return { records, errors };
 }
-import type { VercelClient, VercelDeployment, VercelDomain, VercelEnv, VercelFirewall, VercelInvoice, VercelLogDrain, VercelMember, VercelProject, VercelStore, VercelTeam, VercelTeamBilling } from "./client.js";
+import type { VercelClient, VercelDeployment, VercelDomain, VercelEnv, VercelFirewall, VercelInvoice, VercelLogDrain, VercelMember, VercelProject, VercelStore, VercelTeam, VercelTeamBilling, VercelTeamSecurity, VercelToken } from "./client.js";
 
 /**
  * The Vercel adapter's storage: the team, its projects with their protection and framework, the recent deployments,
@@ -60,6 +60,10 @@ if (!(db.prepare("pragma table_info(vercel_stores)").all() as { name: string }[]
 if (!(db.prepare("pragma table_info(vercel_stores)").all() as { name: string }[]).some((c) => c.name === "partner")) db.exec("alter table vercel_stores add column partner text");
 
 if (!(db.prepare("pragma table_info(vercel_projects)").all() as { name: string }[]).some((c) => c.name === "connect")) db.exec("alter table vercel_projects add column connect text not null default '[]'");
+// OIDC federation per project; when an env variable was created and who last edited it (names only, never values)
+addColumn("vercel_projects", "oidc", "text");
+addColumn("vercel_env", "created_at", "text");
+addColumn("vercel_env", "edited_by", "text");
 
 export interface VercelRefreshResult { team: VercelTeam; projects: number; deployments: number; domains: number; env: number; stores: number; invoices: number; members: number; log_drains: number; usage: { types: number; days: number; projects: number }; errors: string[]; took_ms: number }
 
@@ -78,16 +82,16 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
   }
   const stores = await client.stores();
   const invoices = await client.invoices(12);
-  const members = await client.members(); const drains = await client.logDrains();
+  const members = await client.members(); const drains = await client.logDrains(); const tokens = await client.tokens(); const owner = await client.owner();
   const partners = await readPartners(stores, opts.partners); for (const e of partners.errors) errors.push(e);
   let usage = { types: 0, days: 0, projects: 0 }; try { usage = await refreshUsage(client, team.id, projects.map((p) => p.id)); } catch (e: any) { errors.push(`usage: ${String(e?.message || e).slice(0, 160)}`); }
   db.transaction(() => {
     db.prepare("insert into vercel_team(id, slug, name, plan, personal, fetched_at) values (?, ?, ?, ?, ?, ?) on conflict(id) do update set slug = excluded.slug, name = excluded.name, plan = excluded.plan, personal = excluded.personal, fetched_at = excluded.fetched_at").run(team.id, team.slug, team.name, team.plan, team.personal ? 1 : 0, now);
-    const upP = db.prepare(`insert into vercel_projects(id, team_id, name, framework, node_version, created_at, updated_at, repo, git_provider, production_url, latest_id, latest_url, latest_state, latest_target, latest_at, protection, live, env_count, firewall, connect, first_seen, last_seen, gone)
-      values (@id, @team_id, @name, @framework, @node_version, @created_at, @updated_at, @repo, @git_provider, @production_url, @latest_id, @latest_url, @latest_state, @latest_target, @latest_at, @protection, @live, @env_count, @firewall, @connect, @now, @now, 0)
+    const upP = db.prepare(`insert into vercel_projects(id, team_id, name, framework, node_version, created_at, updated_at, repo, git_provider, production_url, latest_id, latest_url, latest_state, latest_target, latest_at, protection, live, env_count, firewall, connect, oidc, first_seen, last_seen, gone)
+      values (@id, @team_id, @name, @framework, @node_version, @created_at, @updated_at, @repo, @git_provider, @production_url, @latest_id, @latest_url, @latest_state, @latest_target, @latest_at, @protection, @live, @env_count, @firewall, @connect, @oidc, @now, @now, 0)
       on conflict(id) do update set team_id = excluded.team_id, name = excluded.name, framework = excluded.framework, node_version = excluded.node_version, created_at = excluded.created_at, updated_at = excluded.updated_at, repo = excluded.repo, git_provider = excluded.git_provider, production_url = excluded.production_url,
-      latest_id = excluded.latest_id, latest_url = excluded.latest_url, latest_state = excluded.latest_state, latest_target = excluded.latest_target, latest_at = excluded.latest_at, protection = excluded.protection, live = excluded.live, env_count = excluded.env_count, firewall = excluded.firewall, connect = excluded.connect, last_seen = excluded.last_seen, gone = 0`);
-    for (const p of projects) upP.run({ id: p.id, team_id: team.id, name: p.name, framework: p.framework, node_version: p.node_version, created_at: p.created_at, updated_at: p.updated_at, repo: p.repo, git_provider: p.git_provider, production_url: p.production_url, latest_id: p.latest?.id ?? null, latest_url: p.latest?.url ?? null, latest_state: p.latest?.state ?? null, latest_target: p.latest?.target ?? null, latest_at: p.latest?.created_at ?? null, protection: JSON.stringify(p.protection), live: p.live ? 1 : 0, env_count: envCount.get(p.id) ?? 0, firewall: firewalls.get(p.id) ? JSON.stringify(firewalls.get(p.id)) : null, connect: JSON.stringify(p.connect ?? []), now });
+      latest_id = excluded.latest_id, latest_url = excluded.latest_url, latest_state = excluded.latest_state, latest_target = excluded.latest_target, latest_at = excluded.latest_at, protection = excluded.protection, live = excluded.live, env_count = excluded.env_count, firewall = excluded.firewall, connect = excluded.connect, oidc = excluded.oidc, last_seen = excluded.last_seen, gone = 0`);
+    for (const p of projects) upP.run({ id: p.id, team_id: team.id, name: p.name, framework: p.framework, node_version: p.node_version, created_at: p.created_at, updated_at: p.updated_at, repo: p.repo, git_provider: p.git_provider, production_url: p.production_url, latest_id: p.latest?.id ?? null, latest_url: p.latest?.url ?? null, latest_state: p.latest?.state ?? null, latest_target: p.latest?.target ?? null, latest_at: p.latest?.created_at ?? null, protection: JSON.stringify(p.protection), live: p.live ? 1 : 0, env_count: envCount.get(p.id) ?? 0, firewall: firewalls.get(p.id) ? JSON.stringify(firewalls.get(p.id)) : null, connect: JSON.stringify(p.connect ?? []), oidc: p.oidc ? JSON.stringify(p.oidc) : null, now });
     if (projects.length) db.prepare(`update vercel_projects set gone = 1 where team_id = ? and id not in (${projects.map(() => "?").join(",")})`).run(team.id, ...projects.map((p) => p.id));
     const upD = db.prepare(`insert into vercel_deployments(id, team_id, project_id, name, url, state, target, created_at, ready_at, source, branch, commit_sha, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
       on conflict(id) do update set state = excluded.state, target = excluded.target, ready_at = excluded.ready_at, url = excluded.url, last_seen = excluded.last_seen, gone = 0`);
@@ -95,15 +99,15 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
     const upDom = db.prepare("insert into vercel_domains(project_id, name, apex, verified, redirect, branch, created_at, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0) on conflict(project_id, name) do update set apex = excluded.apex, verified = excluded.verified, redirect = excluded.redirect, branch = excluded.branch, last_seen = excluded.last_seen, gone = 0");
     for (const d of domains) upDom.run(d.project_id, d.name, d.apex, d.verified ? 1 : 0, d.redirect, d.branch, d.created_at, now, now);
     db.prepare("update vercel_domains set gone = 1 where last_seen < ? and project_id in (select id from vercel_projects where team_id = ?)").run(now, team.id);
-    const upE = db.prepare("insert into vercel_env(project_id, key, targets, type, updated_at, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, 0) on conflict(project_id, key) do update set targets = excluded.targets, type = excluded.type, updated_at = excluded.updated_at, last_seen = excluded.last_seen, gone = 0");
-    for (const e of env) upE.run(e.project_id, e.key, JSON.stringify(e.targets), e.type, e.updated_at, now, now);
+    const upE = db.prepare("insert into vercel_env(project_id, key, targets, type, updated_at, created_at, edited_by, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0) on conflict(project_id, key) do update set targets = excluded.targets, type = excluded.type, updated_at = excluded.updated_at, created_at = excluded.created_at, edited_by = excluded.edited_by, last_seen = excluded.last_seen, gone = 0");
+    for (const e of env) upE.run(e.project_id, e.key, JSON.stringify(e.targets), e.type, e.updated_at, e.created_at ?? null, e.edited_by ?? null, now, now);
     db.prepare("update vercel_env set gone = 1 where last_seen < ? and project_id in (select id from vercel_projects where team_id = ?)").run(now, team.id);
     const upS = db.prepare(`insert into vercel_stores(id, team_id, name, type, kind, product, product_slug, status, plan, region, created_at, projects, details, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
       on conflict(id) do update set name = excluded.name, type = excluded.type, kind = excluded.kind, product = excluded.product, product_slug = excluded.product_slug, status = excluded.status, plan = excluded.plan, region = excluded.region, projects = excluded.projects, details = excluded.details, last_seen = excluded.last_seen, gone = 0`);
     for (const st of stores) upS.run(st.id, team.id, st.name, st.type, st.kind, st.product, st.product_slug, st.status, st.plan, st.region, st.created_at, JSON.stringify(st.projects), JSON.stringify(st.details), now, now);
     const upPartner = db.prepare("update vercel_stores set partner = ? where id = ?");
     for (const [id, rec] of partners.records) upPartner.run(JSON.stringify(rec), id);
-    db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_extras:${team.id}`, JSON.stringify({ members, log_drains: drains, read_at: now }));
+    db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_extras:${team.id}`, JSON.stringify({ members, log_drains: drains, tokens, token_owner: owner, security: team.security ?? null, read_at: now }));
     db.prepare("update vercel_stores set gone = 1 where team_id = ? and last_seen < ?").run(team.id, now);
     if (team.billing) db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_billing:${team.id}`, JSON.stringify(team.billing));
     const upI = db.prepare(`insert into vercel_invoices(id, team_id, number, status, total, subtotal, tax, currency, created_at, issued_at, paid_at, period_start, period_end, source, hosted_url, pdf_url, groups, line_items, fetched_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -114,10 +118,10 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
 }
 
 const parse = <T,>(s: unknown, d: T): T => { if (typeof s !== "string") return d; try { return JSON.parse(s) as T; } catch { return d; } };
-export interface ProjectRow { id: string; team_id: string; name: string; framework: string | null; node_version: string | null; created_at: string | null; updated_at: string | null; repo: string | null; git_provider: string | null; production_url: string | null; latest_id: string | null; latest_url: string | null; latest_state: string | null; latest_target: string | null; latest_at: string | null; protection: VercelProject["protection"]; live: boolean; env_count: number; firewall: VercelFirewall | null; connect: VercelProject["connect"]; first_seen: string; last_seen: string; gone: boolean }
+export interface ProjectRow { id: string; team_id: string; name: string; framework: string | null; node_version: string | null; created_at: string | null; updated_at: string | null; repo: string | null; git_provider: string | null; production_url: string | null; latest_id: string | null; latest_url: string | null; latest_state: string | null; latest_target: string | null; latest_at: string | null; protection: VercelProject["protection"]; live: boolean; env_count: number; firewall: VercelFirewall | null; connect: VercelProject["connect"]; oidc: VercelProject["oidc"]; first_seen: string; last_seen: string; gone: boolean }
 
 export const vercelTeam = (): (VercelTeam & { fetched_at: string }) | null => { const r = db.prepare("select * from vercel_team order by fetched_at desc limit 1").get() as any; return r ? { id: r.id, slug: r.slug, name: r.name, plan: r.plan, personal: Boolean(r.personal), fetched_at: r.fetched_at } : null; };
-export const listProjects = (includeGone = false): ProjectRow[] => (db.prepare(`select * from vercel_projects where 1 = 1${includeGone ? "" : " and gone = 0"} order by name`).all() as any[]).map((r) => ({ ...r, protection: parse(r.protection, { sso: null, password: null, trusted_ips: null, bypass_automation: false }), live: Boolean(r.live), firewall: parse(r.firewall, null), connect: parse<VercelProject["connect"]>(r.connect, []), gone: Boolean(r.gone) }));
+export const listProjects = (includeGone = false): ProjectRow[] => (db.prepare(`select * from vercel_projects where 1 = 1${includeGone ? "" : " and gone = 0"} order by name`).all() as any[]).map((r) => ({ ...r, protection: parse(r.protection, { sso: null, password: null, trusted_ips: null, bypass_automation: false }), live: Boolean(r.live), firewall: parse(r.firewall, null), connect: parse<VercelProject["connect"]>(r.connect, []), oidc: parse<VercelProject["oidc"]>(r.oidc, null), gone: Boolean(r.gone) }));
 export const listDomains = (projectId?: string): (VercelDomain & { gone: boolean })[] => (db.prepare(`select * from vercel_domains where gone = 0${projectId ? " and project_id = ?" : ""} order by name`).all(...(projectId ? [projectId] : [])) as any[]).map((r) => ({ ...r, verified: Boolean(r.verified), gone: Boolean(r.gone) }));
 export const listDeployments = (projectId?: string, limit = 50): (VercelDeployment & { commit_sha?: string | null })[] => db.prepare(`select * from vercel_deployments where gone = 0${projectId ? " and project_id = ?" : ""} order by created_at desc limit ?`).all(...(projectId ? [projectId, limit] : [limit])) as any[];
 export const listEnvNames = (projectId: string): VercelEnv[] => (db.prepare("select * from vercel_env where gone = 0 and project_id = ? order by key").all(projectId) as any[]).map((r) => ({ ...r, targets: parse<string[]>(r.targets, []) }));
@@ -126,8 +130,10 @@ export const listStores = (opts: { projectId?: string; kind?: string; includeGon
   .map((r) => ({ ...r, projects: parse<VercelStore["projects"]>(r.projects, []).map((p) => ({ ...p, env_var_names: p.env_var_names ?? [], env_var_prefix: p.env_var_prefix ?? null })), details: { ...EMPTY_DETAILS, ...parse<Partial<VercelStore["details"]>>(r.details, {}) }, partner: parse<PartnerRecord | null>(r.partner, null), gone: Boolean(r.gone) })).filter((r) => !opts.projectId || r.projects.some((p: { project_id: string }) => p.project_id === opts.projectId));
 export const storeById = (id: string): StoreRow | null => listStores({ includeGone: true }).find((s) => s.id === id) ?? null;
 const EMPTY_DETAILS: VercelStore["details"] = { billing_state: null, quota_exceeded: false, ownership: null, updated_at: null, connected_projects: null, size_bytes: null, object_count: null, access: null, token_expired: null, external_id: null, external_status: null, plan_id: null, plan_scope: null, plan_type: null, plan_description: null, plan_cost: null, plan_lines: [], metadata: {}, secret_names: [], capabilities: {}, product_tags: [], product_description: null, usage_period: null };
-/** The team's members and log drains as the last collection read them. */
-export const teamExtras = (teamId: string): { members: VercelMember[]; log_drains: VercelLogDrain[]; read_at: string | null } => { const r = db.prepare("select value from settings where key = ?").get(`vercel_extras:${teamId}`) as { value: string } | undefined; return r ? { members: [], log_drains: [], read_at: null, ...parse<any>(r.value, {}) } : { members: [], log_drains: [], read_at: null }; };
+export interface TeamExtras { members: VercelMember[]; log_drains: VercelLogDrain[]; tokens: VercelToken[]; token_owner: { uid: string; username: string | null } | null; security: VercelTeamSecurity | null; read_at: string | null }
+const NO_EXTRAS: TeamExtras = { members: [], log_drains: [], tokens: [], token_owner: null, security: null, read_at: null };
+/** The team's members, log drains, the token owner's tokens and the sign-in guards as the last collection read them. */
+export const teamExtras = (teamId: string): TeamExtras => { const r = db.prepare("select value from settings where key = ?").get(`vercel_extras:${teamId}`) as { value: string } | undefined; return r ? { ...NO_EXTRAS, ...parse<any>(r.value, {}) } : { ...NO_EXTRAS }; };
 export const teamBilling = (teamId: string): VercelTeamBilling | null => { const r = db.prepare("select value from settings where key = ?").get(`vercel_billing:${teamId}`) as { value: string } | undefined; return r ? parse<VercelTeamBilling | null>(r.value, null) : null; };
 export const listInvoices = (limit = 12): VercelInvoice[] => (db.prepare("select * from vercel_invoices order by created_at desc limit ?").all(limit) as any[]).map((r) => ({ ...r, groups: parse(r.groups, []), line_items: parse(r.line_items, []) }));
 export const wipeVercel = (): void => { db.transaction(() => { for (const t of ["vercel_env", "vercel_domains", "vercel_deployments", "vercel_stores", "vercel_invoices", "vercel_usage", "vercel_projects", "vercel_team"]) db.prepare(`delete from ${t}`).run(); db.prepare("delete from settings where key like 'vercel_billing:%' or key like 'vercel_extras:%'").run(); })(); };

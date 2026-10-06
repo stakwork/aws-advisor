@@ -3,6 +3,7 @@ import type { RecInput } from "../../rules.js";
 import { listDomains, listProjects, listStores, teamExtras, vercelTeam, type ProjectRow, type StoreRow } from "./inventory.js";
 import { usageTotals } from "./usage.js";
 import { projectEndpoints, vercelAdapter } from "./index.js";
+import { staticKeyVars } from "../../vercel_aws_links.js";
 
 /**
  * Deterministic findings for a Vercel team, the way the AWS rules and benchmark controls work: each check is a
@@ -25,7 +26,13 @@ export const CONTROL_REFERENCES: Record<string, string[]> = {
   "vercel.control.preview_urls_open": ["https://vercel.com/docs/deployment-protection", "https://vercel.com/docs/deployment-protection/methods-to-protect-deployments/vercel-authentication", "https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation"],
   "vercel.control.domain_unverified": ["https://vercel.com/docs/domains/working-with-domains/add-a-domain", "https://vercel.com/docs/domains/troubleshooting"],
   "vercel.control.firewall_off": ["https://vercel.com/docs/vercel-firewall", "https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting", "https://vercel.com/docs/vercel-firewall/vercel-waf/managed-rulesets"],
-  "vercel.control.member_without_mfa": ["https://vercel.com/docs/accounts/team-members-and-roles/security", "https://vercel.com/docs/accounts/team-members-and-roles"],
+  "vercel.control.member_without_mfa": ["https://vercel.com/docs/two-factor-authentication", "https://vercel.com/docs/two-factor-enforcement", "https://vercel.com/docs/accounts/team-members-and-roles"],
+  "vercel.control.team_2fa_not_enforced": ["https://vercel.com/docs/two-factor-enforcement", "https://vercel.com/docs/two-factor-authentication"],
+  "vercel.control.saml_not_enforced": ["https://vercel.com/docs/saml", "https://vercel.com/docs/rbac/managing-team-members"],
+  "vercel.control.single_owner": ["https://vercel.com/docs/rbac/access-roles", "https://vercel.com/docs/rbac/managing-team-members"],
+  "vercel.control.token_no_expiry": ["https://vercel.com/kb/guide/how-do-i-use-a-vercel-api-access-token", "https://vercel.com/docs/rest-api/reference/welcome"],
+  "vercel.control.token_unused": ["https://vercel.com/kb/guide/how-do-i-use-a-vercel-api-access-token", "https://vercel.com/docs/rest-api/reference/welcome"],
+  "vercel.control.static_aws_keys": ["https://vercel.com/docs/oidc/aws", "https://vercel.com/docs/oidc", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html"],
   "vercel.control.project_without_log_drain": ["https://vercel.com/docs/log-drains", "https://vercel.com/docs/log-drains/log-drains-reference"],
   "vercel.control.store_unconnected": ["https://vercel.com/docs/storage", "https://vercel.com/docs/integrations/install-an-integration/manage-marketplace-integrations"],
   "vercel.control.store_quota_exceeded": ["https://vercel.com/docs/storage", "https://neon.com/docs/introduction/plans"],
@@ -51,6 +58,12 @@ export const CONTROLS: Record<string, { title: string; category: VercelFinding["
   "vercel.control.domain_unverified": { title: "Custom domain not verified", category: "reliability", severity: "warning" },
   "vercel.control.firewall_off": { title: "Vercel firewall off", category: "security", severity: "info" },
   "vercel.control.member_without_mfa": { title: "Team member without MFA", category: "security", severity: "warning" },
+  "vercel.control.team_2fa_not_enforced": { title: "Team does not require 2FA", category: "security", severity: "info" },
+  "vercel.control.saml_not_enforced": { title: "SAML single sign-on not enforced", category: "security", severity: "warning" },
+  "vercel.control.single_owner": { title: "Team has a single Owner", category: "reliability", severity: "info" },
+  "vercel.control.token_no_expiry": { title: "Access token never expires", category: "security", severity: "warning" },
+  "vercel.control.token_unused": { title: "Access token unused for 90 days", category: "security", severity: "info" },
+  "vercel.control.static_aws_keys": { title: "Static AWS access key in env variables", category: "security", severity: "warning" },
   "vercel.control.project_without_log_drain": { title: "Project ships logs nowhere", category: "operations", severity: "info" },
   "vercel.control.store_unconnected": { title: "Store connected to no project", category: "cost", severity: "info" },
   "vercel.control.store_quota_exceeded": { title: "Store over its plan's quota", category: "reliability", severity: "warning" },
@@ -91,6 +104,22 @@ export function vercelFindings(): VercelFinding[] {
   if (extras.log_drains.length) for (const p of projects) if (!drained.has(p.id)) add("vercel.control.project_without_log_drain", p.id, p.name, `no log drain covers this project; its function and edge logs stop at Vercel's retention (the team has ${extras.log_drains.length} drain${extras.log_drains.length === 1 ? "" : "s"})`, { drains: extras.log_drains.map((d) => d.name ?? d.id) }, undefined, "deployments");
   // one finding per member: the resource is the member within the team (the team id keeps it in the team's scope)
   for (const m of extras.members.filter((x) => x.confirmed && x.mfa === false)) add("vercel.control.member_without_mfa", `${teamId}/member/${m.username ?? m.uid}`, m.username ?? m.uid, `${m.username ?? m.uid} (${m.role ?? "member"}) has no MFA on the Vercel account`, { username: m.username, role: m.role, github: m.github });
+  // who can get in, team-wide: 2FA enforcement, SAML, owners, the token owner's tokens, static AWS keys
+  if (team && !team.personal) {
+    const sec = extras.security;
+    // the team object names no enforcement field when it is off (and on plans that lack it): unknown reads as not enforced, said so
+    if (sec && sec.mfa_required !== true && extras.members.length) add("vercel.control.team_2fa_not_enforced", teamId, team.name ?? teamId, sec.mfa_required === false ? "the team does not require two-factor authentication" : `the team reports no two-factor enforcement (${extras.members.filter((m) => m.mfa === true).length} of ${extras.members.length} members have 2FA on their own)`, { mfa_required: sec.mfa_required, members_with_mfa: extras.members.filter((m) => m.mfa === true).length, members: extras.members.length });
+    if (sec?.saml_connected && !sec.saml_enforced) add("vercel.control.saml_not_enforced", teamId, team.name ?? teamId, `SAML single sign-on${sec.saml_provider ? ` (${sec.saml_provider})` : ""} is connected but not enforced: members can still sign in with their own Vercel login`, { provider: sec.saml_provider });
+    const owners = extras.members.filter((m) => m.confirmed && /owner/i.test(m.role ?? ""));
+    if (owners.length === 1 && extras.members.length > 1) add("vercel.control.single_owner", teamId, team.name ?? teamId, `${owners[0].username ?? owners[0].uid} is the team's only Owner: billing, members and team settings depend on one account`, { owner: owners[0].username });
+  }
+  for (const t of extras.tokens.filter((x) => !x.team_ids.length || x.team_ids.includes(teamId))) {
+    const who = `${t.name ?? t.id}${extras.token_owner?.username ? ` (${extras.token_owner.username})` : ""}`;
+    if (!t.expires_at) add("vercel.control.token_no_expiry", `${teamId}/token/${t.id}`, t.name ?? t.id, `token ${who} never expires${t.team_ids.length ? "" : " and is not limited to a team"}`, { token: t.name, created_at: t.created_at, last_used: t.active_at, scope_teams: t.team_ids });
+    const idle = t.active_at ? (Date.now() - Date.parse(t.active_at)) / 86_400_000 : t.created_at ? (Date.now() - Date.parse(t.created_at)) / 86_400_000 : 0;
+    if (idle > 90) add("vercel.control.token_unused", `${teamId}/token/${t.id}`, t.name ?? t.id, `token ${who} ${t.active_at ? `was last used ${Math.floor(idle)} days ago` : `has not been used since it was created ${Math.floor(idle)} days ago`}`, { token: t.name, last_used: t.active_at, created_at: t.created_at });
+  }
+  for (const v of staticKeyVars()) add("vercel.control.static_aws_keys", v.project_id, v.project_name, `${v.names.join(", ")} hold${v.names.length === 1 ? "s" : ""} a long-lived AWS key in ${v.targets.join(", ") || "the project"}${v.candidates[0] ? `; most likely ${v.candidates[0].user}'s key …${v.candidates[0].key.slice(-4)} (created ${Math.abs(v.candidates[0].hours_before)} h ${v.candidates[0].hours_before >= 0 ? "before" : "after"} the variable)` : ""}${v.oidc_enabled ? "; the project already has OIDC federation on" : ""}`, { names: v.names, targets: v.targets, candidates: v.candidates, oidc_enabled: v.oidc_enabled }, undefined, "deployments");
 
   for (const st of stores) {
     const d = st.details; const tab = tabOf(st); const prod = st.projects.some((p) => p.environments.includes("production"));
@@ -133,6 +162,12 @@ export function vercelRecommendations(findings: VercelFinding[], rateCuHour = 0.
     const base = { rule, resource: f.resource, resourceName: f.resource_name, evidence: { findings: group.map((g) => ({ reason: g.reason, ...g.dimensions })), control: f.control_id, category: f.category } };
     switch (f.control_id) {
       case "vercel.control.preview_urls_open": out.push({ ...base, title: `${f.resource_name}: protect preview deployments`, actionType: "security_fix", estMonthlySaving: null, tier: "approve", confidence: 0.9, rationale: `${group[0].reason}. Vercel Authentication on previews (Settings › Deployment Protection) keeps the production URL public and asks preview visitors to log in; nothing in production changes.` }); break;
+      case "vercel.control.team_2fa_not_enforced": out.push({ ...base, title: `${f.resource_name}: require two-factor authentication for the team`, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.8, rationale: `${f.reason}. Team settings › Security › Two-factor enforcement makes 2FA a condition of membership, so a member added later cannot join on a password alone; the Owner turning it on needs 2FA on their own account first.` }); break;
+      case "vercel.control.saml_not_enforced": out.push({ ...base, title: `${f.resource_name}: enforce SAML single sign-on`, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.8, rationale: `${f.reason}. Enforcing it sends every sign-in through the identity provider, so removing a person there removes them here.` }); break;
+      case "vercel.control.single_owner": out.push({ ...base, title: `${f.resource_name}: add a second Owner`, actionType: "other", estMonthlySaving: null, tier: "report", confidence: 0.7, rationale: `${f.reason}. A second Owner (a person who already runs the team) keeps billing and membership reachable if the first account is lost or its owner leaves.` }); break;
+      case "vercel.control.token_no_expiry": out.push({ ...base, title: `${f.resource_name}: replace the token with one that expires`, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.75, rationale: `${f.reason}. A token that never expires works from anywhere until someone deletes it; create a replacement scoped to the team with an expiry, move what uses it, then delete this one.` }); break;
+      case "vercel.control.token_unused": out.push({ ...base, title: `${f.resource_name}: delete the unused token`, actionType: "delete", estMonthlySaving: null, tier: "approve", confidence: 0.7, rationale: `${f.reason}. Nothing has needed it; deleting it removes a credential nobody watches.` }); break;
+      case "vercel.control.static_aws_keys": out.push({ ...base, title: `${f.resource_name}: reach AWS through OIDC instead of a static key`, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.8, rationale: `${f.reason}. With Vercel OIDC federation the functions assume an AWS role with a short-lived token (an IAM OIDC provider for the team's issuer and a role whose trust names the project and environment); then delete the variables and the IAM key.` }); break;
       case "vercel.control.member_without_mfa": out.push({ ...base, title: `${f.resource_name}: enable MFA on the Vercel account`, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.95, rationale: `${f.reason}. A team member's password alone opens every project, env variable name and store on the team; MFA is the member's own setting (Account settings › Security).` }); break;
       case "vercel.control.firewall_off": out.push({ ...base, title: `${f.resource_name}: turn the Vercel firewall on`, actionType: "security_fix", estMonthlySaving: null, tier: "approve", confidence: 0.6, rationale: `${f.reason}. The firewall's managed rules and rate limits are free on Pro; a rate limit on the API routes stops a scraper from turning into a function invoice.` }); break;
       case "vercel.control.project_without_log_drain": out.push({ ...base, title: `${f.resource_name}: add the project to a log drain`, actionType: "enable_logging", estMonthlySaving: null, tier: "approve", confidence: 0.8, rationale: `${f.reason}. Without a drain an incident on this project has no logs older than Vercel's retention to read.` }); break;

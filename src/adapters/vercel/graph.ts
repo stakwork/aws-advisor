@@ -86,5 +86,7 @@ export async function mirrorVercel(): Promise<VercelGraphCounts> {
   for (const p of projects) { const by = new Map<string, (typeof connects)[number]>(); for (const c of p.connect) { const k = `${c.id}|${c.security_group}`; const cur = by.get(k) ?? { project_id: p.id, security_group: c.security_group, subnets: c.subnets, environments: [], dc: c.dc }; if (!cur.environments.includes(c.env)) cur.environments.push(c.env); by.set(k, cur); } connects.push(...by.values()); }
   await writeCypher("MATCH (d:AdvisorResource {provider: $provider, account_id: $account})-[r:GUARDED_BY|IN_SEGMENT]->() WHERE r.via = 'vercel_secure_compute' DELETE r", { provider: VERCEL, account });
   for (let i = 0; i < connects.length; i += 100) await writeCypher(CONNECT_CYPHER, { rows: connects.slice(i, i + 100), now });
+  // the AWS roles the projects assume through OIDC, and the people behind the team members (both need the AWS nodes, so the AWS pass writes them too)
+  try { const edges = await import("../aws/edges.js"); await edges.mirrorVercelRoleLinks(now); await edges.mirrorSamePerson(now); await (await import("../../graph_access.js")).mirrorAccess(now); } catch (e: any) { console.error(`[graph] vercel ↔ aws links: ${e?.message || e}`); }
   return { projects: projects.length, endpoints: endpoints.length + storeEps.length, runtimes: runtimes.length, uses: uses.length, connects: connects.length };
 }
