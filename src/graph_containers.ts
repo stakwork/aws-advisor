@@ -1,7 +1,8 @@
 import { db } from "./db.js";
-import { PROVIDER, accountId, enabled, ensureSchema, inBackground, neoParams, writeCypher } from "./graph_mirror.js";
+import { accountId, enabled, ensureSchema, inBackground, neoParams, writeCypher } from "./graph_mirror.js";
 import { imageRef } from "./graph_software.js";
 import { rowToContainer } from "./container_inventory.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * The containers of the graph (docs/cloud-ontology.md §2) for the AWS adapter, from src/container_inventory.ts:
@@ -68,7 +69,7 @@ export async function mirrorContainers(instanceIds?: string[]): Promise<{ contai
   const rows = raw.map(containerGraphRow);
   const now = new Date().toISOString();
   for (const b of chunks(rows)) {
-    await writeCypher(CONTAINER_CYPHER, neoParams({ rows: b, now, provider: PROVIDER, account: accountId() }));
+    await writeCypher(CONTAINER_CYPHER, neoParams({ rows: b, now, provider: AWS, account: accountId() }));
     await writeCypher(WIRING_CYPHER, neoParams({ rows: b, now }));
   }
   return { containers: rows.length };

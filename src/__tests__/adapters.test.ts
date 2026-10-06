@@ -19,7 +19,7 @@ test("the registry: the adapters (aws, vercel) with their sections, storage and 
   assert.deepEqual(reg.adapters().map((a) => a.id), ["aws", "vercel"]);
   const aws = reg.adapterFor("aws")!;
   assert.equal(aws.label, "AWS"); assert.equal(aws.flow.boundary, "account");
-  assert.deepEqual(aws.sections.map((s) => s.id), ["access", "permissions", "probes", "benchmarks", "members"]);
+  assert.deepEqual(aws.ui.settings.map((s) => s.id), ["access", "permissions", "probes", "benchmarks", "members"]);
   assert.ok(aws.storage.includes("inventory_ec2") && aws.storage.includes("instance_packages") && aws.storage.includes("alas_advisories"));
   assert.equal(aws.capabilities.probes, true); assert.equal(typeof aws.configured(), "boolean", "configured() reads the machine's connection file, not the data dir");
   assert.equal(reg.adapterFor("gcp"), null);
@@ -39,7 +39,6 @@ test("the AWS adapter emits generic resource nodes from its storage, and the mir
   assert.equal(types.RESOURCE_LABELS.includes(web.label), true);
   assert.equal(mirror.RESOURCE_LABELS, types.RESOURCE_LABELS);
   assert.equal(typeof mirror.resourceFromEc2, "function"); assert.equal(mirror.genericState("ec2_instance", "stopping"), "stopped");
-  assert.equal(mirror.PROVIDER, "aws");
   const accounts = await aws.accounts();
   if (aws.configured()) { assert.ok(accounts.length >= 1); assert.equal(accounts[0].provider, "aws"); assert.equal(accounts[0].native_type, "account"); assert.equal(accounts[0].parent_id, null); }
   else assert.deepEqual(accounts, [], "no credentials: no accounts");

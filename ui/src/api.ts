@@ -63,7 +63,8 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   for (let attempt = 0; ; attempt++) {
     try {
       const res = await fetch(url, init);
-      if (!(repeatable && RETRY_STATUS.has(res.status) && attempt < BACKOFF_MS.length)) { settle(true); if (conn.offline && res.ok) emit({ offline: false }); return res; }
+      // the advisor's own error answers carry x-advisor (an upstream failure it reports: retrying will not help); a bare 502 is a proxy that could not reach it
+      if (!(repeatable && RETRY_STATUS.has(res.status) && !res.headers.get("x-advisor") && attempt < BACKOFF_MS.length)) { settle(true); if (conn.offline && res.ok) emit({ offline: false }); return res; }
     } catch (e) {
       if ((e as any)?.name === "AbortError") { settle(false); throw e; }
       if (!isNetworkError(e)) { settle(false); throw e; }

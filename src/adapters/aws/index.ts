@@ -3,8 +3,13 @@ import { config } from "../../config.js";
 import { db } from "../../db.js";
 import { credentialsMeta, hasConnectionFile } from "../../steampipe.js";
 import { AWS, type AccountRecord, type ProviderAdapter, type ResourceNode } from "../types.js";
-import { resourceAccountIndex } from "../../resource_index.js";
-import { TELEMETRY, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRole, resourceFromRootUser, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromService, resourceFromZone, type RoleMap } from "./resources.js";
+import { cachedResourceIndex, resourceIndexFor } from "../../resource_index.js";
+import { AWS_JOBS } from "./jobs.js";
+import { awsAttention, awsCost } from "./overview.js";
+import { awsOnboarding } from "./onboarding.js";
+import { ALL_BENCHMARKS, DEFAULT_BENCHMARKS } from "../../powerpipe.js";
+import { CONTROL_SOURCES } from "../../playbooks.js";
+import { TELEMETRY, lambdaArn, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRole, resourceFromRootUser, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromService, resourceFromZone, type RoleMap } from "./resources.js";
 
 /**
  * The AWS adapter: Steampipe and the SDK behind the generic model. Credentials and the parent/member registry are
@@ -37,11 +42,12 @@ const AWS_LAYERS: ProviderAdapter["layers"] = [
     { name: "status checks", mirror: async () => (await import("../../graph_mirror.js")).mirrorStatusChecks() },
     { name: "usage profiles", mirror: async () => (await import("../../graph_mirror.js")).mirrorUsageProfiles() },
     { name: "capacity patterns", mirror: async () => (await import("../../graph_mirror.js")).mirrorCapacityPatterns() },
-    { name: "network", mirror: async () => (await import("../../graph_network.js")).mirrorNetwork() },
-    { name: "clusters", mirror: async () => (await import("../../graph_clusters.js")).mirrorClusters() },
+    { name: "network", after_run: true, mirror: async () => (await import("../../graph_network.js")).mirrorNetwork() },
+    { name: "clusters", after_run: true, mirror: async () => (await import("../../graph_clusters.js")).mirrorClusters() },
     { name: "threat findings", mirror: async () => (await import("../../graph_services.js")).mirrorThreatFindings() },
     { name: "notifications", mirror: async () => (await import("../../graph_mirror.js")).mirrorCloudNotifications() },
     { name: "software", mirror: async () => (await import("../../graph_software.js")).mirrorSoftware() },
+    { name: "security scan", mirror: async () => { const scan = db.prepare("select id from compliance_scans where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined; return scan ? (await import("../../graph_mirror.js")).mirrorComplianceScan(scan.id) : null; } },
 ];
 
 export const awsAdapter: ProviderAdapter = {
@@ -49,7 +55,6 @@ export const awsAdapter: ProviderAdapter = {
   label: "AWS",
   flow: { boundary: "account", credentials: "a role to assume from the advisor's identity (read role, optional actuator role), or keys / a profile for the first one; the one-command setup creates them", children: "member accounts reached through a role from the parent; the Organizations management account can list them" },
   capabilities: { probes: true, metrics: true, executor: true, compliance: true, cost: true, bill: true, findings: true, changes: true, alerts: true, clusters: true, software: true, network: true },
-  sections: [{ id: "access", label: "Access" }, { id: "permissions", label: "Permissions" }, { id: "probes", label: "Probes" }, { id: "benchmarks", label: "Benchmarks" }, { id: "members", label: "Member accounts" }],
   storage: ["inventory_ec2", "inventory_rds", "inventory_elasticache", "inventory_elb", "inventory_lambda", "inventory_dynamodb", "inventory_s3", "inventory_ebs", "inventory_route53_zone", "inventory_route53_record", "inventory_route53_link", "inventory_service", "threat_findings", "inventory_subnet", "inventory_route_table", "inventory_gateway", "inventory_eip", "inventory_eni", "inventory_cluster",
     "sg_ingress", "sg_egress", "instance_metrics", "instance_apps", "instance_ports", "instance_containers", "instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes", "cluster_workloads", "cluster_services", "cluster_ingresses", "cluster_network_policies", "alas_advisories", "alas_packages", "status_checks", "capacity_patterns"],
   telemetry: TELEMETRY,
@@ -81,12 +86,99 @@ export const awsAdapter: ProviderAdapter = {
   resources(account: string): ResourceNode[] {
     const roles = roleMap();
     // each row carries the account it was collected from (a member account's rows carry the member's id); the mirror attaches it to that node
-    const own = resourceAccountIndex(account);
+    const own = resourceIndexFor(AWS, account);
     return [...rawResources(account, roles)].map((n) => ({ ...n, account_id: own.of(n.id) ?? account }));
   },
+  resourceIds: (account) => inventoryIds(account),
   edges: async (account, stamp) => (await import("./edges.js")).mirrorAwsEdges(account, stamp),
   layers: AWS_LAYERS,
+  legacy_blank_account: true,
+  // every AWS account id is twelve digits, and nothing else's is
+  owns: (id) => ACCOUNT_ID.test(id),
+  accountOf(resource, details) {
+    const idx = cachedResourceIndex(AWS, awsAdapter.primaryAccountId());
+    const d = (details ?? {}) as Record<string, any>;
+    const explicit = [d.account_id, d.run_account_id].find((x) => typeof x === "string" && ACCOUNT_ID.test(x)) as string | undefined;
+    // the resource first, then an account the row states, then whatever the details name that the inventories know (an instance, a pool, a log group, a network)
+    return idx.of(resource) ?? explicit ?? idx.of(d.instance_id) ?? idx.of(d.pool) ?? idx.of(d.log_group) ?? idx.of(d.vpc_id) ?? idx.of(d.nat_gateway_id)
+      ?? (Array.isArray(d.events) ? d.events.map((e: any) => idx.of(e?.instance_id)).find(Boolean) ?? null : null);
+  },
+  onStart() {
+    // the EC2 status checks of the running fleet, read now rather than at the watcher's next cycle: an impaired box alerts within a minute of a deploy
+    setTimeout(() => import("../../status_checks.js").then((m) => m.refreshStatusChecks((l) => console.log(`[status-checks] ${l}`))).catch((e) => console.error(`[status-checks] at start: ${e?.message || e}`)), 20_000).unref();
+    // the fleet's latest probes, judged now: a disk that filled while the advisor was down alerts at once
+    import("../../disk_alerts.js").then((m) => { const r = m.checkAllDiskLevels(); if (r.raised) console.log(`[disk] ${r.raised} disk alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[disk] startup check failed: ${e?.message || e}`));
+    import("../../host_alerts.js").then((m) => { const r = m.checkAllHostLevels(); if (r.raised) console.log(`[host] ${r.raised} host alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[host] startup check failed: ${e?.message || e}`));
+  },
+  jobs: AWS_JOBS,
+  onboarding: awsOnboarding,
+  agentNote: () => { const id = credentialsMeta()?.accountId; return id ? `AWS account ${id} (the default for every aws_* table and tool)` : null; },
+  // the AWS-only pages' APIs: security scans, probes, clusters, vulnerabilities, Identity Center, AWS notifications, swarms, tags
+  routes: async () => [(await import("../../routes/swarms.js")).swarms, (await import("../../routes/tags.js")).tags, (await import("../../routes/security.js")).security, (await import("../../routes/probes.js")).probes,
+    (await import("../../routes/clusters.js")).clusters, (await import("../../routes/vulnerabilities.js")).vulnerabilities, (await import("../../routes/identity_center.js")).identityCenter, (await import("../../routes/cloud_notifications.js")).cloudNotifications],
+  cost: awsCost(() => awsAdapter.primaryAccountId()),
+  attention: () => awsAttention(awsAdapter.primaryAccountId()),
+  // the collection run (src/collector.ts): Powerpipe's Thrifty benchmarks, the fact queries and the rules (src/rules.ts); the security scan (src/compliance.ts) has its own scans table
+  rules: {
+    latestRunId: () => (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id,
+    benchmarks: () => ({ all: [...ALL_BENCHMARKS], defaults: [...DEFAULT_BENCHMARKS] }),
+    start: async (trigger) => {
+      const { isBusy, startRun } = await import("../../collector.js");
+      if (isBusy()) return { run_id: null, note: "a run is already in progress" };
+      return { run_id: startRun(trigger), note: "started" };
+    },
+    run_native_type: "collection_run",
+    control_prefixes: ["aws_", "query.", "rule."],
+    controlFacts(controlId, benchmark) {
+      const id = controlId.toLowerCase(); const b = String(benchmark || "").toLowerCase();
+      if (id.startsWith("aws_compliance.") || b) return { framework: b.includes("cis") || id.includes("cis_") ? "cis" : b.includes("foundational") || id.includes("foundational") ? "foundational_security" : "compliance", category: "security" };
+      if (id.startsWith("aws_thrifty.")) return { framework: "cost", category: "cost" };
+      return null;
+    },
+    controlSources: () => CONTROL_SOURCES,
+    playbooks_from: "alarm",
+    seed_playbooks: true,
+  },
+  // the executor's AWS modules (src/actions/), run under the parent's and each enabled member's read and actuator roles
+  actions: {
+    register: async () => { await import("../../actions/index.js"); },
+    credentials: async () => (await import("../../executor.js")).executorCreds(),
+  },
+  ui: {
+    overview: "aws.overview", bill: "aws.bill", changes: "aws.changes",
+    inventory: [
+      { tab: "ec2", view: "aws.table", label: "EC2 instances" }, { tab: "rds", view: "aws.table", label: "RDS" }, { tab: "elasticache", view: "aws.table", label: "ElastiCache" }, { tab: "lambda", view: "aws.table", label: "Lambda" },
+      { tab: "dynamodb", view: "aws.table", label: "DynamoDB" }, { tab: "elb", view: "aws.table", label: "ELB" }, { tab: "ebs", view: "aws.table", label: "EBS" }, { tab: "s3", view: "aws.table", label: "S3 buckets" },
+      { tab: "route53", view: "aws.table", label: "Route 53" }, { tab: "clusters", view: "aws.table", label: "EKS, ECS" }, { tab: "identities", view: "aws.table", label: "IAM users · IAM Identity Center" }, { tab: "sg", view: "aws.table", label: "security groups" },
+      { tab: "tags", view: "aws.table", label: "AWS tags" }, { tab: "certificates", view: "aws.table", label: "ACM" }, { tab: "messaging", view: "aws.table", label: "SNS" }, { tab: "keys", view: "aws.table", label: "KMS" },
+      { tab: "files", view: "aws.table", label: "EFS" }, { tab: "backups", view: "aws.table", label: "AWS Backup vaults and plans" }, { tab: "analytics", view: "aws.table", label: "Athena workgroups" }, { tab: "stacks", view: "aws.table", label: "CloudFormation" },
+      { tab: "threats", view: "aws.table", label: "GuardDuty" },
+    ],
+    settings: [{ id: "access", label: "Access", view: "aws.access" }, { id: "permissions", label: "Permissions", view: "aws.permissions" }, { id: "probes", label: "Probes", view: "aws.probes" }, { id: "benchmarks", label: "Benchmarks", view: "aws.benchmarks" }, { id: "members", label: "Member accounts", view: "aws.members" }],
+  },
 };
+
+const ACCOUNT_ID = /^\d{12}$/;
+
+/** Every id the mirror writes a resource node for, so references in records (recommendations, alerts, actions) can be matched to nodes; cheaper than building the nodes. */
+function inventoryIds(account: string): Set<string> {
+  const ids = new Set<string>();
+  for (const r of rows("select instance_id as id from inventory_ec2")) ids.add(r.id);
+  for (const r of rows("select db_instance_identifier as id from inventory_rds")) ids.add(r.id);
+  for (const r of rows("select cache_cluster_id as id from inventory_elasticache")) ids.add(r.id);
+  for (const r of rows("select arn as id from inventory_elb")) ids.add(r.id);
+  for (const r of rows("select name, arn, region from inventory_lambda")) ids.add(lambdaArn(r, account));
+  for (const r of rows("select name as id from inventory_s3")) ids.add(r.id);
+  for (const r of rows("select volume_id as id from inventory_ebs")) ids.add(r.id);
+  for (const r of rows("select zone_id as id from inventory_route53_zone")) ids.add(r.id);
+  for (const r of rows("select arn as id from inventory_dynamodb where arn is not null")) ids.add(r.id);
+  for (const r of rows("select arn as id from inventory_iam_user")) ids.add(r.id);
+  for (const r of rows("select arn as id from inventory_root_user")) ids.add(r.id);
+  for (const r of rows("select arn as id from inventory_iam_role")) ids.add(r.id);
+  // certificates, topics, keys, file systems, vaults, plans, workgroups, stacks, web ACLs, detectors (src/service_inventory.ts)
+  for (const r of rows("select id from inventory_service")) ids.add(r.id);
+  return ids;
+}
 
 function rawResources(account: string, roles: ReturnType<typeof roleMap>): ResourceNode[] {
     return [

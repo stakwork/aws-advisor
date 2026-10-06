@@ -194,7 +194,7 @@ export function impactFor(recommendationId: number) {
   if (!v) return { recommendation: rec, verification: null, series: [], total: [], decided_day: rec.decided_at ? String(rec.decided_at).slice(0, 10) : null, after_from: null, actioned: (ACTIONED as readonly string[]).includes(rec.status) };
   let series: DailyCost[] = []; try { series = JSON.parse(v.series || "[]"); } catch { /* an older row without a series */ }
   const from = addDays(v.decided_day, -DAYS_BEFORE);
-  const total = db.prepare("select day, net_unblended as usd from spend_daily where day >= ? order by day").all(from) as DailyCost[];
+  const total = db.prepare("select day, net_unblended as usd from spend_daily where provider = 'aws' and day >= ? order by day").all(from) as DailyCost[];
   const { series: _s, ...verification } = v;
   return { recommendation: rec, verification, series, total, decided_day: v.decided_day, after_from: addDays(v.decided_day, SKIP_DAYS_AFTER_DECISION), actioned: (ACTIONED as readonly string[]).includes(rec.status) };
 }

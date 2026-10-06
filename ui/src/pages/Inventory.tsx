@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate, Link, useSearchParams } from "react-router-dom";
-import { api, cachedProviders, currentScope, currentScopeProvider, realProcesses, rememberProviders, setScope, usd, when } from "../api";
+import { api, currentScope, currentScopeProvider, realProcesses, setScope, usd, when } from "../api";
+import { cachedProviderList, loadProviders, type ProviderInfo } from "../scope";
+import { ProviderView } from "../views";
 import { ClustersPanel } from "../components/clusters";
 import { Timeline } from "../components/timeline";
 import { WatchToggle } from "../components/watch";
@@ -11,10 +13,8 @@ import { UsageProfile } from "../components/usageProfile";
 import { AutoParkSwitch, AutoScaleSwitch } from "../components/consent";
 import { GroupLink, PortsPanel, SecurityGroupsPanel } from "../components/securityGroups";
 import { SoftwarePanel } from "../components/software";
-import { VercelMembers, VercelProjects } from "../components/vercel";
 import { IdentityCenter } from "../components/identityCenter";
 import { Access } from "../components/access";
-import { VercelStores } from "../components/vercelStores";
 import { WakeProfilePanel } from "../components/wakeProfile";
 import { ServicesPanel, type ServiceTab } from "../components/services";
 
@@ -237,10 +237,13 @@ const TABS = ["ec2", "rds", "elasticache", "lambda", "dynamodb", "elb", "ebs", "
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", dynamodb: "Tables", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities",
   certificates: "Certificates", messaging: "Messaging", keys: "Keys", files: "File systems", backups: "Backups", analytics: "Analytics", stacks: "Stacks", threats: "Threat detection" };
-const TAB_NATIVE: Record<Tab, string> = { ec2: "EC2 instances", rds: "RDS · Vercel stores (Neon, …)", elasticache: "ElastiCache · Vercel stores (Redis, KV)", lambda: "Lambda", dynamodb: "DynamoDB", elb: "ELB", ebs: "EBS", s3: "S3 buckets · Vercel Blob", route53: "Route 53", deployments: "Vercel projects", clusters: "EKS, ECS", sg: "security groups", tags: "AWS tags", identities: "IAM users · IAM Identity Center · Vercel team members" ,
-  certificates: "ACM", messaging: "SNS", keys: "KMS", files: "EFS", backups: "AWS Backup vaults and plans", analytics: "Athena workgroups", stacks: "CloudFormation", threats: "GuardDuty" };
-/** Which providers each tab draws from; a tab shows when the scope's provider (or, for all accounts, any configured provider) is among them. */
-const TAB_PROVIDERS: Record<Tab, string[]> = { ec2: ["aws"], rds: ["aws", "vercel"], elasticache: ["aws", "vercel"], lambda: ["aws"], dynamodb: ["aws"], elb: ["aws"], ebs: ["aws"], s3: ["aws", "vercel"], route53: ["aws"], deployments: ["vercel"], clusters: ["aws"], sg: ["aws"], tags: ["aws"], identities: ["aws", "vercel"] , certificates: ["aws"], messaging: ["aws"], keys: ["aws"], files: ["aws"], backups: ["aws"], analytics: ["aws"], stacks: ["aws"], threats: ["aws"] };
+/**
+ * Which providers draw each tab, and with which view: every provider declares its tabs (src/adapters/types.ts
+ * ProviderUi.inventory). "aws.table" is the shared list, search and stats below; any other id is a provider view
+ * (ui/src/views.tsx). A tab shows when the scope's provider (or, for all accounts, any configured provider) declares it.
+ */
+type TabView = { provider: string; view: string; label?: string };
+const TABLE_VIEW = "aws.table";
 const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" , certificates: "id", messaging: "id", keys: "id", files: "id", backups: "id", analytics: "id", stacks: "id", threats: "id" };
 
 /** The platform-service tabs: rendered by ServicesPanel from /inventory/services/:tab, not by the table below. */
@@ -355,18 +358,26 @@ const Related = ({ id, recs, findings, list }: { id: string; recs: number; findi
 export default function Inventory() {
   const [params, setParams] = useSearchParams();
   // which kinds to show: the scope's provider (remembered with the scope, so the first paint is right), or every configured provider
-  const [providersUp, setProvidersUp] = useState<string[] | null>(cachedProviders()); // the configured providers, by id
+  const [providerList, setProviderList] = useState<ProviderInfo[] | null>(cachedProviderList());
   const [scopeProvider, setScopeProvider] = useState<string | null>(currentScope() === "all" ? null : currentScopeProvider());
   const [scopeKnown, setScopeKnown] = useState(currentScope() === "all" || currentScopeProvider() !== null);
   useEffect(() => {
-    api("/providers").then((d) => { const ids = (d.providers || []).filter((p: any) => p.configured).map((p: any) => p.id); rememberProviders(ids); setProvidersUp(ids); }).catch(() => setProvidersUp((p) => p ?? ["aws"]));
+    loadProviders().then(setProviderList);
     const scope = currentScope();
     if (scope === "all") { setScopeProvider(null); setScopeKnown(true); }
     else api("/accounts").then((d) => { const prov = (d.records || []).find((r: any) => r.id === scope)?.provider ?? null; setScopeProvider(prov); setScopeKnown(true); if (prov) setScope(scope, prov); }).catch(() => setScopeKnown(true));
   }, []);
-  const ready = scopeKnown && (scopeProvider !== null || providersUp !== null);
-  const awsView = scopeProvider !== "vercel"; // the AWS lists, stats and search only when the scope is AWS or every account
-  const visibleTabs = TABS.filter((t) => (scopeProvider ? TAB_PROVIDERS[t].includes(scopeProvider) : TAB_PROVIDERS[t].some((p) => (providersUp ?? ["aws"]).includes(p))));
+  const ready = scopeKnown && providerList !== null;
+  // the providers in scope and what each draws per tab
+  const inScope = (providerList ?? []).filter((p) => p.ui && (scopeProvider ? p.id === scopeProvider : p.configured));
+  const viewsOf = (t: Tab): TabView[] => inScope.flatMap((p) => (p.ui!.inventory.filter((x) => x.tab === t).map((x) => ({ provider: p.id, view: x.view, label: x.label }))));
+  // the shared lists, stats and search only when a provider in scope draws its tabs with them
+  const awsView = inScope.some((p) => p.ui!.inventory.some((x) => x.view === TABLE_VIEW));
+  const visibleTabs = TABS.filter((t) => viewsOf(t).length > 0);
+  const nativeOf = (t: Tab) => viewsOf(t).map((v) => v.label).filter(Boolean).join(" · ");
+  // a provider's own view for a tab: the scoped provider's, or for all accounts the ones on a tab the shared list does not draw
+  const providerViews = (t: Tab): TabView[] => { const v = viewsOf(t).filter((x) => x.view !== TABLE_VIEW); return scopeProvider || !viewsOf(t).some((x) => x.view === TABLE_VIEW) ? v : []; };
+  const tableTab = (t: Tab) => viewsOf(t).some((x) => x.view === TABLE_VIEW);
   const requested = params.get("tab") as Tab;
   const tab = (TABS.includes(requested) && visibleTabs.includes(requested) ? requested : visibleTabs[0] ?? "ec2") as Tab;
   const selectedId = params.get("id");
@@ -411,7 +422,7 @@ export default function Inventory() {
     setRows(null);
     // The Tags tab is its own report (src/tag_hygiene.ts): nothing to fetch here.
     // So is Security groups (src/security_groups.ts): its panel fetches its own rows.
-    if (tab === "tags" || tab === "sg" || tab === "clusters" || tab === "deployments" || isServiceTab(tab) || scopeProvider === "vercel") { setRows([]); return Promise.resolve(); }
+    if (tab === "tags" || tab === "sg" || tab === "clusters" || isServiceTab(tab) || !tableTab(tab)) { setRows([]); return Promise.resolve(); }
     const qs = new URLSearchParams();
     if (tab === "ec2") { if (state) qs.set("state", state); if (ssm) qs.set("ssm", ssm); }
     if (tab === "ebs" && state) qs.set("state", state);
@@ -431,7 +442,7 @@ export default function Inventory() {
 
   useEffect(() => { loadSummary(); }, []);
   useEffect(() => { if (tab === "route53") api("/inventory/route53/zones").then(setZones).catch(() => setZones([])); }, [tab, summary?.refreshed_at]);
-  useEffect(() => { loadRows(); }, [tab, state, ssm, sort, gone, zone, link, params.get("q")]);
+  useEffect(() => { loadRows(); }, [tab, state, ssm, sort, gone, zone, link, params.get("q"), providerList, scopeProvider]);
   useEffect(() => { loadDetail(); setProbe({ busy: false, error: "" }); }, [tab, selectedId, rows]);
 
   const [usageBusy, setUsageBusy] = useState(false);
@@ -506,21 +517,17 @@ export default function Inventory() {
         </div>
         <div className="flex flex-wrap gap-1 border-b border-zinc-800">
           {sectionOf(tab).tabs.filter((t) => visibleTabs.includes(t)).map((t) => (
-            <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} title={TAB_NATIVE[t]} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
+            <button key={t} onClick={() => set({ tab: t, id: null, sort: null, state: null })} title={nativeOf(t)} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === t ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
               {TAB_LABEL[t]}{awsView && tabCount(s, t) != null && <span className="ml-1 text-xs text-zinc-500">{tabCount(s, t)}</span>}
             </button>
           ))}
-          <span className="ml-auto self-center pr-1 text-[11px] text-zinc-600">{TAB_NATIVE[tab]}</span>
+          <span className="ml-auto self-center pr-1 text-[11px] text-zinc-600">{nativeOf(tab)}</span>
         </div>
       </div>
 
-      {tab === "deployments" && <VercelProjects />}
-      {scopeProvider === "vercel" && tab === "identities" && <VercelMembers />}
-      {awsView && tab === "identities" && <Access />}
-      {awsView && tab === "identities" && <IdentityCenter />}
-      {scopeProvider === "vercel" && tab === "rds" && <VercelStores kind="database" />}
-      {scopeProvider === "vercel" && tab === "elasticache" && <VercelStores kind="cache" />}
-      {scopeProvider === "vercel" && tab === "s3" && <VercelStores kind="storage" />}
+      {providerViews(tab).map((v) => <ProviderView key={`${v.provider}:${v.view}`} id={v.view} />)}
+      {tableTab(tab) && tab === "identities" && <Access />}
+      {tableTab(tab) && tab === "identities" && <IdentityCenter />}
       {tab === "tags" && <TagsPanel />}
       {tab === "sg" && <SecurityGroupsPanel selected={selectedId} onSelect={(id) => set({ id })} />}
       {awsView && tab === "sg" && <ServicesPanel tab="waf" summary={s?.services?.waf} selected={selectedId} onSelect={(id) => set({ id })} q="" gone={false} />}

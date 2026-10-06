@@ -1,8 +1,9 @@
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
-import { S, query } from "./steampipe.js";
+import { S, credentialsMeta, query } from "./steampipe.js";
 import { addDays, localDay } from "./localdate.js";
+import { AWS } from "./adapters/types.js";
 import { SpendMetric, SpendRow, SpendSummary, summarizeSpend } from "./spend_math.js";
 
 export type { SpendMetric, SpendRow, SpendSummary } from "./spend_math.js";
@@ -18,11 +19,15 @@ export { summarizeSpend } from "./spend_math.js";
 db.exec(`create table if not exists spend_by_account_monthly (month text not null, account_id text not null, usd real not null, fetched_at text not null, primary key (month, account_id))`);
 /** What each linked account's month is made of: unblended cost per service, the last three months (one more Cost Explorer call per refresh). */
 db.exec(`create table if not exists spend_by_account_service_monthly (month text not null, account_id text not null, service text not null, usd real not null, fetched_at text not null, primary key (month, account_id, service))`);
+// every spend row names the provider whose bill it is (spend_daily is keyed by it; src/db.ts); the AWS rows here are Cost Explorer's
+addColumn("spend_by_account_monthly", "provider", "text");
+addColumn("spend_by_account_service_monthly", "provider", "text");
+db.exec("update spend_by_account_monthly set provider = 'aws' where provider is null; update spend_by_account_service_monthly set provider = 'aws' where provider is null");
 
 export interface AccountServiceSpendRow { month: string; account_id: string; service: string; usd: number }
 /** The last `months` months per linked account and service, biggest first within a month. */
 export function servicesByAccount(months = 3): AccountServiceSpendRow[] {
-  return db.prepare("select month, account_id, service, usd from spend_by_account_service_monthly where month >= ? order by month desc, account_id, usd desc").all(monthsAgo(months)) as AccountServiceSpendRow[];
+  return db.prepare("select month, account_id, service, usd from spend_by_account_service_monthly where provider = ? and month >= ? order by month desc, account_id, usd desc").all(AWS, monthsAgo(months)) as AccountServiceSpendRow[];
 }
 
 /** One Cost Explorer call: unblended cost per linked account per service per month, the last three months (aws_cost_usage, LINKED_ACCOUNT × SERVICE). Errors are returned, not thrown. */
@@ -33,12 +38,12 @@ export async function refreshSpendByAccountService(log: (l: string) => void = ()
   let rows: { account_id: string | null; service: string | null; month: string; usd: string | null }[];
   try { rows = await query(sql); } catch (e) { const error = describeError(e, "spend by account and service (aws_cost_usage)"); log(`by account and service failed: ${error}`); return { rows: 0, error }; }
   const at = new Date().toISOString().replace("T", " ").slice(0, 19);
-  const up = db.prepare("insert into spend_by_account_service_monthly(month, account_id, service, usd, fetched_at) values (?, ?, ?, ?, ?) on conflict(month, account_id, service) do update set usd = excluded.usd, fetched_at = excluded.fetched_at");
+  const up = db.prepare("insert into spend_by_account_service_monthly(provider, month, account_id, service, usd, fetched_at) values ('aws', ?, ?, ?, ?, ?) on conflict(month, account_id, service) do update set usd = excluded.usd, fetched_at = excluded.fetched_at, provider = excluded.provider");
   let n = 0;
   db.transaction(() => {
     // a service that dropped to nothing since the last fetch would otherwise keep its old figure: the months fetched are rewritten whole
     const months = [...new Set(rows.map((r) => r.month))];
-    for (const m of months) db.prepare("delete from spend_by_account_service_monthly where month = ?").run(m);
+    for (const m of months) db.prepare("delete from spend_by_account_service_monthly where provider = ? and month = ?").run(AWS, m);
     for (const r of rows) { if (!r.account_id || !r.service) continue; const usd = Number(r.usd ?? 0); if (!usd) continue; up.run(r.month, String(r.account_id), String(r.service), usd, at); n++; }
   })();
   log(`${n} account × service rows stored for ${new Set(rows.map((r) => r.month)).size} month(s)`);
@@ -48,7 +53,7 @@ export async function refreshSpendByAccountService(log: (l: string) => void = ()
 export interface AccountSpendRow { month: string; account_id: string; usd: number }
 /** The last `months` months per linked account, newest first. */
 export function spendByAccount(months = 6): AccountSpendRow[] {
-  return db.prepare("select month, account_id, usd from spend_by_account_monthly where month >= ? order by month desc, usd desc").all(monthsAgo(months)) as AccountSpendRow[];
+  return db.prepare("select month, account_id, usd from spend_by_account_monthly where provider = ? and month >= ? order by month desc, usd desc").all(AWS, monthsAgo(months)) as AccountSpendRow[];
 }
 const monthsAgo = (n: number) => { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - n); return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`; };
 
@@ -59,7 +64,7 @@ export async function refreshSpendByAccount(log: (l: string) => void = () => {})
   let rows: { account_id: string | null; month: string; usd: string | null }[];
   try { rows = await query(sql); } catch (e) { const error = describeError(e, "spend by account (aws_cost_by_account_monthly)"); log(`by account failed: ${error}`); return { rows: 0, error }; }
   const at = new Date().toISOString().replace("T", " ").slice(0, 19);
-  const up = db.prepare("insert into spend_by_account_monthly(month, account_id, usd, fetched_at) values (?, ?, ?, ?) on conflict(month, account_id) do update set usd = excluded.usd, fetched_at = excluded.fetched_at");
+  const up = db.prepare("insert into spend_by_account_monthly(provider, month, account_id, usd, fetched_at) values ('aws', ?, ?, ?, ?) on conflict(month, account_id) do update set usd = excluded.usd, fetched_at = excluded.fetched_at, provider = excluded.provider");
   let n = 0;
   db.transaction(() => { for (const r of rows) { if (!r.account_id) continue; up.run(r.month, String(r.account_id), Number(r.usd ?? 0), at); n++; } })();
   log(`${n} account-month rows stored`);
@@ -72,24 +77,24 @@ export const SPEND_MIN_INTERVAL_MS = 6 * 3600_000;
 export const USAGE_RECORD_TYPES = ["Usage", "SavingsPlanCoveredUsage", "DiscountedUsage"] as const;
 
 export function spendRows(days = SPEND_DAYS, today = localDay()): SpendRow[] {
-  return db.prepare("select day, net_unblended, unblended, amortized, usage_only, fetched_at from spend_daily where day >= ? order by day").all(addDays(today, -(days - 1))) as SpendRow[];
+  return db.prepare("select day, net_unblended, unblended, amortized, usage_only, fetched_at from spend_daily where provider = ? and day >= ? order by day").all(AWS, addDays(today, -(days - 1))) as SpendRow[];
 }
 
 /** The summary over everything stored (the previous month needs rows older than the 45-day series). */
 export function spendSummary(today = localDay(), metric: SpendMetric = "net_unblended"): SpendSummary {
-  const rows = db.prepare("select day, net_unblended, unblended, amortized, usage_only, fetched_at from spend_daily order by day").all() as SpendRow[];
+  const rows = db.prepare("select day, net_unblended, unblended, amortized, usage_only, fetched_at from spend_daily where provider = ? order by day").all(AWS) as SpendRow[];
   return summarizeSpend(rows, today, metric);
 }
 
 export function lastSpendFetch(): string | null {
-  return (db.prepare("select max(fetched_at) as at from spend_daily").get() as { at: string | null }).at;
+  return (db.prepare("select max(fetched_at) as at from spend_daily where provider = ?").get(AWS) as { at: string | null }).at;
 }
 
 export interface SpendRefreshResult { refreshed: boolean; days?: number; fetched_at?: string; skipped?: string; error?: string }
 
 const upsert = db.prepare(`
-  insert into spend_daily(day, net_unblended, unblended, amortized, usage_only, fetched_at) values (?, ?, ?, ?, ?, ?)
-  on conflict(day) do update set net_unblended = excluded.net_unblended, unblended = excluded.unblended, amortized = excluded.amortized, usage_only = excluded.usage_only, fetched_at = excluded.fetched_at`);
+  insert into spend_daily(provider, account_id, day, net_unblended, unblended, amortized, usage_only, fetched_at) values ('aws', ?, ?, ?, ?, ?, ?, ?)
+  on conflict(provider, day) do update set account_id = excluded.account_id, net_unblended = excluded.net_unblended, unblended = excluded.unblended, amortized = excluded.amortized, usage_only = excluded.usage_only, fetched_at = excluded.fetched_at`);
 
 /**
  * One Cost Explorer call: the last 45 days, or back to the first of the previous month when that is earlier
@@ -123,9 +128,11 @@ export async function refreshSpend(opts: { force?: boolean; onLog?: (line: strin
     return { refreshed: false, error };
   }
   const fetchedAt = new Date().toISOString().replace("T", " ").slice(0, 19);
+  // the payer's Cost Explorer: the rows are its bill, which covers every linked account
+  const payer = credentialsMeta()?.accountId ?? null;
   const num = (v: string | null) => (v == null ? null : Number(v));
   db.transaction(() => {
-    for (const r of rows) upsert.run(r.day, num(r.net_unblended), num(r.unblended), num(r.amortized), num(r.usage_only), fetchedAt);
+    for (const r of rows) upsert.run(payer, r.day, num(r.net_unblended), num(r.unblended), num(r.amortized), num(r.usage_only), fetchedAt);
   })();
   log(`${rows.length} days stored (${rows[0]?.day ?? "—"} to ${rows[rows.length - 1]?.day ?? "—"})`);
   await refreshSpendByAccount(log);

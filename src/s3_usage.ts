@@ -20,6 +20,7 @@ import { describeError } from "./permissions.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
 import { entireBucketMetrics } from "./actions/s3_request_metrics.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists s3_usage (
   bucket text primary key, region text, collected_at text not null, json text not null, error text
@@ -224,7 +225,7 @@ export async function refreshS3Usage(bucket: string, onLog: (l: string) => void 
       rationale: `${proposal.rules.map((r) => `${r.id.replace(/^aws-advisor-/, "")}: ${r.why}`).join(" ")}${proposal.notes.length ? ` ${proposal.notes.join(". ")}.` : ""} Apply with put-bucket-lifecycle-configuration using the JSON in the evidence (merge with the existing rules).`,
       evidence: { lifecycle: proposal.lifecycle, rules: proposal.rules, usage: { collected_at: u.collected_at, sample: u.sample, standard_by_age_gb: Object.fromEntries(AGE_BUCKETS.map((a) => [a, gb(u.standard_by_age[a].bytes)])), by_class_gb: Object.fromEntries(Object.entries(u.by_class).map(([c, t]) => [c, gb(t.bytes)])), top_prefixes: u.by_prefix.slice(0, 5).map((p) => ({ prefix: p.prefix, gb: gb(p.bytes), old_gb: gb(p.old_bytes) })), multipart: u.multipart, noncurrent: u.noncurrent, requests: u.requests, small_objects_bytes_share: u.small_objects_bytes_share }, playbook: "aws_thrifty.control.buckets_with_no_lifecycle" },
     };
-    upsertRecommendations(runId, [rec], "rules", undefined, { reconcile: false });
+    upsertRecommendations(runId, [rec], "rules", undefined, { reconcile: false, provider: AWS });
   }
   return { ...u, proposal };
 }

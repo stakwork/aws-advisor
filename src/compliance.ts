@@ -27,6 +27,7 @@ import { configured as sphinxConfigured, inQuietHours, sendSphinx } from "./noti
 import { mirrorComplianceScanInBackground } from "./graph_mirror.js";
 import { syncDecisionConceptInBackground } from "./concepts.js";
 import { accountWhere, type AccountScope } from "./scope.js";
+import { AWS } from "./adapters/types.js";
 
 export const COMPLIANCE_BENCHMARKS: { id: string; title: string }[] = [
   { id: "foundational_security", title: "AWS Foundational Security Best Practices" },
@@ -252,7 +253,7 @@ async function executeScan(scanId: number, benchmarks: string[]) {
 
     const findings = db.prepare("select benchmark, control_id, control_title, severity, resource, reason, region, account_id, first_seen_at from compliance_findings where scan_id = ?").all(scanId) as ScanFinding[];
     const recs = complianceRecommendations(findings);
-    upsertRecommendations(0, recs, "rules", undefined, { reconcile: false });
+    upsertRecommendations(0, recs, "rules", undefined, { reconcile: false, provider: AWS });
     const resolvedRecs = failedBenchmarks ? [] : resolveVanished(new Set(recs.map((r) => `${r.rule}:${r.resource}`)));
     log(scanId, `Recommendations: ${recs.length} warranted${resolvedRecs.length ? `, ${resolvedRecs.length} resolved (the finding went away)` : ""}`);
 

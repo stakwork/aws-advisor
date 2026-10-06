@@ -17,6 +17,7 @@ import { upsertRecommendations } from "../collector.js";
 import type { RecInput } from "../rules.js";
 import { LAMBDA_PRICE } from "../lambda_inventory.js";
 import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { AWS } from "../adapters/types.js";
 
 export const KIND = "lambda_memory" as const;
 export const ACTION_TYPE = "set_lambda_memory";
@@ -178,7 +179,7 @@ export const lambdaMemoryAction: ActionModule = {
             est_usd_month: rec.est_monthly_saving ?? v.saving_usd_month,
           });
         }
-        if (recs.length) { upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false }); filed += recs.length; }
+        if (recs.length) { upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS }); filed += recs.length; }
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { logs.destroy(); lambda.destroy(); }
     }

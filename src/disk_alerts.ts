@@ -7,6 +7,8 @@
  */
 import { config } from "./config.js";
 import { db } from "./db.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 export interface DiskLevel { mount: string; used_pct: number; total_bytes?: number | null; used_bytes?: number | null }
 export type DiskVerdict = "full" | "high" | "ok";
@@ -22,7 +24,7 @@ export function diskVerdict(usedPct: number, thresholds: { warn: number; alarm: 
 
 const gb = (b: number | null | undefined) => (b == null ? null : Math.round((b / 1e9) * 10) / 10);
 const openFor = db.prepare("select id, kind from alerts where kind in ('disk_full', 'disk_high') and resource = ? and acknowledged = 0 order by id desc limit 1");
-const insert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insert = alertInsert(AWS);
 const ack = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where id = ?");
 
 /** Applies the verdicts for one instance's mounts. Returns the number of alerts raised. */

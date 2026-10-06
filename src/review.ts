@@ -14,6 +14,8 @@ import { NATURALLY_IDLE_ROLES, ROLE_CONFIDENCE_THRESHOLD, RecInput, isProtected 
 import { upsertRecommendations } from "./collector.js";
 import { recentIngest, topLogGroups } from "./logs.js";
 import { ContainerStat, DISK_URGENT_DAYS, DISK_HORIZON_DAYS, DailyRow, diskForecast, idleContainers, memoryPressure, spendStep, sustainedIdle } from "./review_math.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists review_findings (
   id integer primary key autoincrement,
@@ -25,7 +27,7 @@ db.exec(`create table if not exists review_findings (
 const WINDOW_DAYS = 30;
 const insertFinding = db.prepare("insert into review_findings(day, kind, resource, resource_name, severity, message, details) values (?, ?, ?, ?, ?, ?, ?) on conflict(day, kind, resource, resource_name) do update set severity = excluded.severity, message = excluded.message, details = excluded.details");
 const openAlert = db.prepare("select id from alerts where kind = ? and resource = ? and acknowledged = 0 limit 1");
-const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insertAlert = alertInsert(AWS);
 
 export interface ReviewResult { day: string; instances: number; findings: Record<string, number>; recommendations: number; alerts: number; errors: string[]; took_ms: number }
 
@@ -102,7 +104,7 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
   if (recs.length) {
     const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0;
     out.recommendations = recs.length;
-    upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
+    upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS });
   }
   onLog(`instances: ${out.instances} reviewed, ${JSON.stringify(out.findings)}`);
 

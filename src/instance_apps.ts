@@ -8,6 +8,8 @@
  */
 import { db } from "./db.js";
 import type { ProbeListener, ProbeProcessGroup, ProbeResult } from "./ssm.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`
 create table if not exists instance_apps (
@@ -85,7 +87,7 @@ const upsert = db.prepare(`insert into instance_apps(instance_id, name, user, ki
     oldest_seconds = excluded.oldest_seconds, last_seen = excluded.last_seen, probes = probes + 1, gone = 0`);
 const markGone = db.prepare("update instance_apps set gone = 1 where instance_id = ? and name = ? and user = ?");
 const insertEvent = db.prepare("insert into instance_app_events(instance_id, name, user, event, at, details) values (?, ?, ?, ?, ?, ?)");
-const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insertAlert = alertInsert(AWS);
 const openAppGone = db.prepare("select 1 from alerts where kind = 'app_gone' and resource = ? and acknowledged = 0 and json_extract(details, '$.app') = ? limit 1");
 
 export interface RecordAppsResult { apps: number; appeared: string[]; disappeared: string[]; returned: string[]; alerts: number }

@@ -8,6 +8,8 @@ import { projectListCost, storeListCost, vercelRates } from "./pricing.js";
 import { NeonClient, RedisCloudClient } from "./partners.js";
 import type { PartnerClients } from "./inventory.js";
 import * as rulesMod from "./rules.js";
+import { vercelResourceIndex } from "./account_index.js";
+import { vercelOnboarding } from "./onboarding.js";
 const require_rules = () => rulesMod;
 
 /** The partner clients the saved keys allow (Settings › Accounts › Vercel › Partners). */
@@ -138,7 +140,6 @@ export const vercelAdapter: ProviderAdapter = {
   flow: { boundary: "team", credentials: "a team access token with read scope (Account settings › Tokens); the team id for a team token, none for a personal account", children: "none: a team is a leaf; a personal account is a team of one" },
   // page gates as much as facts: no probes, metrics, executor, benchmarks, bill, clusters; its endpoints and runtime live in the graph, but the Network and Security pages are AWS-shaped
   capabilities: { probes: false, metrics: false, executor: false, compliance: false, cost: false, bill: true, findings: true, changes: true, alerts: true, clusters: false, software: false, network: false },
-  sections: [{ id: "access", label: "Access" }, { id: "projects", label: "Projects" }, { id: "partners", label: "Partners" }],
   storage: ["vercel_team", "vercel_projects", "vercel_deployments", "vercel_domains", "vercel_env", "vercel_stores", "vercel_invoices"],
   telemetry: VERCEL_TELEMETRY,
   configured: vercelConfigured,
@@ -161,6 +162,75 @@ export const vercelAdapter: ProviderAdapter = {
     const usage = new Map(usageByProject(account, 7).map((u) => [u.project_id, u]));
     for (const p of listProjects(true)) { const t = usageTotals(account, 7, p.id); if (t.requests || t.invocations || t.builds) usage.set(p.id, { project_id: p.id, name: p.name, requests: t.requests, invocations: t.invocations, bandwidth_out_gb: t.bandwidth_out_gb, gb_hours: t.gb_hours, builds: t.builds }); }
     return [...listProjects(true).map((p) => resourceFromProject(p, account, usage)), ...listStores({ includeGone: true }).map((st) => resourceFromStore(st, account)), ...identitiesOfTeam(account, teamExtras(account))]; },
+  resourceIds: (account) => new Set([account, ...listProjects(true).map((p) => p.id), ...listStores({ includeGone: true }).map((s) => s.id)]),
+  owns: (id) => id === vercelAdapter.primaryAccountId() || (vercelConfigured() && /^team_/.test(id)) || Boolean(db.prepare("select 1 from vercel_team where id = ?").get(id)),
+  accountOf(resource, details) {
+    const d = (details ?? {}) as Record<string, unknown>;
+    if (typeof d.team_id === "string" && d.team_id) return d.team_id;
+    return vercelResourceIndex().of(resource) ?? (typeof d.run_account_id === "string" ? d.run_account_id : null);
+  },
+  // its rules are its own code (./rules.ts), run after every collection: one runs row per pass, for the team
+  rules: {
+    latestRunId: (account) => (db.prepare("select id from runs where provider = 'vercel' and account_id = ? and status = 'completed' order by id desc limit 1").get(account ?? vercelAdapter.primaryAccountId()) as { id: number } | undefined)?.id,
+    benchmarks: () => ({ all: [], defaults: [] }),
+    start: async () => { const r = await require_rules().runVercelRules(); return { run_id: r.run_id, note: `${r.findings} findings` }; },
+    run_native_type: "rules_pass",
+    control_prefixes: ["vercel."],
+    controlForRule: (rule) => (/^vercel_/.test(rule) ? rule.replace(/^vercel_/, "vercel.control.") : null),
+    controlFacts: (controlId) => {
+      const id = controlId.toLowerCase(); if (!id.startsWith("vercel.control.")) return null;
+      return { framework: "advisor", category: /mfa|open|firewall|ip_allow|source_ips/.test(id) ? "security" : /suspend|branches|unconnected|cache_cold/.test(id) ? "cost" : "reliability" };
+    },
+    controlSources: () => require_rules().CONTROL_REFERENCES,
+    playbooks_from: "all",
+    seed_playbooks: false,
+  },
+  onboarding: vercelOnboarding,
+  agentNote: () => { const t = vercelTeam(); return t ? `Vercel team ${t.name ?? t.slug ?? t.id} (${t.id}; vercel_projects, vercel_stores, vercel_bill, the vercel.* Steampipe tables, and graph_systems / graph_query with account_id '${t.id}')` : null; },
+  routes: async () => [(await import("../../routes/vercel.js")).vercel],
+  // the team's money is its invoices and the period estimate, read with every collection (./inventory.ts, ./pricing.ts)
+  cost: {
+    refresh: async () => ({ refreshed: false, note: "read with the Vercel collection" }),
+    lastBill: () => { const inv = listInvoices(3).find((i) => i.status === "paid" && i.total != null); return inv ? { month: String(inv.created_at || "").slice(0, 7) || null, usd: Number(inv.total) } : { month: null, usd: null }; },
+    month: async () => {
+      if (!vercelConfigured()) return [];
+      const o = vercelOverview();
+      return [{ key: "period_estimate", label: "Vercel period", usd: o.billing?.estimated_period_usd ?? null, to_total: true }, { key: "stores_at_plan", label: "stores at plan", usd: o.store_stats?.monthly_list_usd ?? null, to_total: true }];
+    },
+  },
+  attention: async () => {
+    if (!vercelConfigured()) return [];
+    const team = vercelAdapter.primaryAccountId();
+    return vercelOverview().attention.map((a) => ({ account: team, level: a.level as "alarm" | "warning" | "info", what: a.what, link: a.tab ? `/inventory?tab=${a.tab}` : "/findings" }));
+  },
+  purgeStorage(account, { dryRun }) {
+    // the team's own tables (vercel_domains and vercel_env hang off a project), its team row and its cached billing
+    const out: Record<string, number> = {};
+    const count = (sql: string) => { try { return (db.prepare(sql.replace(/^delete/, "select count(*) as n")).get(account) as { n: number }).n; } catch { return 0; } };
+    const run = (sql: string) => { try { return db.prepare(sql).run(account).changes; } catch { return 0; } };
+    const stmts: [string, string][] = [["vercel_domains", "delete from vercel_domains where project_id in (select id from vercel_projects where team_id = ?)"], ["vercel_env", "delete from vercel_env where project_id in (select id from vercel_projects where team_id = ?)"],
+      ...["vercel_projects", "vercel_stores", "vercel_usage", "vercel_invoices", "vercel_snapshots", "vercel_changes", "vercel_deployments"].map((t): [string, string] => [t, `delete from ${t} where team_id = ?`]), ["vercel_team", "delete from vercel_team where id = ?"]];
+    for (const [t, sql] of stmts) { const n = dryRun ? count(sql) : run(sql); if (n) out[t] = n; }
+    if (!dryRun) db.prepare("delete from settings where key in (?, ?)").run(`vercel_billing:${account}`, `vercel_extras:${account}`);
+    return out;
+  },
+  // the Vercel connection for Steampipe follows the saved token (written on save, removed with the account; here after a restart)
+  onStart() { import("./steampipe.js").then((m) => { const r = m.ensureVercelConnection(); if (r !== "skipped" && r !== "unchanged") console.log(`[vercel] steampipe connection ${r}`); }).catch((e) => console.error(`[vercel] steampipe connection: ${e?.message || e}`)); },
+  jobs: [{
+    key: "vercelCron", label: "Vercel collection", schedule_name: "Vercel collection (VERCEL_CRON)", tag: "vercel", cron: () => config.vercelCron,
+    blocked: () => (vercelConfigured() ? null : "skipped: no Vercel token (Settings > Accounts)"),
+    run: async () => {
+      const r = await vercelAdapter.collect();
+      try { const { mirrorAdapter } = await import("../../graph_mirror.js"); await mirrorAdapter(vercelAdapter); } catch (e: any) { console.error(`[graph] vercel: ${e?.message || e}`); }
+      return r.errors.length ? `collected with ${r.errors.length} error(s): ${r.errors[0]}` : "collected and mirrored";
+    },
+  }],
+  ui: {
+    overview: "vercel.overview", bill: "vercel.bill", changes: "vercel.changes",
+    inventory: [{ tab: "rds", view: "vercel.stores.database", label: "Vercel stores (Neon, …)" }, { tab: "elasticache", view: "vercel.stores.cache", label: "Vercel stores (Redis, KV)" }, { tab: "s3", view: "vercel.stores.storage", label: "Vercel Blob" },
+      { tab: "deployments", view: "vercel.projects", label: "Vercel projects" }, { tab: "identities", view: "vercel.members", label: "Vercel team members" }],
+    settings: [{ id: "access", label: "Access", view: "vercel.access" }, { id: "projects", label: "Projects", view: "vercel.projects" }, { id: "partners", label: "Partners", view: "vercel.partners" }],
+  },
   layers: [
     { name: "vercel endpoints and runtimes", mirror: async () => (await import("./graph.js")).mirrorVercel() },
     { name: "vercel pricing knowledge and systems", mirror: async () => (await import("./pricing.js")).mirrorVercelPricing() },

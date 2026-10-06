@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { api, usd, when } from "../api";
 import { Badge, Button, Card, Empty, Td, Th } from "../components/ui";
 import { useScopeInfo } from "../scope";
-import { VercelBill } from "../components/vercelBill";
+import { ScopedPage } from "../views";
 
 type Line = { service: string; usage_type: string; quantity: number; unit: string | null; region: string; rule: string | null; unit_price: number | null; modelled: number | null; actual_od: number; net: number; residual: number | null; note?: string };
 type Service = { service: string; actual_net: number; actual_od: number; modelled: number; unpriced_actual: number; lines: number; priced_lines: number; gap_pct: number | null; status: "pass" | "named" | "fail" };
@@ -34,12 +34,11 @@ const delta = (v: number | null | undefined) => (v == null ? "—" : `${v > 0 ? 
 
 /** This month's bill: spent so far, and what the rest of the month costs from what is running now. */
 export default function ThisMonth() {
-  const scopeInfo = useScopeInfo();
-  if (scopeInfo.provider && scopeInfo.provider !== "aws") return scopeInfo.provider === "vercel" ? <VercelBill /> : <Empty>No bill for {scopeInfo.label} yet.</Empty>;
-  return <AwsThisMonth />;
+  return <ScopedPage slot="bill" what="bill" />;
 }
 
-function AwsThisMonth() {
+/** The AWS account's month (the AWS adapter's bill view, ui/src/views.tsx). */
+export function AwsThisMonth() {
   const [d, setD] = useState<{ forecast: Forecast | null; history: { day: string; forecast_net: number; mtd_net: number }[]; price_check: { month: string; reconciliation: Recon | null }; scope?: { account: string; spend: { month: string; usd: number }[] | null } | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");

@@ -6,6 +6,8 @@
  */
 import { db } from "./db.js";
 import { S, parentSchema, query } from "./steampipe.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 export interface GateResult { ok: boolean; accountId?: string; error?: string; kind?: "credentials" | "steampipe" }
 
@@ -34,7 +36,7 @@ export async function credentialGate(context: string): Promise<GateResult> {
     ? `AWS credentials for connection "${S}" are not working: ${short(result.error!)}. Sampling, probes and runs are paused until valid credentials are saved in Settings.`
     : `Steampipe is not answering for connection "${S}": ${short(result.error!)}. Sampling, probes and runs are paused.`;
   if (!open) {
-    db.prepare("insert into alerts(kind, resource, message, details) values ('credentials', ?, ?, ?)")
+    alertInsert(AWS, "credentials")
       .run(S, message, JSON.stringify({ context, error: result.error, kind: result.kind, since: new Date().toISOString() }));
   }
   console.warn(`[gate] ${context} skipped: ${message}`);

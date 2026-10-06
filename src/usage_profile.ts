@@ -44,6 +44,7 @@ import type { RecInput } from "./rules.js";
 import { executorCreds, type Creds } from "./executor.js";
 import { metricDimension } from "./elb_inventory.js";
 import { HOURS_PER_WEEK, describeSchedule, offHoursPerWeek, parseSchedule, type Schedule } from "./actions/schedule_hours.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists usage_log_signals (subject text not null, hour integer not null, count integer not null, primary key (subject, hour))`);
 db.exec(`create table if not exists usage_profiles (
@@ -490,7 +491,7 @@ export async function usageProfilePass(onLog: (s: string) => void = () => {}, op
   }
   setSetting("usage_last_pass", JSON.stringify({ at: new Date().toISOString(), subjects: list.length, profiled, errors, only: opts.only ?? null }));
   let filed = 0;
-  if (recs.length) { const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0; filed = upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false }); }
+  if (recs.length) { const runId = (db.prepare("select id from runs where provider = 'aws' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? 0; filed = upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS }); }
   try { const { mirrorUsageProfilesInBackground } = await import("./graph_mirror.js"); mirrorUsageProfilesInBackground(); } catch { /* graph optional */ }
   return { profiled, recommendations: filed, errors, took_ms: Date.now() - t0 };
 }

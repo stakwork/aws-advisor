@@ -30,6 +30,8 @@ import { beginPass, endPass, logEvent } from "./executor_log.js";
 import { mirrorPassInBackground } from "./graph_mirror.js";
 import { checkLine, checkProposals, parseCheck, reusableCheck, type ProposalCheck } from "./proposal_check.js";
 import { accountWhere, type AccountScope } from "./scope.js";
+import { adapterFor } from "./adapters/index.js";
+import type { ProviderId } from "./adapters/types.js";
 
 db.exec(`create table if not exists actions (
   id integer primary key autoincrement,
@@ -62,6 +64,8 @@ create index if not exists actions_dedupe on actions(dedupe, status);
 create index if not exists actions_status on actions(status, created_at)`);
 // Member accounts (src/accounts.ts): the account a row's resource lives in; null = the parent (rows from before there were members).
 addColumn("actions", "account_id", "text");
+// The provider whose module made the row (registerAction); rows from before there was more than one provider were AWS's.
+if (!(db.pragma("table_info(actions)") as { name: string }[]).some((c) => c.name === "provider")) { addColumn("actions", "provider", "text"); db.exec("update actions set provider = 'aws' where provider is null"); }
 // Jev's second opinion on the proposal (src/proposal_check.ts): verdict, scores and reason, asked once per change.
 addColumn("actions", "check_json", "text");
 // When a stale row was proposed again (recordProposal): the same row comes back instead of a duplicate; the grace period restarts here.
@@ -168,9 +172,22 @@ export interface ActionModule {
 
 export class NoActuator extends Error { constructor(m: string) { super(m); this.name = "NoActuator"; } }
 
-const modules = new Map<ActionKind, ActionModule>();
-export function registerAction(m: ActionModule): void { modules.set(m.kind, m); }
+const modules = new Map<ActionKind, ActionModule & { provider: ProviderId }>();
+/** A provider's adapter registers its modules under its id (src/adapters/types.ts ProviderActions); the ledger row and the credentials follow the provider. */
+export function registerAction(m: ActionModule, provider: ProviderId): void { modules.set(m.kind, { ...m, provider }); }
 export const actionModules = () => [...modules.values()];
+
+/** The credentials a provider's modules run under, from its adapter. */
+export async function providerCreds(provider: ProviderId): Promise<Creds> {
+  const a = adapterFor(provider);
+  if (!a?.actions) throw new Error(`provider ${provider} has no actions`);
+  return (await a.actions.credentials()) as Creds;
+}
+/** The credentials the module of a kind runs under. */
+async function credsOfKind(kind: ActionKind): Promise<Creds> {
+  const mod = modules.get(kind); if (!mod) throw new Error(`no module for ${kind}`);
+  return providerCreds(mod.provider);
+}
 
 /** Pricing the estimates use (us-east-1 list): what the ledger's "≈ USD/month" column means. */
 export const ACU_USD_HOUR = 0.12;
@@ -574,9 +591,11 @@ export function recordProposal(p: Proposal, mode: string, trigger: string): { ro
       .run(p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null, p.resource_name ?? null, p.account_id ?? null, mode, trigger, stale.id);
     return { row: getAction(stale.id)!, fresh: true, revived: true };
   }
-  const id = Number(db.prepare(`insert into actions(kind, resource, resource_name, region, account_id, dedupe, status, mode, trigger, title, reason, before_json, after_json, facts_json, rollback, est_usd_month)
-    values (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(p.kind, p.resource, p.resource_name ?? null, p.region, p.account_id ?? null, p.dedupe, mode, trigger, p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null).lastInsertRowid);
+  const provider = modules.get(p.kind)?.provider;
+  if (!provider) throw new Error(`no module registered for ${p.kind}`);
+  const id = Number(db.prepare(`insert into actions(provider, kind, resource, resource_name, region, account_id, dedupe, status, mode, trigger, title, reason, before_json, after_json, facts_json, rollback, est_usd_month)
+    values (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(provider, p.kind, p.resource, p.resource_name ?? null, p.region, p.account_id ?? null, p.dedupe, mode, trigger, p.title, p.reason, json.before, json.after, json.facts, p.rollback, p.est_usd_month ?? null).lastInsertRowid);
   return { row: getAction(id)!, fresh: true, revived: false };
 }
 
@@ -625,7 +644,7 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   if (missing.length) throw new Error(`the actuator role${row.account_id ? ` of account ${row.account_id}` : ""} is not allowed ${missing.join(", ")}; #${id} can only be done by a person (or widen the role's policy)`);
   const p = proposalOf(row);
   let creds: Creds;
-  try { creds = credsForAccount(executorCreds(), row.account_id); creds.act(); }
+  try { creds = credsForAccount(await credsOfKind(row.kind), row.account_id); creds.act(); }
   catch (e: any) {
     const why = e?.message || String(e);
     db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(why, trigger, id);
@@ -689,7 +708,7 @@ export async function advanceAction(id: number, trigger = "schedule"): Promise<{
   if (advancing.has(id)) return { row, wait_ms: 20_000 };
   // No credentials is a setup problem, not a failed stage: the row waits for the next pass.
   let creds: Creds;
-  try { creds = credsForAccount(executorCreds(), row.account_id); } catch (e: any) { console.error(`[executor] #${id} not advanced: ${e?.message || e}`); return { row, wait_ms: null }; }
+  try { creds = credsForAccount(await credsOfKind(row.kind), row.account_id); } catch (e: any) { console.error(`[executor] #${id} not advanced: ${e?.message || e}`); return { row, wait_ms: null }; }
   advancing.add(id);
   try {
     const p = proposalOf(row);
@@ -740,7 +759,7 @@ export async function stepAction(id: number, name: string, by: string): Promise<
   const trigger = by || "manual";
   try {
     const p = proposalOf(row);
-    try { recordStage(row, p, await mod.step(name, p, credsForAccount(executorCreds(), row.account_id), trigger), "step", trigger); }
+    try { recordStage(row, p, await mod.step(name, p, credsForAccount(await credsOfKind(row.kind), row.account_id), trigger), "step", trigger); }
     catch (e) {
       const error = actuatorDenied(e, row.kind, "apply") ?? describeError(e, `${row.kind} ${name}`);
       db.prepare("update actions set facts_json = ?, error = ? where id = ?").run(JSON.stringify(p.facts), `${name} failed: ${error}`, id);
@@ -780,7 +799,7 @@ async function verifyInner(row: ActionRow, mod: ActionModule, creds?: Creds, tri
   const id = row.id;
   const event = (outcome: "verified" | "failed" | "pending" | "error", detail: string) => logEvent({ action_id: id, kind: row.kind, event: "verify", outcome, trigger, detail });
   try {
-    const v = await mod.verify(proposalOf(row), credsForAccount(creds || executorCreds(), row.account_id));
+    const v = await mod.verify(proposalOf(row), credsForAccount(creds || await credsOfKind(row.kind), row.account_id));
     if (v.ok === true) { db.prepare("update actions set status = 'verified', verified_at = datetime('now'), result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); event("verified", v.note); closeRecommendation(getAction(id)!); }
     else if (v.ok === false) { db.prepare("update actions set status = 'failed', error = ? where id = ?").run(`read-back disagrees: ${v.note}`, id); event("failed", `read-back disagrees: ${v.note}`); }
     else { db.prepare("update actions set result = coalesce(result, '') || ' · ' || ? where id = ?").run(v.note, id); event("pending", v.note); }
@@ -801,7 +820,7 @@ export async function revertAction(id: number, by = "manual"): Promise<ActionRow
   if (advancing.has(id)) throw new Error(`#${id} is moving a stage right now; revert in a minute`);
   const missingRevert = by === "manual" ? [] : rowMissing(row, "revert", (await actuatorCapabilities(row.account_id)).caps[row.kind]);
   if (missingRevert.length) throw new Error(`the actuator role${row.account_id ? ` of account ${row.account_id}` : ""} is not allowed ${missingRevert.join(", ")}; #${id} can only be undone by a person (or widen the role's policy)`);
-  const creds = credsForAccount(executorCreds(), row.account_id); creds.act();
+  const creds = credsForAccount(await credsOfKind(row.kind), row.account_id); creds.act();
   console.log(`[executor] reverting #${id} ${row.kind} ${row.resource}${row.account_id ? ` (account ${row.account_id})` : ""} (${by})`);
   try {
     const p = proposalOf(row);
@@ -839,8 +858,13 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
     if (mode === "off") { const n = "mode off: nothing planned"; out.notes.push(n); log(n); out.took_ms = Date.now() - t0; return out; }
     const paused = pauseState();
     if (paused.paused) { const n = `${pauseLine(paused)}; nothing planned or applied`; out.notes.push(n); log(n); out.took_ms = Date.now() - t0; return out; }
-    let creds: Creds;
-    try { creds = executorCreds(); } catch (e: any) { out.errors.push(e?.message || String(e)); out.took_ms = Date.now() - t0; return out; }
+    // each provider's modules run under that provider's credentials, built once per pass; a provider whose credentials fail is skipped with the error
+    const credsBy = new Map<ProviderId, Creds | Error>();
+    const credsFor = async (provider: ProviderId): Promise<Creds | null> => {
+      if (!credsBy.has(provider)) { try { credsBy.set(provider, await providerCreds(provider)); } catch (e: any) { credsBy.set(provider, e instanceof Error ? e : new Error(String(e))); out.errors.push(e?.message || String(e)); } }
+      const c = credsBy.get(provider)!; return c instanceof Error ? null : c;
+    };
+    if (![...new Set(actionModules().map((m) => m.provider))].length) { out.took_ms = Date.now() - t0; return out; }
     // Staged rows (a migration) move a stage on, and the driver picks them up again (after a restart, or past its time).
     for (const r of db.prepare("select id, kind from actions where status = 'applied' order by id").all() as { id: number; kind: ActionKind }[]) {
       if (!modules.get(r.kind)?.advance) continue;
@@ -849,7 +873,7 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
       if (a.wait_ms != null) driveInBackground(r.id, trigger);
     }
     // Rows applied earlier and still unverified (a snapshot still archiving) get read back first.
-    for (const r of db.prepare("select id, kind from actions where status = 'applied' order by id").all() as { id: number; kind: ActionKind }[]) { if (modules.get(r.kind)?.advance) continue; const v = await verifyAction(r.id, creds, trigger); if (v.status === "verified") { out.verified++; log(`#${r.id} read back: verified`); } }
+    for (const r of db.prepare("select id, kind from actions where status = 'applied' order by id").all() as { id: number; kind: ActionKind }[]) { const m = modules.get(r.kind); if (!m || m.advance) continue; const c = await credsFor(m.provider); if (!c) continue; const v = await verifyAction(r.id, c, trigger); if (v.status === "verified") { out.verified++; log(`#${r.id} read back: verified`); } }
     const budget = { left: Math.max(1, config.actMaxPerPass) };
     const touched = new Set<number>();
     // What each account's actuator role may do, fetched once per account per pass (a member's row is judged on the member's role).
@@ -862,6 +886,7 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
     };
     for (const mod of modules.values()) {
       if (opts.kinds && !opts.kinds.includes(mod.kind)) continue;
+      const creds = await credsFor(mod.provider); if (!creds) continue;
       let plan: PlanResult;
       try { plan = await mod.plan(creds, (l) => log(`${mod.kind}: ${l}`)); }
       catch (e) { const m = describeError(e, `${mod.kind} plan`); out.errors.push(`${mod.kind}: ${m}`); log(`${mod.kind}: plan failed: ${m}`); continue; }
@@ -942,9 +967,10 @@ export async function deleteActions(ids: number[], opts: { force?: boolean } = {
 /** What the pass would propose right now, without touching the ledger. */
 export async function previewActions(): Promise<{ proposals: Proposal[]; notes: string[]; errors: string[] }> {
   const out = { proposals: [] as Proposal[], notes: [] as string[], errors: [] as string[] };
-  let creds: Creds;
-  try { creds = executorCreds(); } catch (e: any) { out.errors.push(e?.message || String(e)); return out; }
+  const credsBy = new Map<ProviderId, Creds | null>();
   for (const mod of modules.values()) {
+    if (!credsBy.has(mod.provider)) { try { credsBy.set(mod.provider, await providerCreds(mod.provider)); } catch (e: any) { out.errors.push(e?.message || String(e)); credsBy.set(mod.provider, null); } }
+    const creds = credsBy.get(mod.provider); if (!creds) continue;
     try { const p = await mod.plan(creds, () => {}); out.proposals.push(...p.proposals); out.notes.push(...p.notes.map((n) => `${mod.kind}: ${n}`)); }
     catch (e) { out.errors.push(`${mod.kind}: ${describeError(e, `${mod.kind} plan`)}`); }
   }

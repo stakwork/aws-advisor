@@ -7,7 +7,7 @@ import { SetupWizard } from "../components/setup";
 import { AgentPrompts } from "../components/prompts";
 import { RuntimeSettings } from "../components/runtimeSettings";
 import { ProbesCard } from "../components/probes";
-import { VercelAccess, VercelPartners, VercelProjects } from "../components/vercel";
+import { ProviderView } from "../views";
 
 type Mode = "keys" | "profile" | "chain";
 
@@ -34,7 +34,9 @@ const AWS_SECTIONS = ["access", "permissions", "probes", "benchmarks", "members"
 type AwsSection = (typeof AWS_SECTIONS)[number];
 const AWS_SECTION_LABEL: Record<AwsSection, string> = { access: "Access", permissions: "Permissions", probes: "Probes", benchmarks: "Benchmarks", members: "Member accounts" };
 const PROBE_CRONS = ["probeCron", "probeDockerCron", "probeAppsCron", "probeSoftwareCron"];
-type ProviderInfo = { id: string; label: string; boundary: string; credentials: string; children: string; available: boolean; configured: boolean; sections: { id: string; label: string }[] };
+type ProviderInfo = { id: string; label: string; boundary: string; credentials: string; children: string; available: boolean; configured: boolean; sections: { id: string; label: string }[]; ui: { settings: { id: string; label: string; view: string }[] } | null };
+/** A provider whose Settings sections are this page's own (the AWS adapter declares aws.* views: credentials, permissions, probes, benchmarks, members); every other provider's sections are its views in ui/src/views.tsx. */
+const BUILTIN_VIEW = /^aws\./;
 
 
 const MODES: { id: Mode; label: string; hint: string }[] = [
@@ -119,13 +121,19 @@ export default function Settings() {
   );
 
   const parentId = aws.accountId || "aws";
-  const other = records.find((r) => r.provider !== "aws" && r.id === account) ?? (account === "vercel" ? { provider: "vercel", id: "vercel", native_type: "team", name: "Vercel", parent_id: null, access: "", enabled: true, last_test: null } : null);
+  // the parent's sections as its adapter declares them (the built-in views), in its order
+  const declared = providerList.find((p) => p.ui?.settings.some((x) => BUILTIN_VIEW.test(x.view)))?.ui?.settings.map((x) => x.id).filter((x): x is AwsSection => (AWS_SECTIONS as readonly string[]).includes(x));
+  const awsSections: AwsSection[] = declared?.length ? declared : [...AWS_SECTIONS];
+  const providerOf = (id: string) => providerList.find((p) => p.id === id);
+  const builtin = (provider: string) => Boolean(providerOf(provider)?.ui?.settings.some((x) => BUILTIN_VIEW.test(x.view)));
+  // an account of a provider with its own views; a provider id stands for its first account before one exists (Add account)
+  const other = records.find((r) => !builtin(r.provider) && r.id === account)
+    ?? (account && providerOf(account) && !builtin(account) ? { provider: account, id: account, native_type: providerOf(account)!.boundary, name: providerOf(account)!.label, parent_id: null, access: "", enabled: true, last_test: null } : null);
   const selected = other ? "other" : account === parentId || account === "aws" ? "parent" : members.find((m) => m.account_id === account) ? "member" : null;
-  const vercelConfigured = providerList.find((p) => p.id === "vercel")?.configured ?? false;
   const accountRows = [
     ...(aws.configured ? [{ provider: "aws", boundary: "account", id: parentId, name: "parent", access: aws.mode === "profile" ? `profile ${aws.profile}` : aws.mode === "chain" ? "instance / default chain" : `key ${aws.accessKeyMasked || ""}`, status: aws.accountId ? `connected · saved ${when(aws.savedAt)}` : "saved, not tested yet", parent: null as string | null }] : []),
     ...members.map((m) => ({ provider: "aws", boundary: "account", id: m.account_id, name: m.name, access: `role ${m.role_arn.split("/").pop()}`, status: m.last_test ? `${m.last_test.ok ? "ok" : "failed"} · ${when(m.last_test.at)}${m.enabled ? "" : " · disabled"}` : "not tested yet", parent: parentId })),
-    ...records.filter((r) => r.provider !== "aws").map((r) => ({ provider: r.provider, boundary: r.native_type.replace(/_/g, " "), id: r.id, name: r.name, access: r.access, status: r.last_test ? `${r.last_test.ok ? "ok" : "failed"} · ${r.last_test.detail || ""}` : "not read yet", parent: r.parent_id })),
+    ...records.filter((r) => !builtin(r.provider)).map((r) => ({ provider: r.provider, boundary: r.native_type.replace(/_/g, " "), id: r.id, name: r.name, access: r.access, status: r.last_test ? `${r.last_test.ok ? "ok" : "failed"} · ${r.last_test.detail || ""}` : "not read yet", parent: r.parent_id })),
   ];
 
   return (
@@ -167,7 +175,7 @@ export default function Settings() {
           {adding && (
             <div className="mt-3 grid gap-2 md:grid-cols-2">
               {providerList.map((p) => (
-                <button key={p.id} type="button" disabled={!p.available} onClick={() => { setAdding(false); if (p.id === "aws") setQ({ account: aws.configured ? parentId : "aws", section: aws.configured ? "members" : "access" }); else setQ({ account: records.find((r) => r.provider === p.id)?.id || p.id, section: "access" }); }}
+                <button key={p.id} type="button" disabled={!p.available} onClick={() => { setAdding(false); if (builtin(p.id)) setQ({ account: aws.configured ? parentId : "aws", section: aws.configured ? "members" : "access" }); else setQ({ account: records.find((r) => r.provider === p.id)?.id || p.id, section: "access" }); }}
                   className={`rounded border p-3 text-left ${p.available ? "border-zinc-700 hover:bg-zinc-900" : "cursor-not-allowed border-zinc-800 opacity-50"}`} title={`${p.credentials}; children: ${p.children}`}>
                   <div className="text-sm text-zinc-100">{p.label} <span className="text-xs text-zinc-500">· {p.boundary}</span>{!p.available && <span className="ml-2 text-xs text-zinc-500">not available yet</span>}</div>
                   <div className="text-xs text-zinc-500">{p.credentials}</div>
@@ -187,13 +195,11 @@ export default function Settings() {
             <span className="text-zinc-200">{providerList.find((p) => p.id === other.provider)?.label || other.provider} {other.native_type.replace(/_/g, " ")} <span className="font-mono">{other.id !== other.provider ? other.id : ""}</span></span>
           </div>
           <div className="flex flex-wrap gap-1 border-b border-zinc-800" role="tablist">
-            {(providerList.find((p) => p.id === other.provider)?.sections ?? [{ id: "access", label: "Access" }]).map((sec) => (
+            {(providerOf(other.provider)?.ui?.settings ?? [{ id: "access", label: "Access", view: "" }]).map((sec) => (
               <button key={sec.id} type="button" role="tab" aria-selected={(params.get("section") || "access") === sec.id} onClick={() => setQ({ section: sec.id })} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${(params.get("section") || "access") === sec.id ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>{sec.label}</button>
             ))}
           </div>
-          {other.provider === "vercel" && (params.get("section") || "access") === "access" && <VercelAccess configured={vercelConfigured} onChange={() => { loadRecords(); api("/providers").then((d) => setProviderList(d.providers || [])).catch(() => {}); }} />}
-          {other.provider === "vercel" && params.get("section") === "projects" && <VercelProjects />}
-          {other.provider === "vercel" && params.get("section") === "partners" && <VercelPartners />}
+          {(() => { const sec = providerOf(other.provider)?.ui?.settings.find((x) => x.id === (params.get("section") || "access")); return sec ? <ProviderView id={sec.view} configured={providerOf(other.provider)?.configured ?? false} onChange={() => { loadRecords(); api("/providers").then((d) => setProviderList(d.providers || [])).catch(() => {}); }} /> : null; })()}
         </>
       )}
 
@@ -206,7 +212,7 @@ export default function Settings() {
             {selected === "member" && <span className="text-xs text-zinc-500">· reached through a role from the parent; its credentials, permissions and probes are the parent's</span>}
           </div>
           <div className="flex flex-wrap gap-1 border-b border-zinc-800" role="tablist">
-            {AWS_SECTIONS.map((sec) => (
+            {awsSections.map((sec) => (
               <button key={sec} type="button" role="tab" aria-selected={section === sec} onClick={() => setQ({ section: sec })} className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${section === sec ? "border-zinc-100 text-zinc-100" : "border-transparent text-zinc-400 hover:text-zinc-200"}`}>
                 {AWS_SECTION_LABEL[sec]}{sec === "members" && members.length ? <span className="ml-1 text-xs text-zinc-500">{members.length}</span> : null}
               </button>

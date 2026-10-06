@@ -9,9 +9,11 @@ import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 import { config } from "./config.js";
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 const openErr = db.prepare("select id from alerts where kind = 'lambda_errors' and resource = ? and acknowledged = 0 limit 1");
-const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insertAlert = alertInsert(AWS);
 const ackErr = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = 'lambda_errors' and resource = ? and acknowledged = 0");
 
 /** Pure: a function whose error share of invocations crosses the threshold (with enough invocations to mean it); closes at half the threshold. */

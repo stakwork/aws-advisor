@@ -17,6 +17,8 @@ import { refreshSsoInventory } from "./sso_inventory.js";
 import { refreshSignIns } from "./sign_ins.js";
 import { refreshRoleTrust } from "./role_trust.js";
 import { refreshServiceInventory, serviceSummary } from "./service_inventory.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * Inventory: a snapshot of EC2 instances (with their SSM status, EBS, CPU, latest probe and list price),
@@ -406,11 +408,11 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
       markGone("inventory_elasticache", now, cacheRows, (l) => console.log(`[inventory] ${l}`));
       // memory pressure on a cache is an alert: at 90 % of DatabaseMemoryUsagePercentage keys start being evicted
       const openCache = db.prepare("select id from alerts where kind = 'cache_memory_high' and resource = ? and acknowledged = 0 limit 1");
-      const insCache = db.prepare("insert into alerts(kind, resource, message, details) values ('cache_memory_high', ?, ?, ?)");
+      const insCache = alertInsert(AWS, "cache_memory_high");
       const ackCache = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = 'cache_memory_high' and resource = ? and acknowledged = 0");
       // an RDS instance whose freeable memory touched half a gigabyte is one query away from swapping
       const openRds = db.prepare("select id from alerts where kind = 'rds_memory_low' and resource = ? and acknowledged = 0 limit 1");
-      const insRds = db.prepare("insert into alerts(kind, resource, message, details) values ('rds_memory_low', ?, ?, ?)");
+      const insRds = alertInsert(AWS, "rds_memory_low");
       const ackRds = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = 'rds_memory_low' and resource = ? and acknowledged = 0");
       for (const [id, bytes] of rdsMem) {
         const gbFree = bytes / 1e9; const open = openRds.get(id);

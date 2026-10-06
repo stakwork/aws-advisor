@@ -1,6 +1,7 @@
 import { db } from "./db.js";
-import { PROVIDER, accountId, enabled, writeCypher } from "./graph_mirror.js";
+import { accountId, enabled, writeCypher } from "./graph_mirror.js";
 import { listClusters, listIngresses, listNetworkPolicies, listServices, listWorkloads, selects } from "./cluster_inventory.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * Clusters and workloads in the graph (docs/cloud-ontology.md §1 AdvisorCluster / AdvisorDeployment, §8 step 4): one
@@ -117,11 +118,11 @@ export interface ClusterGraphCounts { clusters: number; workloads: number; endpo
 export async function mirrorClusters(): Promise<ClusterGraphCounts | null> {
   if (!enabled()) return null;
   const t0 = Date.now(); const account = accountId(); const stamp = now();
-  const w = (cypher: string, batch: any[]) => writeCypher(cypher, { rows: batch, account, provider: PROVIDER, now: stamp });
+  const w = (cypher: string, batch: any[]) => writeCypher(cypher, { rows: batch, account, provider: AWS, now: stamp });
   for (const l of ["AdvisorCluster", "AdvisorDeployment", "AdvisorImage"]) await writeCypher(`CREATE CONSTRAINT ${l.toLowerCase()}_id IF NOT EXISTS FOR (n:${l}) REQUIRE n.id IS UNIQUE`);
   const clusters = listClusters();
   // node pools of an EKS cluster: the pools of the instances whose tags name the cluster (managed node groups and Karpenter alike); ECS container instances have no pool
-  const poolIdsOf = (c: any) => c.kind === "eks" ? rows(`select distinct pool from inventory_ec2 where gone = 0 and pool is not null and (json_extract(snapshot, '$.tags."eks:cluster-name"') = ? or json_extract(snapshot, '$.tags."aws:eks:cluster-name"') = ? or json_extract(snapshot, '$.tags."alpha.eksctl.io/cluster-name"') = ? or json_extract(snapshot, '$.tags."kubernetes.io/cluster/' || ? || '"') is not null)`, c.name, c.name, c.name, c.name).map((r) => `${PROVIDER}:${account}:pool:${r.pool}`) : [];
+  const poolIdsOf = (c: any) => c.kind === "eks" ? rows(`select distinct pool from inventory_ec2 where gone = 0 and pool is not null and (json_extract(snapshot, '$.tags."eks:cluster-name"') = ? or json_extract(snapshot, '$.tags."aws:eks:cluster-name"') = ? or json_extract(snapshot, '$.tags."alpha.eksctl.io/cluster-name"') = ? or json_extract(snapshot, '$.tags."kubernetes.io/cluster/' || ? || '"') is not null)`, c.name, c.name, c.name, c.name).map((r) => `${AWS}:${account}:pool:${r.pool}`) : [];
   // Member accounts (src/accounts.ts): a cluster's row carries its account; everything inside the cluster follows it
   const clusterAccount = new Map(clusters.map((c) => [c.arn, (c as any).account_id ? String((c as any).account_id) : null]));
   const clusterRows = clusters.map((c) => {
@@ -176,7 +177,7 @@ export async function mirrorClusters(): Promise<ClusterGraphCounts | null> {
     }
   }
   for (const b of chunks(endpointRows)) await w(ENDPOINT_CYPHER, b);
-  await writeCypher(INHERIT_VERDICT_CYPHER, { provider: PROVIDER, now: stamp });
+  await writeCypher(INHERIT_VERDICT_CYPHER, { provider: AWS, now: stamp });
 
   const policyRows = policies.map((p) => {
     const rules: any[] = [];

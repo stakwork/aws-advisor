@@ -3,11 +3,11 @@
  * assume a member's read role, and the bill per linked account for the Bill page.
  */
 import { Router } from "express";
-import { listAccounts, removeAccount, saveAccount, testAccount, validateAccount } from "../accounts.js";
+import { listAccounts } from "../accounts.js";
 import { credentialsMeta, hasConnectionFile, sdkIdentity } from "../steampipe.js";
 import { actuatorTrustPolicy } from "../permissions.js";
 import { servicesByAccount, spendByAccount } from "../spend.js";
-import { allAccounts, providers } from "../adapters/index.js";
+import { adapterFor, allAccounts, providers } from "../adapters/index.js";
 import { accountsOverview , generalOverview } from "../accounts_overview.js";
 
 export const accounts = Router();
@@ -46,25 +46,34 @@ accounts.get("/accounts/organization", async (_req, res) => {
 });
 accounts.get("/accounts/general", async (_req, res) => { try { res.json(await generalOverview()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
-/** Body: { account_id, name?, role_arn, act_role_arn?, regions?, enabled? }. Saves, rewrites the connection files, tests the read role. */
-accounts.post("/accounts", async (req, res) => {
-  let a;
-  try { a = validateAccount(req.body || {}); } catch (e: any) { return res.status(400).json({ error: e.message }); }
-  const saved = saveAccount(a);
-  const test = await testAccount(a.account_id, 20_000);
-  res.json({ saved: saved.account, files_rewritten: saved.files_rewritten, test, accounts: listAccounts() });
+/**
+ * Accounts of any provider, through its adapter's onboarding (src/adapters/types.ts ProviderOnboarding): add from the
+ * Settings form, test, remove, and check what the advisor may do there. The body is the provider's own form.
+ */
+const onboardingOf = (id: string) => adapterFor(id)?.onboarding ?? null;
+accounts.post("/providers/:provider/accounts", async (req, res) => {
+  const o = onboardingOf(String(req.params.provider)); if (!o) return res.status(404).json({ error: `no provider ${req.params.provider} that adds accounts` });
+  const r = await o.add(req.body || {}); res.status(r.ok ? 200 : r.status ?? 400).json(r.ok ? r : { error: r.error });
+});
+accounts.post("/providers/:provider/accounts/:id/test", async (req, res) => {
+  const o = onboardingOf(String(req.params.provider)); if (!o) return res.status(404).json({ error: `no provider ${req.params.provider}` });
+  const r = await o.test(String(req.params.id)); res.status(r.ok ? 200 : 400).json(r);
+});
+accounts.delete("/providers/:provider/accounts/:id", async (req, res) => {
+  const o = onboardingOf(String(req.params.provider)); if (!o) return res.status(404).json({ error: `no provider ${req.params.provider}` });
+  const r = await o.remove(String(req.params.id)); res.status(r.ok ? 200 : r.status ?? 400).json(r.ok ? r : { error: r.error });
+});
+accounts.post("/providers/:provider/permissions", async (req, res) => {
+  const o = onboardingOf(String(req.params.provider)); if (!o?.permissionCheck) return res.status(404).json({ error: `provider ${req.params.provider} has no permission check` });
+  const account = typeof req.body?.account_id === "string" && req.body.account_id.trim() ? req.body.account_id.trim() : null;
+  try { res.json(await o.permissionCheck(account, req.body || {})); } catch (e: any) { res.status(502).json({ error: e?.message || String(e) }); }
 });
 
-accounts.post("/accounts/:id/test", async (req, res) => {
-  const test = await testAccount(String(req.params.id), 20_000);
-  res.status(test.ok ? 200 : 400).json({ test, accounts: listAccounts() });
-});
-
-accounts.delete("/accounts/:id", (req, res) => {
-  const r = removeAccount(String(req.params.id));
-  if (!r.removed) return res.status(404).json({ error: `no member account ${req.params.id}` });
-  res.json({ ...r, accounts: listAccounts() });
-});
+/** The AWS member routes the Settings page has always called: the AWS adapter's onboarding under their old paths. */
+const aws = () => adapterFor("aws")!.onboarding!;
+accounts.post("/accounts", async (req, res) => { const r = await aws().add(req.body || {}); res.status(r.ok ? 200 : r.status ?? 400).json(r.ok ? r : { error: r.error }); });
+accounts.post("/accounts/:id/test", async (req, res) => { const r = await aws().test(String(req.params.id)); res.status(r.ok ? 200 : 400).json(r); });
+accounts.delete("/accounts/:id", async (req, res) => { const r = await aws().remove(String(req.params.id)); res.status(r.ok ? 200 : r.status ?? 400).json(r.ok ? r : { error: r.error }); });
 
 /**
  * The last six months per linked account (the payer's Cost Explorer), with the names the registry knows, and what each

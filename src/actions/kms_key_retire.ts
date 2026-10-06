@@ -23,6 +23,7 @@ import { config } from "../config.js";
 import { upsertRecommendations } from "../collector.js";
 import type { RecInput } from "../rules.js";
 import { credsForAccount, approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { AWS } from "../adapters/types.js";
 
 export const KIND = "kms_key_retire" as const;
 export const ACTION_TYPE = "retire_kms_key";
@@ -188,7 +189,7 @@ export const kmsKeyRetireAction: ActionModule = {
             evidence: { region, key_arn: meta.Arn, aliases: aliases.get(id) ?? [], created: meta.CreationDate ? new Date(meta.CreationDate).toISOString() : null, events: ev.events, last_event: ev.last, refs: keyRefs, lookback_days: LOOKBACK_DAYS },
           });
         }
-        if (recs.length) upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
+        if (recs.length) upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS });
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { kms.destroy(); trail.destroy(); }
     }

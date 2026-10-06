@@ -12,6 +12,7 @@ import { taskFor } from "./tasks.js";
 import { critiqueText, gradeByRubric } from "./rubric.js";
 import { listDecisionConcepts, systemPromptFor } from "./concepts.js";
 import { checkTiers } from "./tiercheck.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * repo2graph client. The advisor posts a findings batch to POST /repo/agent, gets a request id back
@@ -329,7 +330,7 @@ async function importFindingsResult(run: AgentRunRow, result: any): Promise<numb
   if (checked) console.log(`[agent] tier check: ${checked} recommendations checked, ${changed} tier(s) tightened`);
   // lazy import to avoid a cycle at module load
   const { upsertRecommendations } = require_collector();
-  upsertRecommendations(run.run_id ?? 0, recs, "agent", run.request_id);
+  upsertRecommendations(run.run_id ?? 0, recs, "agent", run.request_id, { provider: run.run_id ? undefined : AWS });
   return recs.length;
 }
 

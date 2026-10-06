@@ -1,8 +1,9 @@
 import { db } from "./db.js";
-import { PROVIDER, accountId, enabled, writeCypher } from "./graph_mirror.js";
+import { accountId, enabled, writeCypher } from "./graph_mirror.js";
 import { ingressRulesFor, naclVerdict, reachOf, type IngressRule, type NaclEntry, type PortReach, type ReachContext, type RuleRef } from "./instance_apps.js";
 import { vpcHasIpv6 } from "./security_groups.js";
 import { allEgressRules, eniOwner, isPublicSubnet, listEips, listEnis, listGateways, listRouteTables, listSubnets, routeTableOf, routeTarget, type EniRow, type GatewayRow, type RouteTableRow, type SubnetRow } from "./network_inventory.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * The network layer of the graph (docs/cloud-ontology.md §3) for the AWS adapter: networks (VPCs), segments
@@ -290,7 +291,7 @@ export async function mirrorNetwork(): Promise<NetworkCounts | null> {
   const t0 = Date.now();
   const account = accountId();
   const stamp = now();
-  const w = (cypher: string, batch: any[]) => writeCypher(cypher, { rows: batch, account, provider: PROVIDER, now: stamp });
+  const w = (cypher: string, batch: any[]) => writeCypher(cypher, { rows: batch, account, provider: AWS, now: stamp });
   for (const l of NETWORK_LABELS) await writeCypher(`CREATE CONSTRAINT ${l.toLowerCase()}_id IF NOT EXISTS FOR (n:${l}) REQUIRE n.id IS UNIQUE`);
 
   const vpcs = rows("select vpc_id, region, account_id, cidr_block, is_default, ipv6_blocks from inventory_vpc");
@@ -422,7 +423,7 @@ export async function mirrorReachability(instanceIds?: string[]): Promise<{ endp
     }
   }
   for (const b of chunks(out.map((r) => r.id), 500)) await writeCypher(VERDICT_CLEAR_CYPHER, { ids: b });
-  for (const b of chunks(out, 100)) await writeCypher(VERDICT_CYPHER, { rows: b, account, provider: PROVIDER, now: stamp });
+  for (const b of chunks(out, 100)) await writeCypher(VERDICT_CYPHER, { rows: b, account, provider: AWS, now: stamp });
   return { endpoints: out.length };
 }
 

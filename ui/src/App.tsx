@@ -105,15 +105,15 @@ function AppShell() {
           ))}
         </nav>
         <div className="mt-8 text-xs text-zinc-500">
+          {scopeInfo.providers.some((p) => p.configured) || aws?.configured ? <ScopePicker /> : null}
           {aws?.configured ? (
             <>
-              <ScopePicker />
               <div title={aws.label}>{aws.mode === "profile" ? `profile ${aws.profile}` : aws.mode === "chain" ? "instance / default chain" : `key ${aws.accessKeyMasked || ""}`}{aws.temporary ? " (expires)" : ""}</div>
               {aws.roleArn && <div className="truncate" title={aws.roleArn}>role {String(aws.roleArn).split("/").pop()}</div>}
             </>
-          ) : (
-            <NavLink to="/settings?tab=accounts" className="text-amber-300">No AWS credentials yet →</NavLink>
-          )}
+          ) : !scopeInfo.providers.some((p) => p.configured) ? (
+            <NavLink to="/settings?tab=accounts" className="text-amber-300">No account yet →</NavLink>
+          ) : null}
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-6">

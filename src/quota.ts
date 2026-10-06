@@ -7,6 +7,8 @@
  */
 import { config } from "./config.js";
 import { db } from "./db.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 export class QuotaError extends Error { constructor(public quota: string, message: string) { super(message); this.name = "QuotaError"; } }
 
@@ -37,7 +39,7 @@ export function quotaStatus(): QuotaStatus[] {
 
 function raise(quota: string, message: string): never {
   const open = db.prepare("select id from alerts where kind = 'quota' and resource = ? and acknowledged = 0 limit 1").get(quota);
-  if (!open) db.prepare("insert into alerts(kind, resource, message, details) values ('quota', ?, ?, ?)").run(quota, message, JSON.stringify({ summary: message, quota, status: quotaStatus() }));
+  if (!open) alertInsert(AWS, "quota").run(quota, message, JSON.stringify({ summary: message, quota, status: quotaStatus() }));
   console.warn(`[quota] ${message}`);
   throw new QuotaError(quota, message);
 }

@@ -25,10 +25,9 @@ import { alertLevel } from "./alert_level.js";
 
 export { RESOURCE_LABELS } from "./adapters/types.js";
 export type { ResourceLabel, GenericState, TelemetryKind, ResourceNode } from "./adapters/types.js";
-import { AWS, RESOURCE_LABELS, type ResourceLabel, type ResourceNode, type TelemetryKind } from "./adapters/types.js";
-import { TELEMETRY, telemetryId, poolId, lambdaArn, inventoryIdOf, guessedType, type RoleMap } from "./adapters/aws/resources.js";
-import { resourceAccountIndex } from "./resource_index.js";
-export const PROVIDER = AWS;
+import { AWS, RESOURCE_LABELS, type ProviderAdapter, type ResourceLabel, type ResourceNode, type TelemetryKind } from "./adapters/types.js";
+import { inventoryIdOf, guessedType, type RoleMap } from "./adapters/aws/resources.js";
+import { adapterFor, adapters } from "./adapters/index.js";
 export const BATCH = 250;
 export const QUERY_TIMEOUT_MS = 5_000;
 export const QUERY_ROW_CAP = 200;
@@ -92,10 +91,23 @@ function getDriver(): Driver {
       connectionTimeout: 5_000,
       connectionAcquisitionTimeout: 10_000,
       maxConnectionPoolSize: 10,
+      // a server that is down fails a transaction in seconds, not after the driver's default 30 s of retries
+      maxTransactionRetryTime: 3_000,
     });
   }
   return driver;
 }
+
+/**
+ * When Neo4j cannot be reached, every read and write fails at once for the next 30 s with the same error, instead of
+ * each one waiting on the driver: a page that asks for ten graph views gets ten quick errors, not ten slow ones.
+ * `verifyConnection` (the Knowledge page's status) always really tries, and clears the state when it connects.
+ */
+const DOWN_MS = 30_000;
+let down: { until: number; error: string } | null = null;
+const unreachable = (e: unknown) => /Failed to connect|ServiceUnavailable|ECONNREFUSED|ENOTFOUND|Connection acquisition timed out/i.test(String((e as any)?.code || "") + " " + String((e as any)?.message || e));
+function checkReachable(): void { if (down && Date.now() < down.until) throw new Error(`Neo4j is not reachable at ${graphUriForDisplay() ?? "the configured URI"}: ${down.error}`); }
+function noteFailure(e: unknown): void { if (unreachable(e)) down = { until: Date.now() + DOWN_MS, error: String((e as any)?.message || e).slice(0, 200) }; }
 
 const session = (mode: "READ" | "WRITE"): Session =>
   getDriver().session({ defaultAccessMode: mode === "READ" ? neo4j.session.READ : neo4j.session.WRITE, ...(config.neo4jDatabase ? { database: config.neo4jDatabase } : {}) });
@@ -215,14 +227,10 @@ export function runNode(row: any): RunNode {
     findings_count: num(row.findings_count) ?? 0, recommendations_count: num(row.recommendations_count) ?? 0 };
 }
 
-/** Where a control comes from and what it is about, read off its id. */
+/** Where a control comes from and what it is about: the provider that claims it says (src/adapters/types.ts controlFacts); the advisor's own rules otherwise. */
 export function controlFacts(controlId: string, benchmark?: string | null): { framework: string; category: string } {
-  const id = controlId.toLowerCase();
-  const b = String(benchmark || "").toLowerCase();
-  if (id.startsWith("aws_compliance.") || b) return { framework: b.includes("cis") || id.includes("cis_") ? "cis" : b.includes("foundational") || id.includes("foundational") ? "foundational_security" : "compliance", category: "security" };
-  if (id.startsWith("aws_thrifty.")) return { framework: "cost", category: "cost" };
-  if (id.startsWith("vercel.control.")) return { framework: "advisor", category: /mfa|open|firewall|ip_allow|source_ips/.test(id) ? "security" : /suspend|branches|unconnected|cache_cold/.test(id) ? "cost" : "reliability" };
-  return { framework: "advisor", category: /security|exposed|public|sg_/.test(id) ? "security" : "cost" };
+  for (const a of adapters()) { const f = a.rules?.controlFacts?.(controlId, benchmark); if (f) return f; }
+  return { framework: "advisor", category: /security|exposed|public|sg_/.test(controlId.toLowerCase()) ? "security" : "cost" };
 }
 
 export interface FlagEdge { control_id: string; control_title: string | null; resource_id: string; run_id: number; reason: string | null }
@@ -297,9 +305,10 @@ export interface ReadResult { columns: string[]; rows: Record<string, any>[]; ro
 export async function readQuery(cypher: string, params: Record<string, unknown> = {}, opts: { timeoutMs?: number; rowCap?: number } = {}): Promise<ReadResult> {
   if (!enabled()) throw new Error("the graph mirror is not configured (NEO4J_URI)");
   const cap = opts.rowCap ?? QUERY_ROW_CAP;
+  checkReachable();
   const s = session("READ");
   try {
-    const res = await s.executeRead((tx) => tx.run(cypher, neoParams(params)), { timeout: opts.timeoutMs ?? QUERY_TIMEOUT_MS });
+    const res = await s.executeRead((tx) => tx.run(cypher, neoParams(params)), { timeout: opts.timeoutMs ?? QUERY_TIMEOUT_MS }).catch((e) => { noteFailure(e); throw e; });
     const columns = res.records[0]?.keys.map(String) ?? [];
     const rows = res.records.slice(0, cap).map((r) => mapValues(r.toObject()));
     return { columns, rows, row_count: rows.length, truncated: res.records.length > cap };
@@ -322,8 +331,9 @@ export function neoParams<T>(v: T): T {
 }
 
 async function write(cypher: string, params: Record<string, unknown> = {}): Promise<void> {
+  checkReachable();
   const s = session("WRITE");
-  try { await s.executeWrite((tx) => tx.run(cypher, neoParams(params)), { timeout: 60_000 }); }
+  try { await s.executeWrite((tx) => tx.run(cypher, neoParams(params)), { timeout: 60_000 }).catch((e) => { noteFailure(e); throw e; }); }
   finally { await s.close(); }
 }
 
@@ -374,34 +384,43 @@ const tableExists = (name: string) => Boolean(db.prepare("select 1 from sqlite_m
 const rowsOf = (sql: string, ...params: unknown[]): any[] => { try { return db.prepare(sql).all(...params) as any[]; } catch { return []; } };
 
 /**
- * Member accounts (src/accounts.ts): which account a record belongs to, for the nodes derived from records rather than
- * inventory rows (recommendations, alerts, actions, ports, packages, pools). The row's own stamp when it has one, else
- * the account of the resource it names (src/resource_index.ts), else null, which the Cypher reads as the mirror's account.
+ * Which account a record belongs to, for the nodes derived from records rather than resource rows (recommendations,
+ * alerts, actions, ports, packages, pools): the row's own stamp when the provider owns it, else the account the provider
+ * says the resource it names is in, else null, which the Cypher reads as the provider's primary account.
  */
-function accountResolver(account = accountId()): (explicit: unknown, ...resources: (string | null | undefined)[]) => string | null {
-  const idx = resourceAccountIndex(account);
-  return (explicit, ...resources) => { if (explicit && /^\d{12}$/.test(String(explicit))) return String(explicit); for (const r of resources) { const a = idx.of(r); if (a) return a; } return null; };
+function accountResolver(adapter: ProviderAdapter = awsAdapter): (explicit: unknown, ...resources: (string | null | undefined)[]) => string | null {
+  return (explicit, ...resources) => {
+    if (explicit && adapter.owns(String(explicit))) return String(explicit);
+    for (const r of resources) { if (!r) continue; const a = adapter.accountOf(r, null); if (a) return a; }
+    return null;
+  };
 }
 
-/** Every id the mirror writes a resource node for, so references in records can be matched to nodes. */
-function inventoryIds(account = accountId()): Set<string> {
-  const ids = new Set<string>();
-  for (const r of rowsOf("select instance_id as id from inventory_ec2")) ids.add(r.id);
-  for (const r of rowsOf("select db_instance_identifier as id from inventory_rds")) ids.add(r.id);
-  for (const r of rowsOf("select cache_cluster_id as id from inventory_elasticache")) ids.add(r.id);
-  for (const r of rowsOf("select arn as id from inventory_elb")) ids.add(r.id);
-  for (const r of rowsOf("select name, arn, region from inventory_lambda")) ids.add(lambdaArn(r, account));
-  for (const r of rowsOf("select name as id from inventory_s3")) ids.add(r.id);
-  for (const r of rowsOf("select volume_id as id from inventory_ebs")) ids.add(r.id);
-  for (const r of rowsOf("select zone_id as id from inventory_route53_zone")) ids.add(r.id);
-  for (const r of rowsOf("select arn as id from inventory_dynamodb where arn is not null")) ids.add(r.id);
-  for (const r of rowsOf("select arn as id from inventory_iam_user")) ids.add(r.id);
-  for (const r of rowsOf("select arn as id from inventory_root_user")) ids.add(r.id);
-  for (const r of rowsOf("select arn as id from inventory_iam_role")) ids.add(r.id);
-  // certificates, topics, keys, file systems, vaults, plans, workgroups, stacks, web ACLs, detectors (src/service_inventory.ts)
-  for (const r of rowsOf("select id from inventory_service")) ids.add(r.id);
-  return ids;
+/** The ids a provider's resource nodes carry in the graph, for the records that target them. */
+function resourceIdsOf(adapter: ProviderAdapter, account: string): Set<string> {
+  return adapter.resourceIds ? adapter.resourceIds(account) : new Set([account, ...adapter.resources(account).map((r) => r.id)]);
 }
+
+/** Generic node ids every adapter's telemetry and pools share: `<provider>:<account>:telemetry:<kind>`, `<provider>:<account>:pool:<name>`. */
+export const telemetryNodeId = (provider: string, account: string, kind: TelemetryKind) => `${provider}:${account}:telemetry:${kind}`;
+export const poolNodeId = (provider: string, account: string, name: string) => `${provider}:${account}:pool:${name}`;
+
+/** The provider a control id belongs to, by the prefixes its rules declare (`aws_…`, `vercel.…`); null when none claims it. */
+export function controlProvider(controlId: string): string | null {
+  return adapters().find((a) => a.rules?.control_prefixes.some((p) => controlId.startsWith(p)))?.id ?? null;
+}
+
+/** Rows grouped by their provider column, with the adapter for each; rows of a provider with no adapter are left out (and said once). */
+function byProvider<T extends { provider?: unknown }>(rows: T[]): { adapter: ProviderAdapter; rows: T[] }[] {
+  const out = new Map<string, T[]>();
+  for (const r of rows) { const p = String(r.provider ?? ""); out.set(p, [...(out.get(p) ?? []), r]); }
+  const groups: { adapter: ProviderAdapter; rows: T[] }[] = [];
+  for (const [p, list] of out) { const a = adapterFor(p); if (a) groups.push({ adapter: a, rows: list }); else logError(`records of provider "${p || "none"}"`, new Error(`${list.length} row(s) without an adapter were not mirrored`)); }
+  return groups;
+}
+
+/** Every id the AWS adapter writes a resource node for (src/adapters/aws/index.ts resourceIds). */
+function inventoryIds(account = accountId()): Set<string> { return awsAdapter.resourceIds!(account); }
 
 /** fingerprint -> concept id from the concepts table (created by src/concepts.ts; absent in a bare database). */
 function conceptIds(): Map<string, string> {
@@ -409,17 +428,14 @@ function conceptIds(): Map<string, string> {
   catch { return new Map(); }
 }
 
-function roleMap(): RoleMap {
-  return new Map((db.prepare("select resource_id, role, role_confidence, protected_prob from resource_roles").all() as any[]).map((r) => [String(r.resource_id), { role: String(r.role), role_confidence: num(r.role_confidence), protected_prob: num(r.protected_prob) }]));
-}
 
 const chunks = <T,>(items: T[], size = BATCH): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
 
 /** The account node and its telemetry nodes, for any adapter: the provider's word for the boundary and its sources. */
-async function mirrorAccount(account: string, provider: string = PROVIDER, telemetry: Record<TelemetryKind, { native: string }> = TELEMETRY, nativeType = "account"): Promise<void> {
+async function mirrorAccount(account: string, provider: string, telemetry: Record<TelemetryKind, { native: string }>, nativeType = "account"): Promise<void> {
   await write("MERGE (a:AdvisorAccount {id: $id}) SET a.account_id = $id, a.provider = $provider, a.native_type = $native_type, a.native_id = $id, a.kind = 'account', a.updated_at = $now", { id: account, provider, native_type: nativeType, now: now() });
   await mirrorAccountRecords(provider);
-  const rows = (Object.keys(telemetry) as TelemetryKind[]).filter((k) => telemetry[k].native !== "none").map((kind) => ({ id: `${provider}:${account}:telemetry:${kind}`, kind, native: telemetry[kind].native }));
+  const rows = (Object.keys(telemetry) as TelemetryKind[]).filter((k) => telemetry[k].native !== "none").map((kind) => ({ id: telemetryNodeId(provider, account, kind), kind, native: telemetry[kind].native }));
   await write(`UNWIND $rows AS row MERGE (t:AdvisorTelemetry {id: row.id}) SET t.kind = row.kind, t.native = row.native, t.provider = $provider, t.account_id = $account, t.native_type = 'telemetry', t.native_id = row.id, t.updated_at = $now
     WITH t MATCH (a:AdvisorAccount {id: $account}) MERGE (t)-[:IN_ACCOUNT]->(a)`, { rows, account, provider, now: now() });
 }
@@ -447,28 +463,56 @@ OPTIONAL MATCH (p:AdvisorAccount {id: row.parent_id})
 FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END | MERGE (a)-[:PART_OF]->(p))`, { rows, now: now() });
 }
 
-/**
- * Any adapter but AWS, whole: its account node, the generic resource nodes it emits (marked gone when they stop
- * appearing), then its own layers. AWS goes through mirrorResources, which still writes its resource edges itself.
- */
-export async function mirrorAdapter(adapter: import("./adapters/types.js").ProviderAdapter): Promise<{ resources: number; layers: Record<string, unknown> }> {
-  if (!enabled() || !adapter.configured()) return { resources: 0, layers: {} };
-  await ensureSchema();
+/** An adapter's primary account node with its telemetry, in the provider's word for the boundary. */
+async function mirrorAdapterAccount(adapter: ProviderAdapter): Promise<string> {
   const account = adapter.primaryAccountId();
-  const nativeType = (await adapter.accounts())[0]?.native_type ?? "account";
+  let nativeType = "account"; try { nativeType = (await adapter.accounts())[0]?.native_type ?? "account"; } catch { /* the account list is a nicety here */ }
   await mirrorAccount(account, adapter.id, adapter.telemetry, nativeType);
+  return account;
+}
+
+/** The adapters the mirror writes: the configured ones, and any whose storage still holds resources (collected before the credentials went away). */
+function mirroredAdapters(): ProviderAdapter[] {
+  return adapters().filter((a) => { if (a.configured()) return true; try { return a.resources(a.primaryAccountId()).length > 0; } catch { return false; } });
+}
+
+/**
+ * One adapter's resources, for any provider: its account node, the generic resource nodes it emits from its storage
+ * (each attached to the account it belongs to, a member's to the member), its own edges, and the nodes that stopped
+ * appearing marked gone.
+ */
+export async function mirrorAdapterResources(adapter: ProviderAdapter): Promise<{ resources: number }> {
+  if (!enabled()) return { resources: 0 };
+  await ensureSchema();
+  const account = await mirrorAdapterAccount(adapter);
   const rows = adapter.resources(account);
   const stamp = now();
-  const toRow = (n: ResourceNode) => ({ ...n, pool_id: null, observed: n.observed.map((o) => ({ ...o, id: `${adapter.id}:${account}:telemetry:${o.kind}` })) });
+  const toRow = (n: ResourceNode) => ({ ...n, pool_id: n.pool ? poolNodeId(adapter.id, n.account_id ?? account, n.pool) : null, observed: n.observed.map((o) => ({ ...o, id: telemetryNodeId(adapter.id, account, o.kind) })) });
   for (const label of RESOURCE_LABELS) {
     const mine = rows.filter((r) => r.label === label);
     for (const batch of chunks(mine)) await write(resourceCypher(label), { rows: batch.map(toRow), account, provider: adapter.id, now: stamp });
   }
+  for (const batch of chunks(rows.map((r) => ({ id: r.id, kinds: r.observed.map((o) => o.kind) })))) await write(OBSERVED_PRUNE_CYPHER, { rows: batch });
+  // the adapter's own edges (listeners, endpoints, volumes, DNS, deployments on AWS) and the extra nodes they create
   const extra = adapter.edges ? await adapter.edges(account, stamp) : [];
-  await write("MATCH (r:AdvisorResource {provider: $provider, account_id: $account}) WHERE NOT r.id IN $ids AND coalesce(r.gone, false) = false SET r.gone = true, r.updated_at = $now", { provider: adapter.id, account, ids: [...rows.map((r) => r.id), ...extra], now: stamp });
+  await write("MATCH (r:AdvisorResource {provider: $provider}) WHERE r.account_id IN $accounts AND NOT r.id IN $ids AND coalesce(r.gone, false) = false SET r.gone = true, r.updated_at = $now",
+    { accounts: [...new Set([account, ...rows.map((r) => r.account_id).filter((x): x is string => Boolean(x))])], provider: adapter.id, ids: [...rows.map((r) => r.id), ...extra], now: stamp });
+  return { resources: rows.length };
+}
+
+/** One adapter's graph layers beyond resources, in its order; a failing layer is logged and the next one runs. */
+export async function mirrorAdapterLayers(adapter: ProviderAdapter): Promise<Record<string, unknown>> {
   const layers: Record<string, unknown> = {};
+  if (!enabled()) return layers;
   for (const layer of adapter.layers) { try { layers[layer.name] = await layer.mirror(); } catch (e) { logError(`${adapter.id} ${layer.name}`, e); } }
-  return { resources: rows.length, layers };
+  return layers;
+}
+
+/** One adapter, whole: its resources, then its layers (after a provider's own collection). */
+export async function mirrorAdapter(adapter: ProviderAdapter): Promise<{ resources: number; layers: Record<string, unknown> }> {
+  if (!enabled() || !adapter.configured()) return { resources: 0, layers: {} };
+  const { resources } = await mirrorAdapterResources(adapter);
+  return { resources, layers: await mirrorAdapterLayers(adapter) };
 }
 
 import { REF_MERGE } from "./graph_cypher.js";
@@ -516,26 +560,12 @@ MATCH (r:AdvisorResource {id: row.id})-[e:OBSERVED_BY]->(t:AdvisorTelemetry)
 WHERE NOT t.kind IN row.kinds
 DELETE e`;
 
-/** EC2, RDS, ElastiCache, balancers, Lambda, S3, EBS and Route 53 as resource nodes; resources the graph has but the inventory no longer lists are marked gone. */
-export async function mirrorResources(): Promise<{ resources: number }> {
+/** Every mirrored adapter's resources (or one provider's); resources the graph has but the storage no longer lists are marked gone. */
+export async function mirrorResources(provider?: string): Promise<{ resources: number }> {
   if (!enabled()) return { resources: 0 };
-  await ensureSchema();
-  const account = accountId();
-  await mirrorAccount(account);
-  // the adapter emits the generic nodes from its own storage
-  const rows: ResourceNode[] = awsAdapter.resources(account);
-  const stamp = now();
-  const toRow = (n: ResourceNode) => ({ ...n, pool_id: n.pool ? poolId(n.account_id ?? account, n.pool) : null, observed: n.observed.map((o) => ({ ...o, id: telemetryId(account, o.kind) })) });
-  for (const label of RESOURCE_LABELS) {
-    const mine = rows.filter((r) => r.label === label);
-    for (const batch of chunks(mine)) await write(resourceCypher(label), { rows: batch.map(toRow), account, provider: PROVIDER, now: stamp });
-  }
-  for (const batch of chunks(rows.map((r) => ({ id: r.id, kinds: r.observed.map((o) => o.kind) })))) await write(OBSERVED_PRUNE_CYPHER, { rows: batch });
-  // the adapter's own edges (listeners, endpoints, volumes, DNS, deployments on AWS) and the extra nodes they create
-  const extra = awsAdapter.edges ? await awsAdapter.edges(account, stamp) : [];
-  await write("MATCH (r:AdvisorResource {provider: $provider}) WHERE r.account_id IN $accounts AND NOT r.id IN $ids AND coalesce(r.gone, false) = false SET r.gone = true, r.updated_at = $now",
-    { accounts: [...new Set([account, ...rows.map((r) => r.account_id).filter((x): x is string => Boolean(x))])], provider: PROVIDER, ids: [...rows.map((r) => r.id), ...extra], now: stamp });
-  return { resources: rows.length };
+  let resources = 0;
+  for (const a of mirroredAdapters().filter((x) => !provider || x.id === provider)) resources += (await mirrorAdapterResources(a)).resources;
+  return { resources };
 }
 
 
@@ -569,28 +599,21 @@ WITH rec, row
 OPTIONAL MATCH (c:Concept {id: row.concept_id})
 FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END | MERGE (rec)-[:DECIDED_AS]->(c))`;
 
-/** Recommendations (all, or the given ids) with their target, run, incident and, when the concepts table maps the fingerprint and the Concept exists, the DECIDED_AS edge. */
+/** Recommendations (all, or the given ids) with their target, run, incident and, when the concepts table maps the fingerprint and the Concept exists, the DECIDED_AS edge; each under its own provider and account. */
 export async function mirrorRecommendations(ids?: number[]): Promise<{ recommendations: number }> {
   if (!enabled()) return { recommendations: 0 };
   if (ids && !ids.length) return { recommendations: 0 };
   await ensureSchema();
-  const account = accountId();
-  await mirrorAccount(account);
-  const inv = inventoryIds(account);
   const concepts = conceptIds();
   const raw = (ids
     ? db.prepare(`select * from recommendations where id in (${ids.map(() => "?").join(",")})`).all(...ids)
     : db.prepare("select * from recommendations").all()) as any[];
   const stamp = now();
-  // the AWS rules' and the agent's rows under the primary account; a platform provider's rules (rule vercel_*) under its own account, targeting its own nodes
-  const aws = raw.filter((r) => !/^vercel_/.test(String(r.rule)));
-  const acct = accountResolver(account);
-  const rows = aws.map((r) => { const node = recommendationNode(r, inv, concepts); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
-  for (const batch of chunks(rows)) await write(RECOMMENDATION_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
-  const vercel = raw.filter((r) => /^vercel_/.test(String(r.rule)));
-  if (vercel.length) {
-    const team = (db.prepare("select id from vercel_team order by fetched_at desc limit 1").get() as { id: string } | undefined)?.id;
-    if (team) { const vids = await platformIds("vercel", team); const vrows = vercel.map((r) => recommendationNode(r, vids, concepts)); for (const batch of chunks(vrows)) await write(RECOMMENDATION_CYPHER, { rows: batch, account: team, provider: "vercel", now: stamp }); }
+  for (const { adapter, rows: mine } of byProvider(raw)) {
+    const account = await mirrorAdapterAccount(adapter);
+    const inv = resourceIdsOf(adapter, account); const acct = accountResolver(adapter);
+    const rows = mine.map((r) => { const node = recommendationNode(r, inv, concepts); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
+    for (const batch of chunks(rows)) await write(RECOMMENDATION_CYPHER, { rows: batch, account, provider: adapter.id, now: stamp });
   }
   return { recommendations: raw.length };
 }
@@ -623,8 +646,9 @@ MERGE (c:AdvisorControl {id: row.control_id})
 SET c.title = coalesce(c.title, row.title), c.framework = coalesce(c.framework, row.framework), c.category = coalesce(c.category, row.category), c.provider = $provider, c.native_type = 'control', c.native_id = row.control_id, c.account_id = $account, c.updated_at = $now
 MERGE (c)-[:HAS_PLAYBOOK]->(p)`;
 
-function latestCompletedRunId(): number | null {
-  return (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id ?? null;
+/** The latest completed run of a provider (its rules say which, for its primary account). */
+function latestCompletedRunId(adapter: ProviderAdapter = awsAdapter): number | null {
+  return adapter.rules?.latestRunId(null) ?? (db.prepare("select id from runs where provider = ? and status = 'completed' order by id desc limit 1").get(adapter.id) as { id: number } | undefined)?.id ?? null;
 }
 
 /**
@@ -634,18 +658,23 @@ function latestCompletedRunId(): number | null {
 export async function mirrorPlaybooks(): Promise<{ playbooks: number }> {
   if (!enabled()) return { playbooks: 0 };
   await ensureSchema();
-  const account = accountId();
   const sourceRow = (id: string) => { const r = db.prepare("select id, kind, origin, title, url, hash, fetched_at, changed_at from sources where id = ?").get(id) as any; return r ?? null; };
   const rows = listPlaybooks().map((p) => {
     const pv = p.provenance; const generated = pv?.origin === "generated";
     const srcIds = generated ? (pv?.sources ?? []).map((x) => x.id) : [];
     const sourceNodes = srcIds.map(sourceRow).filter(Boolean);
-    return { id: `${PROVIDER}:${p.control_id}`, control_id: p.control_id, title: p.title, tier: p.tier, effort: p.effort, meaning: p.meaning, act_when: p.act_when, ignore_when: p.ignore_when,
+    const provider = controlProvider(p.control_id) ?? "";
+    return { provider, account: adapterFor(provider)?.primaryAccountId() ?? null, id: `${provider}:${p.control_id}`, control_id: p.control_id, title: p.title, tier: p.tier, effort: p.effort, meaning: p.meaning, act_when: p.act_when, ignore_when: p.ignore_when,
       steps: p.steps, citations: (p.citations ?? []).map((c) => c ?? ""), saving: p.saving, references: p.references ?? [], sources: generated ? srcIds : p.references ?? [], source_hashes: generated ? (pv?.sources ?? []).map((x) => x.hash) : [],
       generated_at: pv?.generated_at ?? null, generated_by: generated ? pv?.generated_by ?? null : "hand-written seed (src/playbooks.ts)", stale_after: pv?.stale_after ?? null, review_status: generated ? pv?.review_status ?? "generated" : "seed", origin: pv?.origin ?? "seed", confidence: pv?.confidence ?? null,
       source_nodes: sourceNodes, ...controlFacts(p.control_id) };
   });
-  for (const batch of chunks(rows)) await write(PLAYBOOK_CYPHER, { rows: batch, account, provider: PROVIDER, now: now() });
+  // a playbook whose control no provider claims is not written (and said once): its id would name no provider
+  if (rows.some((r) => !r.provider)) logError("playbooks", new Error(`${rows.filter((r) => !r.provider).map((r) => r.control_id).slice(0, 5).join(", ")}: no provider claims these controls`));
+  for (const provider of [...new Set(rows.map((r) => r.provider).filter(Boolean))]) {
+    const mine = rows.filter((r) => r.provider === provider);
+    for (const batch of chunks(mine)) await write(PLAYBOOK_CYPHER, { rows: batch, account: mine[0].account, provider, now: now() });
+  }
   return { playbooks: rows.length };
 }
 
@@ -653,42 +682,35 @@ export async function mirrorPlaybooks(): Promise<{ playbooks: number }> {
  * FLAGGED edges for the latest completed run's alarm findings whose resource is in the inventory (one per control and
  * resource); earlier runs' edges are dropped first, so the graph shows the current state, not the history.
  */
-export async function mirrorControls(runId = latestCompletedRunId(), opts: { provider?: string; account?: string; ids?: Set<string> } = {}): Promise<{ controls: number; flagged: number }> {
+export async function mirrorControls(runId?: number | null, opts: { provider?: string; account?: string; ids?: Set<string> } = {}): Promise<{ controls: number; flagged: number }> {
+  const adapter = adapterFor(opts.provider ?? "") ?? awsAdapter;
+  runId ??= latestCompletedRunId(adapter);
   if (!enabled() || runId == null) return { controls: 0, flagged: 0 };
   await ensureSchema();
-  const provider = opts.provider ?? PROVIDER; const account = opts.account ?? accountId();
+  const provider = adapter.id; const account = opts.account ?? adapter.primaryAccountId();
   const findings = db.prepare("select control_id, control_title, resource, reason from findings where run_id = ? and status = 'alarm' and resource is not null order by id").all(runId) as any[];
-  const edges = flagEdges(findings, opts.ids ?? inventoryIds(account), runId).map((e) => ({ ...e, ...controlFacts(e.control_id) }));
+  const edges = flagEdges(findings, opts.ids ?? resourceIdsOf(adapter, account), runId).map((e) => ({ ...e, ...controlFacts(e.control_id) }));
   await write("MATCH (:AdvisorControl)-[f:FLAGGED]->(:AdvisorResource {provider: $provider}) WHERE f.run_id <> $runId DELETE f", { provider, runId });
   const stamp = now();
   for (const batch of chunks(edges)) await write(FLAG_CYPHER, { rows: batch, account, provider, now: stamp });
   return { controls: new Set(edges.map((e) => e.control_id)).size, flagged: edges.length };
 }
 
-/** The ids a platform account's resources carry in the graph (projects, stores, the team), for the edges that target them. */
-async function platformIds(provider: string, account: string): Promise<Set<string>> {
-  if (provider === "vercel") { const inv = await import("./adapters/vercel/inventory.js"); return new Set([account, ...inv.listProjects(true).map((p) => p.id), ...inv.listStores({ includeGone: true }).map((s) => s.id)]); }
-  return new Set([account]);
-}
-
-/** One run as an AdvisorRun node; when it is the latest completed run, its alarm findings become the FLAGGED edges (unless `controls` is false). */
+/** One run as an AdvisorRun node in its provider's account; when it is that provider's latest completed run, its alarm findings become the FLAGGED edges (unless `controls` is false). */
 export async function mirrorRun(runId: number, opts: { controls?: boolean } = {}): Promise<{ run: number | null; flagged: number }> {
   if (!enabled()) return { run: null, flagged: 0 };
   await ensureSchema();
   const row = db.prepare("select id, started_at, finished_at, status, trigger, findings_count, recommendations_count, provider, account_id from runs where id = ?").get(runId) as any;
   if (!row) return { run: null, flagged: 0 };
-  // an AWS collection run belongs to the primary account; a platform provider's rules pass to the account on the row
-  const provider = String(row.provider || PROVIDER); const platform = provider !== PROVIDER;
-  const account = platform ? String(row.account_id) : accountId();
-  if (!platform) await mirrorAccount(account);
+  const adapter = adapterFor(String(row.provider)); if (!adapter) return { run: null, flagged: 0 };
+  // the primary account's node is written first; a run against another of the provider's accounts (a re-pointed parent, a second project) stays with it
+  const primary = await mirrorAdapterAccount(adapter);
+  const account = row.account_id && adapter.owns(String(row.account_id)) ? String(row.account_id) : primary;
   const node = runNode(row);
   await write(`MERGE (r:AdvisorRun {id: $row.id}) SET r += $row, r.account_id = $account, r.provider = $provider, r.native_type = $kind, r.native_id = toString($row.id), r.updated_at = $now
-    WITH r MATCH (a:AdvisorAccount {id: $account}) MERGE (r)-[:IN_ACCOUNT]->(a)`, { row: node, account, provider, kind: platform ? "rules_pass" : "collection_run", now: now() });
+    WITH r MATCH (a:AdvisorAccount {id: $account}) MERGE (r)-[:IN_ACCOUNT]->(a)`, { row: node, account, provider: adapter.id, kind: adapter.rules?.run_native_type ?? "rules_run", now: now() });
   let flagged = 0;
-  if (opts.controls !== false && node.status === "completed") {
-    if (platform) flagged = (await mirrorControls(runId, { provider, account, ids: await platformIds(provider, account) })).flagged;
-    else if (latestCompletedRunId() === runId) flagged = (await mirrorControls(runId)).flagged;
-  }
+  if (opts.controls !== false && node.status === "completed" && latestCompletedRunId(adapter) === runId) flagged = (await mirrorControls(runId, { provider: adapter.id, account })).flagged;
   return { run: runId, flagged };
 }
 
@@ -727,19 +749,20 @@ MERGE (i)-[:INVESTIGATES]->(a)`;
 export async function mirrorAlertsAndIncidents(): Promise<{ alerts: number; incidents: number }> {
   if (!enabled()) return { alerts: 0, incidents: 0 };
   await ensureSchema();
-  const account = accountId();
-  await mirrorAccount(account);
-  const inv = inventoryIds(account);
-  const acct = accountResolver(account);
-  const alerts = (db.prepare("select id, kind, resource, message, created_at, acknowledged, acknowledged_by, triage, cause, account_id from alerts").all() as any[])
-    .map((r) => { const node = alertNode(r, inv, alertLevel({ ...r, triage: safeJson(r.triage) })); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
+  const all = db.prepare("select id, kind, resource, message, created_at, acknowledged, acknowledged_by, triage, cause, account_id, provider from alerts").all() as any[];
   // an incident belongs where its alert does
-  const incidents = (db.prepare("select i.id, i.alert_id, i.status, i.cause, i.confidence, i.episode_cost_usd, i.monthly_run_rate_usd, i.created_at, a.account_id as alert_account, a.resource as alert_resource from incidents i left join alerts a on a.id = i.alert_id").all() as any[])
-    .map((r) => ({ ...incidentNode(r), account_id: acct(r.alert_account, r.alert_resource) }));
-  const stamp = now();
-  for (const batch of chunks(alerts)) await write(ALERT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
-  for (const batch of chunks(incidents)) await write(INCIDENT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
-  return { alerts: alerts.length, incidents: incidents.length };
+  const allIncidents = db.prepare("select i.id, i.alert_id, i.status, i.cause, i.confidence, i.episode_cost_usd, i.monthly_run_rate_usd, i.created_at, a.account_id as alert_account, a.resource as alert_resource, a.provider from incidents i left join alerts a on a.id = i.alert_id").all() as any[];
+  const stamp = now(); let alerts = 0; let incidents = 0;
+  for (const { adapter, rows: mine } of byProvider(all)) {
+    const account = await mirrorAdapterAccount(adapter);
+    const inv = resourceIdsOf(adapter, account); const acct = accountResolver(adapter);
+    const rows = mine.map((r) => { const node = alertNode(r, inv, alertLevel({ ...r, triage: safeJson(r.triage) })); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
+    const inc = allIncidents.filter((r) => r.provider === adapter.id).map((r) => ({ ...incidentNode(r), account_id: acct(r.alert_account, r.alert_resource) }));
+    for (const batch of chunks(rows)) await write(ALERT_CYPHER, { rows: batch, account, provider: adapter.id, now: stamp });
+    for (const batch of chunks(inc)) await write(INCIDENT_CYPHER, { rows: batch, account, provider: adapter.id, now: stamp });
+    alerts += rows.length; incidents += inc.length;
+  }
+  return { alerts, incidents };
 }
 
 // ---- the executor's ledger ---------------------------------------------------------------------------------------------------
@@ -774,9 +797,6 @@ export async function mirrorActions(ids?: number[]): Promise<{ actions: number }
   if (!enabled()) return { actions: 0 };
   if (ids && !ids.length) return { actions: 0 };
   await ensureSchema();
-  const account = accountId();
-  await mirrorAccount(account);
-  const inv = inventoryIds(account);
   let raw: any[] = [];
   // the latest bill verdict of the change's kind on its resource rides along (src/verify.ts), when it has been measured
   const hasV = tableExists("action_verifications");
@@ -784,11 +804,14 @@ export async function mirrorActions(ids?: number[]): Promise<{ actions: number }
     (select v.realised_usd_month from action_verifications v where v.action_key = a.kind || ':' || a.resource order by v.id desc limit 1) as realised_usd_month` : "";
   try { raw = ids ? db.prepare(`select a.*${cols} from actions a where a.id in (${ids.map(() => "?").join(",")})`).all(...ids) : db.prepare(`select a.*${cols} from actions a`).all(); }
   catch { return { actions: 0 }; /* the executor has not created its table yet */ }
-  const acct = accountResolver(account);
-  const rows = raw.map((r) => { const node = actionNode(r, inv); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
   const stamp = now();
-  for (const batch of chunks(rows)) await write(ACTION_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
-  return { actions: rows.length };
+  for (const { adapter, rows: mine } of byProvider(raw)) {
+    const account = await mirrorAdapterAccount(adapter);
+    const inv = resourceIdsOf(adapter, account); const acct = accountResolver(adapter);
+    const rows = mine.map((r) => { const node = actionNode(r, inv); return { ...node, account_id: acct(r.account_id, node.resource_id, node.resource) }; });
+    for (const batch of chunks(rows)) await write(ACTION_CYPHER, { rows: batch, account, provider: adapter.id, now: stamp });
+  }
+  return { actions: raw.length };
 }
 
 // ---- executor passes ------------------------------------------------------------------------------------------------------
@@ -812,12 +835,14 @@ export async function mirrorPass(passId: number): Promise<{ pass: number | null;
   const p = getPass(passId);
   if (!p) return { pass: null, events: 0 };
   await ensureSchema();
-  const account = accountId();
-  await mirrorAccount(account);
-  const pass = { id: p.id, started_at: p.started_at, finished_at: p.finished_at, trigger: p.trigger, mode: p.mode, proposed: p.proposed, fresh: p.fresh, applied: p.applied, verified: p.verified,
+  // a pass plans every registered provider's modules: it belongs to each provider that has actions (in the first one's account, the others named)
+  const actors = adapters().filter((a) => a.actions);
+  if (!actors.length) return { pass: null, events: 0 };
+  const account = await mirrorAdapterAccount(actors[0]);
+  const pass = { providers: actors.map((a) => a.id), id: p.id, started_at: p.started_at, finished_at: p.finished_at, trigger: p.trigger, mode: p.mode, proposed: p.proposed, fresh: p.fresh, applied: p.applied, verified: p.verified,
     failed: p.failed, refused: p.refused, held: p.held, stale: p.stale, took_ms: p.took_ms, errors: p.errors.join("; ").slice(0, 1000) || null };
   const events = p.events.map((e) => ({ action_id: e.action_id, event: e.event, outcome: e.outcome, at: e.at, trigger: e.trigger, detail: e.detail ? e.detail.slice(0, 300) : null }));
-  await write(PASS_CYPHER, { pass, events, account, provider: PROVIDER, now: now() });
+  await write(PASS_CYPHER, { pass, events, account, provider: actors[0].id, now: now() });
   return { pass: passId, events: events.length };
 }
 
@@ -871,7 +896,7 @@ export async function mirrorPorts(instanceIds?: string[]): Promise<{ ports: numb
   const rows = raw.map((r) => ({ id: `${r.instance_id}:${r.proto}:${r.port}`, instance_id: String(r.instance_id), account_id: instanceAccount.get(String(r.instance_id)) ?? null, proto: String(r.proto), port: num(r.port), bind: str(r.bind), scope: str(r.scope), exposure: str(r.exposure), process: r.process == null ? null : String(r.process), container: r.container == null ? null : String(r.container), container_port: r.container_port == null ? null : num(r.container_port),
     app_name: r.app_name == null ? null : String(r.app_name), first_seen: str(r.first_seen), last_seen: str(r.last_seen), probes: num(r.probes), gone: Boolean(r.gone) }));
   const stamp = now();
-  for (const batch of chunks(rows)) await write(PORT_CYPHER, { rows: batch, account: accountId(), provider: PROVIDER, now: stamp });
+  for (const batch of chunks(rows)) await write(PORT_CYPHER, { rows: batch, account: accountId(), provider: AWS, now: stamp });
   for (const batch of chunks(rows.filter((r) => r.container))) await write(CONTAINER_PORT_CYPHER, { rows: batch, now: stamp });
   return { ports: rows.length };
 }
@@ -935,10 +960,9 @@ export async function mirrorComplianceScan(scanId: number): Promise<{ scan: numb
   await ensureSchema();
   const row = db.prepare("select id, started_at, finished_at, status, trigger, alarms, new_alarms, resolved, errors, counts from compliance_scans where id = ?").get(scanId) as any;
   if (!row) return { scan: null, flagged: 0 };
-  const account = accountId();
-  await mirrorAccount(account);
+  const account = await mirrorAdapterAccount(awsAdapter);
   await write(`MERGE (s:AdvisorSecurityScan {id: $row.id}) SET s += $row, s.account_id = $account, s.provider = $provider, s.native_type = 'compliance_scan', s.native_id = toString($row.id), s.updated_at = $now
-    WITH s MATCH (a:AdvisorAccount {id: $account}) MERGE (s)-[:IN_ACCOUNT]->(a)`, { row: { ...row, counts: row.counts || "{}" }, account, provider: PROVIDER, now: now() });
+    WITH s MATCH (a:AdvisorAccount {id: $account}) MERGE (s)-[:IN_ACCOUNT]->(a)`, { row: { ...row, counts: row.counts || "{}" }, account, provider: AWS, now: now() });
   let flagged = 0;
   const latest = (db.prepare("select id from compliance_scans where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
   if (row.status === "completed" && latest === scanId) {
@@ -953,9 +977,9 @@ export async function mirrorComplianceScan(scanId: number): Promise<{ scan: numb
       edges.push({ control_id: String(f.control_id), control_title: str(f.control_title), resource_id: rid, run_id: scanId, reason: f.reason ? String(f.reason).slice(0, 500) : null,
         severity: str(f.severity), benchmark: str(f.benchmark), first_seen_at: str(f.first_seen_at), ...controlFacts(String(f.control_id), str(f.benchmark)) });
     }
-    await write("MATCH (:AdvisorControl)-[f:SECURITY_FLAGGED]->(:AdvisorResource {provider: $provider}) WHERE f.scan_id <> $scanId DELETE f", { provider: PROVIDER, scanId });
+    await write("MATCH (:AdvisorControl)-[f:SECURITY_FLAGGED]->(:AdvisorResource {provider: $provider}) WHERE f.scan_id <> $scanId DELETE f", { provider: AWS, scanId });
     const stamp = now();
-    for (const batch of chunks(edges)) await write(SECURITY_FLAG_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
+    for (const batch of chunks(edges)) await write(SECURITY_FLAG_CYPHER, { rows: batch, account, provider: AWS, now: stamp });
     flagged = edges.length;
   }
   const recIds = (db.prepare("select id from recommendations where action_type = 'security_fix'").all() as { id: number }[]).map((r) => r.id);
@@ -966,39 +990,39 @@ export async function mirrorComplianceScan(scanId: number): Promise<{ scan: numb
 // ---- full resync, stats, wipe --------------------------------------------------------------------------------------------
 
 export interface MirrorCounts {
-  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; network?: import("./graph_network.js").NetworkCounts | null; account_id: string; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; apps: number; took_ms: number }
+  knowledge?: import("./graph_knowledge.js").KnowledgeCounts | null; network?: import("./graph_network.js").NetworkCounts | null; account_id: string; accounts?: { provider: string; id: string }[]; resources: number; recommendations: number; runs: number; flagged: number; controls: number; playbooks: number; alerts: number; incidents: number; actions: number; passes: number; apps: number; took_ms: number }
 
-/** Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. */
+/**
+ * Everything, in dependency order, in batches; idempotent, so it doubles as the repair after a wipe. Every mirrored
+ * adapter's resources first, then the records of every provider (runs, playbooks, controls, recommendations,
+ * alerts, actions, passes), then each adapter's own layers (some link to records: a pressure event to the action
+ * that answered it), then the knowledge layer.
+ */
 export async function mirrorAll(): Promise<MirrorCounts | null> {
   if (!enabled()) return null;
   const t0 = Date.now();
   await ensureSchema();
-  const account = accountId();
-  await mirrorAccount(account);
-  const { resources } = await mirrorResources();
+  const mirrored = mirroredAdapters();
+  let resources = 0;
+  for (const a of mirrored) { try { resources += (await mirrorAdapterResources(a)).resources; } catch (e) { logError(`${a.id} resources`, e); } }
   const runs = db.prepare("select id from runs order by id").all() as { id: number }[];
   for (const r of runs) await mirrorRun(r.id, { controls: false });
   const { playbooks } = await mirrorPlaybooks();
-  const ctl = await mirrorControls();
+  const ctl = { controls: 0, flagged: 0 };
+  for (const a of mirrored) { const c = await mirrorControls(null, { provider: a.id }); ctl.controls += c.controls; ctl.flagged += c.flagged; }
   const { recommendations } = await mirrorRecommendations();
   const { alerts, incidents } = await mirrorAlertsAndIncidents();
   const { actions } = await mirrorActions();
   const { passes } = await mirrorPasses();
-  // the adapter's own layers, in its order (apps and ports, status checks, usage, capacity, network, clusters, software on AWS)
-  let apps = 0; let network: import("./graph_network.js").NetworkCounts | null = null;
-  for (const layer of awsAdapter.layers) {
-    try { const r: any = await layer.mirror(); if (layer.name === "apps and ports") apps = Number(r?.apps ?? 0); if (layer.name === "network") network = r ?? null; }
-    catch (e) { logError(layer.name, e); }
-  }
-  const scan = db.prepare("select id from compliance_scans where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined;
-  if (scan) await mirrorComplianceScan(scan.id);
-  // every other configured adapter, whole (its account, resources and layers)
-  const { adapters } = await import("./adapters/index.js");
-  for (const a of adapters().filter((x) => x.id !== PROVIDER && x.configured())) { try { await mirrorAdapter(a); } catch (e) { logError(`${a.id} adapter`, e); } }
+  // each adapter's own layers, in its order (apps and ports, status checks, usage, capacity, network, clusters, software, the security scan on AWS; endpoints and pricing on Vercel)
+  const layers: Record<string, Record<string, unknown>> = {};
+  for (const a of mirrored) layers[a.id] = await mirrorAdapterLayers(a);
   const { mirrorKnowledge } = await import("./graph_knowledge.js");
   const knowledge = await mirrorKnowledge();
   try { const { mirrorSwarmCosts } = await import("./swarm_costs_graph.js"); await mirrorSwarmCosts(); } catch (e) { logError("swarm costs", e); }
-  return { account_id: account, knowledge, network, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes, apps, took_ms: Date.now() - t0 };
+  const aws: any = layers[AWS] ?? {};
+  return { account_id: mirrored[0]?.primaryAccountId() ?? accountId(), accounts: mirrored.map((a) => ({ provider: a.id, id: a.primaryAccountId() })), knowledge, network: aws.network ?? null, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes,
+    apps: Number(aws["apps and ports"]?.apps ?? 0), took_ms: Date.now() - t0 };
 }
 
 export interface GraphStats { nodes: Record<string, number>; relationships: Record<string, number>; decided_as: number; total_nodes: number; total_relationships: number }
@@ -1033,11 +1057,12 @@ async function deleteWhere(match: string, params: Record<string, unknown>): Prom
  * controls without a flag and their playbooks). Archetypes, system types, Concept nodes and everything else in the
  * graph are untouched. A mirrorAll afterwards rebuilds it all.
  */
-export async function wipeMirror(account = accountId()): Promise<{ deleted: number }> {
+export async function wipeMirror(account?: string): Promise<{ deleted: number }> {
   if (!enabled()) return { deleted: 0 };
-  let deleted = await deleteWhere("MATCH (n) WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') AND n.account_id = $account", { account });
-  const { adapters } = await import("./adapters/index.js");
-  for (const a of adapters().filter((x) => x.id !== PROVIDER && x.configured())) deleted += await deleteWhere("MATCH (n) WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') AND n.account_id = $account AND n.provider = $provider", { account: a.primaryAccountId(), provider: a.id });
+  let deleted = 0;
+  // one account when named (a purge, a removed team); every mirrored adapter's primary account otherwise (the resync's wipe)
+  if (account) deleted += await deleteWhere("MATCH (n) WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') AND n.account_id = $account", { account });
+  else for (const a of mirroredAdapters()) deleted += await deleteWhere("MATCH (n) WHERE any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') AND n.account_id = $account AND n.provider = $provider", { account: a.primaryAccountId(), provider: a.id });
   deleted += await deleteWhere("MATCH (n) WHERE (n:AdvisorApp OR n:AdvisorContainer OR n:AdvisorImage OR n:AdvisorSource OR n:AdvisorClient OR n:KnVulnerability OR n:AdvisorPackage) AND NOT (n)--()", {});
   deleted += await deleteWhere("MATCH (c:AdvisorControl) WHERE NOT (c)-[:FLAGGED|SECURITY_FLAGGED]->() OPTIONAL MATCH (c)-[:HAS_PLAYBOOK]->(p:KnPlaybook) WITH collect(c) + collect(p) AS ns UNWIND ns AS n", {});
   deleted += (await wipeLegacy()).deleted;
@@ -1056,8 +1081,10 @@ export async function verifyConnection(): Promise<{ connected: boolean; error?: 
   if (!enabled()) return { connected: false, error: "NEO4J_URI is not set" };
   try {
     const info = await getDriver().verifyConnectivity(config.neo4jDatabase ? { database: config.neo4jDatabase } : undefined);
+    down = null;
     return { connected: true, server: `${info.address} ${info.agent || ""}`.trim() };
   } catch (e: any) {
+    noteFailure(e);
     return { connected: false, error: String(e?.message || e).slice(0, 300) };
   }
 }
@@ -1127,8 +1154,16 @@ export async function resourceView(id: string): Promise<ResourceView | null> {
 // ---- fire-and-forget hooks -----------------------------------------------------------------------------------------------
 
 /** End of a collection run: the run node, the refreshed inventory, every recommendation (the batch reconciles many), then the knowledge layer on top. */
-export const mirrorAfterRunInBackground = (runId: number) => inBackground(`mirror of run ${runId}`, async () => { await mirrorRun(runId); await mirrorResources(); await mirrorRecommendations(); const { mirrorNetwork } = await import("./graph_network.js"); await mirrorNetwork(); const { mirrorClusters } = await import("./graph_clusters.js"); await mirrorClusters(); mirrorKnowledgeInBackground(`run ${runId}`); });
-
+/** After a provider's run: the run, its resources, the recommendations, and the layers the adapter marks as following a run (network and clusters on AWS), then the knowledge layer. */
+export const mirrorAfterRunInBackground = (runId: number) => inBackground(`mirror of run ${runId}`, async () => {
+  await mirrorRun(runId);
+  const provider = (db.prepare("select provider from runs where id = ?").get(runId) as { provider: string } | undefined)?.provider;
+  const adapter = provider ? adapterFor(provider) : null;
+  await mirrorResources(adapter?.id);
+  await mirrorRecommendations();
+  for (const layer of adapter?.layers.filter((l) => l.after_run) ?? []) { try { await layer.mirror(); } catch (e) { logError(`${adapter!.id} ${layer.name}`, e); } }
+  mirrorKnowledgeInBackground(`run ${runId}`);
+});
 let knowledgeInFlight: Promise<unknown> | null = null;
 let knowledgeAgain: string | null = null;
 /**
@@ -1153,7 +1188,7 @@ export function mirrorKnowledgeInBackground(why: string): void {
     }
   })().finally(() => { knowledgeInFlight = null; });
 }
-export const mirrorResourcesInBackground = () => inBackground("resource mirror", mirrorResources);
+export const mirrorResourcesInBackground = (provider?: string) => inBackground(`resource mirror${provider ? ` (${provider})` : ""}`, () => mirrorResources(provider));
 
 /** Usage profiles (src/usage_profile.ts) on the node they describe: the instance's AdvisorCompute, or the AdvisorNodePool of an autoscaling group. */
 export async function mirrorUsageProfiles(): Promise<{ profiles: number }> {
@@ -1162,11 +1197,11 @@ export async function mirrorUsageProfiles(): Promise<{ profiles: number }> {
   const account = accountId();
   const reviews = new Map<string, any>(); for (const r of rowsOf("select subject, reviewed_at, verdict, schedule, confidence, reason from usage_reviews")) reviews.set(r.subject, r);
   const rows = rowsOf("select subject, kind, name, account_id, computed_at, quiet_hours_week, confidence, suggested_schedule, off_hours_week, est_usd_month, summary, quiet_windows from usage_profiles")
-    .map((r) => ({ id: r.kind === "asg" ? poolId(r.account_id ? String(r.account_id) : account, String(r.name)) : String(r.subject), account_id: r.account_id ? String(r.account_id) : null, name: str(r.name), kind: r.kind, computed_at: r.computed_at, quiet_hours_week: r.quiet_hours_week, confidence: r.confidence, suggested_schedule: r.suggested_schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, summary: r.summary, quiet_windows: (() => { try { return (JSON.parse(r.quiet_windows) as any[]).map((w) => w.label); } catch { return []; } })(), review_verdict: reviews.get(r.subject)?.verdict ?? null, review_schedule: reviews.get(r.subject)?.schedule ?? null, review_confidence: reviews.get(r.subject)?.confidence ?? null, review_reason: reviews.get(r.subject)?.reason ?? null, reviewed_at: reviews.get(r.subject)?.reviewed_at ?? null }));
+    .map((r) => ({ id: r.kind === "asg" ? poolNodeId(AWS, r.account_id ? String(r.account_id) : account, String(r.name)) : String(r.subject), account_id: r.account_id ? String(r.account_id) : null, name: str(r.name), kind: r.kind, computed_at: r.computed_at, quiet_hours_week: r.quiet_hours_week, confidence: r.confidence, suggested_schedule: r.suggested_schedule, off_hours_week: r.off_hours_week, est_usd_month: r.est_usd_month, summary: r.summary, quiet_windows: (() => { try { return (JSON.parse(r.quiet_windows) as any[]).map((w) => w.label); } catch { return []; } })(), review_verdict: reviews.get(r.subject)?.verdict ?? null, review_schedule: reviews.get(r.subject)?.schedule ?? null, review_confidence: reviews.get(r.subject)?.confidence ?? null, review_reason: reviews.get(r.subject)?.reason ?? null, reviewed_at: reviews.get(r.subject)?.reviewed_at ?? null }));
   const stamp = now();
   const props = "usage_computed_at: row.computed_at, usage_quiet_hours_week: row.quiet_hours_week, usage_confidence: row.confidence, usage_schedule: row.suggested_schedule, usage_off_hours_week: row.off_hours_week, usage_est_usd_month: row.est_usd_month, usage_summary: row.summary, usage_quiet_windows: row.quiet_windows, usage_review_verdict: row.review_verdict, usage_review_schedule: row.review_schedule, usage_review_confidence: row.review_confidence, usage_review_reason: row.review_reason, usage_reviewed_at: row.reviewed_at, updated_at: $now";
   for (const batch of chunks(rows.filter((r) => r.kind === "ec2"))) await write(`UNWIND $rows AS row MATCH (r:AdvisorResource {id: row.id}) SET r += {${props}}`, { rows: batch, now: stamp });
-  for (const batch of chunks(rows.filter((r) => r.kind === "asg"))) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name SET p += {${props}}`, { rows: batch, account, provider: PROVIDER, now: stamp });
+  for (const batch of chunks(rows.filter((r) => r.kind === "asg"))) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name SET p += {${props}}`, { rows: batch, account, provider: AWS, now: stamp });
   return { profiles: rows.length };
 }
 export const mirrorUsageProfilesInBackground = () => inBackground("usage profile mirror", mirrorUsageProfiles);
@@ -1182,17 +1217,17 @@ export async function mirrorCapacityPatterns(): Promise<{ patterns: number; even
   const account = accountId();
   const rows = rowsOf("select env_id, env_name, asg, region, account_id, computed_at, json from capacity_patterns");
   const stamp = now();
-  const nodes = rows.flatMap((r) => { try { const p = JSON.parse(r.json); return [{ id: poolId(r.account_id ? String(r.account_id) : account, String(r.asg)), account_id: r.account_id ? String(r.account_id) : null, name: String(r.asg), env_id: r.env_id, env_name: r.env_name, region: r.region, computed_at: p.computed_at, days: p.days, weeks: p.weeks, coverage: p.coverage, confident: Boolean(p.confident), floor: p.floor, ceiling: p.ceiling ?? null, learned_min: p.learned, wanted: p.wanted, trigger: p.trigger ?? null, binding: p.binding ?? null, signals: p.signals?.summary ?? null, pressure_events: p.pressure_events, summary: p.summary }]; } catch { return []; } });
+  const nodes = rows.flatMap((r) => { try { const p = JSON.parse(r.json); return [{ id: poolNodeId(AWS, r.account_id ? String(r.account_id) : account, String(r.asg)), account_id: r.account_id ? String(r.account_id) : null, name: String(r.asg), env_id: r.env_id, env_name: r.env_name, region: r.region, computed_at: p.computed_at, days: p.days, weeks: p.weeks, coverage: p.coverage, confident: Boolean(p.confident), floor: p.floor, ceiling: p.ceiling ?? null, learned_min: p.learned, wanted: p.wanted, trigger: p.trigger ?? null, binding: p.binding ?? null, signals: p.signals?.summary ?? null, pressure_events: p.pressure_events, summary: p.summary }]; } catch { return []; } });
   const props = "capacity_env_id: row.env_id, capacity_env_name: row.env_name, capacity_computed_at: row.computed_at, capacity_days: row.days, capacity_weeks: row.weeks, capacity_coverage: row.coverage, capacity_confident: row.confident, capacity_floor: row.floor, capacity_ceiling: row.ceiling, capacity_learned_min: row.learned_min, capacity_wanted: row.wanted, capacity_trigger: row.trigger, capacity_binding: row.binding, capacity_signals: row.signals, capacity_pressure_events: row.pressure_events, capacity_summary: row.summary, capacity_updated_at: $now";
-  for (const batch of chunks(nodes)) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name, p.region = row.region SET p += {${props}}`, { rows: batch, account, provider: PROVIDER, now: stamp });
+  for (const batch of chunks(nodes)) await write(`UNWIND $rows AS row MERGE (p:AdvisorNodePool {id: row.id}) SET p.name = row.name, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.name, p.region = row.region SET p += {${props}}`, { rows: batch, account, provider: AWS, now: stamp });
   const envAccount = new Map(rows.map((r) => [String(r.env_id), r.account_id ? String(r.account_id) : null]));
-  const events = rowsOf("select id, env_id, asg, at, ring, desired, max_size, cpu_avg, action_id, note from capacity_pressure_events where datetime(at) > datetime('now', '-28 days')").map((e) => { const a = envAccount.get(String(e.env_id)) ?? null; return { ...e, account_id: a, pool_id: poolId(a ?? account, String(e.asg)) }; });
+  const events = rowsOf("select id, env_id, asg, at, ring, desired, max_size, cpu_avg, action_id, note from capacity_pressure_events where datetime(at) > datetime('now', '-28 days')").map((e) => { const a = envAccount.get(String(e.env_id)) ?? null; return { ...e, account_id: a, pool_id: poolNodeId(AWS, a ?? account, String(e.asg)) }; });
   for (const batch of chunks(events)) await write(`UNWIND $rows AS row
     MERGE (p:AdvisorNodePool {id: row.pool_id}) ON CREATE SET p.name = row.asg, p.kind = 'asg', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg
     MERGE (e:AdvisorPressureEvent {id: row.id}) SET e += {env_id: row.env_id, at: row.at, ring: row.ring, desired: row.desired, max_size: row.max_size, signal: 'cpu', value: row.cpu_avg, cpu_avg: row.cpu_avg, note: row.note, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'pressure_event', native_id: toString(row.id), updated_at: $now}
     MERGE (p)-[:PRESSURED_AT]->(e)
     WITH e, row WHERE row.action_id IS NOT NULL
-    MATCH (a:AdvisorAction {id: row.action_id}) MERGE (a)-[:ANSWERED]->(e)`, { rows: batch, account, provider: PROVIDER, now: stamp });
+    MATCH (a:AdvisorAction {id: row.action_id}) MERGE (a)-[:ANSWERED]->(e)`, { rows: batch, account, provider: AWS, now: stamp });
   return { patterns: nodes.length, events: events.length };
 }
 export const mirrorCapacityPatternsInBackground = () => inBackground("capacity pattern mirror", mirrorCapacityPatterns);
@@ -1208,8 +1243,8 @@ export async function mirrorCloudNotifications(): Promise<{ notifications: numbe
     MERGE (n:AdvisorNotification {id: row.arn}) SET n += {feed: row.feed, source: row.source, event_type: row.event_type, headline: row.headline, notification_type: row.notification_type, event_status: row.event_status, origin_region: row.origin_region, related_account: row.related_account, created_at: row.created_at, aggregation: row.aggregation, event_count: row.event_count, regions: row.regions, configuration_arn: row.configuration_arn, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'notification_event', native_id: row.arn, updated_at: $now}
     WITH n, row OPTIONAL MATCH (n)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
     WITH DISTINCT n, row MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.native_id = coalesce(row.account_id, $account), a.kind = 'account', a.updated_at = $now
-    MERGE (n)-[:IN_ACCOUNT]->(a)`, { rows: batch, account, provider: PROVIDER, now: stamp });
-  await write("MATCH (n:AdvisorNotification {provider: $provider}) WHERE n.updated_at < $now DETACH DELETE n", { provider: PROVIDER, now: stamp });
+    MERGE (n)-[:IN_ACCOUNT]->(a)`, { rows: batch, account, provider: AWS, now: stamp });
+  await write("MATCH (n:AdvisorNotification {provider: $provider}) WHERE n.updated_at < $now DETACH DELETE n", { provider: AWS, now: stamp });
   return { notifications: rows.length };
 }
 export const mirrorComplianceScanInBackground = (scanId: number) => inBackground(`security scan mirror (${scanId})`, () => mirrorComplianceScan(scanId));
@@ -1229,7 +1264,7 @@ export function mirrorWakeProfile(instanceId: string): void {
     try { domains = row ? (JSON.parse(row.profile).domains ?? []) : []; } catch { /* kept empty */ }
     await write(`MERGE (r:AdvisorResource {id: $id}) ON CREATE SET r:AdvisorCompute, r.provider = $provider, r.account_id = $account, r.native_type = 'ec2_instance', r.native_id = $id
       SET r.wake_profile = $profile, r.wake_enabled = $enabled, r.wake_domains = $domains, r.wake_updated_at = $updated_at, r.wake_updated_by = $by, r.updated_at = $now`,
-      { id: instanceId, profile: row?.profile ?? null, enabled: row ? Boolean(row.enabled) : null, domains: row ? domains : null, updated_at: row?.updated_at ?? null, by: row?.updated_by ?? null, now: now(), provider: PROVIDER, account: accountResolver()(null, instanceId) ?? accountId() });
+      { id: instanceId, profile: row?.profile ?? null, enabled: row ? Boolean(row.enabled) : null, domains: row ? domains : null, updated_at: row?.updated_at ?? null, by: row?.updated_by ?? null, now: now(), provider: AWS, account: accountResolver()(null, instanceId) ?? accountId() });
   });
 }
 /** After the executor planned, applied, read back, reverted or retired a row: the ledger is history future agents act on. */

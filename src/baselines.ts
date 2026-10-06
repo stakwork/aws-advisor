@@ -10,6 +10,8 @@ import { S, query } from "./steampipe.js";
 import { Baseline, Point, buildBaseline, scoreValue } from "./baseline_math.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists baselines (
   scope_kind text not null, scope_id text not null, metric text not null,
@@ -133,7 +135,7 @@ export async function refreshBaselines(onLog: (s: string) => void = () => {}): P
             if (step && !open) {
               const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(r.instance_id) as any)?.name || r.instance_id;
               const msg = `${name}: ${metric === "NetworkOut" ? "sends" : "receives"} ${avg.toFixed(1)} GB/day over the last two days, ${(avg / Math.max(0.01, b.median)).toFixed(1)}x its 14-day median of ${b.median.toFixed(1)} GB/day`;
-              db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)").run(kind, res, msg, JSON.stringify({ summary: msg, instance_id: r.instance_id, metric, recent_gb_day: avg, median_gb_day: b.median, p95_gb_day: b.p95 }));
+              alertInsert(AWS).run(kind, res, msg, JSON.stringify({ summary: msg, instance_id: r.instance_id, metric, recent_gb_day: avg, median_gb_day: b.median, p95_gb_day: b.p95 }));
             }
             if (!step && open) db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where id = ?").run((open as any).id);
           }

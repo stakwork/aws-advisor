@@ -77,7 +77,7 @@ test("spend summary reads the spend_daily table (fixture rows in a scratch datab
   process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-browse-test-"));
   const { db } = await import("../db.js");
   const { spendSummary, spendRows } = await import("../spend.js");
-  const ins = db.prepare("insert into spend_daily(day, net_unblended, unblended, amortized, usage_only, fetched_at) values (?, ?, ?, ?, ?, ?)");
+  const ins = db.prepare("insert into spend_daily(provider, day, net_unblended, unblended, amortized, usage_only, fetched_at) values ('aws', ?, ?, ?, ?, ?, ?)");
   for (const r of [...fixture(), row(TODAY, 3, "2026-09-19 12:15:00")]) ins.run(r.day, r.net_unblended, r.unblended, r.amortized, r.usage_only, r.fetched_at);
   const s = spendSummary(TODAY);
   assert.equal(s.today.usd, 3);

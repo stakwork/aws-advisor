@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
-import { resourceAccountIndex } from "./resource_index.js";
-import { awsAdapter } from "./adapters/aws/index.js";
+import { rowAccount } from "./alert_store.js";
+import { AWS, type ProviderId } from "./adapters/types.js";
 import { createHash } from "node:crypto";
 import { db, getJsonSetting } from "./db.js";
 import { config } from "./config.js";
@@ -44,7 +44,7 @@ const fingerprint = (...parts: string[]) => createHash("sha1").update(parts.join
 
 export function startRun(trigger = "manual"): number {
   if (busy) throw new Error("a run is already in progress");
-  const id = Number(db.prepare("insert into runs(trigger) values (?)").run(trigger).lastInsertRowid);
+  const id = Number(db.prepare("insert into runs(trigger, provider) values (?, ?)").run(trigger, AWS).lastInsertRowid);
   busy = true;
   execute(id).finally(() => { busy = false; });
   return id;
@@ -271,14 +271,16 @@ async function auroraStats(onLog: (l: string) => void): Promise<AuroraStat[]> {
 }
 
 /** Inserts new recommendations, refreshes open ones, and (for a full rules batch) resolves ones whose resource is gone. Returns open count. */
-export function upsertRecommendations(runId: number, recs: RecInput[], source: "rules" | "agent", agentRequestId?: string, opts: { reconcile?: boolean } = {}): number {
+export function upsertRecommendations(runId: number, recs: RecInput[], source: "rules" | "agent", agentRequestId?: string, opts: { reconcile?: boolean; provider?: ProviderId } = {}): number {
   const select = db.prepare("select id, status from recommendations where fingerprint = ?");
   const insert = db.prepare(`
-    insert into recommendations(fingerprint, run_id, source, rule, title, resource, resource_name, action_type, est_monthly_saving, tier, confidence, rationale, evidence, agent_request_id, account_id)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  const runAccount = (db.prepare("select account_id, provider from runs where id = ?").get(runId) as { account_id: string | null; provider: string } | undefined);
-  const idx = resourceAccountIndex(awsAdapter.primaryAccountId());
-  const accountOf = (resource: string | null | undefined) => idx.of(resource) ?? (runAccount && runAccount.provider !== "aws" ? runAccount.account_id : null);
+    insert into recommendations(fingerprint, run_id, source, rule, title, resource, resource_name, action_type, est_monthly_saving, tier, confidence, rationale, evidence, agent_request_id, account_id, provider)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  // the provider and account are decided when the row is written: the run's provider (or the caller's, for a pass without a run row), and the account the provider says the resource is in
+  const run = (db.prepare("select account_id, provider from runs where id = ?").get(runId) as { account_id: string | null; provider: string } | undefined);
+  const provider = opts.provider ?? run?.provider;
+  if (!provider) throw new Error(`upsertRecommendations: run #${runId} does not exist and no provider was given`);
+  const accountOf = (r: RecInput) => rowAccount(provider, r.resource, { ...(r.evidence && typeof r.evidence === "object" ? r.evidence as Record<string, unknown> : {}), ...(run?.account_id ? { run_account_id: run.account_id } : {}) }) ?? run?.account_id ?? null;
   const refresh = db.prepare(`
     update recommendations set run_id = ?, title = ?, est_monthly_saving = ?, tier = ?, confidence = ?, rationale = ?, evidence = ?, updated_at = datetime('now')
     where id = ?`);
@@ -291,7 +293,7 @@ export function upsertRecommendations(runId: number, recs: RecInput[], source: "
       const existing = select.get(fp) as { id: number; status: string } | undefined;
       if (!existing) {
         insert.run(fp, runId, source, r.rule, r.title, r.resource, r.resourceName || null, r.actionType, r.estMonthlySaving, r.tier,
-          r.confidence, r.rationale, JSON.stringify(r.evidence), agentRequestId || null, accountOf(r.resource));
+          r.confidence, r.rationale, JSON.stringify(r.evidence), agentRequestId || null, accountOf(r), provider);
       } else if (["open", "snoozed", "resolved"].includes(existing.status)) {
         // approved, pending, rejected and done rows are deliberately left alone: what a human decided (or is in
         // the middle of) must stay what it says (title, tier, saving), or a later agent answer could rewrite an
@@ -305,7 +307,7 @@ export function upsertRecommendations(runId: number, recs: RecInput[], source: "
       // the daily review's items (rule review_*) come from the statistics, not from this batch: it refreshes them itself,
       // nor does the security scan's (rule sec_*, src/compliance.ts), which reconciles its own, nor the security groups' (rule sg_*,
       // src/security_groups.ts), refreshed with the inventory
-      const stale = db.prepare("select id, fingerprint, decided_at from recommendations where status = 'open' and source = 'rules' and rule not like 'review_%' and rule not like 'sec\\_%' escape '\\' and rule not like 'sg\\_%' escape '\\' and rule not like 'vercel\\_%' escape '\\'").all() as { id: number; fingerprint: string; decided_at: string | null }[];
+      const stale = db.prepare("select id, fingerprint, decided_at from recommendations where status = 'open' and source = 'rules' and rule not like 'review_%' and rule not like 'sec\\_%' escape '\\' and rule not like 'sg\\_%' escape '\\' and provider = ?").all(provider) as { id: number; fingerprint: string; decided_at: string | null }[];
       for (const s of stale) {
         if (seen.has(s.fingerprint)) continue;
         db.prepare("update recommendations set status = 'resolved', updated_at = datetime('now') where id = ?").run(s.id);

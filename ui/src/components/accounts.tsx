@@ -60,7 +60,8 @@ export function GeneralOverview() {
   useEffect(() => { api("/accounts/general").then(setD).catch(() => setD(null)); }, []);
   if (!d) return null;
   const m = d.month; const r = d.recommendations;
-  const monthHint = [m.aws_projected_usd != null ? `AWS projected ${usd(m.aws_projected_usd)}` : null, m.vercel_estimated_usd != null ? `Vercel period ${usd(m.vercel_estimated_usd)}` : null, m.vercel_stores_at_plan_usd != null ? `stores at plan ${usd(m.vercel_stores_at_plan_usd)}` : null].filter(Boolean).join(" · ");
+  // each provider's parts of the month in its own words (a projection, a period estimate, stores at plan)
+  const monthHint = (m.parts || []).filter((p: any) => p.usd != null).map((p: any) => `${p.label} ${usd(p.usd)}`).join(" · ");
   const tone = (l: string) => (l === "alarm" ? "text-red-300" : l === "warning" ? "text-orange-300" : "text-zinc-400");
   const open = (a: any) => { setScope(a.account, a.provider); window.location.assign(a.link); };
   return (
@@ -68,12 +69,12 @@ export function GeneralOverview() {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <Stat label="This month, all providers" value={m.total_usd != null ? `~${usd(m.total_usd)}` : "—"} hint={monthHint || "no spend read yet"} />
         <Stat label="Open recommendations" value={r.open} hint={`${usd(r.saving_usd_month)}/mo claimed · ${Object.entries(r.by_provider).map(([p, b]: any) => `${p.toUpperCase()} ${b.open}`).join(" · ")}`} />
-        <Stat label="Alarms" value={<span className={d.counts.alarms ? "text-orange-300" : "text-emerald-300"}>{d.counts.alarms}</span>} hint={`latest AWS run's alarm findings · ${d.counts.alerts_open} open alerts`} />
+        <Stat label="Alarms" value={<span className={d.counts.alarms ? "text-orange-300" : "text-emerald-300"}>{d.counts.alarms}</span>} hint={`alarm findings of each provider's latest run · ${d.counts.alerts_open} open alerts`} />
         <Stat label="Security" value={<span className={d.counts.security_critical ? "text-red-300" : d.counts.security_high ? "text-orange-300" : "text-emerald-300"}>{d.counts.security_critical} / {d.counts.security_high}</span>} hint="critical / high across accounts" />
         <Stat label="Accounts" value={d.accounts} hint={d.providers.map((p: string) => p.toUpperCase()).join(" · ")} />
       </div>
       <Card title={<span>Needs attention <span className="font-normal text-zinc-500">· across every account; each line says whose</span></span>}>
-        {!d.attention.length ? <div className="text-sm text-zinc-500">Nothing open: no alarm findings, no unacknowledged alerts, nothing in the Vercel team's attention list.</div> : (
+        {!d.attention.length ? <div className="text-sm text-zinc-500">Nothing open: no alarm findings, no unacknowledged alerts, nothing in any provider's attention list.</div> : (
           <ul className="space-y-1 text-sm">
             {d.attention.map((a: any, i: number) => (
               <li key={i} className="flex items-start gap-2">

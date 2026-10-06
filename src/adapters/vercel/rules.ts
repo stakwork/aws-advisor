@@ -2,7 +2,8 @@ import { db } from "../../db.js";
 import type { RecInput } from "../../rules.js";
 import { listDomains, listProjects, listStores, teamExtras, vercelTeam, type ProjectRow, type StoreRow } from "./inventory.js";
 import { usageTotals } from "./usage.js";
-import { projectEndpoints, vercelAdapter } from "./index.js";
+import { VERCEL, projectEndpoints, vercelAdapter } from "./index.js";
+import { insertAlert } from "../../alert_store.js";
 import { staticKeyVars } from "../../vercel_aws_links.js";
 
 /**
@@ -203,7 +204,7 @@ export async function runVercelRules(): Promise<VercelRulesResult> {
     for (const f of findings) ins.run(runId, f.control_id, f.control_title, f.severity === "info" ? "info" : "alarm", f.resource, f.reason, JSON.stringify({ ...f.dimensions, severity: f.severity, category: f.category, resource_name: f.resource_name, tab: f.tab ?? null }), teamId, `${f.control_id}:${f.resource}`);
     upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
     const live = new Set(recs.map((r) => `${r.rule}:${r.resource}`));
-    for (const row of db.prepare("select id, fingerprint from recommendations where status = 'open' and source = 'rules' and rule like 'vercel\\_%' escape '\\'").all() as { id: number; fingerprint: string }[]) {
+    for (const row of db.prepare("select id, fingerprint from recommendations where status = 'open' and source = 'rules' and provider = 'vercel'").all() as { id: number; fingerprint: string }[]) {
       if (!live.has(row.fingerprint)) { db.prepare("update recommendations set status = 'resolved', updated_at = datetime('now') where id = ?").run(row.id); resolved++; }
     }
     db.prepare("update runs set status = 'completed', finished_at = datetime('now'), findings_count = ?, recommendations_count = ? where id = ?").run(findings.length, recs.length, runId);
@@ -223,16 +224,17 @@ export function syncAlerts(teamId: string, teamName: string | null, findings: Ve
   const live = new Map(findings.filter((f) => f.severity !== "info").map((f) => [`${f.control_id}:${f.resource}`, f]));
   const open = db.prepare("select id, details from alerts where kind like 'vercel\\_%' escape '\\' and acknowledged = 0").all() as { id: number; details: string | null }[];
   // the first pass ever finds the backlog: it is recorded as alerts but not paged, so the bot does not open with twenty messages about things that were already true
-  const firstPass = !(db.prepare("select 1 from alerts where kind like 'vercel\\_%' escape '\\' limit 1").get());
+  const firstPass = !(db.prepare("select 1 from alerts where provider = 'vercel' limit 1").get());
   const openBy = new Map<string, number>();
   for (const a of open) { try { const fp = JSON.parse(a.details || "{}").fingerprint; if (fp) openBy.set(String(fp), a.id); } catch { /* */ } }
   let raised = 0; let closed = 0;
-  const ins = firstPass ? db.prepare("insert into alerts(kind, resource, message, details, notified_at, notify_result) values (?, ?, ?, ?, datetime('now'), 'skipped: already true at the first rules pass; only new findings page')") : db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+  const skip = firstPass ? "skipped: already true at the first rules pass; only new findings page" : undefined;
   const close = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system', triage = ? where id = ?");
   for (const [fp, f] of live) {
     if (openBy.has(fp)) continue;
     const message = `${teamName ? `${teamName}: ` : ""}${f.resource_name && f.resource !== teamId && !f.resource.includes("/member/") ? `${f.resource_name}: ` : ""}${f.reason}`;
-    ins.run(`vercel_${f.control_id.replace(/^vercel\.control\./, "")}`, f.resource, message, JSON.stringify({ summary: message, level: f.severity, fingerprint: fp, control_id: f.control_id, control_title: f.control_title, category: f.category, resource_name: f.resource_name, team_id: teamId, run_id: runId, tab: f.tab ?? null, ...f.dimensions }));
+    insertAlert(VERCEL, { kind: `vercel_${f.control_id.replace(/^vercel\.control\./, "")}`, resource: f.resource, message, account_id: teamId, skip_notify: skip,
+      details: JSON.stringify({ summary: message, level: f.severity, fingerprint: fp, control_id: f.control_id, control_title: f.control_title, category: f.category, resource_name: f.resource_name, team_id: teamId, run_id: runId, tab: f.tab ?? null, ...f.dimensions }) });
     raised++;
   }
   for (const [fp, id] of openBy) if (!live.has(fp)) { close.run(JSON.stringify({ closed_by: "system", reason: `the finding was not raised by rules pass #${runId}`, closed_at: new Date().toISOString() }), id); closed++; }

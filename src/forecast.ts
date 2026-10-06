@@ -83,7 +83,7 @@ export function resourceChanges(month: string): { new_resources: ResourceChange[
 
 /** Complete days Cost Explorer has for the month: the latest stored day before today, else yesterday (0 on the 1st). */
 export function elapsedDays(month: string, today = localDay()): number {
-  const last = (db.prepare("select max(day) as d from spend_daily where day < ? and day >= ?").get(today, `${month}-01`) as { d: string | null }).d;
+  const last = (db.prepare("select max(day) as d from spend_daily where provider = 'aws' and day < ? and day >= ?").get(today, `${month}-01`) as { d: string | null }).d;
   const fallback = Number(today.slice(8, 10)) - 1;
   return Math.max(0, last ? Number(last.slice(8, 10)) : fallback);
 }

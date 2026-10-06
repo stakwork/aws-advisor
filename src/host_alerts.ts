@@ -5,6 +5,8 @@
  */
 import { config } from "./config.js";
 import { db } from "./db.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 export type HostKind = "memory_high" | "memory_full" | "swap_in_use" | "load_high" | "reboot";
 export interface HostSample { collected_at: string; cpus: number; mem_used_pct: number | null; swap_used_pct: number | null; load1: number | null; load5: number | null; load15: number | null; uptime_seconds: number | null }
@@ -53,7 +55,7 @@ export function sampleFromProbe(collectedAt: string, d: any): HostSample {
 }
 
 const openKinds = db.prepare("select id, kind from alerts where kind in ('memory_high', 'memory_full', 'swap_in_use', 'load_high') and resource = ? and acknowledged = 0");
-const insert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insert = alertInsert(AWS);
 const ackKind = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where resource = ? and kind = ? and acknowledged = 0");
 const prevProbe = db.prepare("select collected_at, json from instance_metrics where instance_id = ? and id < ? and coalesce(kind, 'all') in ('host', 'all') order by id desc limit 1");
 

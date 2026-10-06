@@ -50,7 +50,7 @@ test("impactFor: the stored series and the medians for an actioned recommendatio
   const rows = [...series("2026-08-27", 14, () => 18), ...series("2026-09-10", 12, (i) => (i < 2 ? 12 : 1.4))];
   db.prepare(`insert into verifications(recommendation_id, decided_day, days_after, scope_service, scope_usage, scope_note, verdict, before_usd_day, after_usd_day, realised_usd_month, estimate_usd_month, ratio, applied, note, series)
     values (1, '2026-09-10', 12, 'Amazon Relational Database Service', '%Aurora:%', 'Aurora lines of the whole account', 'realised', 18, 1.4, 498, 467, 1.07, null, '14 days before at 18.00', ?)`).run(JSON.stringify(rows));
-  for (const r of [...series("2026-08-27", 26, (i) => 95 - (i >= 16 ? 16 : 0))]) db.prepare("insert into spend_daily(day, net_unblended) values (?, ?)").run(r.day, r.usd);
+  for (const r of [...series("2026-08-27", 26, (i) => 95 - (i >= 16 ? 16 : 0))]) db.prepare("insert into spend_daily(provider, day, net_unblended) values ('aws', ?, ?)").run(r.day, r.usd);
 
   const i = impactFor(1)!;
   assert.equal(i.actioned, true);

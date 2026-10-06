@@ -12,6 +12,7 @@ import { S, query } from "./steampipe.js";
 import { describeError } from "./permissions.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists tag_hygiene (
   resource text primary key, kind text not null, name text, region text, account_id text,
@@ -203,7 +204,7 @@ function fileRecommendations(rows: { resource: string; kind: string; name: strin
       evidence: { kind, required, rows: list.slice(0, ROW_CAP).map((r) => ({ resource: r.resource, name: r.name, missing: r.missing, suggested: r.suggested })) },
     });
   }
-  if (recs.length) upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
+  if (recs.length) upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS });
   const clean = seenKinds.filter((k) => !byKind.has(k));
   if (clean.length) db.prepare(`update recommendations set status = 'resolved', decision_reason = 'every resource of the kind carries the required tags now', updated_at = datetime('now') where rule = 'tag_hygiene' and status = 'open' and resource in (${clean.map((k) => `'tags:${k}'`).join(", ")})`).run();
 }

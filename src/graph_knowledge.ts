@@ -13,9 +13,10 @@ import { ROLE_OPTIONS } from "./roles.js";
 import { LOG_INGEST_PRICE, LOG_STORAGE_PRICE, logGroupTags, observedLogShipping } from "./logs.js";
 import { getReconciliation, lastFullMonth } from "./reconcile.js";
 import { resourceAccountIndex } from "./resource_index.js";
-import { PROVIDER, accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
+import { accountId, enabled, readQuery, writeCypher } from "./graph_mirror.js";
 import { AttributionContext, ObservedShipping, attributeLogGroup } from "./log_attribution.js";
 import { LAMBDA_PRICE, lambdaFactsMap, lambdaMonthlyCost } from "./lambda_inventory.js";
+import { AWS } from "./adapters/types.js";
 
 export const KN_LABELS = ["KnSystemType", "KnArchetype", "KnSystem", "KnDestination", "KnLogGroup", "KnPricingOverlay"] as const;
 
@@ -115,8 +116,8 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
 
   // ---- general area: system types (instance SKUs from the price cache, usage rules from the pricebook), archetypes
   const skus = (db.prepare("select kind, sku, region, engine, hourly, fetched_at from prices where hourly is not null").all() as any[]).map((p) => ({
-    id: `${p.kind}|${p.sku}|${p.region}`, provider: PROVIDER, kind: typeKind(p.kind), native_kind: p.kind, sku: p.sku, region: p.region, engine: p.engine, list_price: p.hourly, price_unit: "USD/hour", unit: "hour", source: "pricing_api", valid_from: String(p.fetched_at).slice(0, 10) }));
-  const usage = pricebookCatalog().map((r) => ({ id: `usage|${r.rule}`, provider: PROVIDER, kind: "usage", native_kind: "usage", sku: r.rule, region: "us-east-1", engine: null, list_price: r.unit_price, price_unit: `USD/${r.unit}`, unit: r.unit, source: "pricebook", valid_from: PRICEBOOK_DATE, note: r.note ?? null }));
+    id: `${p.kind}|${p.sku}|${p.region}`, provider: AWS, kind: typeKind(p.kind), native_kind: p.kind, sku: p.sku, region: p.region, engine: p.engine, list_price: p.hourly, price_unit: "USD/hour", unit: "hour", source: "pricing_api", valid_from: String(p.fetched_at).slice(0, 10) }));
+  const usage = pricebookCatalog().map((r) => ({ id: `usage|${r.rule}`, provider: AWS, kind: "usage", native_kind: "usage", sku: r.rule, region: "us-east-1", engine: null, list_price: r.unit_price, price_unit: `USD/${r.unit}`, unit: r.unit, source: "pricebook", valid_from: PRICEBOOK_DATE, note: r.note ?? null }));
   await writeCypher(`UNWIND $rows AS row MERGE (t:KnSystemType {id: row.id}) SET t += row, t.updated_at = $now`, { rows: [...skus, ...usage], now });
   const archetypes = Object.entries(ROLE_OPTIONS).map(([name, description]) => ({ id: name, name, description, native_type: "archetype", native_id: name }));
   await writeCypher(`UNWIND $rows AS row MERGE (a:KnArchetype {id: row.id}) SET a += row, a.updated_at = $now`, { rows: archetypes, now });
@@ -182,20 +183,20 @@ WITH s, row
 OPTIONAL MATCH (s)-[po:PART_OF]->() DELETE po
 WITH DISTINCT s, row
 OPTIONAL MATCH (parent:KnSystem {id: row.parent})
-FOREACH (_ IN CASE WHEN parent IS NULL THEN [] ELSE [1] END | MERGE (s)-[:PART_OF]->(parent))`, { rows: rows.map((r) => ({ ...r, types: r.types.map((t: any) => ({ ...t, generic_kind: typeKind(t.kind) })) })), account, provider: PROVIDER, now });
-  await writeCypher("MATCH (s:KnSystem {provider: $provider}) WHERE NOT s.id IN $ids SET s.gone = true, s.updated_at = $now", { provider: PROVIDER, ids: rows.map((r) => r.id), now });
+FOREACH (_ IN CASE WHEN parent IS NULL THEN [] ELSE [1] END | MERGE (s)-[:PART_OF]->(parent))`, { rows: rows.map((r) => ({ ...r, types: r.types.map((t: any) => ({ ...t, generic_kind: typeKind(t.kind) })) })), account, provider: AWS, now });
+  await writeCypher("MATCH (s:KnSystem {provider: $provider}) WHERE NOT s.id IN $ids SET s.gone = true, s.updated_at = $now", { provider: AWS, ids: rows.map((r) => r.id), now });
 
   // ---- pricing overlays: the Savings Plan (from the reconstruction) and reservations (from the account)
   const overlays: any[] = [];
   const rec = getReconciliation(lastFullMonth());
-  if (rec) overlays.push({ id: `sp:${account}`, kind: "commitment", native_kind: "savings_plan", provider: PROVIDER, account_id: account, commitment_usd_month: rec.totals.sp_fee_model, covered_od_usd_month: rec.totals.sp_covered_od, discount_rate: rec.totals.sp_discount_rate, month: rec.month, covers_kind: "compute" });
+  if (rec) overlays.push({ id: `sp:${account}`, kind: "commitment", native_kind: "savings_plan", provider: AWS, account_id: account, commitment_usd_month: rec.totals.sp_fee_model, covered_od_usd_month: rec.totals.sp_covered_od, discount_rate: rec.totals.sp_discount_rate, month: rec.month, covers_kind: "compute" });
   try {
     const ris = await query<any>(`select reserved_db_instance_id as id, account_id, db_instance_class as sku, db_instance_count as count, product_description as engine, state, start_time, duration, offering_type from ${S}.aws_rds_reserved_db_instance where state = 'active'`);
-    for (const r of ris) overlays.push({ id: `ri:rds:${r.id}`, kind: "reservation", native_kind: "reserved_db_instance", provider: PROVIDER, account_id: r.account_id ? String(r.account_id) : account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "database" });
+    for (const r of ris) overlays.push({ id: `ri:rds:${r.id}`, kind: "reservation", native_kind: "reserved_db_instance", provider: AWS, account_id: r.account_id ? String(r.account_id) : account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "database" });
   } catch { /* not readable; the overlay is skipped */ }
   try {
     const ris = await query<any>(`select reserved_cache_node_id as id, account_id, cache_node_type as sku, cache_node_count as count, product_description as engine, state, start_time, duration, offering_type from ${S}.aws_elasticache_reserved_cache_node where state = 'active'`);
-    for (const r of ris) overlays.push({ id: `ri:cache:${r.id}`, kind: "reservation", native_kind: "reserved_cache_node", provider: PROVIDER, account_id: r.account_id ? String(r.account_id) : account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "cache" });
+    for (const r of ris) overlays.push({ id: `ri:cache:${r.id}`, kind: "reservation", native_kind: "reserved_cache_node", provider: AWS, account_id: r.account_id ? String(r.account_id) : account, sku: r.sku, count: Number(r.count), engine: r.engine, offering: r.offering_type, start: r.start_time ? new Date(r.start_time).toISOString() : null, end: r.start_time && r.duration ? new Date(new Date(r.start_time).getTime() + Number(r.duration) * 1000).toISOString() : null, covers_kind: "cache" });
   } catch { /* skipped */ }
   if (overlays.length) await writeCypher(`
 UNWIND $rows AS row
@@ -260,7 +261,7 @@ FOREACH (o IN row.observed | MERGE (r:AdvisorResource {id: o.instance_id}) MERGE
 WITH g, row
 UNWIND [o IN row.observed WHERE o.via STARTS WITH 'docker:'] AS o
 MATCH (c:AdvisorContainer {id: 'container:' + o.instance_id + ':' + substring(o.via, 7)})
-MERGE (c)-[e:SHIPS_LOGS_TO]->(g) SET e.via = 'log driver', e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed'`, { rows: lg, provider: PROVIDER, now });
+MERGE (c)-[e:SHIPS_LOGS_TO]->(g) SET e.via = 'log driver', e.source = o.source, e.observed_at = o.at, e.attributed_by = 'observed'`, { rows: lg, provider: AWS, now });
     traffic += lg.length;
   }
   // ---- decisions with an outcome

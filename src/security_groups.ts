@@ -15,6 +15,7 @@ import { accountWhere, type AccountScope } from "./scope.js";
 import { BROAD_RANGE, ingressRulesFor, ruleRef, type IngressRule, type RuleRef } from "./instance_apps.js";
 import { upsertRecommendations } from "./collector.js";
 import type { RecInput } from "./rules.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists inventory_sg (
   group_id text primary key, group_name text, description text, vpc_id text, region text, account_id text, refreshed_at text not null
@@ -216,7 +217,7 @@ export function dormantIpv6Recommendations(): RecInput[] {
 export function syncSecurityGroupRecommendations(): { warranted: number; resolved: number } {
   if (!(db.prepare("select count(*) as n from inventory_vpc").get() as { n: number }).n) return { warranted: 0, resolved: 0 };
   const recs = dormantIpv6Recommendations();
-  upsertRecommendations(0, recs, "rules", undefined, { reconcile: false });
+  upsertRecommendations(0, recs, "rules", undefined, { reconcile: false, provider: AWS });
   const seen = new Set(recs.map((r) => `${r.rule}:${r.resource}`));
   const open = db.prepare("select id, fingerprint from recommendations where status = 'open' and rule = ?").all(DORMANT_RULE) as { id: number; fingerprint: string }[];
   const gone = open.filter((r) => !seen.has(r.fingerprint));

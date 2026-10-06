@@ -251,6 +251,7 @@ test("ledger: pages newest first, counts kinds within the status scope, lands on
 
 test("ledger: a proposal seen again keeps its row and date; one that went stale is revived, not duplicated, and its grace restarts", async () => {
   const { recordProposal, graceLeftMs } = await import("../executor.js");
+  await import("../actions/index.js"); // the ledger row takes its provider from the registered module
   const { db } = await import("../db.js");
   db.exec("delete from actions");
   const p = { kind: "efs_lifecycle" as const, resource: "fs-1", resource_name: "fs-1", region: "us-east-1", account_id: null, dedupe: "efs_lifecycle:us-east-1:fs-1:30", title: "fs-1: cold files to IA after 30 days", reason: "no policy", before: {}, after: {}, facts: {}, rollback: "empty policy", est_usd_month: 1 };

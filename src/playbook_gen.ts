@@ -3,7 +3,8 @@ import { postAgentRequest, type AgentRunRow } from "./agent.js";
 import { systemPromptFor } from "./concepts.js";
 import { config } from "./config.js";
 import { db } from "./db.js";
-import { CONTROL_REFERENCES } from "./adapters/vercel/rules.js";
+import { adapters } from "./adapters/index.js";
+import { controlProvider } from "./graph_mirror.js";
 import { askJev, jevEnabled } from "./jev.js";
 import { EFFORT_LEVELS } from "./resolve.js";
 import { CONTROL_SOURCES, type Playbook, type PlaybookEffort, type PlaybookTier } from "./playbooks.js";
@@ -48,12 +49,13 @@ export interface GeneratedPlaybook { control_id: string; title: string; meaning:
 
 /** Where a control's documentation lives: the catalogue's official pages for the AWS controls, the control table's for a platform provider; the benchmark mod's own text is read as well. */
 export function referencesFor(controlId: string): string[] {
-  if (controlId.startsWith("vercel.control.")) return CONTROL_REFERENCES[controlId] ?? [];
-  return CONTROL_SOURCES[controlId] ?? [];
+  const provider = controlProvider(controlId);
+  const a = adapters().find((x) => x.id === provider);
+  return a?.rules?.controlSources()[controlId] ?? CONTROL_SOURCES[controlId] ?? [];
 }
 
 /** Whether the generator knows a control: the mod defines it, or sources are listed for it. */
-export const knownForGeneration = (controlId: string): boolean => Boolean(modControl(controlId)) || controlId in CONTROL_SOURCES || controlId in CONTROL_REFERENCES;
+export const knownForGeneration = (controlId: string): boolean => Boolean(modControl(controlId)) || controlId in CONTROL_SOURCES || referencesFor(controlId).length > 0;
 
 export function controlSection(controlId: string, sources: SourceRow[], unread: string[]): string {
   const lines = [`## Control ${controlId}`];
@@ -224,13 +226,16 @@ export interface DueControl { control_id: string; why: string }
 export function controlsDue(opts: { limit?: number } = {}): DueControl[] {
   const out = new Map<string, string>();
   const gen = new Map((db.prepare("select control_id, sources, stale_after, status, published from playbooks").all() as any[]).map((r) => [r.control_id, r]));
-  const runId = (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
-  const flagged = runId ? (db.prepare("select distinct control_id from findings where run_id = ? and status = 'alarm'").all(runId) as { control_id: string }[]).map((r) => r.control_id) : [];
-  for (const id of flagged) if (!gen.has(id)) out.set(id, "flagged in the latest run, no generated playbook yet");
-  for (const r of db.prepare("select id from runs where provider <> 'aws' and status = 'completed' and id in (select max(id) from runs where provider <> 'aws' and status = 'completed' group by account_id)").all() as { id: number }[])
-    // every finding of the pass, info ones too: each is a control a person reads about, and the info ones carry recommendations as well
-    for (const f of db.prepare("select distinct control_id from findings where run_id = ?").all(r.id) as { control_id: string }[]) if (!gen.has(f.control_id) && referencesFor(f.control_id).length) out.set(f.control_id, "raised in the account's latest rules pass, no generated playbook yet");
-  for (const id of Object.keys(CONTROL_SOURCES)) if (!gen.has(id)) out.set(id, "sources listed, no generated playbook yet");
+  // each provider's latest run per account: its alarms (a collection run), or every finding with sources listed (a rules pass whose info findings carry recommendations too)
+  for (const a of adapters()) {
+    if (!a.rules) continue;
+    if (a.rules.playbooks_from === "alarm") {
+      const runId = a.rules.latestRunId(null);
+      if (runId) for (const f of db.prepare("select distinct control_id from findings where run_id = ? and status = 'alarm'").all(runId) as { control_id: string }[]) if (!gen.has(f.control_id)) out.set(f.control_id, "flagged in the latest run, no generated playbook yet");
+    } else for (const r of db.prepare("select max(id) as id from runs where provider = ? and status = 'completed' group by account_id").all(a.id) as { id: number }[])
+      for (const f of db.prepare("select distinct control_id from findings where run_id = ?").all(r.id) as { control_id: string }[]) if (!gen.has(f.control_id) && referencesFor(f.control_id).length) out.set(f.control_id, "raised in the account's latest rules pass, no generated playbook yet");
+    if (a.rules.seed_playbooks) for (const id of Object.keys(a.rules.controlSources())) if (!gen.has(id)) out.set(id, "sources listed, no generated playbook yet");
+  }
   const nowIso = new Date().toISOString();
   for (const [id, r] of gen) {
     if (r.status === "pending") continue;

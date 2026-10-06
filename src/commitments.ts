@@ -11,6 +11,8 @@ import { db } from "./db.js";
 import { sdkCredentials } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError, noteSuccess } from "./permissions.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`create table if not exists commitment_utilization (
   kind text not null, id text not null, day text not null,
@@ -21,7 +23,7 @@ db.exec(`create table if not exists commitment_utilization (
 export interface CommitmentRow { kind: string; id: string; detail: string; monthly_usd: number | null; expires: string | null; days_left: number | null; utilization_pct: number | null; unused_usd_30d: number | null; unused_hours_30d?: number | null; net_savings_usd_30d: number | null }
 
 const openAlert = db.prepare("select id from alerts where kind = ? and resource = ? and acknowledged = 0 limit 1");
-const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insertAlert = alertInsert(AWS);
 const ackAlert = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where kind = ? and resource = ? and acknowledged = 0");
 const dayStr = (d: Date) => d.toISOString().slice(0, 10);
 

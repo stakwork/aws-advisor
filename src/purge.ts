@@ -1,5 +1,5 @@
 import { db, getSetting, setSetting } from "./db.js";
-import { resourceAccountIndex } from "./resource_index.js";
+import { providerOfAccount, stampRowAccounts } from "./scope.js";
 import { listMembers } from "./accounts.js";
 
 /**
@@ -53,39 +53,28 @@ export function tablesWithAccountId(): string[] {
   return (db.prepare("select name from sqlite_master where type = 'table' and sql like '%account_id%' and name not in ('settings', 'vercel_usage', 'vercel_team', 'vercel_projects', 'vercel_stores', 'vercel_invoices', 'vercel_snapshots', 'vercel_changes')").all() as { name: string }[]).map((r) => r.name).sort();
 }
 
-/** Removes everything the advisor holds about one AWS account. Irreversible; the caller confirms. */
-export const ACCOUNT_TARGET_RE = /^(\d{12}|team_[A-Za-z0-9]+)$/;
-/** The Vercel tables keyed by team (vercel_domains and vercel_env hang off a project). */
-const VERCEL_TEAM_TABLES = ["vercel_projects", "vercel_stores", "vercel_usage", "vercel_invoices", "vercel_snapshots", "vercel_changes", "vercel_deployments"];
+/** Whether a purge target is an account some provider owns (an AWS account id, a Vercel team id, ...). */
+export function isAccountTarget(account: string): boolean { return Boolean(account) && providerOfAccount(account) != null; }
+
+/**
+ * Removes everything the advisor holds about one account of any provider. Irreversible; the caller confirms. The
+ * provider forgets what its own storage keeps by its own key (a team's projects), then every table with an
+ * account_id loses that account's rows, recommendations, alerts and actions included (older ones are stamped with
+ * their account first), and the graph loses its nodes.
+ */
 export async function purgeAccountData(account: string, opts: { graph?: boolean } = {}): Promise<PurgeResult> {
-  if (!ACCOUNT_TARGET_RE.test(account)) throw new Error("account must be a 12-digit AWS account id or a Vercel team id");
+  const adapter = providerOfAccount(account);
+  if (!adapter) throw new Error(`no provider owns the account "${account}"`);
   const out: PurgeResult = { account, tables: {}, attributed: {}, graph_deleted: 0 };
-  if (!/^\d{12}$/.test(account)) {
-    // a platform account: its own tables by team id, the rows its rules passes wrote, and its graph nodes
-    db.transaction(() => {
-      for (const [table, col] of [["vercel_domains", "project_id"], ["vercel_env", "project_id"]] as const) { try { const n = db.prepare(`delete from ${table} where ${col} in (select id from vercel_projects where team_id = ?)`).run(account).changes; if (n) out.tables[table] = n; } catch { /* */ } }
-      for (const table of VERCEL_TEAM_TABLES) { try { const n = db.prepare(`delete from ${table} where team_id = ?`).run(account).changes; if (n) out.tables[table] = n; } catch { /* */ } }
-      try { const n = db.prepare("delete from vercel_team where id = ?").run(account).changes; if (n) out.tables.vercel_team = n; } catch { /* */ }
-      for (const table of ["recommendations", "alerts", "actions"]) { try { const n = db.prepare(`delete from ${table} where account_id = ?`).run(account).changes; if (n) out.attributed[table] = n; } catch { /* */ } }
-      try { const n = db.prepare("delete from runs where provider <> 'aws' and account_id = ?").run(account).changes; if (n) out.tables.runs = n; } catch { /* */ }
-      try { db.prepare("delete from findings where run_id not in (select id from runs)").run(); } catch { /* */ }
-      db.prepare("delete from settings where key in (?, ?)").run(`vercel_billing:${account}`, `vercel_extras:${account}`);
-    })();
-    if (opts.graph !== false) { try { const { wipeMirror, enabled } = await import("./graph_mirror.js"); if (enabled()) out.graph_deleted = (await wipeMirror(account)).deleted; } catch (e: any) { console.error(`[purge] graph: ${e?.message || e}`); } }
-    return out;
-  }
-  // rows that name a resource: attribute them while the inventories still exist
-  const idx = resourceAccountIndex(account);
-  const mine = (resource: unknown) => idx.of(resource ? String(resource) : null) === account;
+  for (const t of ["recommendations", "alerts", "actions"] as const) stampRowAccounts(t);
   db.transaction(() => {
-    for (const [table, col] of [["recommendations", "resource"], ["alerts", "resource"], ["actions", "resource"], ["incidents", "resource"]] as const) {
-      let rows: { id: number }[] = []; try { rows = (db.prepare(`select id, ${col} as r from ${table}`).all() as any[]).filter((r) => mine(r.r)); } catch { continue; }
-      if (!rows.length) continue;
-      if (table === "recommendations") { try { db.prepare(`delete from verifications where recommendation_id in (${rows.map(() => "?").join(",")})`).run(...rows.map((r) => r.id)); } catch { /* no table */ } }
-      const n = db.prepare(`delete from ${table} where id in (${rows.map(() => "?").join(",")})`).run(...rows.map((r) => r.id)).changes;
-      out.attributed[table] = n;
-    }
-    for (const table of tablesWithAccountId()) {
+    Object.assign(out.tables, adapter.purgeStorage?.(account, { dryRun: false }) ?? {});
+    // incidents and verifications hang off the rows that go
+    const alertIds = (db.prepare("select id from alerts where account_id = ?").all(account) as { id: number }[]).map((r) => r.id);
+    if (alertIds.length) { try { const n = db.prepare(`delete from incidents where alert_id in (${alertIds.map(() => "?").join(",")})`).run(...alertIds).changes; if (n) out.attributed.incidents = n; } catch { /* no table */ } }
+    try { db.prepare("delete from verifications where recommendation_id in (select id from recommendations where account_id = ?)").run(account); } catch { /* no table */ }
+    for (const table of ["recommendations", "alerts", "actions"]) { try { const n = db.prepare(`delete from ${table} where account_id = ?`).run(account).changes; if (n) out.attributed[table] = n; } catch { /* */ } }
+    for (const table of tablesWithAccountId().filter((t) => !["recommendations", "alerts", "actions"].includes(t))) {
       try { const n = db.prepare(`delete from ${table} where account_id = ?`).run(account).changes; if (n) out.tables[table] = n; } catch { /* a view or a table without the column */ }
     }
     try { db.prepare("delete from findings where run_id not in (select id from runs)").run(); } catch { /* */ }
@@ -97,17 +86,13 @@ export async function purgeAccountData(account: string, opts: { graph?: boolean 
 
 /** What a purge would remove, for the confirmation. */
 export function purgePreview(account: string): { tables: Record<string, number>; attributed: Record<string, number> } {
-  if (!/^\d{12}$/.test(account)) {
-    const tables: Record<string, number> = {}; const attributed: Record<string, number> = {};
-    for (const t of [...VERCEL_TEAM_TABLES]) { try { const n = (db.prepare(`select count(*) as n from ${t} where team_id = ?`).get(account) as { n: number }).n; if (n) tables[t] = n; } catch { /* */ } }
-    for (const t of ["recommendations", "alerts", "actions"]) { try { const n = (db.prepare(`select count(*) as n from ${t} where account_id = ?`).get(account) as { n: number }).n; if (n) attributed[t] = n; } catch { /* */ } }
-    return { tables, attributed };
-  }
-  const idx = resourceAccountIndex(account); const mine = (resource: unknown) => idx.of(resource ? String(resource) : null) === account;
+  const adapter = providerOfAccount(account);
+  if (!adapter) throw new Error(`no provider owns the account "${account}"`);
+  for (const t of ["recommendations", "alerts", "actions"] as const) stampRowAccounts(t);
+  const tables: Record<string, number> = { ...(adapter.purgeStorage?.(account, { dryRun: true }) ?? {}) };
   const attributed: Record<string, number> = {};
-  for (const [table, col] of [["recommendations", "resource"], ["alerts", "resource"], ["actions", "resource"]] as const) { try { const n = (db.prepare(`select ${col} as r from ${table}`).all() as any[]).filter((r) => mine(r.r)).length; if (n) attributed[table] = n; } catch { /* */ } }
-  const tables: Record<string, number> = {};
-  for (const table of tablesWithAccountId()) { try { const n = (db.prepare(`select count(*) as n from ${table} where account_id = ?`).get(account) as { n: number }).n; if (n) tables[table] = n; } catch { /* */ } }
+  for (const t of ["recommendations", "alerts", "actions"]) { try { const n = (db.prepare(`select count(*) as n from ${t} where account_id = ?`).get(account) as { n: number }).n; if (n) attributed[t] = n; } catch { /* */ } }
+  for (const table of tablesWithAccountId().filter((t) => !["recommendations", "alerts", "actions"].includes(t))) { try { const n = (db.prepare(`select count(*) as n from ${table} where account_id = ?`).get(account) as { n: number }).n; if (n) tables[table] = n; } catch { /* */ } }
   return { tables, attributed };
 }
 

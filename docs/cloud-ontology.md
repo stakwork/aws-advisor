@@ -1754,6 +1754,30 @@ collection iterates the registry per adapter; the Settings page gets the Account
 and the discovery step for providers that have one. Jev's role classification and the rules are already per resource
 and need nothing.
 
+## 8b. Adding a provider (the contract, 2026-10-06)
+
+AWS is one adapter among equals: nothing above `src/adapters/` names a provider. A new cloud is a directory
+`src/adapters/<provider>/` exporting a `ProviderAdapter` (`src/adapters/types.ts`), added to the registry
+(`src/adapters/index.ts`) and to the resource index (`src/resource_index.ts`), plus its UI components registered in
+`ui/src/views.tsx`. What the adapter declares, and who reads it:
+
+| field | what it is | read by |
+|---|---|---|
+| `collect`, `resources`, `resourceIds`, `edges`, `layers` | its storage refreshed, the generic nodes, its edges, its graph layers (`after_run` ones follow each run) | `src/graph_mirror.ts` (`mirrorAll` loops over every adapter) |
+| `owns`, `accountOf`, `legacy_blank_account` | which account ids are its; which account a row (alert, recommendation) belongs to | `src/scope.ts`, `src/alert_store.ts`, the record mirrors |
+| `jobs` | its scheduled jobs (cron key, label, why it is blocked, the run) | `src/scheduler.ts`, "Run now" |
+| `rules` | latest run per account, benchmarks, control prefixes and facts, playbook sources | findings, playbooks, controls, the run list |
+| `actions` | registers its executor modules under its id; the credentials they run under | `src/executor.ts` (ledger rows carry `provider`) |
+| `onboarding` | add / test / remove an account, permission check, setup | `POST /api/providers/:id/accounts` and the rest |
+| `cost`, `attention` | last bill per account, this month in its own terms, what needs a person | the accounts and general overviews |
+| `routes`, `onStart`, `purgeStorage`, `agentNote` | its own API, start-up checks, forgetting an account, its line in the agent's instructions | `src/index.ts`, `src/purge.ts`, `src/mcp.ts` |
+| `ui` | the view ids for its Overview, Bill, Changes, Inventory tabs and Settings sections | every page through `ui/src/views.tsx` |
+
+Recommendations, alerts and actions carry `provider` and `account_id` from the moment they are written (alerts through
+`insertAlert`, recommendations from their run's provider, actions from the module's); `spend_daily` is keyed by
+`(provider, day)` and the monthly spend tables carry `provider`. Rows from before were backfilled once (vercel_* rules
+and kinds are Vercel's, everything else AWS's).
+
 ## 9. Open decisions
 
 - Whether the v1 labels `AdvisorPort` and `AdvisorNodePool.name` as key are dropped at the end of step 1 or kept one

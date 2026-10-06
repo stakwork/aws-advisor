@@ -266,12 +266,15 @@ create table if not exists resource_roles (
 );
 
 create table if not exists spend_daily (
-  day text primary key,
+  provider text not null,
+  account_id text,
+  day text not null,
   net_unblended real,
   unblended real,
   amortized real,
   usage_only real,
-  fetched_at text not null default (datetime('now'))
+  fetched_at text not null default (datetime('now')),
+  primary key (provider, day)
 );
 
 create table if not exists resolutions (
@@ -327,6 +330,16 @@ create table if not exists inventory_elasticache (
 for (const t of ["recommendations", "alerts"]) if (!(db.prepare(`pragma table_info(${t})`).all() as { name: string }[]).some((c) => c.name === "account_id")) { try { db.exec(`alter table ${t} add column account_id text`); } catch (e: any) { if (!/duplicate column/i.test(String(e?.message))) throw e; } }
 // runs carry their provider: the AWS collection run (default) or a platform provider's rules pass (vercel); every "latest run" lookup names the provider it wants
 if (!(db.prepare("pragma table_info(runs)").all() as { name: string }[]).some((c) => c.name === "provider")) { try { db.exec("alter table runs add column provider text not null default 'aws'"); } catch (e: any) { if (!/duplicate column/i.test(String(e?.message))) throw e; } }
+// recommendations and alerts carry the provider they were made for, written with the row (the run's provider, the
+// raiser's); rows from before the column existed are backfilled once from what only one provider writes: vercel_* rules
+// and alert kinds are Vercel's, everything else was AWS's (the only other provider then)
+for (const t of ["recommendations", "alerts"]) {
+  const had = (db.prepare(`pragma table_info(${t})`).all() as { name: string }[]).some((c) => c.name === "provider");
+  if (had) continue;
+  addColumn(t, "provider", "text");
+  db.prepare(`update ${t} set provider = case when ${t === "alerts" ? "kind" : "rule"} like 'vercel\\_%' escape '\\' then 'vercel' else 'aws' end where provider is null`).run();
+}
+rekeySpendDaily();
 
 // agent_runs grew a kind (findings | incident) and an alert_id, and run_id became optional, when alert
 // investigations arrived. SQLite cannot relax a NOT NULL, so databases from before that are rebuilt once.
@@ -446,6 +459,23 @@ export function rekeyByAccount(table: string, key: string): boolean {
     db.exec(`alter table ${tmp} rename to ${table}`);
   })();
   return true;
+}
+
+/**
+ * spend_daily was one row per day of the AWS payer's bill; it is keyed by (provider, day) now, so a second provider's
+ * daily cost has its own rows. The rows from before are AWS's, under the account the credentials resolved to.
+ */
+function rekeySpendDaily() {
+  const cols = db.pragma("table_info(spend_daily)") as { name: string }[];
+  if (!cols.length || cols.some((c) => c.name === "provider")) return;
+  const payer = (() => { try { const v = (db.prepare("select value from settings where key = 'aws_credentials_meta'").get() as { value: string } | undefined)?.value; return v ? JSON.parse(v).accountId ?? null : null; } catch { return null; } })();
+  db.transaction(() => {
+    db.exec(`create table spend_daily__rekey (provider text not null, account_id text, day text not null, net_unblended real, unblended real, amortized real, usage_only real,
+      fetched_at text not null default (datetime('now')), primary key (provider, day))`);
+    db.prepare("insert into spend_daily__rekey (provider, account_id, day, net_unblended, unblended, amortized, usage_only, fetched_at) select 'aws', ?, day, net_unblended, unblended, amortized, usage_only, fetched_at from spend_daily").run(payer);
+    db.exec("drop table spend_daily");
+    db.exec("alter table spend_daily__rekey rename to spend_daily");
+  })();
 }
 
 function migrateAgentRuns() {

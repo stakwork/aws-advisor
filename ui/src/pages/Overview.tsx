@@ -8,7 +8,7 @@ import { alertLevel } from "../alertLevel";
 import { ImpactList } from "../components/impact";
 import { AccountsOverview, GeneralOverview } from "../components/accounts";
 import { useScopeInfo } from "../scope";
-import { VercelOverview } from "../components/vercelOverview";
+import { ScopedPage } from "../views";
 
 const PREVIEW = 5;
 const PAGE = 10;
@@ -170,7 +170,25 @@ function SectionHeading({ title, to, label = "open →" }: { title: string; to: 
   return <div className="flex items-baseline justify-between border-b border-zinc-800 pb-1"><h2 className="text-base font-medium text-zinc-100">{title}</h2><Link to={to} className="text-xs text-zinc-500 hover:text-zinc-300">{label}</Link></div>;
 }
 
+/**
+ * One account: the overview its provider declares (ui/src/views.tsx), never another provider's cards; every account
+ * with more than one provider configured: the general view across them.
+ */
 export default function Overview() {
+  const scopeInfo = useScopeInfo();
+  if (scopeInfo.ready && scopeInfo.scope === "all" && scopeInfo.providers.filter((p) => p.configured).length > 1) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between"><h1 className="text-xl font-semibold text-zinc-100">Overview</h1><span className="text-sm text-zinc-500">All accounts · pick one under "Looking at" for its own overview</span></div>
+        <GeneralOverview />
+      </div>
+    );
+  }
+  return <ScopedPage slot="overview" what="overview" />;
+}
+
+/** The AWS account's overview (the AWS adapter's overview view). */
+export function AwsOverview() {
   const [d, setD] = useState<any>(null);
   const [spend, setSpend] = useState<any>(null);
   const [spendMsg, setSpendMsg] = useState("");
@@ -185,24 +203,6 @@ export default function Overview() {
   const loadAlerts = () => api(`/alerts?status=open&page=${expanded ? alertPage : 1}&page_size=${expanded ? PAGE : PREVIEW}`).then(setAlerts).catch(() => {});
   useEffect(() => { load(); loadSpend(); const t = setInterval(() => { load(); loadSpend(); }, 10000); return () => clearInterval(t); }, []);
   useEffect(() => { loadAlerts(); const t = setInterval(loadAlerts, 10000); return () => clearInterval(t); }, [expanded, alertPage]);
-  const scopeInfo = useScopeInfo();
-  // one account: its own overview, never another provider's cards; every account: the table across them
-  if (scopeInfo.provider && scopeInfo.provider !== "aws") {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between"><h1 className="text-xl font-semibold text-zinc-100">Overview</h1><span className="text-sm text-zinc-500">Looking at {scopeInfo.label}</span></div>
-        {scopeInfo.provider === "vercel" ? <VercelOverview /> : <Empty>No overview for {scopeInfo.label} yet.</Empty>}
-      </div>
-    );
-  }
-  if (scopeInfo.ready && scopeInfo.scope === "all" && scopeInfo.providers.filter((p) => p.configured).length > 1) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between"><h1 className="text-xl font-semibold text-zinc-100">Overview</h1><span className="text-sm text-zinc-500">All accounts · pick one under "Looking at" for its own overview</span></div>
-        <GeneralOverview />
-        </div>
-    );
-  }
   if (err) return <Empty>{err}</Empty>;
   if (!d) return <Empty>Loading…</Empty>;
 

@@ -12,26 +12,20 @@ import { browse } from "./routes/browse.js";
 import { mountMcp } from "./mcp.js";
 import { checkCli } from "./step_runner.js";
 import { startScheduler } from "./scheduler.js";
+import { adapters } from "./adapters/index.js";
 import { loadTasks } from "./tasks.js";
 import { actions } from "./routes/actions.js";
-import { swarms } from "./routes/swarms.js";
-import { tags } from "./routes/tags.js";
 import { accounts } from "./routes/accounts.js";
 import { passReports } from "./routes/pass_reports.js";
-import { security } from "./routes/security.js";
-import { probes } from "./routes/probes.js";
-import { clusters } from "./routes/clusters.js";
-import { vulnerabilities } from "./routes/vulnerabilities.js";
-import { vercel } from "./routes/vercel.js";
-import { identityCenter } from "./routes/identity_center.js";
 import { access } from "./routes/access.js";
-import { cloudNotifications } from "./routes/cloud_notifications.js";
-import "./actions/index.js";
 import { ensureOperationalPatterns } from "./concepts.js";
 loadTasks();
 void ensureOperationalPatterns(); // the operational-pattern Concepts, seeded once into the graph
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// every provider's action modules into the executor's registry, before a route or the scheduler can ask for one
+for (const a of adapters()) { try { await a.actions?.register(); } catch (e: any) { console.error(`[${a.id}] actions not registered: ${e?.message || e}`); } }
+
 const app = express();
 app.use(express.json({ limit: "5mb" }));
 
@@ -49,24 +43,20 @@ import { callback } from "./routes/callback.js";
 process.on("unhandledRejection", (reason) => console.error(`[fatal-avoided] unhandled rejection: ${(reason as any)?.stack || reason}`));
 process.on("uncaughtException", (err) => console.error(`[fatal-avoided] uncaught exception: ${err?.stack || err}`));
 
+// every answer the advisor itself gives is marked, so the UI retries a 502/503/504 only when it came from a proxy in
+// between (the advisor unreachable), never when the advisor is reporting an upstream failure (Neo4j, AWS, the agent)
+app.use("/api", (_req, res, next) => { res.setHeader("x-advisor", "1"); next(); });
 app.use("/api", callback); // the agent webhook: before every authenticated router
 app.use("/api", browse);
 app.use("/api", knowledge);
 app.use("/api", graph);
 app.use("/api", prompts);
 app.use("/api", actions);
-app.use("/api", swarms);
-app.use("/api", tags);
 app.use("/api", accounts);
 app.use("/api", passReports);
-app.use("/api", security);
-app.use("/api", probes);
-app.use("/api", clusters);
-app.use("/api", vulnerabilities);
-app.use("/api", vercel);
-app.use("/api", identityCenter);
+// each provider's own routes (src/adapters/types.ts routes): AWS's security, probes, clusters, ...; Vercel's team, projects and stores
+for (const a of adapters()) { try { for (const r of (await a.routes?.()) ?? []) app.use("/api", r); } catch (e: any) { console.error(`[${a.id}] routes not mounted: ${e?.message || e}`); } }
 app.use("/api", access);
-app.use("/api", cloudNotifications);
 app.use("/api", api);
 mountMcp(app, "/mcp");
 
@@ -111,12 +101,7 @@ const onListen = () => {
   import("./doorman.js").then((m) => m.startDoorman()).catch((e) => console.error(`[doorman] not started: ${e?.message || e}`));
   // the knowledge layer of the graph (Kn labels) is rebuilt from what the database holds, so a deploy never leaves it empty
   setTimeout(() => import("./graph_mirror.js").then((m) => m.mirrorKnowledgeInBackground("server start")).catch((e) => console.error(`[graph] knowledge layer at start: ${e?.message || e}`)), 15_000).unref();
-  // the EC2 status checks of the running fleet, read now rather than at the watcher's next cycle: an impaired box alerts within a minute of a deploy
-  setTimeout(() => import("./status_checks.js").then((m) => m.refreshStatusChecks((l) => console.log(`[status-checks] ${l}`))).catch((e) => console.error(`[status-checks] at start: ${e?.message || e}`)), 20_000).unref();
-  // the fleet's latest probes, judged now: a disk that filled while the advisor was down alerts at once
-  import("./disk_alerts.js").then((m) => { const r = m.checkAllDiskLevels(); if (r.raised) console.log(`[disk] ${r.raised} disk alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[disk] startup check failed: ${e?.message || e}`));
-  import("./host_alerts.js").then((m) => { const r = m.checkAllHostLevels(); if (r.raised) console.log(`[host] ${r.raised} host alert(s) from the latest probes of ${r.instances} instances`); }).catch((e) => console.error(`[host] startup check failed: ${e?.message || e}`));
-  // the Vercel connection for Steampipe follows the saved token (written on save, removed with the account; here after a restart)
-  import("./adapters/vercel/steampipe.js").then((m) => { const r = m.ensureVercelConnection(); if (r !== "skipped" && r !== "unchanged") console.log(`[vercel] steampipe connection ${r}`); }).catch((e) => console.error(`[vercel] steampipe connection: ${e?.message || e}`));
+  // each provider's own start-up checks (src/adapters/types.ts onStart)
+  for (const a of adapters()) { try { a.onStart?.(); } catch (e: any) { console.error(`[${a.id}] start-up: ${e?.message || e}`); } }
 };
 if (config.bindAddr) app.listen(config.port, config.bindAddr, onListen); else app.listen(config.port, onListen);

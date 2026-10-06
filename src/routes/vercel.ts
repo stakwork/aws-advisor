@@ -3,6 +3,7 @@ import { authMiddleware } from "../auth.js";
 import { VercelClient } from "../adapters/vercel/client.js";
 import { vercelAdapter, vercelClient, projectEndpoints, vercelOverview, projectDetail, vercelBill, storeDetail, partnersConfigured } from "../adapters/vercel/index.js";
 import { vercelRates } from "../adapters/vercel/pricing.js";
+import { vercelOnboarding } from "../adapters/vercel/onboarding.js";
 import { listDeployments, listDomains, listEnvNames, listProjects, listStores, teamExtras, vercelTeam, wipeVercel } from "../adapters/vercel/inventory.js";
 import { setRuntimeSetting } from "../runtime_settings.js";
 import { ensureVercelConnection } from "../adapters/vercel/steampipe.js";
@@ -16,17 +17,10 @@ import { db } from "../db.js";
 export const vercel = Router();
 vercel.use(authMiddleware);
 
-/** Body: { token, team_id? }. Tests the token against the API before saving; collects and mirrors in the background. */
+/** Body: { token, team_id? }. Tests the token against the API before saving; collects and mirrors in the background (the adapter's onboarding; also POST /api/providers/vercel/accounts). */
 vercel.post("/accounts/vercel", async (req, res) => {
-  const token = String(req.body?.token || "").trim(); const teamId = String(req.body?.team_id || "").trim();
-  if (!/^[A-Za-z0-9_-]{16,}$/.test(token)) return res.status(400).json({ error: "the token looks wrong (16+ letters, digits, - or _)" });
-  if (teamId && !/^team_[A-Za-z0-9]+$/.test(teamId)) return res.status(400).json({ error: "a team id looks like team_…; leave it empty for a personal account" });
-  try {
-    const who = await new VercelClient({ token, teamId: teamId || null }).whoami();
-    setRuntimeSetting("vercelToken", token); setRuntimeSetting("vercelTeamId", teamId || null);
-    (async () => { await vercelAdapter.collect(); console.log(`[vercel] steampipe connection ${ensureVercelConnection()}`); try { const { mirrorAdapter } = await import("../graph_mirror.js"); await mirrorAdapter(vercelAdapter); } catch (e: any) { console.error(`[graph] vercel: ${e?.message || e}`); } })().catch((e) => console.error(`[vercel] first collection failed: ${e?.message || e}`));
-    res.json({ ok: true, account: who, note: "saved; the first collection runs now and the projects appear in a minute" });
-  } catch (e: any) { res.status(400).json({ error: `the token was refused: ${String(e?.message || e).slice(0, 300)}` }); }
+  const r = await vercelOnboarding.add(req.body || {});
+  res.status(r.ok ? 200 : r.status ?? 400).json(r.ok ? r : { error: r.error });
 });
 
 /** Body: { neon_api_key?, redis_api_key?, redis_secret_key? }. Each key is tested against the partner's API before it is saved; an empty string removes it. */
@@ -59,12 +53,7 @@ vercel.get("/vercel/changes", async (req, res) => {
 vercel.get("/vercel/members", (_req, res) => { if (!vercelAdapter.configured()) return res.json({ configured: false, members: [], read_at: null }); const x = teamExtras(vercelTeam()?.id ?? vercelAdapter.primaryAccountId()); res.json({ configured: true, members: x.members, read_at: x.read_at }); });
 vercel.get("/vercel/partners", (_req, res) => { const stores = listStores(); res.json({ configured: partnersConfigured(), stores: stores.filter((s) => s.partner).map((s) => ({ id: s.id, name: s.name, product: s.product, read_at: s.partner!.read_at, error: s.partner!.error })) }); });
 
-vercel.delete("/accounts/vercel", async (_req, res) => {
-  const team = vercelTeam();
-  setRuntimeSetting("vercelToken", null); setRuntimeSetting("vercelTeamId", null); setRuntimeSetting("neonApiKey", null); setRuntimeSetting("redisCloudApiKey", null); setRuntimeSetting("redisCloudSecretKey", null); wipeVercel(); console.log(`[vercel] steampipe connection ${ensureVercelConnection()}`);
-  try { if (team) { const { wipeMirror } = await import("../graph_mirror.js"); await wipeMirror(team.id); } } catch (e: any) { console.error(`[graph] vercel wipe: ${e?.message || e}`); }
-  res.json({ ok: true });
-});
+vercel.delete("/accounts/vercel", async (_req, res) => res.json(await vercelOnboarding.remove(vercelAdapter.primaryAccountId())));
 
 vercel.get("/vercel/projects", (_req, res) => {
   if (!vercelAdapter.configured()) return res.json({ configured: false, team: null, projects: [] });

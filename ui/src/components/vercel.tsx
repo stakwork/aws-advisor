@@ -13,10 +13,10 @@ export function VercelAccess({ configured, onChange }: { configured: boolean; on
   const [busy, setBusy] = useState(false); const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const save = async (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true); setMsg(null);
-    try { const r = await api("/accounts/vercel", { method: "POST", body: JSON.stringify({ token, team_id: teamId }) }); setMsg({ ok: true, text: `${r.account.name || r.account.id}${r.account.plan ? ` (${r.account.plan} plan)` : ""}: ${r.note}` }); setToken(""); onChange(); }
+    try { const r = await api("/providers/vercel/accounts", { method: "POST", body: JSON.stringify({ token, team_id: teamId }) }); setMsg({ ok: true, text: `${r.account.name || r.account.id}${r.account.plan ? ` (${r.account.plan} plan)` : ""}: ${r.note}` }); setToken(""); onChange(); }
     catch (err: any) { setMsg({ ok: false, text: err.message }); } finally { setBusy(false); }
   };
-  const remove = async () => { setBusy(true); try { await api("/accounts/vercel", { method: "DELETE" }); setMsg({ ok: true, text: "removed: the token, the stored projects and the graph nodes" }); onChange(); } catch (err: any) { setMsg({ ok: false, text: err.message }); } finally { setBusy(false); } };
+  const remove = async () => { setBusy(true); try { await api("/providers/vercel/accounts/current", { method: "DELETE" }); setMsg({ ok: true, text: "removed: the token, the stored projects and the graph nodes" }); onChange(); } catch (err: any) { setMsg({ ok: false, text: err.message }); } finally { setBusy(false); } };
   return (
     <Card title="Vercel access">
       <p className="mb-3 text-sm text-zinc-400">A Vercel access token with read scope (Account settings › Tokens). For a team, the team id (<span className="font-mono text-xs">team_…</span>, from the team's settings); leave it empty for a personal account. The token is checked against the API, saved as a runtime secret and never shown again. Only reads: projects, deployments, domains, the <em>names</em> of environment variables (never their values) and the firewall state.</p>

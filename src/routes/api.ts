@@ -1,4 +1,5 @@
-import { JOBS, runJobNow } from "../scheduler.js";
+import { allJobs, runJobNow } from "../scheduler.js";
+import { adapters } from "../adapters/index.js";
 import { belowBar } from "../rubric.js";
 import { taskFor } from "../tasks.js";
 import { Router, type Request } from "express";
@@ -15,7 +16,7 @@ import { getRunChanges } from "../changes.js";
 import { listIamUsers, iamSummary } from "../iam_inventory.js";
 import { ssoSummary } from "../sso_inventory.js";
 import { proposeReadPolicyUpdates } from "../actions/read_policy.js";
-import { ACCOUNT_TARGET_RE, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
+import { isAccountTarget, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
 import { postRejectionLearning } from "../learnings.js";
 import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
 import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy, VIEW_ONLY_POLICY_ARN } from "../permissions.js";
@@ -208,7 +209,7 @@ api.delete("/settings/aws/change", (_req, res) => { dismissAccountChange(); res.
 api.get("/settings/data/preview", (req, res) => {
   const target = String(req.query.target || "all").trim();
   if (target === "all") return res.json({ target, ...wipePreview(req.query.preserve_concepts === "1") });
-  if (!ACCOUNT_TARGET_RE.test(target)) return res.status(400).json({ error: "target must be all, a 12-digit AWS account id or a Vercel team id" });
+  if (!isAccountTarget(target)) return res.status(400).json({ error: "target must be all or the id of an account a provider knows (an AWS account id, a Vercel team id, ...)" });
   res.json({ target, ...purgePreview(target) });
 });
 // Body: { target: "all" | <account id>, confirm: <"WIPE" for all, the id typed again otherwise>, preserve_concepts?: boolean }. Irreversible; refused while a run is collecting.
@@ -220,7 +221,7 @@ api.post("/settings/data/wipe", async (req, res) => {
       if (confirm !== "WIPE") return res.status(400).json({ error: "type WIPE under confirm" });
       return res.json(await wipeAllData({ preserveConcepts: Boolean(req.body?.preserve_concepts) }));
     }
-    if (!ACCOUNT_TARGET_RE.test(target)) return res.status(400).json({ error: "target must be all, a 12-digit AWS account id or a Vercel team id" });
+    if (!isAccountTarget(target)) return res.status(400).json({ error: "target must be all or the id of an account a provider knows (an AWS account id, a Vercel team id, ...)" });
     if (confirm !== target) return res.status(400).json({ error: "type the account id again under confirm" });
     res.json(await purgeAccountData(target));
   } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -240,8 +241,9 @@ api.get("/settings/runtime", (_req, res) => res.json({ settings: listRuntimeSett
 api.get("/quotas", (_req, res) => res.json({ quotas: quotaStatus() }));
 api.post("/settings/runtime/:key/run", async (req, res) => {
   const key = String(req.params.key);
-  if (!JOBS[key]) return res.status(404).json({ error: `no job for ${key}` });
-  try { res.json({ key, label: JOBS[key].label, result: await runJobNow(key) }); }
+  const job = allJobs()[key];
+  if (!job) return res.status(404).json({ error: `no job for ${key}` });
+  try { res.json({ key, label: job.label, result: await runJobNow(key) }); }
   catch (e: any) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 api.put("/settings/runtime", (req, res) => {
@@ -259,10 +261,14 @@ api.put("/settings/benchmarks", (req, res) => {
 
 // ---- runs -----------------------------------------------------------------
 api.get("/runs", (req, res) => {
-  // the AWS collection runs, or a platform account's rules passes when the sidebar looks at one
-  const scope = accountScope(req.query as any); const platform = scope && !scope.primary && !/^\d{12}$/.test(scope.id);
-  res.json(platform ? db.prepare("select id, started_at, finished_at, status, trigger, account_id, findings_count, recommendations_count, error, provider from runs where provider <> 'aws' and account_id = ? order by id desc limit 100").all(scope!.id)
-    : db.prepare("select id, started_at, finished_at, status, trigger, account_id, findings_count, recommendations_count, error, provider from runs where provider = 'aws' order by id desc limit 100").all());
+  // the scope's provider's runs (every account: the first provider with rules); the account's own runs when it has any, else the provider's (a member is covered by its parent's runs)
+  const scope = accountScope(req.query as any);
+  const provider = scope?.provider ?? adapters().find((a) => a.rules)?.id ?? null;
+  if (!provider) return res.json([]);
+  const own = scope && db.prepare("select 1 from runs where provider = ? and account_id = ? limit 1").get(provider, scope.id);
+  const cols = "id, started_at, finished_at, status, trigger, account_id, findings_count, recommendations_count, error, provider";
+  res.json(own ? db.prepare(`select ${cols} from runs where provider = ? and account_id = ? order by id desc limit 100`).all(provider, scope!.id)
+    : db.prepare(`select ${cols} from runs where provider = ? order by id desc limit 100`).all(provider));
 });
 
 api.post("/runs", (_req, res) => {
@@ -357,28 +363,7 @@ api.get("/nat/:id/attribution", async (req, res) => {
   catch (e: any) { res.status(502).json({ error: e.message }); }
 });
 
-// ---- findings -------------------------------------------------------------
-api.get("/findings", (req, res) => {
-  const runId = req.query.run_id ? Number(req.query.run_id) : (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
-  if (!runId) return res.json({ run_id: null, findings: [] });
-  const where: string[] = ["run_id = ?"]; const params: unknown[] = [runId];
-  if (req.query.control_id) { where.push("control_id = ?"); params.push(req.query.control_id); }
-  if (req.query.status) { where.push("status = ?"); params.push(req.query.status); }
-  if (req.query.q) { where.push("(resource like ? or reason like ?)"); params.push(`%${req.query.q}%`, `%${req.query.q}%`); }
-  const findings = db.prepare(`select id, source, benchmark, control_id, control_title, status, resource, reason, account_id, region, dimensions from findings where ${where.join(" and ")} order by control_id, resource limit 2000`).all(...params);
-  const controls = db.prepare("select control_id, control_title, status, count(*) as n from findings where run_id = ? group by 1,2,3 order by n desc").all(runId);
-  res.json({ run_id: runId, controls, findings });
-});
-
 // ---- recommendations ------------------------------------------------------
-api.get("/recommendations", (req, res) => {
-  const status = typeof req.query.status === "string" ? req.query.status : "open";
-  const rows = status === "all"
-    ? db.prepare("select * from recommendations order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all()
-    : db.prepare("select * from recommendations where status = ? order by coalesce(est_monthly_saving, -1) desc, updated_at desc").all(status);
-  res.json(rows);
-});
-
 api.get("/recommendations/:id", (req, res) => {
   const row = db.prepare("select * from recommendations where id = ?").get(req.params.id) as { resource: string | null; resource_name: string | null; title: string | null; rationale: string | null } | undefined;
   if (!row) return res.status(404).json({ error: "not found" });
@@ -771,15 +756,6 @@ api.post("/watch", async (_req, res) => {
 });
 
 api.get("/watch", (_req, res) => res.json(latestWatchSummary()));
-
-// ?status=open (default) | acknowledged | all; ?all=1 is the older spelling of status=all. Rows carry incident_id / incident_status when investigated.
-api.get("/alerts", (req, res) => {
-  const all = req.query.all === "1" || req.query.all === "true";
-  const status = typeof req.query.status === "string" ? req.query.status : all ? "all" : "open";
-  stampRowAccounts("alerts");
-  const inScope = rowInScope(accountScope(req.query as any));
-  res.json(listAlerts(status === "acknowledged" ? "acknowledged" : status === "all" ? "all" : "open").filter((a: any) => inScope(a)));
-});
 
 api.post("/alerts/:id/ack", (req, res) => {
   const r = db.prepare("update alerts set acknowledged = 1, acknowledged_by = ? where id = ?").run(typeof req.body?.by === "string" && req.body.by ? req.body.by : "ui", req.params.id);

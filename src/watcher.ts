@@ -10,6 +10,8 @@ import { attributeAlerts, attributePendingAlerts } from "./alert_cause.js";
 import { mirrorAlertsInBackground, mirrorResourcesInBackground } from "./graph_mirror.js";
 import { getBaseline, scoreValue } from "./baselines.js";
 import { MIN_DAYS_FOR_SEASONAL } from "./baseline_math.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * Lightweight watcher (WATCH_CRON). Runs only cheap live Steampipe queries, never Powerpipe or Cost
@@ -29,7 +31,7 @@ export interface WatchResult { sample_id: number; collected_at: string; samples:
 const STATE_CODE: Record<string, number> = { pending: 0, running: 1, "shutting-down": 2, terminated: 3, stopping: 4, stopped: 5 };
 
 const insertSample = db.prepare("insert into watch_samples(sample_id, collected_at, key, label, value, dims) values (?, ?, ?, ?, ?, ?)");
-const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insertAlert = alertInsert(AWS);
 
 /**
  * Whether an instance missing from this pass may be called gone: only when the pass saw instances at all and, when
@@ -256,7 +258,7 @@ export async function watchOnce(): Promise<WatchResult> {
   try {
     const inv = await refreshInventory();
     errors.push(...inv.errors.map((e) => `inventory ${e}`));
-    mirrorResourcesInBackground();
+    mirrorResourcesInBackground(AWS);
   } catch (e: any) {
     errors.push(`inventory: ${describeError(e, "inventory refresh", 300)}`);
   }

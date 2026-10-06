@@ -1,7 +1,8 @@
 import { db } from "./db.js";
-import { PROVIDER, accountId, enabled, inBackground, neoParams, writeCypher } from "./graph_mirror.js";
+import { accountId, enabled, inBackground, neoParams, writeCypher } from "./graph_mirror.js";
 import { resourceAccountIndex } from "./resource_index.js";
 import { ecosystemOf, packageScope, vulnerabilityMatches, type VulnMatch } from "./software_vulns.js";
+import { AWS } from "./adapters/types.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
@@ -76,7 +77,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   const t0 = Date.now(); const now = new Date().toISOString(); const account = accountId();
   // Member accounts (src/accounts.ts): a package or image node is stamped with the account of the box it was seen on
   const idx = resourceAccountIndex(account);
-  const w = (cypher: string, batch: any[]) => writeCypher(cypher, neoParams({ rows: batch.map((r) => (r && typeof r === "object" && "instance_id" in r && !("account_id" in r) ? { ...r, account_id: idx.of(String(r.instance_id)) } : r)), now, provider: PROVIDER, account }));
+  const w = (cypher: string, batch: any[]) => writeCypher(cypher, neoParams({ rows: batch.map((r) => (r && typeof r === "object" && "instance_id" in r && !("account_id" in r) ? { ...r, account_id: idx.of(String(r.instance_id)) } : r)), now, provider: AWS, account }));
   const where = instanceIds ? ` and instance_id in (${instanceIds.map(() => "?").join(",")})` : "";
   const args = instanceIds ?? [];
   const os = new Map<string, any>(); for (const o of rows(`select * from instance_os where 1=1${where}`, ...args)) os.set(o.instance_id, o);
@@ -127,7 +128,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of chunks(affects)) await w(AFFECTS_CYPHER, b);
   // a rebuilt verdict replaces the old ones of the same boxes; what no longer matches disappears
   if (instanceIds) await writeCypher(`UNWIND $ids AS id MATCH (c:AdvisorResource {id: id})-[r:VULNERABLE_TO]->() DELETE r`, { ids: instanceIds });
-  else await writeCypher(`MATCH (c:AdvisorResource {provider: $provider})-[r:VULNERABLE_TO]->() DELETE r`, { provider: PROVIDER });
+  else await writeCypher(`MATCH (c:AdvisorResource {provider: $provider})-[r:VULNERABLE_TO]->() DELETE r`, { provider: AWS });
   for (const b of chunks(verdicts)) await w(VERDICT_CYPHER, b);
   // packages nobody has any more, advisories nothing is affected by
   await writeCypher("MATCH (p:AdvisorPackage) WHERE NOT (p)--() DELETE p");

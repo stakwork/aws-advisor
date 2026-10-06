@@ -16,6 +16,7 @@ import { db } from "../db.js";
 import { upsertRecommendations } from "../collector.js";
 import type { RecInput } from "../rules.js";
 import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { AWS } from "../adapters/types.js";
 
 export const KIND = "cpu_credit_spec" as const;
 export const ACTION_TYPE = "set_credit_specification";
@@ -166,7 +167,7 @@ export const cpuCreditSpecAction: ActionModule = {
             est_usd_month: target === "standard" ? (rec.est_monthly_saving ?? v.surplus_usd_30d) : null,
           });
         }
-        if (recs.length) { upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false }); filed += recs.length; }
+        if (recs.length) { upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS }); filed += recs.length; }
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { ec2.destroy(); cw.destroy(); }
     }

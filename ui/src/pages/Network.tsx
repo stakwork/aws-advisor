@@ -106,7 +106,7 @@ export default function Network() {
   const rebuild = async () => { setBusy(true); try { await api("/graph/network/sync", { method: "POST", body: "{}" }); setLists({}); await loadOverview(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
   if (err && !overview) return <div className="space-y-4"><h1 className="text-xl font-semibold text-zinc-100">Network</h1><Card><div className="text-sm text-zinc-400">{err}</div><div className="mt-2 text-xs text-zinc-500">The network layer lives in the Neo4j mirror: configure it under Settings › Graph mirror, then resync from the Knowledge page.</div></Card></div>;
-  if (!overview) return <div className="text-sm text-zinc-500">Loading the network layer…</div>;
+  if (!overview) return err ? <div className="text-sm text-red-300">The network layer could not be read: {err}</div> : <div className="text-sm text-zinc-500">Loading the network layer…</div>;
 
   const totals = overview.exposure_totals as Record<string, number>;
   const judged = Object.entries(totals).filter(([k]) => k !== "unjudged").reduce((s, [, n]) => s + n, 0);

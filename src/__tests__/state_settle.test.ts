@@ -4,6 +4,7 @@ import { test } from "node:test";
 test("a read-back that still shows the old state right after StopInstances is in flight, not a failure; minutes later it is", async () => {
   const { db } = await import("../db.js");
   const { recordProposal, stillLanding, STATE_SETTLE_MS } = await import("../executor.js");
+  await import("../actions/index.js"); // the ledger row takes its provider from the registered module
   type Proposal = import("../executor.js").Proposal;
   const id = "i-0f0000000000c0a11";
   const p: Proposal = {

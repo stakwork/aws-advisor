@@ -5,6 +5,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { safeEqual } from "./auth.js";
 import { db } from "./db.js";
+import { adapters } from "./adapters/index.js";
 import { S, query, queryReadOnly } from "./steampipe.js";
 import { ProbeError, containerSignals, latestProbe, probeInstance, summarizeProbe, useSummary } from "./ssm.js";
 import { listRules, rulesFor, signalKinds, upsertRule } from "./signal_rules.js";
@@ -34,8 +35,6 @@ import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, S
 import { registerSwarmTools } from "./mcp_swarms.js";
 import { registerTagTools } from "./mcp_tags.js";
 import { complianceFindings, exposureOfResource, shortControl } from "./compliance.js";
-import { credentialsMeta } from "./steampipe.js";
-import { vercelTeam } from "./adapters/vercel/inventory.js";
 
 /**
  * MCP fact server, mounted at /mcp (Streamable HTTP, stateless: one server+transport per request).
@@ -192,7 +191,7 @@ function recommendationHistory(a: { resource?: string; rule?: string; limit: num
 }
 
 function findingsForResource(a: { resource: string; run_id?: number; limit: number }) {
-  const runId = a.run_id ?? (db.prepare("select id from runs where provider = 'aws' and status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
+  const runId = a.run_id ?? adapters().find((x) => x.rules)?.rules?.latestRunId(null);
   if (!runId) return text({ run_id: null, findings: [] });
   const rows = db.prepare(`
     select control_id, control_title, status, resource, reason, region, account_id, source, benchmark, dimensions
@@ -256,12 +255,10 @@ function alertContextTool(a: { alert_id: number; hours: number }) {
   return text({ ...ctx, note: "watch_samples: nat_bytes_hour values are bytes in + out through the gateway over the hour before each sample (dims carry in/out); instance_state values are state codes (dims.state is the name)." });
 }
 
-/** The accounts the advisor is pointed at, for the server instructions and the chat brief: the AWS account and, when a token is saved, the Vercel team. */
-export function accountsNote(): { aws: string | null; vercel: { id: string; name: string | null; plan: string | null } | null; line: string } {
-  let aws: string | null = null; try { aws = credentialsMeta()?.accountId ?? null; } catch { /* no credentials yet */ }
-  let vercel: { id: string; name: string | null; plan: string | null } | null = null; try { const t = vercelTeam(); if (t) vercel = { id: t.id, name: t.name ?? t.slug, plan: t.plan }; } catch { /* no table yet */ }
-  const parts = [aws ? `AWS account ${aws} (the default for every aws_* table and tool)` : null, vercel ? `Vercel team ${vercel.name ?? vercel.id} (${vercel.id}; vercel_projects, vercel_stores, vercel_bill, the vercel.* Steampipe tables, and graph_systems / graph_query with account_id '${vercel.id}')` : null].filter(Boolean);
-  return { aws, vercel, line: parts.length ? `Accounts: ${parts.join("; ")}.` : "No account is configured yet." };
+/** The accounts the advisor is pointed at, for the server instructions: each configured provider says in one line which account and which tools reach it (src/adapters/types.ts agentNote). */
+export function accountsNote(): { line: string } {
+  const parts = adapters().filter((a) => a.configured()).map((a) => { try { return a.agentNote?.() ?? null; } catch { return null; } }).filter((x): x is string => Boolean(x));
+  return { line: parts.length ? `Accounts: ${parts.join("; ")}.` : "No account is configured yet." };
 }
 
 export function createFactServer(): McpServer {

@@ -1,5 +1,5 @@
 import { useScopeInfo } from "../scope";
-import { VercelChanges } from "../components/vercel";
+import { ScopedPage } from "../views";
 import { CloudNotifications } from "../components/cloudNotifications";
 import { useEffect, useState } from "react";
 import { api, when } from "../api";
@@ -14,12 +14,11 @@ const HOURS = [24, 72, 168];
 
 /** What changed in the account (CloudTrail write events by people and deployments) and what the logs cost. */
 export default function Changes() {
-  const scopeInfo = useScopeInfo();
-  if (scopeInfo.provider && scopeInfo.provider !== "aws") return scopeInfo.provider === "vercel" ? <div className="space-y-6"><h1 className="text-xl font-semibold text-zinc-100">Changes</h1><VercelChanges /></div> : <Empty>No change record for {scopeInfo.label} yet.</Empty>;
-  return <AwsChanges />;
+  return <ScopedPage slot="changes" what="change record" />;
 }
 
-function AwsChanges() {
+/** CloudTrail write events and the log bill (the AWS adapter's changes view, ui/src/views.tsx). */
+export function AwsChanges() {
   const [hours, setHours] = useState(24);
   const [trail, setTrail] = useState<Trail | null>(null);
   const [logs, setLogs] = useState<Logs | null>(null);

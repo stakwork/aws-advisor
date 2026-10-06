@@ -1,39 +1,19 @@
 import cron from "node-cron";
-import { config } from "./config.js";
-import { isBusy, startRun } from "./collector.js";
-import { hasConnectionFile } from "./steampipe.js";
-import { watchOnce } from "./watcher.js";
-import { probePass } from "./probe_pass.js";
-import { credentialGate } from "./gate.js";
-import { refreshSpend } from "./spend.js";
-import { getReconciliation, lastFullMonth, reconcileMonth } from "./reconcile.js";
-import { runForecast } from "./forecast.js";
-import { localDay } from "./localdate.js";
-import { refreshBaselines } from "./baselines.js";
-import { runReview } from "./review.js";
-import { dispatchObservation } from "./observe.js";
-import { refreshLogs } from "./logs.js";
-import { refreshTrail } from "./trail.js";
-import { refreshCloudNotifications } from "./cloud_notifications.js";
-import { runVerifications } from "./verify.js";
-import { refreshCommitments } from "./commitments.js";
-import { refreshS3Inventory } from "./s3_inventory.js";
-import { s3UsagePass } from "./s3_usage.js";
-import { usageProfilePass } from "./usage_profile.js";
-import { usageReviewPass } from "./usage_review.js";
-import { usageInvestigationPass } from "./usage_agent.js";
 import { dispatchNotifications } from "./notify.js";
-import { dispatchActionNotifications, runExecutorPass } from "./executor.js";
+import { dispatchActionNotifications } from "./executor.js";
 import { dispatchPassReports } from "./pass_report.js";
-import { refreshSwarmCosts } from "./swarm_costs.js";
-import { refreshTagHygiene } from "./tag_hygiene.js";
-import { mirrorSwarmCosts } from "./swarm_costs_graph.js";
-import { mirrorAlertsInBackground, mirrorKnowledgeInBackground } from "./graph_mirror.js";
-import { refreshStatusChecks } from "./status_checks.js";
-import { complianceBusy, startComplianceScan } from "./compliance.js";
-import { attributePendingAlerts } from "./alert_cause.js";
+import { cronOff } from "./cron_off.js";
+import { adapters } from "./adapters/index.js";
+import type { ProviderJob } from "./adapters/types.js";
 
-export const cronOff = (expr: string) => !expr || /^(off|none|false|0)$/i.test(expr);
+export { cronOff };
+export { priceCheckAndForecast } from "./adapters/aws/jobs.js";
+
+/**
+ * One loop over every registered provider's jobs (src/adapters/types.ts ProviderJob): each adapter declares its
+ * collection, scans and passes with their crons, and the scheduler runs them all the same way. No job is named
+ * here; a new provider's jobs are scheduled by registering its adapter.
+ */
 
 const tasks: { stop: () => void }[] = [];
 
@@ -53,120 +33,21 @@ export function restartScheduler(): ReturnType<typeof startScheduler> {
   return startScheduler();
 }
 
-let watching = false;
-
-/** Starts the scheduled full run (RUN_CRON) and the lightweight watcher (WATCH_CRON). */
-/** The month's forecast after every spend refresh; the last full month's price check once, from the 3rd, when it is missing. */
-export async function priceCheckAndForecast(): Promise<void> {
-  const last = lastFullMonth();
-  if (!getReconciliation(last) && Number(localDay().slice(8, 10)) >= 3) {
-    try { const r = await reconcileMonth(last, (l) => console.log(`[price-check] ${l}`)); if (!r.eval.every((e) => e.pass)) console.warn(`[price-check] ${last}: ${r.eval.filter((e) => !e.pass).map((e) => e.criterion).join("; ")}`); }
-    catch (e: any) { console.error(`[price-check] failed: ${e?.message || e}`); }
-  }
-  await runForecast((l) => console.log(`[forecast] ${l}`));
+/** Every provider's jobs by their settings key, with the provider that owns each. */
+export function allJobs(): Record<string, ProviderJob & { provider: string }> {
+  const out: Record<string, ProviderJob & { provider: string }> = {};
+  for (const a of adapters()) for (const j of a.jobs) out[j.key] = { ...j, provider: a.id };
+  return out;
 }
 
-/** Every cron job by its settings key: the same function runs on schedule and from "Run now" on the Settings page. */
-export const JOBS: Record<string, { label: string; run: () => Promise<string> }> = {
-  runCron: { label: "Collection run", run: async () => {
-    if (isBusy()) return "skipped: a run is already in progress";
-    if (!(await credentialGate("scheduler")).ok) return "skipped: AWS credentials are not working";
-    const id = startRun("schedule");
-    return `started run #${id}`;
-  } },
-  complianceCron: { label: "Security scan", run: async () => {
-    if (complianceBusy()) return "skipped: a scan is already in progress";
-    if (!(await credentialGate("compliance")).ok) return "skipped: AWS credentials are not working";
-    return `started security scan #${startComplianceScan("schedule")}`;
-  } },
-  watchCron: { label: "Watcher", run: async () => {
-    if (watching) return "skipped: previous sample still collecting";
-    watching = true;
-    try {
-      const r = await watchOnce();
-      // the EC2 status checks (system, instance, EBS) on the same cadence: an alert when a box is impaired
-      let status = "";
-      try { const s = await refreshStatusChecks((l) => console.log(`[status-checks] ${l}`)); status = `; status checks: ${s.instances} instances, ${s.impaired} impaired, ${s.raised} raised${s.errors.length ? `, errors: ${s.errors.length}` : ""}`; }
-      catch (e: any) { console.error(`[status-checks] failed: ${e?.message || e}`); status = `; status checks failed: ${e?.message || e}`; }
-      return `sample ${r.sample_id}: ${r.samples} values, ${r.alerts} alerts${r.errors.length ? `, errors: ${r.errors.join("; ")}` : ""}${status}`;
-    }
-    finally { watching = false; }
-  } },
-  probeCron: { label: "Probe pass: host", run: async () => { const r = await probePass("host"); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates${r.databases ? `; ${r.databases.refreshed.length} database(s) profiled${r.databases.failed.length ? `, ${r.databases.failed.length} failed` : ""}` : ""}`; } },
-  probeDockerCron: { label: "Probe pass: containers and activity", run: async () => { const r = await probePass("docker"); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates`; } },
-  probeAppsCron: { label: "Probe pass: programs and ports", run: async () => { const r = await probePass("apps"); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates`; } },
-  probeSoftwareCron: { label: "Probe pass: installed software", run: async () => { const r = await probePass("software"); return `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates`; } },
-  vulnCron: { label: "Vulnerability match", run: async () => {
-    const { scanVulnerabilities } = await import("./software_vulns.js");
-    const r = await scanVulnerabilities({ trigger: "cron" });
-    try { const { mirrorSoftware } = await import("./graph_software.js"); await mirrorSoftware(); } catch (e: any) { console.error(`[graph] software: ${e?.message || e}`); }
-    return `${r.asked} of ${r.queries} package versions asked, ${r.fetched} advisories read, ${r.matches} matches (${r.vulns} advisories)${r.unsupported.length ? `; not matchable: ${r.unsupported.map((u) => `${u.os} (${u.instances})`).join(", ")}` : ""}`;
-  } },
-  playbookCron: { label: "Playbooks from sources", run: async () => {
-    const { controlsDue, generatePlaybooks } = await import("./playbook_gen.js");
-    if (!config.repo2graphUrl) return "skipped: no repo2graph URL (Settings > Agent)";
-    const due = controlsDue({ limit: 12 });
-    if (!due.length) return "nothing due: every playbook is current";
-    const r = await generatePlaybooks(due.map((d) => d.control_id), { trigger: "cron" });
-    return `${r.jobs.length} agent run(s) for ${r.jobs.reduce((n, j) => n + j.control_ids.length, 0)} controls (${due.slice(0, 3).map((d) => `${d.control_id.replace(/^aws_\w+\.control\./, "")}: ${d.why}`).join("; ")}${due.length > 3 ? "; ..." : ""})${r.skipped.length ? `; skipped ${r.skipped.length}` : ""}`;
-  } },
-  vercelCron: { label: "Vercel collection", run: async () => {
-    const { vercelAdapter } = await import("./adapters/vercel/index.js");
-    if (!vercelAdapter.configured()) return "skipped: no Vercel token (Settings > Accounts)";
-    const r = await vercelAdapter.collect();
-    try { const { mirrorAdapter } = await import("./graph_mirror.js"); await mirrorAdapter(vercelAdapter); } catch (e: any) { console.error(`[graph] vercel: ${e?.message || e}`); }
-    return r.errors.length ? `collected with ${r.errors.length} error(s): ${r.errors[0]}` : "collected and mirrored";
-  } },
-  spendCron: { label: "Spend refresh", run: async () => {
-    const r = await refreshSpend();
-    console.log(`[spend] ${r.refreshed ? `${r.days} days stored` : `skipped: ${r.skipped || r.error}`}`);
-    try { await refreshCommitments((l) => console.log(`[commitments] ${l}`)); } catch (e: any) { console.error(`[commitments] failed: ${e?.message || e}`); }
-    try { await priceCheckAndForecast(); } catch (e: any) { console.error(`[forecast] failed: ${e?.message || e}`); }
-    return r.refreshed ? `${r.days} days stored, commitments and forecast refreshed` : `spend skipped: ${r.skipped || r.error}; commitments and forecast refreshed`;
-  } },
-  baselineCron: { label: "Baselines", run: async () => {
-    const r = await refreshBaselines((l) => console.log(`[baselines] ${l}`));
-    return `nat ${r.nat}, cpu ${r.cpu}, probes ${r.probes}, spend ${r.spend} in ${r.took_ms} ms${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
-  } },
-  reviewCron: { label: "Daily review", run: async () => { const r: any = await runReview((l) => console.log(`[review] ${l}`)); return `${r?.instances ?? "?"} instances reviewed, ${r?.recommendations ?? 0} recommendations, ${r?.alerts ?? 0} alerts`; } },
-  swarmCostCron: { label: "Cost per swarm", run: async () => { const r = await refreshSwarmCosts((l) => console.log(`[swarms] ${l}`)); mirrorSwarmCosts().catch((e: any) => console.error(`[graph] swarm costs: ${e?.message || e}`)); return `${r.swarms} swarm(s), ≈ ${r.total_usd.toFixed(2)} USD/month${r.snapshots_known ? "" : " (snapshots unknown)"}`; } },
-  observeCron: { label: "Morning observation", run: async () => {
-    if (!config.repo2graphUrl) return "skipped: no repo2graph URL (Settings > Agent)";
-    const r = await dispatchObservation();
-    return `dispatched ${r.requestId}`;
-  } },
-  logsCron: { label: "Logs and CloudTrail", run: async () => {
-    const out: string[] = [];
-    try { await refreshLogs((l) => console.log(`[logs] ${l}`)); out.push("logs"); mirrorKnowledgeInBackground("logs refresh"); } catch (e: any) { console.error(`[logs] failed: ${e?.message || e}`); out.push(`logs failed: ${e?.message || e}`); }
-    try { await refreshTrail(26, (l) => console.log(`[cloudtrail] ${l}`)); out.push("cloudtrail"); } catch (e: any) { console.error(`[cloudtrail] failed: ${e?.message || e}`); out.push(`cloudtrail failed: ${e?.message || e}`); }
-    try { const r = await refreshCloudNotifications(undefined, (l) => console.log(`[notifications] ${l}`)); out.push(`notifications ${r.events}`); } catch (e: any) { console.error(`[notifications] failed: ${e?.message || e}`); out.push(`notifications failed: ${e?.message || e}`); }
-    try { await refreshS3Inventory((l) => console.log(`[s3] ${l}`)); out.push("s3"); } catch (e: any) { console.error(`[s3] failed: ${e?.message || e}`); out.push(`s3 failed: ${e?.message || e}`); }
-    try { const r = await s3UsagePass((l) => console.log(`[s3-usage] ${l}`)); out.push(`s3 usage ${r.analysed.length}/${r.candidates}`); } catch (e: any) { console.error(`[s3-usage] failed: ${e?.message || e}`); out.push(`s3 usage failed: ${e?.message || e}`); }
-    try { const r = await usageProfilePass((l) => console.log(`[usage] ${l}`)); out.push(`usage profiles ${r.profiled}, ${r.recommendations} schedule recommendation(s)`); } catch (e: any) { console.error(`[usage] failed: ${e?.message || e}`); out.push(`usage failed: ${e?.message || e}`); }
-    try { const r = await usageReviewPass((l) => console.log(`[usage-review] ${l}`)); out.push(`usage review ${r.reviewed} reviewed${r.errors.length ? ` (${r.errors[0]})` : ""}`); } catch (e: any) { console.error(`[usage-review] failed: ${e?.message || e}`); out.push(`usage review failed: ${e?.message || e}`); }
-    try { const r = await usageInvestigationPass((l) => console.log(`[usage-agent] ${l}`)); out.push(`usage investigations ${r.dispatched} sent of ${r.candidates} unsure`); } catch (e: any) { console.error(`[usage-agent] failed: ${e?.message || e}`); out.push(`usage investigations failed: ${e?.message || e}`); }
-    try { const r = await refreshTagHygiene((l) => console.log(`[tags] ${l}`)); out.push(`tags ${r.missing} missing, ${r.opt_in} opt-in`); } catch (e: any) { console.error(`[tags] failed: ${e?.message || e}`); out.push(`tags failed: ${e?.message || e}`); }
-    return out.join(", ");
-  } },
-  actCron: { label: "Auto-actions pass", run: async () => {
-    const r = await runExecutorPass("schedule");
-    return `${r.mode}: ${r.proposed} proposed (${r.fresh} new), ${r.applied} applied, ${r.verified} verified, ${r.failed} failed, ${r.refused} refused, ${r.stale} stale${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
-  } },
-  pressureCron: { label: "Pressure check", run: async () => {
-    const r = await runExecutorPass("pressure", { kinds: ["beanstalk_pressure"] });
-    return `${r.mode}: ${r.proposed} proposed, ${r.applied} applied, ${r.failed} failed${r.notes.length ? `; ${r.notes.slice(0, 3).join("; ")}` : ""}${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`;
-  } },
-  verifyCron: { label: "Saving verification", run: async () => { const r: any = await runVerifications({ onLog: (l) => console.log(`[verify] ${l}`) }); return typeof r === "object" && r ? JSON.stringify(r).slice(0, 200) : "done"; } },
-};
-
-const tag: Record<string, string> = { swarmCostCron: "swarms", runCron: "scheduler", complianceCron: "compliance", watchCron: "watcher", probeCron: "probe-pass:host", probeDockerCron: "probe-pass:docker", probeAppsCron: "probe-pass:apps", probeSoftwareCron: "probe-pass:software", vulnCron: "vulns", playbookCron: "playbooks", vercelCron: "vercel", spendCron: "spend", baselineCron: "baselines", reviewCron: "review", observeCron: "observe", logsCron: "logs", verifyCron: "verify", actCron: "executor", pressureCron: "pressure" };
 const jobInFlight = new Set<string>();
 
-/** Runs one job now, as the cron would, and reports what it did or why it did nothing. The credential check is the same. */
+/** Runs one job now, as the cron would, and reports what it did or why it did nothing. The provider's own check (credentials) is the same. */
 export async function runJobNow(key: string, trigger = "manual"): Promise<string> {
-  const job = JOBS[key]; if (!job) throw new Error(`no job for ${key}`);
-  const t = tag[key] || key;
-  if (key !== "reviewCron" && key !== "vercelCron" && !hasConnectionFile()) { const m = "skipped: AWS credentials are not configured (Settings > AWS access)"; console.log(`[${t}] ${m}`); return m; }
+  const job = allJobs()[key]; if (!job) throw new Error(`no job for ${key}`);
+  const t = job.tag || key;
+  const blocked = job.blocked?.() ?? null;
+  if (blocked) { console.log(`[${t}] ${blocked}`); return blocked; }
   if (jobInFlight.has(key)) { const m = "skipped: already running"; console.log(`[${t}] ${m}`); return m; }
   jobInFlight.add(key);
   console.log(`[${t}] started (${trigger})`);
@@ -183,18 +64,10 @@ export async function runJobNow(key: string, trigger = "manual"): Promise<string
 
 export function startScheduler(): Record<string, string | null> {
   const out: Record<string, string | null> = {};
-  const crons: Record<string, string> = { swarmCostCron: config.reviewCron, runCron: config.runCron, complianceCron: config.complianceCron, watchCron: config.watchCron, probeCron: config.probeCron, probeDockerCron: config.probeDockerCron, probeAppsCron: config.probeAppsCron, probeSoftwareCron: config.probeSoftwareCron, vulnCron: config.vulnCron, playbookCron: config.playbookCron, vercelCron: config.vercelCron, spendCron: config.spendCron, baselineCron: config.baselineCron, reviewCron: config.reviewCron, observeCron: config.observeCron, logsCron: config.logsCron, verifyCron: config.verifyCron, actCron: config.actCron, pressureCron: config.actPressureCron };
-  const names: Record<string, string> = { swarmCostCron: "Cost per swarm (REVIEW_CRON)", runCron: "Scheduler (RUN_CRON)", complianceCron: "Security scan (COMPLIANCE_CRON)", watchCron: "Watcher (WATCH_CRON)", probeCron: "Probe pass: host (PROBE_CRON)", probeDockerCron: "Probe pass: containers (PROBE_DOCKER_CRON)", probeAppsCron: "Probe pass: programs and ports (PROBE_APPS_CRON)", probeSoftwareCron: "Probe pass: installed software (PROBE_SOFTWARE_CRON)", vulnCron: "Vulnerability match (VULN_CRON)", playbookCron: "Playbooks from sources (PLAYBOOK_CRON)", vercelCron: "Vercel collection (VERCEL_CRON)", spendCron: "Spend refresh (SPEND_CRON)", baselineCron: "Baselines (BASELINE_CRON)", reviewCron: "Daily review (REVIEW_CRON)", observeCron: "Observation (OBSERVE_CRON)", logsCron: "Logs and CloudTrail (LOGS_CRON)", verifyCron: "Saving verification (VERIFY_CRON)", actCron: "Auto-actions pass (ACT_CRON)", pressureCron: "Pressure check (ACT_PRESSURE_CRON)" };
-  for (const key of Object.keys(JOBS)) {
-    if (key === "observeCron" && !config.repo2graphUrl) { console.log("Observation (OBSERVE_CRON) disabled: no repo2graph URL (Settings > Agent)"); out[key] = null; continue; }
-    out[key] = schedule(names[key], crons[key], () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });
+  for (const [key, job] of Object.entries(allJobs())) {
+    const off = job.disabled?.() ?? null;
+    if (off) { console.log(`${job.schedule_name} disabled: ${off}`); out[key] = null; continue; }
+    out[key] = schedule(job.schedule_name, job.cron(), () => { runJobNow(key, "cron").catch(() => { /* logged */ }); });
   }
-  // CloudTrail delivers 5 to 15 minutes late: alerts still waiting for their event are looked at again between
-  // watcher samples (src/alert_cause.ts), and the ones explained go out with their "Why:".
-  if (!cronOff(config.watchCron)) schedule("Alert causes (every 10 minutes)", "*/10 * * * *", () => {
-    attributePendingAlerts()
-      .then((r) => { if (r.found) { mirrorAlertsInBackground(); } })
-      .catch((e: any) => console.error(`[cause] failed: ${e?.message || e}`));
-  });
   return out;
 }

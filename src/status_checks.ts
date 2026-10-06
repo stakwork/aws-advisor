@@ -13,6 +13,8 @@ import { db } from "./db.js";
 import { accountCredentials } from "./accounts.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
+import { alertInsert } from "./alert_store.js";
+import { AWS } from "./adapters/types.js";
 
 db.exec(`
 create table if not exists instance_status (
@@ -85,7 +87,7 @@ const upsertStatus = db.prepare(`insert into instance_status(instance_id, accoun
   on conflict(instance_id) do update set account_id = excluded.account_id, region = excluded.region, system_status = excluded.system_status, instance_status = excluded.instance_status, ebs_status = excluded.ebs_status, events = excluded.events, checked_at = excluded.checked_at`);
 const insertEvent = db.prepare("insert into instance_status_events(instance_id, field, from_status, to_status, at, details) values (?, ?, ?, ?, ?, ?)");
 const isOpen = db.prepare("select 1 from alerts where kind = 'status_check_failed' and resource = ? and acknowledged = 0 limit 1");
-const insertAlert = db.prepare("insert into alerts(kind, resource, message, details) values (?, ?, ?, ?)");
+const insertAlert = alertInsert(AWS);
 const ack = db.prepare("update alerts set acknowledged = 1, acknowledged_by = 'system' where resource = ? and kind = 'status_check_failed' and acknowledged = 0");
 
 /** Stores one reading, records the transitions and applies the alert verdict. Returns what happened; the transport is elsewhere so this is testable. */

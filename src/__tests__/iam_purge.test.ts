@@ -51,8 +51,8 @@ test("a parent change is recorded, previewed and purged explicitly; the new acco
   put(row("i-0aaa000000000001", "210987654321")); put(row("i-0bbb000000000002", "210987654399"));
   const run = Number(db.prepare("insert into runs(trigger, status, account_id, provider) values ('test', 'completed', '210987654321', 'aws')").run().lastInsertRowid);
   db.prepare("insert into findings(run_id, source, control_id, status, resource, account_id, fingerprint) values (?, 'test', 'c', 'alarm', 'i-0aaa000000000001', '210987654321', 'c:i-0aaa000000000001')").run(run);
-  db.prepare("insert into recommendations(fingerprint, run_id, rule, title, resource, action_type) values ('r:i-0aaa000000000001', ?, 'r', 't', 'i-0aaa000000000001', 'stop')").run(run);
-  db.prepare("insert into recommendations(fingerprint, run_id, rule, title, resource, action_type) values ('r:i-0bbb000000000002', ?, 'r', 't', 'i-0bbb000000000002', 'stop')").run(run);
+  db.prepare("insert into recommendations(fingerprint, run_id, rule, title, resource, action_type, provider) values ('r:i-0aaa000000000001', ?, 'r', 't', 'i-0aaa000000000001', 'stop', 'aws')").run(run);
+  db.prepare("insert into recommendations(fingerprint, run_id, rule, title, resource, action_type, provider) values ('r:i-0bbb000000000002', ?, 'r', 't', 'i-0bbb000000000002', 'stop', 'aws')").run(run);
   const preview = purge.purgePreview("210987654321");
   assert.equal(preview.tables.inventory_ec2, 1); assert.equal(preview.tables.runs, 1); assert.equal(preview.attributed.recommendations, 1);
   const r = await purge.purgeAccountData("210987654321", { graph: false });
@@ -61,7 +61,7 @@ test("a parent change is recorded, previewed and purged explicitly; the new acco
   assert.equal((db.prepare("select count(*) as n from recommendations").get() as any).n, 1);
   assert.equal((db.prepare("select count(*) as n from findings").get() as any).n, 0, "the old run's findings went with it");
   assert.equal(purge.pendingAccountChange(), null, "purging the old account closes the pending change");
-  await assert.rejects(() => purge.purgeAccountData("nope"), /12-digit/);
+  await assert.rejects(() => purge.purgeAccountData("nope"), /no provider owns/);
 });
 
 test("a parent change stamps the rows that carried no account with the previous parent, so they do not become the new parent's", async () => {
@@ -89,9 +89,10 @@ test("scopedStmt narrows a summary query to the account: on its gone clause, wit
 
 test("rows that name a resource get the account they were made for, and rowInScope reads it first", async () => {
   const { rowInScope, stampRowAccounts } = await import("../scope.js");
-  db.prepare("insert into recommendations(fingerprint, run_id, rule, title, resource, action_type) values ('x:i-0bbb000000000002', 0, 'x', 't', 'i-0bbb000000000002', 'stop')").run();
-  db.prepare("insert into alerts(kind, resource, message, details) values ('vercel_test', 'prj_zzz', 'm', ?)").run(JSON.stringify({ team_id: "team_example999" }));
-  db.prepare("insert into alerts(kind, resource, message, details) values ('quota', null, 'quota hit', '{}')").run();
+  // rows from before the account was written with them (their provider was backfilled by the migration)
+  db.prepare("insert into recommendations(fingerprint, run_id, rule, title, resource, action_type, provider) values ('x:i-0bbb000000000002', 0, 'x', 't', 'i-0bbb000000000002', 'stop', 'aws')").run();
+  db.prepare("insert into alerts(kind, resource, message, details, provider) values ('vercel_test', 'prj_zzz', 'm', ?, 'vercel')").run(JSON.stringify({ team_id: "team_example999" }));
+  db.prepare("insert into alerts(kind, resource, message, details, provider) values ('quota', null, 'quota hit', '{}', 'aws')").run();
   assert.ok(stampRowAccounts("recommendations") >= 1); assert.ok(stampRowAccounts("alerts") >= 1);
   assert.equal((db.prepare("select account_id from recommendations where fingerprint = 'x:i-0bbb000000000002'").get() as any).account_id, "210987654399", "from the inventory's id");
   assert.equal((db.prepare("select account_id from alerts where kind = 'vercel_test'").get() as any).account_id, "team_example999", "from the details a platform pass wrote");
@@ -133,5 +134,5 @@ test("a Vercel team is a purge target: its tables by team id, its attributed row
   assert.equal(pv.tables.vercel_projects, 1); assert.equal(pv.attributed.recommendations, 1);
   const r = await purge.purgeAccountData("team_test01", { graph: false });
   assert.equal(r.tables.vercel_team, 1); assert.equal(r.tables.vercel_projects, 1); assert.equal(r.attributed.recommendations, 1); assert.equal(r.tables.runs, 1);
-  await assert.rejects(() => purge.purgeAccountData("nonsense", { graph: false }), /12-digit AWS account id or a Vercel team id/);
+  await assert.rejects(() => purge.purgeAccountData("nonsense", { graph: false }), /no provider owns/);
 });

@@ -16,6 +16,7 @@ import { config } from "../config.js";
 import { upsertRecommendations } from "../collector.js";
 import type { RecInput } from "../rules.js";
 import { approvedRecs, type ActionModule, type Creds, type Proposal } from "../executor.js";
+import { AWS } from "../adapters/types.js";
 
 export const KIND = "idle_load_balancer" as const;
 export const ACTION_TYPE = "delete_load_balancer";
@@ -157,7 +158,7 @@ export const idleLoadBalancerAction: ActionModule = {
             evidence: { region, load_balancer_arn: arn, type, dns_name: lb.DNSName ?? null, created: lb.CreatedTime ? new Date(lb.CreatedTime).toISOString() : null, metrics: metrics.get(arn) ?? {}, targets, target_groups: tgs.map((t) => t.TargetGroupName), metric_days: METRIC_DAYS },
           });
         }
-        if (recs.length) upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false });
+        if (recs.length) upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS });
       } catch (e: any) { const m = String(e?.message || e); notes.push(`${region}: ${m.slice(0, 160)}`); log(`${region}: ${m}`); }
       finally { elb.destroy(); cw.destroy(); }
     }
