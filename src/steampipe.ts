@@ -246,14 +246,44 @@ export async function sdkIdentity(timeoutMs = 15_000): Promise<{ ok: true; arn: 
   }
 }
 
+/**
+ * One query on its own connection, cut off after `ms` on both sides (statement_timeout for the server, closing the
+ * socket for the client). The shared pool's 600 s statement timeout would let a plugin stuck retrying new credentials
+ * hold a connection test, and the request waiting on it, for ten minutes.
+ */
+async function boundedQuery<T>(sql: string, ms: number): Promise<T[]> {
+  const client = new pg.Client({ connectionString: config.steampipeUrl, statement_timeout: ms, query_timeout: ms + 2000, connectionTimeoutMillis: Math.min(ms, 10_000) });
+  client.on("error", () => { /* surfaced by the query below */ });
+  try {
+    await client.connect();
+    return (await client.query(sql)).rows as T[];
+  } finally {
+    client.end().catch(() => {});
+  }
+}
+
 /** Polls until the schema answers, so a freshly written connection has time to load. */
 export async function testConnection(timeoutMs = 45_000): Promise<{ ok: boolean; accountId?: string; error?: string }> {
+  const first = await pollAccount(timeoutMs);
+  if (first.ok || !first.missingSchema) return first;
+  // The schema is not there at all. Steampipe either has not read the connection yet or is holding it in error.
+  const state = await connectionState(parentSchema());
+  if (state?.error) return { ok: false, error: `Steampipe connection "${parentSchema()}" failed to load: ${state.error}` };
+  if (state || !hasConnectionFile() || !mayRestartForMissingSchema()) return first;
+  // Not listed although the file names it: the running service missed the change (seen after a settings import that
+  // added the member connections, cured by a container restart). Restart it once and look again.
+  const reload = await reloadSteampipeService(`connection "${parentSchema()}" missing from the running service`);
+  if (!reload.restarted) return { ok: false, error: `${first.error} (${reload.note})` };
+  return pollAccount(timeoutMs);
+}
+
+async function pollAccount(timeoutMs: number): Promise<{ ok: boolean; accountId?: string; error?: string; missingSchema?: boolean }> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown = "";
   while (Date.now() < deadline) {
     try {
       // the parent's connection: over the aggregator this is one row per account and the first could be a member's
-      const rows = await query<{ account_id: string }>(`select account_id from ${parentSchema()}.aws_account`);
+      const rows = await boundedQuery<{ account_id: string }>(`select account_id from ${parentSchema()}.aws_account`, Math.max(1000, deadline - Date.now()));
       if (rows[0]?.account_id) return { ok: true, accountId: rows[0].account_id };
       lastError = "query returned no rows";
     } catch (e: any) {
@@ -262,5 +292,22 @@ export async function testConnection(timeoutMs = 45_000): Promise<{ ok: boolean;
     await new Promise((r) => setTimeout(r, 2000));
   }
   // Recorded once, at the end: a denial on aws_account (sts:GetCallerIdentity / iam:ListAccountAliases) gets its remedy here.
-  return { ok: false, error: describeError(lastError, "connection test (aws_account)") };
+  const missingSchema = /relation "[^"]+\.aws_account" does not exist/.test(String((lastError as any)?.message ?? lastError));
+  return { ok: false, error: describeError(lastError, "connection test (aws_account)"), missingSchema };
+}
+
+/** What the running service says about one connection; null when it does not list it (or cannot be asked). */
+async function connectionState(name: string): Promise<{ state: string; error: string | null } | null> {
+  try {
+    const rows = await boundedQuery<{ state: string; error: string | null }>(`select state, error from steampipe_connection where name = '${name.replace(/'/g, "''")}'`, 10_000);
+    return rows[0] ?? null;
+  } catch { return null; }
+}
+
+/** At most one self-restart per ten minutes, so a connection that never loads does not restart the service on every test. */
+let lastSchemaRestart = 0;
+function mayRestartForMissingSchema(): boolean {
+  if (Date.now() - lastSchemaRestart < 600_000) return false;
+  lastSchemaRestart = Date.now();
+  return true;
 }

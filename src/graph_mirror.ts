@@ -332,10 +332,21 @@ export function neoParams<T>(v: T): T {
   return v;
 }
 
+/** A node MERGE, `MERGE (x:Label {…})`, not the start of a path merge. */
+const NODE_MERGE = /\bMERGE\s*\((\w+):([\w:`]+)\s*\{[^{}]*\}\)(?!\s*[-<])/g;
+
+/**
+ * Every node the advisor writes carries a `ref_id` (a UUID, Jarvis's node key: graph/search answers with it and every
+ * Jarvis read and link goes through it). Added here, on creation, to each node MERGE of the statement, so no writer
+ * has to remember it; MERGE accepts several ON CREATE SET clauses, so one already there is unaffected. A node made
+ * any other way gets it from the sweep after a sync (backfillRefIds).
+ */
+export const withRefIds = (cypher: string): string => cypher.replace(NODE_MERGE, (m, v) => `${m} ON CREATE SET ${v}.ref_id = randomUUID()`);
+
 async function write(cypher: string, params: Record<string, unknown> = {}): Promise<void> {
   checkReachable();
   const s = session("WRITE");
-  try { await s.executeWrite((tx) => tx.run(cypher, neoParams(params)), { timeout: 60_000 }).catch((e) => { noteFailure(e); throw e; }); }
+  try { await s.executeWrite((tx) => tx.run(withRefIds(cypher), neoParams(params)), { timeout: 60_000 }).catch((e) => { noteFailure(e); throw e; }); }
   finally { await s.close(); }
 }
 
@@ -355,6 +366,24 @@ export async function ensureSchema(): Promise<void> {
   for (const old of ["advisorrole_name", "advisornodepool_name", "advisorport_id", "advisorplaybook_id", "knservice_id"]) await write(`DROP CONSTRAINT ${old} IF EXISTS`);
   await wipeLegacy();
   schemaReady = true;
+  // nodes written before ref_id existed: once per process, in the background (a large graph takes a while)
+  void backfillRefIds().then((n) => { if (n) console.log(`[graph] ref_id given to ${n} nodes`); }).catch((e) => logError("ref_id backfill", e));
+}
+
+/** Gives a `ref_id` to every advisor node (Advisor*, Kn*, Schema) that has none, a thousand at a time. Returns how many. */
+export async function backfillRefIds(): Promise<number> {
+  if (!enabled()) return 0;
+  let total = 0;
+  for (;;) {
+    const s = session("WRITE");
+    try {
+      const res = await s.executeWrite((tx) => tx.run(
+        "MATCH (n) WHERE n.ref_id IS NULL AND any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn' OR l = 'Schema') WITH n LIMIT 1000 SET n.ref_id = randomUUID() RETURN count(*) AS n"), { timeout: 60_000 });
+      const n = Number(res.records[0]?.get("n") ?? 0);
+      total += n;
+      if (n < 1000) return total;
+    } finally { await s.close(); }
+  }
 }
 
 /** Removes the nodes the v1 mirror wrote under labels that no longer exist, and id-only resource stubs (only ever ours; nothing else is touched). */
@@ -1016,6 +1045,7 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   // last, so it reads everything the sync wrote
   let schema: import("./graph_schema.js").SchemaCounts | null = null;
   try { const { mirrorSchema } = await import("./graph_schema.js"); schema = await mirrorSchema(); } catch (e) { logError("schema", e); }
+  try { await backfillRefIds(); } catch (e) { logError("ref_id backfill", e); }
   const aws: any = layers[AWS] ?? {};
   return { schema, account_id: mirrored[0]?.primaryAccountId() ?? accountId(), accounts: mirrored.map((a) => ({ provider: a.id, id: a.primaryAccountId() })), knowledge, network: aws.network ?? null, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes,
     apps: Number(aws["apps and ports"]?.apps ?? 0), took_ms: Date.now() - t0 };

@@ -591,6 +591,7 @@ function TransferCard() {
             </table>
             <p className="text-zinc-500">Ticked values are saved here and win over this host's env. Check the host-specific ones (Neo4j, doorman, link URL) before importing.</p>
             <Button onClick={apply} disabled={busy}>{busy ? "Importing…" : `Import ${pick.size} settings and the credentials`}</Button>
+            {busy && <span className="ml-2 text-zinc-500">saving, restarting Steampipe and testing the new connection; up to three minutes</span>}
           </div>
         )}
         {result && (

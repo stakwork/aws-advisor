@@ -351,3 +351,15 @@ test("accountId: the credentials' account first, the latest run's only when none
   db.prepare("delete from settings where key = 'aws_credentials_meta'").run();
   assert.equal(gm.accountId(), TEST_ACCOUNT);
 });
+
+test("withRefIds: every node MERGE gets a ref_id on create, path merges and other clauses are left alone", () => {
+  const out = gm.withRefIds(`UNWIND $rows AS row
+MERGE (r:AdvisorResource {id: row.id}) ON CREATE SET r.first_seen = $now SET r.name = row.name
+FOREACH (_ IN CASE WHEN row.vpc IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: coalesce(row.vpc, '')}) MERGE (r)-[:IN]->(n))
+MERGE (a:AdvisorAccount {id: row.account})-[:OWNS]->(r)
+MATCH (x:AdvisorRun {id: $run}) MERGE (x)-[:SAW]->(r)`);
+  assert.match(out, /MERGE \(r:AdvisorResource \{id: row\.id\}\) ON CREATE SET r\.ref_id = randomUUID\(\) ON CREATE SET r\.first_seen = \$now/);
+  assert.match(out, /MERGE \(n:AdvisorNetwork \{id: coalesce\(row\.vpc, ''\)\}\) ON CREATE SET n\.ref_id = randomUUID\(\) MERGE \(r\)-\[:IN\]->\(n\)/);
+  assert.equal((out.match(/ref_id/g) || []).length, 2, "a path merge and a MATCH are not rewritten");
+  assert.equal(gm.withRefIds("MATCH (n:AdvisorResource) SET n.x = 1"), "MATCH (n:AdvisorResource) SET n.x = 1");
+});
