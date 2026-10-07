@@ -25,6 +25,7 @@ import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommand
 import { latestWatchSummary, watchOnce } from "../watcher.js";
 import { cronOff } from "../scheduler.js";
 import { listRuntimeSettings, setRuntimeSetting } from "../runtime_settings.js";
+import { applyImport, buildPayload, openBundle, planImport, sealPayload } from "../settings_transfer.js";
 import { quotaStatus } from "../quota.js";
 import { ec2Detail, inventorySummary, listEc2, listElasticache, listRds, refreshInventory } from "../inventory.js";
 import { listLambda } from "../lambda_inventory.js";
@@ -250,6 +251,28 @@ api.put("/settings/runtime", (req, res) => {
   const { key, value } = req.body || {};
   if (typeof key !== "string") return res.status(400).json({ error: "key required" });
   try { res.json({ setting: setRuntimeSetting(key, value == null ? null : String(value)) }); }
+  catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+
+// ---- settings export / import (Settings › Other) -----------------------------------------------------------------
+// Configuration only: runtime settings with their secrets, the AWS credentials (keys included), member accounts, benchmarks,
+// prompt and probe-script overrides. No data and no graph: the new host collects its own with a run. Sealed with a passphrase.
+api.post("/settings/export", (req, res) => {
+  try { res.set("content-disposition", `attachment; filename="cloud-advisor-settings-${new Date().toISOString().slice(0, 10)}.json"`).set("cache-control", "no-store").json(sealPayload(buildPayload(), req.body?.passphrase)); }
+  catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+// Body: { bundle, passphrase }. What the import would change; nothing is written.
+api.post("/settings/import/preview", (req, res) => {
+  try { res.json(planImport(openBundle(req.body?.bundle, req.body?.passphrase))); }
+  catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+// Body: { bundle, passphrase, runtime_keys?: string[] }. Applies it, rewrites the Steampipe connection and tests it.
+api.post("/settings/import", async (req, res) => {
+  if (isBusy()) return res.status(409).json({ error: "a collection run is in progress; wait for it to finish" });
+  let payload;
+  try { payload = openBundle(req.body?.bundle, req.body?.passphrase); } catch (e: any) { return res.status(400).json({ error: e.message }); }
+  const keys = Array.isArray(req.body?.runtime_keys) ? req.body.runtime_keys.map(String) : undefined;
+  try { res.json(await applyImport(payload, { runtimeKeys: keys })); }
   catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 

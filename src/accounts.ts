@@ -56,11 +56,12 @@ export const memberConnections = (): MemberConnection[] =>
   listMembers().filter((m) => m.enabled).map((m) => ({ account_id: m.account_id, role_arn: m.role_arn, ...(m.regions?.length ? { regions: m.regions } : {}) }));
 
 /** Checks and normalises a member from the API. Throws with a user-facing message on the first problem. */
-export function validateAccount(input: any): MemberAccount {
+/** `parentId` is the parent to refuse as a member: the saved credentials' account by default, the incoming one on a settings import. */
+export function validateAccount(input: any, parentId: string | null | undefined = credentialsMeta()?.accountId): MemberAccount {
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
   const account_id = str(input?.account_id);
   if (!ACCOUNT_ID_RE.test(account_id)) throw new Error(`account_id must be the 12-digit account number, got "${account_id}"`);
-  const parent = credentialsMeta()?.accountId;
+  const parent = parentId;
   if (parent && parent === account_id) throw new Error(`${account_id} is the parent account (the credentials in Settings); add the children only`);
   const role_arn = str(input?.role_arn);
   if (!ROLE_ARN_RE.test(role_arn) || /\s/.test(role_arn)) throw new Error(`role_arn must look like arn:aws:iam::${account_id}:role/name, got "${role_arn}"`);

@@ -27,7 +27,7 @@ const TAB_HINT: Record<Tab, string> = {
   "auto-actions": "the executor: mode, roles, floors, caps and kill switch",
   agent: "repo2graph, Jev, the prompts and the graph mirror",
   notifications: "the Sphinx bot: where alerts and threads go",
-  other: "quotas, required tags and the dev token",
+  other: "quotas, required tags, export and import of the settings, and the dev token",
 };
 /** The sections of an AWS account: what the AWS adapter brings. Another provider will declare its own list. */
 const AWS_SECTIONS = ["access", "permissions", "probes", "benchmarks", "members"] as const;
@@ -351,6 +351,7 @@ export default function Settings() {
       {tab === "other" && (
         <>
           <RuntimeSettings groups={["Quotas", "Inventory"]} title="Quotas and inventory" />
+          <TransferCard />
       <Card title="API token (dev)">
         <p className="mb-2 text-xs text-zinc-500">Only needed when the backend runs with API_TOKEN set and you use the Vite dev server. The built app gets a token injected automatically.</p>
         <div className="flex gap-2"><input className="flex-1" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} placeholder="paste API_TOKEN" /><Button variant="ghost" onClick={() => { localStorage.setItem("advisor_token", tokenInput); location.reload(); }}>Use</Button></div>
@@ -514,6 +515,94 @@ function DataCard({ accounts }: { accounts: { id: string; provider: string; name
         <span className="text-xs text-zinc-500">Refused while a collection run is in progress. The next run rebuilds the inventories and the graph with every row stamped with its account.</span>
       </div>
       {msg && <div className="mt-2 text-xs text-zinc-300">{msg}</div>}
+    </Card>
+  );
+}
+
+type ImportPlan = {
+  runtime: { key: string; label: string; group: string; secret: boolean; from_source: "setting" | "env"; current_source: "setting" | "env" | "default"; same: boolean; selected: boolean }[];
+  aws: { mode: string; label: string; account_id: string | null; replaces: string | null; warning: string | null } | null;
+  members: { account_id: string; name: string; enabled: boolean }[];
+  benchmarks: boolean; compliance_benchmarks: boolean; prompts: string[]; probe_scripts: string[];
+};
+
+/** Moves this advisor's configuration (keys included, sealed with a passphrase) to another host. No data travels: the new host collects its own with a run. */
+function TransferCard() {
+  const [exportPass, setExportPass] = useState(""); const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
+  const [bundle, setBundle] = useState<any>(null); const [importPass, setImportPass] = useState("");
+  const [plan, setPlan] = useState<ImportPlan | null>(null); const [pick, setPick] = useState<Set<string>>(new Set()); const [result, setResult] = useState<any>(null);
+  const run = async (f: () => Promise<void>) => { setBusy(true); setMsg(""); try { await f(); } catch (e: any) { setMsg(e.message); } finally { setBusy(false); } };
+  const doExport = () => run(async () => {
+    const b = await api("/settings/export", { method: "POST", body: JSON.stringify({ passphrase: exportPass }) });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(b, null, 2)], { type: "application/json" }));
+    a.download = `cloud-advisor-settings-${b.exported_at.slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(a.href);
+    setExportPass(""); setMsg(`exported ${b.from.runtime} runtime settings, ${b.from.aws_mode ? `the ${b.from.aws_mode} credentials` : "no AWS credentials"} and ${b.from.members} member accounts`);
+  });
+  const readFile = (f: File | undefined) => { setPlan(null); setResult(null); setMsg(""); if (!f) return setBundle(null); f.text().then((t) => setBundle(JSON.parse(t))).catch(() => setMsg("that file is not JSON")); };
+  const preview = () => run(async () => {
+    const p: ImportPlan = await api("/settings/import/preview", { method: "POST", body: JSON.stringify({ bundle, passphrase: importPass }) });
+    setPlan(p); setPick(new Set(p.runtime.filter((r) => r.selected).map((r) => r.key)));
+  });
+  const apply = () => run(async () => {
+    setResult(await api("/settings/import", { method: "POST", body: JSON.stringify({ bundle, passphrase: importPass, runtime_keys: [...pick] }) }));
+    setPlan(null); setImportPass("");
+  });
+  const toggle = (k: string) => setPick((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+  const src = (s: string) => (s === "default" ? "default" : s === "env" ? "env" : "saved");
+  return (
+    <Card title={<span>Export / import settings <span className="font-normal text-zinc-500">· configuration and keys only, no data; run a collection on the new host afterwards</span></span>}>
+      <div className="space-y-4 text-sm">
+        <div>
+          <div className="mb-1 text-zinc-300">Export</div>
+          <p className="mb-2 text-xs text-zinc-500">Runtime settings with their secrets (saved and env-provided), the AWS credentials including static keys, member accounts, benchmarks, prompt and probe-script overrides. The file is encrypted with the passphrase; keep the two apart.</p>
+          <div className="flex gap-2">
+            <input type="password" autoComplete="new-password" className="flex-1" value={exportPass} onChange={(e) => setExportPass(e.target.value)} placeholder="passphrase (10+ characters)" />
+            <Button onClick={doExport} disabled={busy || exportPass.length < 10}>Download export</Button>
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-zinc-300">Import</div>
+          <div className="flex flex-wrap gap-2">
+            <input type="file" accept="application/json,.json" onChange={(e) => readFile(e.target.files?.[0])} className="text-xs" />
+            <input type="password" autoComplete="off" className="flex-1" value={importPass} onChange={(e) => setImportPass(e.target.value)} placeholder="passphrase" />
+            <Button variant="ghost" onClick={preview} disabled={busy || !bundle || !importPass}>Preview</Button>
+          </div>
+          {bundle?.from && <p className="mt-1 text-xs text-zinc-500">From {bundle.from.public_url}{bundle.from.account_id ? ` · account ${bundle.from.account_id}` : ""} · exported {when(bundle.exported_at)}</p>}
+        </div>
+        {plan && (
+          <div className="space-y-2 rounded border border-zinc-800 p-3 text-xs">
+            <div><span className="text-zinc-400">AWS credentials: </span>{plan.aws ? <>{plan.aws.label}{plan.aws.account_id ? ` (account ${plan.aws.account_id})` : ""}{plan.aws.replaces ? <span className="text-amber-300"> · replaces {plan.aws.replaces}</span> : ""}</> : "none in the export"}</div>
+            {plan.aws?.warning && <div className="text-amber-300">{plan.aws.warning}</div>}
+            <div><span className="text-zinc-400">Member accounts: </span>{plan.members.length ? plan.members.map((m) => `${m.name} ${m.account_id}${m.enabled ? "" : " (disabled)"}`).join(", ") : "none"} <span className="text-zinc-500">(replaces this host's list)</span></div>
+            <div><span className="text-zinc-400">Overrides: </span>{[plan.benchmarks && "benchmarks", plan.compliance_benchmarks && "compliance benchmarks", ...plan.prompts.map((p) => `prompt ${p}`), ...plan.probe_scripts.map((p) => `probe script ${p}`)].filter(Boolean).join(", ") || "none"}</div>
+            <table className="w-full">
+              <thead><tr className="text-left text-zinc-500"><th className="w-6" /><th>Setting</th><th>In the export</th><th>Here now</th></tr></thead>
+              <tbody>
+                {plan.runtime.map((r) => (
+                  <tr key={r.key} className="border-t border-zinc-900">
+                    <td><input type="checkbox" checked={pick.has(r.key)} onChange={() => toggle(r.key)} /></td>
+                    <td className="py-0.5">{r.group} › {r.label}{r.secret && <span className="ml-1 text-zinc-500">(secret)</span>}</td>
+                    <td className="text-zinc-400">{src(r.from_source)}</td>
+                    <td className={r.same ? "text-zinc-500" : r.current_source === "default" ? "text-zinc-400" : "text-amber-300"}>{r.same ? "same value" : src(r.current_source)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-zinc-500">Ticked values are saved here and win over this host's env. Check the host-specific ones (Neo4j, doorman, link URL) before importing.</p>
+            <Button onClick={apply} disabled={busy}>{busy ? "Importing…" : `Import ${pick.size} settings and the credentials`}</Button>
+          </div>
+        )}
+        {result && (
+          <div className="rounded border border-zinc-800 p-3 text-xs text-zinc-300">
+            <div>Applied {result.runtime.applied.length} runtime settings, {result.members} member accounts{result.overrides.length ? `, ${result.overrides.join(", ")}` : ""}.</div>
+            {result.runtime.failed.length > 0 && <div className="text-red-300">Failed: {result.runtime.failed.map((f: any) => `${f.key} (${f.error})`).join("; ")}</div>}
+            {result.aws?.test && <div className="mt-1"><TestOutcome test={result.aws.test} sdk={result.aws.sdk} /></div>}
+            <div className="mt-1 text-zinc-500">Next: start a run (Runs › Start) to collect the inventory and fill the graph.</div>
+          </div>
+        )}
+        {msg && <div className="text-xs text-zinc-300">{msg}</div>}
+      </div>
     </Card>
   );
 }
