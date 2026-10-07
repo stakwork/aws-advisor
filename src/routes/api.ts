@@ -1,4 +1,5 @@
 import { allJobs, runJobNow } from "../scheduler.js";
+import { listAgentRuns } from "../graph_agent_runs.js";
 import { adapters } from "../adapters/index.js";
 import { belowBar } from "../rubric.js";
 import { taskFor } from "../tasks.js";
@@ -337,6 +338,12 @@ api.post("/runs/:id/agent", async (req, res) => {
   if (inflight && !req.query.force) return res.status(409).json({ error: `agent run ${inflight.request_id} is still pending; poll it or pass ?force=1 to start another` });
   try { res.status(202).json(await dispatchToAgent(run.id)); }
   catch (e: any) { res.status(502).json({ error: e.message }); }
+});
+
+// every request to the agent, the same entries the graph holds (src/graph_agent_runs.ts)
+api.get("/agent-runs", (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  res.json(listAgentRuns({ kind: q.kind || undefined, status: q.status || undefined, page: Number(q.page) || 1, pageSize: Number(q.page_size) || 50 }));
 });
 
 api.get("/agent-runs/:requestId", (req, res) => {

@@ -145,15 +145,27 @@ const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", 
 function ReviewSummary() {
   const [r, setR] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  // what the last Run now did: a run on the same day often finds the same things, so the list alone looks unchanged
+  const [ran, setRan] = useState<{ ok: boolean; text: string } | null>(null);
   const load = () => api("/review").then(setR).catch(() => setR(null));
   useEffect(() => { load(); }, []);
-  const run = async () => { setBusy(true); try { await api("/review/run", { method: "POST", body: "{}" }); await load(); } finally { setBusy(false); } };
+  const run = async () => {
+    setBusy(true); setRan(null);
+    try {
+      const x: any = await api("/review/run", { method: "POST", body: "{}" });
+      const found = Object.values(x.findings || {}).reduce((s: number, n: any) => s + Number(n || 0), 0);
+      setRan({ ok: !(x.errors || []).length, text: `Reviewed ${x.instances} instance${x.instances === 1 ? "" : "s"} in ${(x.took_ms / 1000).toFixed(1)} s: ${found} observation${found === 1 ? "" : "s"}, ${x.recommendations} recommendation${x.recommendations === 1 ? "" : "s"}, ${x.alerts} new alert${x.alerts === 1 ? "" : "s"}${(x.errors || []).length ? `; errors: ${x.errors.join("; ")}` : ""}` });
+      await load();
+    } catch (e: any) { setRan({ ok: false, text: `Review failed: ${e?.message || e}` }); }
+    finally { setBusy(false); }
+  };
   if (!r) return <Empty>Loading…</Empty>;
   const counts: Record<string, number> = {};
   for (const f of r.findings) counts[f.kind] = (counts[f.kind] || 0) + 1;
   return (
     <div className="space-y-1 text-sm">
       <div className="flex items-center justify-between text-xs text-zinc-500"><span>{r.day ? `${r.day} · ${r.findings.length} observation${r.findings.length === 1 ? "" : "s"}${r.scope && r.scope.total !== r.findings.length ? ` for this account (${r.scope.total} across accounts)` : ""}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Reviewing…" : "Run now"}</Button></div>
+      {ran && <div className={`text-xs ${ran.ok ? "text-zinc-400" : "text-red-400"}`}>{ran.text}</div>}
       {r.day && r.findings.length === 0 && <div className="text-zinc-500">Nothing stands out in the statistics.</div>}
       <div className="flex flex-wrap gap-2 text-xs">{Object.entries(counts).map(([k, n]) => <Badge key={k}>{`${n} ${REVIEW_LABEL[k] || k}`}</Badge>)}</div>
       <ul className="space-y-0.5">{r.findings.slice(0, 6).map((f: any) => (

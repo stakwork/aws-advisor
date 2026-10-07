@@ -13,6 +13,7 @@ import { critiqueText, gradeByRubric } from "./rubric.js";
 import { listDecisionConcepts, systemPromptFor } from "./concepts.js";
 import { checkTiers } from "./tiercheck.js";
 import { AWS } from "./adapters/types.js";
+import { mirrorAgentRunInBackground } from "./graph_agent_runs.js";
 
 /**
  * repo2graph client. The advisor posts a findings batch to POST /repo/agent, gets a request id back
@@ -165,8 +166,10 @@ export async function postAgentRequest(req: AgentRequest): Promise<AgentAccepted
   });
   if (!res.ok) throw new Error(`repo2graph responded ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = (await res.json()) as { request_id: string; sessionId: string; events_token: string };
-  db.prepare("insert into agent_runs(kind, run_id, alert_id, recommendation_id, request_id, session_id, events_token, prompt, retry_of) values (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(req.link.kind, req.link.kind === "findings" ? req.link.runId : null, req.link.kind === "incident" ? req.link.alertId : null, req.link.kind === "resolution" || req.link.kind === "chat" ? req.link.recommendationId : null, data.request_id, data.sessionId, data.events_token, req.prompt, req.retryOf ?? null);
+  db.prepare("insert into agent_runs(kind, run_id, alert_id, recommendation_id, request_id, session_id, events_token, prompt, retry_of, agent_name, model, link, metadata) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(req.link.kind, req.link.kind === "findings" ? req.link.runId : null, req.link.kind === "incident" ? req.link.alertId : null, req.link.kind === "resolution" || req.link.kind === "chat" ? req.link.recommendationId : null, data.request_id, data.sessionId, data.events_token, req.prompt, req.retryOf ?? null,
+      req.agentName, config.agentModel, JSON.stringify(req.link), JSON.stringify(req.metadata ?? {}));
+  mirrorAgentRunInBackground(data.request_id);
   return { requestId: data.request_id, sessionId: data.sessionId, eventsToken: data.events_token };
 }
 
@@ -231,6 +234,7 @@ export async function handleAgentResult(requestId: string, payload: { status: st
   if (run.status && run.status !== "pending") throw new Error(`agent request ${requestId} is already ${run.status}`);
   if (payload.status !== "completed") {
     db.prepare("update agent_runs set status = 'failed', error = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.error ?? payload), run.id);
+    mirrorAgentRunInBackground(run.request_id);
     if (run.kind === "incident") await completeIncident(run, payload);
     if (run.kind === "resolution") completeResolution(run, payload);
     if (run.kind === "observe") completeObservation(run, payload);
@@ -242,6 +246,7 @@ export async function handleAgentResult(requestId: string, payload: { status: st
   }
   db.prepare("update agent_runs set status = 'completed', result = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(payload.result), run.id);
   await gradeAndMaybeRetry(run, payload);
+  mirrorAgentRunInBackground(run.request_id); // after the grade, so the entry carries the score and the retry
   if (run.kind === "incident") return { kind: run.kind, imported: (await completeIncident(run, payload)).imported };
   if (run.kind === "resolution") { completeResolution(run, payload); return { kind: run.kind, imported: 0 }; }
   if (run.kind === "observe") { completeObservation(run, payload); return { kind: run.kind, imported: 0 }; }

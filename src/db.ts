@@ -349,6 +349,8 @@ for (const [col, type] of [["acknowledged_by", "text"], ["triage", "text"], ["tr
 // Tailored resolutions (src/resolve.ts) are a third kind of agent run, linked to a recommendation.
 addColumn("agent_runs", "recommendation_id", "integer");
 for (const [col, type] of [["prompt", "text"], ["score", "real"], ["grade", "text"], ["retry_of", "text"], ["retried_by", "text"]]) addColumn("agent_runs", col, type);
+// what the request was, for its entry in the graph (src/graph_agent_runs.ts): the agent it ran as, the model, the flow that owns it and the metadata sent
+for (const col of ["agent_name", "model", "link", "metadata"]) addColumn("agent_runs", col, "text");
 addColumn("resolutions", "gate_outcome", "text");
 // Step progress on a recommendation's plan and the day to look at it again (src/progress.ts).
 addColumn("recommendations", "progress", "text");

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import { ConnectionBanner } from "./components/connection";
-import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert, Network as NetworkIcon } from "lucide-react";
+import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert, Network as NetworkIcon, Bot } from "lucide-react";
 import { api, currentScope, onScopeChange, setScope, signIn, token } from "./api";
 import { useScopeInfo, type Capability } from "./scope";
 import { Gate } from "./components/gate";
@@ -17,6 +17,7 @@ import Knowledge from "./pages/Knowledge";
 import Bill from "./pages/Bill";
 import Changes from "./pages/Changes";
 import Chat from "./pages/Chat";
+import Agent from "./pages/Agent";
 import Actions from "./pages/Actions";
 import Security from "./pages/Security";
 import Network from "./pages/Network";
@@ -36,6 +37,7 @@ const nav: { to: string; label: string; icon: any; need?: Capability }[] = [
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
   { to: "/actions", label: "Auto-actions", icon: Wand2, need: "executor" },
   { to: "/chat", label: "Chat", icon: MessageSquare },
+  { to: "/agent", label: "Agent", icon: Bot },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
@@ -133,6 +135,7 @@ function AppShell() {
           <Route path="/changes" element={<Gate need="changes"><Changes /></Gate>} />
           <Route path="/actions" element={<Gate need="executor"><Actions /></Gate>} />
           <Route path="/chat" element={<Chat />} />
+          <Route path="/agent" element={<Agent />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

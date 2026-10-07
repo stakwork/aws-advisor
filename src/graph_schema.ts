@@ -57,6 +57,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorIncident: "An incident grouping alerts",
   AdvisorAction: "An executor action: every change the advisor proposed, applied, verified or reverted",
   AdvisorPass: "One observe pass of the monitor",
+  AdvisorAgentRun: "One request to the repo2graph agent (findings review, morning observation, investigation, chat turn) and what it was about",
   AdvisorApp: "A program or container running on a box, from the probe's process list",
   AdvisorEndpoint: "Something listening: a port on a box, a balancer listener, a database endpoint, a function URL, a cluster API",
   AdvisorPressureEvent: "A capacity pressure event on a pool and the action that answered it",
@@ -125,7 +126,6 @@ export function buildSchema(labels: LabelSample[], edges: EdgeSample[]): { nodes
   for (const l of labels) {
     const a: Record<string, string> = {}; const s: string[] = [];
     for (const p of l.props) {
-      if (p.key === "name_inferred") continue; // bookkeeping for the inferred name (graph_mirror backfillJarvisFields), not an attribute
       if (JARVIS_FIELDS.has(p.key)) { s.push(p.key); continue; }
       a[p.key] = `${p.count >= l.total ? "" : "?"}${attrType(p.values)}`;
     }

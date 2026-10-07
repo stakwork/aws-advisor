@@ -355,16 +355,16 @@ test("accountId: the credentials' account first, the latest run's only when none
   assert.equal(gm.accountId(), TEST_ACCOUNT);
 });
 
-test("withRefIds: every node MERGE gets a ref_id on create, path merges and other clauses are left alone", () => {
+test("withRefIds: every node MERGE gets a ref_id (ours also the Jarvis labels and namespace advisor) on create, path merges and other clauses are left alone", () => {
   const out = gm.withRefIds(`UNWIND $rows AS row
 MERGE (r:AdvisorResource {id: row.id}) ON CREATE SET r.first_seen = $now SET r.name = row.name
 FOREACH (_ IN CASE WHEN row.vpc IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: coalesce(row.vpc, '')}) MERGE (r)-[:IN]->(n))
 MERGE (a:AdvisorAccount {id: row.account})-[:OWNS]->(r)
 MATCH (x:AdvisorRun {id: $run}) MERGE (x)-[:SAW]->(r)`);
-  assert.match(out, /MERGE \(r:AdvisorResource \{id: row\.id\}\) ON CREATE SET r\.ref_id = randomUUID\(\), r:Data_Bank:Domain_cloud ON CREATE SET r\.first_seen = \$now/);
-  assert.match(out, /MERGE \(n:AdvisorNetwork \{id: coalesce\(row\.vpc, ''\)\}\) ON CREATE SET n\.ref_id = randomUUID\(\), n:Data_Bank:Domain_cloud MERGE \(r\)-\[:IN\]->\(n\)/);
+  assert.match(out, /MERGE \(r:AdvisorResource \{id: row\.id\}\) ON CREATE SET r\.ref_id = randomUUID\(\), r:Data_Bank:Domain_cloud, r\.namespace = 'advisor' ON CREATE SET r\.first_seen = \$now/);
+  assert.match(out, /MERGE \(n:AdvisorNetwork \{id: coalesce\(row\.vpc, ''\)\}\) ON CREATE SET n\.ref_id = randomUUID\(\), n:Data_Bank:Domain_cloud, n\.namespace = 'advisor' MERGE \(r\)-\[:IN\]->\(n\)/);
   assert.equal((out.match(/ref_id/g) || []).length, 2, "a path merge and a MATCH are not rewritten");
   assert.equal(gm.withRefIds("MATCH (n:AdvisorResource) SET n.x = 1"), "MATCH (n:AdvisorResource) SET n.x = 1");
-  // Jarvis's own Schema nodes get the ref_id but stay out of Data_Bank
+  // Jarvis's own Schema nodes get the ref_id but stay out of Data_Bank and carry no namespace (a Schema property is an attribute declaration)
   assert.equal(gm.withRefIds("MERGE (s:Schema {type: $t})"), "MERGE (s:Schema {type: $t}) ON CREATE SET s.ref_id = randomUUID()");
 });

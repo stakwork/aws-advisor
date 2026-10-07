@@ -49,7 +49,7 @@ UNWIND $rows AS row
 MERGE (d:AdvisorResource {id: row.id})
 ON CREATE SET d.first_seen = row.first_seen
 SET d:AdvisorDeployment
-SET d += {name: row.name, platform: row.platform, workload_kind: row.kind, namespace: row.namespace, environment: row.environment, containers: row.container_count, images: row.images, replicas_desired: row.replicas_desired, replicas_ready: row.replicas_ready,
+SET d += {name: row.name, platform: row.platform, workload_kind: row.kind, k8s_namespace: row.namespace, environment: row.environment, containers: row.container_count, images: row.images, replicas_desired: row.replicas_desired, replicas_ready: row.replicas_ready,
   health: CASE WHEN row.replicas_desired IS NULL THEN 'unknown' WHEN row.replicas_ready >= row.replicas_desired THEN 'ok' WHEN row.replicas_ready > 0 THEN 'degraded' ELSE 'severe' END, state: CASE WHEN row.gone THEN 'terminated' ELSE 'running' END,
   revision: row.revision, strategy: row.strategy, schedule: row.schedule, service_account: row.service_account, labels: row.labels_kv, region: row.region, created_at: row.created, pods_running: row.pods_running,
   provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.uid, gone: row.gone, last_seen: row.last_seen, updated_at: $now}
@@ -106,7 +106,7 @@ SET e.exposure = CASE WHEN 'internet' IN srcs THEN 'internet' ELSE e.exposure EN
 const POLICY_CYPHER = `
 UNWIND $rows AS row
 MERGE (f:AdvisorFilter {id: row.id}) ON CREATE SET f.first_seen = $now
-SET f += {kind: 'network_policy', stateful: true, default_action: 'deny', default: false, name: row.name, namespace: row.namespace, description: row.description, rules: row.rule_count, attached: row.attached, policy_types: row.policy_types, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'kubernetes_network_policy', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET f += {kind: 'network_policy', stateful: true, default_action: 'deny', default: false, name: row.name, k8s_namespace: row.namespace, description: row.description, rules: row.rule_count, attached: row.attached, policy_types: row.policy_types, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'kubernetes_network_policy', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
 WITH f, row
 MERGE (c:AdvisorResource {id: row.cluster_arn}) MERGE (f)-[:IN_CLUSTER]->(c)
 WITH f, row
