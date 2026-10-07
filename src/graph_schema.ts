@@ -7,9 +7,9 @@
  * and goes when the last one is gone (node schemas are soft-deleted with is_deleted, as Jarvis does; edge schemas are
  * removed). Ours are the Schema nodes of domain Cloud; Thing and every other domain's schema are never touched.
  */
-import { enabled, readQuery, writeCypher, logError, LEGACY_LABELS } from "./graph_mirror.js";
+import { enabled, readQuery, writeCypher, logError, LEGACY_LABELS, SCHEMA_DOMAIN } from "./graph_mirror.js";
 
-export const SCHEMA_DOMAIN = "Cloud";
+export { SCHEMA_DOMAIN };
 const ROOT = "Thing";
 const BASE = "AdvisorResource";
 

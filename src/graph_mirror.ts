@@ -335,13 +335,22 @@ export function neoParams<T>(v: T): T {
 /** A node MERGE, `MERGE (x:Label {…})`, not the start of a path merge. */
 const NODE_MERGE = /\bMERGE\s*\((\w+):([\w:`]+)\s*\{[^{}]*\}\)(?!\s*[-<])/g;
 
+/** The Jarvis schema domain the advisor's types live in (src/graph_schema.ts), and the label Jarvis gives that domain's nodes. */
+export const SCHEMA_DOMAIN = "Cloud";
+export const DOMAIN_LABEL = `Domain_${SCHEMA_DOMAIN.toLowerCase()}`;
+/** What Jarvis needs on a node to find it: Data_Bank (every ref_id lookup, graph/search and expansion are scoped to it) and the domain label (expansion keeps only nodes in a visible domain). */
+const JARVIS_LABELS = `Data_Bank:${DOMAIN_LABEL}`;
+const isAdvisorLabel = (l: string) => /^`?(Advisor|Kn)/.test(l);
+
 /**
  * Every node the advisor writes carries a `ref_id` (a UUID, Jarvis's node key: graph/search answers with it and every
- * Jarvis read and link goes through it). Added here, on creation, to each node MERGE of the statement, so no writer
- * has to remember it; MERGE accepts several ON CREATE SET clauses, so one already there is unaffected. A node made
- * any other way gets it from the sweep after a sync (backfillRefIds).
+ * Jarvis read and link goes through it), and the advisor's own nodes (Advisor*, Kn*) Jarvis's Data_Bank and domain
+ * labels. Added here, on creation, to each node MERGE of the statement, so no writer has to remember it; MERGE
+ * accepts several ON CREATE SET clauses, so one already there is unaffected. A node made any other way, or before
+ * this, gets them from the sweep after a sync (backfillRefIds).
  */
-export const withRefIds = (cypher: string): string => cypher.replace(NODE_MERGE, (m, v) => `${m} ON CREATE SET ${v}.ref_id = randomUUID()`);
+export const withRefIds = (cypher: string): string => cypher.replace(NODE_MERGE, (m, v, label) =>
+  `${m} ON CREATE SET ${v}.ref_id = randomUUID()${isAdvisorLabel(label) ? `, ${v}:${JARVIS_LABELS}` : ""}`);
 
 async function write(cypher: string, params: Record<string, unknown> = {}): Promise<void> {
   checkReachable();
@@ -367,23 +376,33 @@ export async function ensureSchema(): Promise<void> {
   await wipeLegacy();
   schemaReady = true;
   // nodes written before ref_id existed: once per process, in the background (a large graph takes a while)
-  void backfillRefIds().then((n) => { if (n) console.log(`[graph] ref_id given to ${n} nodes`); }).catch((e) => logError("ref_id backfill", e));
+  void backfillRefIds().then((n) => { if (n) console.log(`[graph] ref_id or Jarvis labels given to ${n} nodes`); }).catch((e) => logError("ref_id backfill", e));
 }
 
-/** Gives a `ref_id` to every advisor node (Advisor*, Kn*, Schema) that has none, a thousand at a time. Returns how many. */
+/**
+ * Gives a `ref_id` to every advisor node that has none (Advisor*, Kn*, and the Schema nodes), and the Data_Bank and
+ * domain labels to the Advisor* and Kn* ones that lack them, a thousand at a time. Returns how many nodes changed.
+ */
 export async function backfillRefIds(): Promise<number> {
   if (!enabled()) return 0;
+  const ours = "any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn')";
+  const sweeps = [
+    `MATCH (n) WHERE n.ref_id IS NULL AND (${ours} OR n:Schema) WITH n LIMIT 1000 SET n.ref_id = randomUUID() RETURN count(*) AS n`,
+    `MATCH (n) WHERE ${ours} AND NOT (n:Data_Bank AND n:${DOMAIN_LABEL}) WITH n LIMIT 1000 SET n:${JARVIS_LABELS} RETURN count(*) AS n`,
+  ];
   let total = 0;
-  for (;;) {
-    const s = session("WRITE");
-    try {
-      const res = await s.executeWrite((tx) => tx.run(
-        "MATCH (n) WHERE n.ref_id IS NULL AND any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn' OR l = 'Schema') WITH n LIMIT 1000 SET n.ref_id = randomUUID() RETURN count(*) AS n"), { timeout: 60_000 });
-      const n = Number(res.records[0]?.get("n") ?? 0);
-      total += n;
-      if (n < 1000) return total;
-    } finally { await s.close(); }
+  for (const cypher of sweeps) {
+    for (;;) {
+      const s = session("WRITE");
+      try {
+        const res = await s.executeWrite((tx) => tx.run(cypher), { timeout: 60_000 });
+        const n = Number(res.records[0]?.get("n") ?? 0);
+        total += n;
+        if (n < 1000) break;
+      } finally { await s.close(); }
+    }
   }
+  return total;
 }
 
 /** Removes the nodes the v1 mirror wrote under labels that no longer exist, and id-only resource stubs (only ever ours; nothing else is touched). */
