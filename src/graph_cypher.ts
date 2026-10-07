@@ -31,3 +31,6 @@ CALL {
   FOREACH (_ IN CASE WHEN l_hit IS NULL THEN [1] ELSE [] END | ${REF_MERGE("l_ref", id, o.guessed ?? "null", o.namedBy)} ${edge("l_ref")}${set})
 }`;
 };
+
+/** True when `alias` is one of our nodes: sweeps over relationship types the wider graph may also use (ASSIGNED, GRANTED, ...) start from ours only. */
+export const OURS = (alias: string) => `any(l IN labels(${alias}) WHERE l STARTS WITH 'Advisor')`;

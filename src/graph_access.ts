@@ -18,6 +18,7 @@
  * written on the pass are removed, credentials not seen are marked gone, clients, addresses and people left with no edge go.
  */
 import { db } from "./db.js";
+import { OURS } from "./graph_cypher.js";
 import { allFingerprints, listActors, listDirectoryChanges, listPeople, type Actor, type Person } from "./sign_ins.js";
 import { actorKey, clientKey, foldIps, isPrivateIp, matchKeys, type ClientUse, type IpUse } from "./sign_in_facts.js";
 import { teamExtras, vercelTeam } from "./adapters/vercel/inventory.js";
@@ -201,12 +202,12 @@ export async function mirrorAccess(stamp: string): Promise<{ credentials: number
   for (const b of chunks(g.ips)) await writeCypher(IP_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(pp.persons)) await writeCypher(PERSON_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(pp.links)) await writeCypher(HAS_IDENTITY_CYPHER, { rows: b, now: stamp });
-  await writeCypher("MATCH ()-[r:HAS_CREDENTIAL|SIGNS_IN_WITH|USED_FROM|SIGNED_IN_FROM|HAS_IDENTITY]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
+  await writeCypher(`MATCH (s)-[r:HAS_CREDENTIAL|SIGNS_IN_WITH|USED_FROM|SIGNED_IN_FROM|HAS_IDENTITY]->() WHERE ${OURS("s")} AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
   await writeCypher("MATCH (c:AdvisorCredential) WHERE c.updated_at IS NULL OR c.updated_at <> $now SET c.gone = true", { now: stamp });
   await writeCypher("MATCH (n) WHERE (n:AdvisorClient OR (n:AdvisorSource AND n.kind = 'ip')) AND NOT (n)--() DELETE n", {});
   await writeCypher("MATCH (p:AdvisorPerson) WHERE p.updated_at IS NULL OR p.updated_at <> $now DETACH DELETE p", { now: stamp });
   // identities of one person were joined directly by SAME_PERSON before AdvisorPerson: remove those edges
-  await writeCypher("MATCH ()-[r:SAME_PERSON]->() DELETE r", {});
+  await writeCypher(`MATCH (s)-[r:SAME_PERSON]->() WHERE ${OURS("s")} DELETE r`, {});
   // Vercel tokens were identities for a day before they became credentials: remove those nodes
   await writeCypher("MATCH (n:AdvisorIdentity {native_type: 'vercel_token'}) DETACH DELETE n", {});
   // what each identity and person may do and reach (src/graph_entitlements.ts), on the people just written

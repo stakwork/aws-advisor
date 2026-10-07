@@ -1,5 +1,5 @@
 import { db } from "../../db.js";
-import { REF_MERGE } from "../../graph_cypher.js";
+import { OURS, REF_MERGE } from "../../graph_cypher.js";
 import { inventoryIdsOf, tableExistsIn, writeCypher } from "../../graph_mirror.js";
 import { AWS } from "../types.js";
 import { elbEdges, lambdaArn, poolId } from "./resources.js";
@@ -172,7 +172,7 @@ export async function mirrorVercelRoleLinks(stamp: string): Promise<void> {
   const { oidcLinks } = await import("../../vercel_aws_links.js");
   const rows = oidcLinks();
   for (const batch of chunks(rows)) await write(VERCEL_RUNS_AS_CYPHER, { rows: batch, now: stamp });
-  await write("MATCH ()-[x:RUNS_AS]->() WHERE x.via = 'vercel_oidc' AND (x.updated_at IS NULL OR x.updated_at <> $now) DELETE x", { now: stamp });
+  await write(`MATCH (s)-[x:RUNS_AS]->() WHERE ${OURS("s")} AND x.via = 'vercel_oidc' AND (x.updated_at IS NULL OR x.updated_at <> $now) DELETE x`, { now: stamp });
 }
 
 /** Everything above, in order; returns the ids of the nodes written here beyond the resources (the deployments), so the core keeps them. */

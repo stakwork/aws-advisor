@@ -23,6 +23,7 @@ import { listEntitlements, listPrincipals, policyRows } from "./entitlements.js"
 import { storedCatalogue } from "./service_reference.js";
 import { grade, gradeLine, permsOf } from "./policy_facts.js";
 import { db } from "./db.js";
+import { OURS } from "./graph_cypher.js";
 import { permissionSetOfRole } from "./sso_inventory.js";
 
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
@@ -197,8 +198,10 @@ export async function mirrorEntitlements(stamp: string): Promise<Record<string, 
   for (const b of chunks(touchedRows)) await writeCypher(TOUCHED_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(personAccess)) await writeCypher(PERSON_ACCESS_CYPHER, { rows: b, now: stamp });
   // what this pass did not write goes; RUNS_AS from Vercel OIDC is src/adapters/aws/edges.ts's
-  await writeCypher("MATCH ()-[r:GRANTED|IN_GROUP|PROVISIONED_AS|ASSIGNED|CAN_ACCESS|REACHES|CAN_ASSUME|CAN_SHELL_INTO|HOLDS_KEY_OF|TOUCHED]->() WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
-  await writeCypher("MATCH ()-[r:RUNS_AS]->() WHERE r.via <> 'vercel_oidc' AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r", { now: stamp });
+  // ASSIGNED is only ours when it ends at a permission set: an Elastic IP's ASSIGNED edges are src/graph_network.ts's
+  await writeCypher(`MATCH (s)-[r:GRANTED|IN_GROUP|PROVISIONED_AS|CAN_ACCESS|REACHES|CAN_ASSUME|CAN_SHELL_INTO|HOLDS_KEY_OF|TOUCHED]->() WHERE ${OURS("s")} AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
+  await writeCypher("MATCH (:AdvisorResource)-[r:ASSIGNED]->(:AdvisorPermissionSet) WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
+  await writeCypher(`MATCH (s)-[r:RUNS_AS]->() WHERE ${OURS("s")} AND r.via <> 'vercel_oidc' AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
   await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR n:AdvisorRepository) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
   return counts;
 }
