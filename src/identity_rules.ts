@@ -11,6 +11,12 @@
  * - identity_role_wide_trust: a role whose trust is wider than it looks (an OIDC issuer without a subject, "*", an
  *   external account without an external id, Cognito guests);
  * - identity_unused_outside_role: a role another account, a pipeline or a federated issuer may assume, unused for 90 days.
+ * - identity_unused_write: a person holds write (or permissions-management) access to services in an account that
+ *   none of their sessions used in 90 days (CloudTrail writes, service last accessed): least privilege, per person;
+ * - identity_escalation: a user or role that is not an administrator but holds permissions-management actions that let
+ *   it raise its own access (iam:PutUserPolicy, iam:AttachRolePolicy, iam:PassRole with a compute service…);
+ * - identity_indirect_admin: a person whose own assignments are not administrative but who reaches an administrator
+ *   role through a path (a role they may assume, a shell on an instance with an admin profile, a project's OIDC role).
  *
  * Nothing is automated (tier report or approve): every fix is a person's change to sign-in or trust. Each rule's
  * playbook is generated from the official pages listed in src/playbooks.ts CONTROL_SOURCES (rule.identity_*).
@@ -22,6 +28,9 @@ import { listMembers } from "./accounts.js";
 import { oidcLinks } from "./vercel_aws_links.js";
 import { credentialsMeta } from "./steampipe.js";
 import { ssoMeta } from "./sso_inventory.js";
+import { accessEdges, accessWorld, reach, touchedFromTrail } from "./access_paths.js";
+import { personId } from "./graph_access.js";
+import { listPeople } from "./sign_ins.js";
 
 const DESKTOP = new Set(["macOS", "Windows", "Linux"]);
 const days = (iso: string | null | undefined) => (iso ? (Date.now() - Date.parse(iso)) / 86_400_000 : Infinity);
@@ -98,6 +107,46 @@ export function identityRecommendations(): RecInput[] {
       evidence: { principals: r.principals.filter((p) => p.kind !== "service"), last_used: r.last_used, created: r.created, admin: r.admin, account_id: r.account_id },
     });
   }
+  out.push(...accessRecommendations());
   return out;
 }
+
+/** The three recommendations from what people may do (src/access_paths.ts). */
+function accessRecommendations(): RecInput[] {
+  const out: RecInput[] = [];
+  let world: ReturnType<typeof accessWorld>;
+  try { world = accessWorld(); } catch { return out; }
+  if (!world.entitlements.size) return out;
+  const built = accessEdges(world); const touched = touchedFromTrail(90).services;
+  for (const p of listPeople(world.actors).filter((x) => x.status === "active" && !x.machine)) {
+    const id = personId(p); if (!id) continue;
+    const r = reach(p, world, built, touched);
+    for (const a of r.accounts) {
+      const unused = a.unused_write_services ?? [];
+      // only once the window really covers 90 days: last-accessed data, or that much stored CloudTrail
+      if (unused.length >= 3 && !a.every && a.usage_days >= 90) out.push({
+        rule: "identity_unused_write", title: `${p.name}: write access to ${unused.length} services unused in 90 days (${a.account_id})`, resource: `${id}:${a.account_id}:unused-write`, resourceName: p.name, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.6,
+        rationale: `${p.name} may change ${unused.slice(0, 8).join(", ")}${unused.length > 8 ? ` and ${unused.length - 8} more` : ""} in account ${a.account_id}, and none of their sessions changed anything there in 90 days (${a.used_services.length ? `they used ${a.used_services.slice(0, 6).join(", ")}` : "no recorded writes"}). Access that is never used is only risk: narrow the permission set or policy to what is used, or move the rare tasks to a separate set assumed when needed. Granted through: ${a.paths.slice(0, 2).map((x) => x.steps.join(" → ")).join("; ")}.`,
+        evidence: { person: id, account_id: a.account_id, unused_write_services: unused, used_services: a.used_services, principals: a.principals },
+      });
+      if (a.admin && !a.direct) out.push({
+        rule: "identity_indirect_admin", title: `${p.name}: reaches administrator access in ${a.account_id} through a path`, resource: `${id}:${a.account_id}:indirect-admin`, resourceName: p.name, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: a.paths.some((x) => x.decision === "allowed") ? 0.75 : 0.5,
+        rationale: `${p.name}'s own access to account ${a.account_id} is not administrative, but ${a.paths.slice(0, 3).map((x) => x.steps.join(" → ") + (x.decision === "conditional" ? " (under a condition)" : "")).join("; ")} ends at administrator permissions. Access granted on paper is narrower than what the person can do: narrow the step that leads there (who the role trusts, who may open a shell on the instance, who may deploy the project) or make the access explicit.`,
+        evidence: { person: id, account_id: a.account_id, paths: a.paths },
+      });
+    }
+  }
+  // principals people or pipelines use (not a service's own role) that can raise their own permissions
+  const serviceOnly = new Set(world.roles.filter((r) => r.principals.length && r.principals.every((x) => x.kind === "service")).map((r) => r.arn));
+  for (const e of world.entitlements.values()) {
+    if (e.kind === "group" || e.grants.admin || !e.escalation.length || serviceOnly.has(e.arn) || /^AWSServiceRoleFor|^AWSReservedSSO_/.test(e.name)) continue;
+    out.push({
+      rule: "identity_escalation", title: `${e.name}: can raise its own permissions`, resource: e.arn, resourceName: e.name, actionType: "security_fix", estMonthlySaving: null, tier: "report", confidence: 0.65,
+      rationale: `${e.name} is not an administrator but holds ${e.escalation.slice(0, 6).join(", ")}${e.escalation.length > 6 ? ", …" : ""}: with these it can attach or write a policy, pass a more powerful role to a service, or change who may assume a role, and so become an administrator. Its effective access: ${e.line}. Scope these actions to named resources, add a permissions boundary, or remove them.`,
+      evidence: { arn: e.arn, account_id: e.account_id, escalation: e.escalation, policies: e.policies.map((x) => x.name), boundary: e.boundary },
+    });
+  }
+  return out;
+}
+
 

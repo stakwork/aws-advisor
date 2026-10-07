@@ -630,12 +630,51 @@ group, a single identity included, so questions about people start here; root us
 `(person)-[:HAS_IDENTITY {kind, matched_by}]->(identity)`.
 
 Id `person:<match key>`: the smallest match key of the Identity Center user when there is one, else of the first
-identity, so the node keeps its id when another identity joins or leaves. Properties roll up the identities: `name`,
-`email`, `machine` (no identity opens a console), `status` (`active`, `invited`, `disabled`), `admin` (any live
-identity), `mfa` (the weakest among the identities that open a console) and `mfa_weakest_kind`, `platforms`,
-`channels`, `keys`, `last_seen_at`, `identities` (count). Rebuilt every pass; a person no longer matched is removed.
+identity, so the node keeps its id when another identity joins or leaves. Properties are the person's own: `name`,
+`email`, `machine` (no identity opens a console: a bot, not a person), `status` (`active`, `invited`, `disabled`),
+`last_seen_at`, `identities` (count). What belongs to one identity stays on it (admin, MFA, sign-in clients, keys,
+grants): follow `HAS_IDENTITY`. Rebuilt every pass; a person no longer matched is removed.
 
-`AdvisorPolicy`: `name`, `managed` (provider-managed), `admin`, `wildcard_actions`, `wildcard_resources`, `attached`.
+### What a person can touch
+
+What every principal may do is graded from its policy documents (src/entitlements.ts, src/policy_facts.ts) the way the
+IAM console's policy summary grades them, against AWS's machine-readable service reference: per service, the access
+levels its allowed actions fall in (`list`, `read`, `tagging`, `write`, `permissions` for permissions management), a
+user's own and its groups' policies within its permissions boundary and the organisation's SCPs. Identity Center
+permission sets are graded through the `AWSReservedSSO_*` role each is provisioned as in an account.
+
+- Every IAM user and role carries its grade on its own node (there is no `CAN_ACCESS` edge from it: its account is
+  `IN_ACCOUNT`, and the root user is `admin`): `access_level` (`admin` or the highest level), `access_line` (`Write on ec2, s3;
+  Permissions management on iam`), `write_services`, `permissions_services` (`['*']` is every service) and `escalation`
+  (the permissions-management actions a non-administrator holds: `iam:PutUserPolicy`, `iam:PassRole`, …).
+- `AdvisorPolicy` {`kind`: `aws_managed` | `customer_managed` | `inline`, `level`, `admin`, `line`, `services`, `url`}: the
+  statements are not stored; `url` is AWS's reference page (AWS-managed) or the IAM console page of the policy or of its holder (inline); an inline
+  policy's id is `<holder arn>#inline:<name>`. `(identity | AdvisorGroup)-[:GRANTED {via: attached | inline | permissions boundary}]->(policy)`.
+- `AdvisorGroup` (an IAM group, `level`, `line`): `(iam user)-[:IN_GROUP]->(group)`.
+- `AdvisorPermissionSet` {`admin`, `level`, `line`, `accounts`, `policies`}: `(sso user)-[:ASSIGNED {account_id, via}]->(set)-[:PROVISIONED_AS {account_id}]->(reserved role)`.
+- `(identity)-[:CAN_ACCESS {via, level, admin, line}]->(AdvisorAccount | Vercel project | AdvisorCluster)`, plus what applies
+  to the target: `write_services` (account), `deploy` and `env_vars` (Vercel project), `namespaces` (cluster): the grants no node states (an Identity Center user per assignment, a Vercel
+  member's team or project role with what it deploys and which environment variables it reaches, an EKS access entry or
+  `aws-auth` mapping).
+- Paths, each with `decision` `allowed` or `conditional` (a condition the documents do not settle): `CAN_ASSUME` (a role's
+  trust names the principal, or its account and the principal's policies allow `sts:AssumeRole`; an Identity Center user
+  reaches its reserved roles through `ASSIGNED` → `PROVISIONED_AS` instead; an `AdvisorRepository` {id `github:<owner>/<repo>`} the roles its workflows assume),
+  `CAN_SHELL_INTO` (Session Manager or EC2 Instance Connect on an instance; written for non-administrators only, an
+  administrator reaching every instance of its account; likewise an administrator's `CAN_ASSUME` is drawn only into
+  another account), `RUNS_AS {via: instance profile}` (the
+  instance's role), `HOLDS_KEY_OF` (a Vercel project whose variables hold an IAM user's static key). Each carries its
+  facts as properties, only when set: `refs` (a pipeline's branches or tags), `profile` (the instance profile),
+  `environments` (a project's OIDC environments), `names` and `targets` (the variables holding a key), `note`, `account_id`.
+- `(identity)-[:TOUCHED {events, actions, last_at}]->(resource)`: what it changed in 90 days of CloudTrail writes.
+- `(AdvisorPerson)-[:REACHES {level, admin, line, direct, paths, decision}]->(account | project | cluster)`, plus what
+  applies to the target as on `CAN_ACCESS`: everything the person reaches, directly or through the paths (`direct: false`),
+  folded per target. Derived from the identities' edges: the grant is always an identity's `CAN_ACCESS`; `REACHES` is the
+  person-level summary. Use is not on the edge: `TOUCHED` is the evidence, and access granted but unused is the dated
+  `identity_unused_write` recommendation (CloudTrail writes and IAM last-accessed data).
+
+Not modelled: resource policies (a bucket policy granting another account) and condition values. The exact answer for
+one question comes from `iam:SimulatePrincipalPolicy` on each principal the person reaches (Inventory › Identities, a
+person's "Exact check").
 
 ### AdvisorCredential / AdvisorClient
 
@@ -1380,8 +1419,16 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `STORES_ON` | AdvisorCompute → AdvisorStorage (block) | attached volume |
 | `USES_SECRET` | resource → AdvisorSecret | reads a secret or env var |
 | `RUNS_AS` | resource → AdvisorIdentity | the identity it acts with |
-| `GRANTED` | AdvisorIdentity → AdvisorPolicy | permissions |
-| `CAN_ASSUME` | AdvisorIdentity → AdvisorIdentity | trust |
+| `GRANTED {via}` | AdvisorIdentity, AdvisorGroup → AdvisorPolicy | permissions: attached, inline or the permissions boundary |
+| `IN_GROUP` | AdvisorIdentity → AdvisorGroup | an IAM user's groups |
+| `ASSIGNED {account_id, via}` | AdvisorIdentity (sso user) → AdvisorPermissionSet | an Identity Center assignment, direct or through a group |
+| `PROVISIONED_AS {account_id}` | AdvisorPermissionSet → AdvisorIdentity (role) | the reserved role a set is in an account |
+| `CAN_ACCESS` | AdvisorIdentity → AdvisorAccount, Vercel project, AdvisorCluster | what the identity is granted there (§What a person can touch) |
+| `REACHES` | AdvisorPerson → AdvisorAccount, Vercel project, AdvisorCluster | derived: everything the person reaches through any identity and path, folded per target |
+| `CAN_ASSUME {via, decision}` | AdvisorIdentity, AdvisorRepository → AdvisorIdentity (role) | trust plus the principal's own `sts:AssumeRole` (an Identity Center user's reserved roles: `ASSIGNED` → `PROVISIONED_AS`) |
+| `CAN_SHELL_INTO {via, decision}` | AdvisorIdentity → AdvisorCompute | Session Manager or EC2 Instance Connect |
+| `HOLDS_KEY_OF` | AdvisorDeployment (Vercel project) → AdvisorIdentity (iam user) | a static key in the project's variables |
+| `TOUCHED {events, actions, last_at}` | AdvisorIdentity → resource | what it changed in 90 days of CloudTrail writes |
 | `HAS_CREDENTIAL` | AdvisorIdentity → AdvisorCredential | what it proves itself with |
 | `SIGNS_IN_WITH` | AdvisorIdentity → AdvisorClient | the clients it was seen using |
 | `USED_FROM` | AdvisorCredential → AdvisorClient | which client a credential was used from |

@@ -31,8 +31,7 @@ export interface ClientRow { id: string; client: string; platform: string | null
 export interface SignsInRow { identity_id: string; client_id: string; events: number; failures: number; first_at: string; last_at: string; accounts: string[]; factors: string[] }
 export interface UsedFromRow { credential_id: string; client_id: string; events: number; last_at: string }
 export interface PersonRow {
-  id: string; name: string; email: string | null; machine: boolean; status: Person["status"]; admin: boolean; mfa: Person["mfa"]; mfa_weakest_kind: string | null;
-  platforms: string[]; channels: string[]; keys: number; last_seen_at: string | null; matched_by: string[]; identities: number;
+  id: string; name: string; email: string | null; machine: boolean; status: Person["status"]; last_seen_at: string | null; matched_by: string[]; identities: number;
 }
 export interface HasIdentityRow { person_id: string; identity_id: string; kind: Actor["kind"]; matched_by: string[] }
 export interface IpRow { identity_id: string; ip: string; private: boolean; events: number; failures: number; first_at: string; last_at: string; clients: string[] }
@@ -109,13 +108,17 @@ export function accessGraphRows(actors: Actor[], x: AccessExtras, now = Date.now
  * or leaves the group, and is unique because groups sharing a key are merged. A name too short to match falls back to
  * the identity id. Pure.
  */
+/** A person's node id (see personRows); null for a group with no identity. Pure. */
+export function personId(p: Person): string | null {
+  const anchor = p.identities.find((i) => i.kind === "sso_user") ?? p.identities[0]; if (!anchor) return null;
+  return `person:${[...matchKeys(anchor)].sort()[0] ?? anchor.id}`;
+}
+
 export function personRows(people: Person[]): { persons: PersonRow[]; links: HasIdentityRow[] } {
   const persons: PersonRow[] = []; const links: HasIdentityRow[] = [];
   for (const p of people) {
-    const anchor = p.identities.find((i) => i.kind === "sso_user") ?? p.identities[0]; if (!anchor) continue;
-    const id = `person:${[...matchKeys(anchor)].sort()[0] ?? anchor.id}`;
-    persons.push({ id, name: p.name, email: p.email, machine: p.machine, status: p.status, admin: p.admin, mfa: p.mfa, mfa_weakest_kind: p.mfa_weakest_kind,
-      platforms: p.platforms, channels: p.channels, keys: p.keys, last_seen_at: p.last_seen_at, matched_by: p.matched_by, identities: p.identities.length });
+    const id = personId(p); if (!id) continue;
+    persons.push({ id, name: p.name, email: p.email, machine: p.machine, status: p.status, last_seen_at: p.last_seen_at, matched_by: p.matched_by, identities: p.identities.length });
     for (const i of p.identities) links.push({ person_id: id, identity_id: i.id, kind: i.kind, matched_by: p.matched_by });
   }
   return { persons, links };
@@ -173,9 +176,10 @@ MERGE (i)-[r:SIGNED_IN_FROM]->(s) SET r += {events: row.events, failures: row.fa
 const PERSON_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorPerson {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, email: row.email, machine: row.machine, status: row.status, admin: row.admin, mfa: row.mfa, mfa_weakest_kind: row.mfa_weakest_kind,
-  platforms: row.platforms, channels: row.channels, keys: row.keys, last_seen_at: row.last_seen_at, matched_by: row.matched_by, identities: row.identities,
-  native_type: 'person', native_id: row.id, updated_at: $now}`;
+SET p += {name: row.name, email: row.email, machine: row.machine, status: row.status, last_seen_at: row.last_seen_at, matched_by: row.matched_by, identities: row.identities,
+  native_type: 'person', native_id: row.id, updated_at: $now}
+// admin, MFA, clients and keys are each identity's (reached through HAS_IDENTITY), not rolled up onto the person
+REMOVE p.admin, p.mfa, p.mfa_weakest_kind, p.platforms, p.channels, p.keys`;
 
 const HAS_IDENTITY_CYPHER = `
 UNWIND $rows AS row
@@ -205,5 +209,7 @@ export async function mirrorAccess(stamp: string): Promise<{ credentials: number
   await writeCypher("MATCH ()-[r:SAME_PERSON]->() DELETE r", {});
   // Vercel tokens were identities for a day before they became credentials: remove those nodes
   await writeCypher("MATCH (n:AdvisorIdentity {native_type: 'vercel_token'}) DETACH DELETE n", {});
+  // what each identity and person may do and reach (src/graph_entitlements.ts), on the people just written
+  try { await (await import("./graph_entitlements.js")).mirrorEntitlements(stamp); } catch (e: any) { console.error(`[graph] entitlements: ${e?.message || e}`); }
   return counts;
 }

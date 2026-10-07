@@ -195,6 +195,74 @@ function IdentityBlock({ i, acct, ic }: { i: Identity; acct: (id: string | null)
   );
 }
 
+type ReachPath = { steps: string[]; decision: "allowed" | "conditional" | "denied" };
+type AccountReach = { account_id: string; level: string; admin: boolean; every: boolean; line: string; write_services: string[]; permissions_services: string[]; resource_access_services: string[]; path_services: string[]; used_services: string[]; unused_write_services: string[] | null; usage_days: number; direct: boolean; paths: ReachPath[]; principals: string[] };
+type Reach = {
+  person_id: string; accounts: AccountReach[]; projects: { project_id: string; name: string; level: string; deploy: string; env_vars: string; via: string }[];
+  clusters: { cluster_arn: string; level: string; via: string; paths: ReachPath[] }[]; shells: { instance_id: string; name: string | null; account_id: string; via: string; decision: string; runs_as: string | null }[];
+  roles: { arn: string; name: string; account_id: string | null; admin: boolean; decision: string; paths: ReachPath[] }[]; escalation: { principal: string; actions: string[] }[]; notes: string[];
+  meta?: { read_at: string | null; last_accessed_at: string | null; scp: { org: boolean; policies: number; note: string | null } };
+};
+type SimRow = { principal: string; account_id: string; action: string; resource: string; decision: string; matched: string[]; boundary_allows: boolean | null; scp_allows: boolean | null; missing_context: string[]; error?: string };
+
+const LEVEL: Record<string, string> = { admin: "Administrator", permissions: "Permissions management", write: "Write", tagging: "Tagging", read: "Read", list: "List", none: "Nothing", unknown: "Not graded yet", cluster_admin: "Cluster admin", edit: "Edit", view: "View", groups: "Kubernetes groups", owner: "Owner", project_admin: "Project admin", project_developer: "Developer", project_viewer: "Viewer" };
+const levelTone = (l: string) => (["admin", "cluster_admin", "owner", "permissions"].includes(l) ? "text-orange-300" : ["write", "project_admin", "project_developer", "edit"].includes(l) ? "text-amber-200" : "text-zinc-300");
+const pathText = (p: ReachPath) => p.steps.join(" → ");
+const services = (s: string[], n = 8) => (s.includes("*") ? "every service" : s.length ? `${s.slice(0, n).join(", ")}${s.length > n ? ` +${s.length - n}` : ""}` : "—");
+
+/** What one person can touch: every account (directly or through a path) with its grade, the projects, clusters, shells and roles, and an exact check. */
+function ReachBlock({ personKey, acct }: { personKey: string; acct: (id: string | null) => string }) {
+  const [r, setR] = useState<Reach | null>(null);
+  const [err, setErr] = useState("");
+  const [actions, setActions] = useState("");
+  const [resource, setResource] = useState("");
+  const [sim, setSim] = useState<{ summary: string; rows: SimRow[] } | null>(null);
+  const [simBusy, setSimBusy] = useState(false);
+  useEffect(() => { api(`/inventory/access/people/${encodeURIComponent(personKey)}/reach`).then(setR).catch((e) => setErr(e.message)); }, [personKey]);
+  const simulate = async () => {
+    setSimBusy(true); setSim(null);
+    try { setSim(await api(`/inventory/access/people/${encodeURIComponent(personKey)}/simulate`, { method: "POST", body: JSON.stringify({ actions, resource: resource || null }) })); }
+    catch (e: any) { setSim({ summary: e.message, rows: [] }); } finally { setSimBusy(false); }
+  };
+  if (err) return <div className="text-xs text-red-300">{err}</div>;
+  if (!r) return <div className="text-xs text-zinc-500">Reading what they can touch…</div>;
+  const nothing = !r.accounts.length && !r.projects.length && !r.clusters.length;
+  return (
+    <div className="rounded border border-zinc-800 p-3 text-xs">
+      <div className="mb-2 flex items-center gap-2"><span className="font-medium text-zinc-100">What they can touch</span><Help text="Graded from the policy documents the way the IAM console's policy summary grades them (List, Read, Write, Tagging, Permissions management), within permissions boundaries and the organisation's SCPs. Paths follow role trust, instance profiles behind a shell, and Vercel projects' OIDC roles and keys. Conditions and resource policies are not evaluated: use the exact check below." /></div>
+      {r.notes.map((n) => <div key={n} className="mb-1 text-zinc-500">{n}</div>)}
+      {nothing ? <div className="text-zinc-500">Nothing found.</div> : null}
+      {r.accounts.length ? <table className="mb-2 w-full border-collapse">
+        <thead><tr><Th>Account</Th><Th>Access</Th><Th>Unused</Th><Th>How</Th></tr></thead>
+        <tbody>{r.accounts.map((a) => <tr key={a.account_id} className="border-t border-zinc-800 align-top">
+          <Td className="whitespace-nowrap">{acct(a.account_id)}</Td>
+          <Td><span className={levelTone(a.admin ? "admin" : a.level)}>{LEVEL[a.admin ? "admin" : a.level] ?? a.level}</span><div className="text-[11px] text-zinc-400">{a.line}</div></Td>
+          <Td className="text-zinc-400">{a.unused_write_services == null ? <span className="text-zinc-600" title="No last-accessed data and no stored CloudTrail for this account yet">unknown</span> : <>{a.unused_write_services.length ? <span className="text-amber-200">{services(a.unused_write_services, 6)}</span> : a.every ? <span className="text-zinc-500">uses {a.used_services.length} of every</span> : "none"}<div className="text-[11px] text-zinc-600">{a.usage_days < 90 ? `only ${a.usage_days} days known` : "90 days"}{a.used_services.length ? ` · used ${services(a.used_services, 4)}` : ""}</div></>}</Td>
+          <Td className="text-zinc-400">{!a.direct ? <Badge>through a path</Badge> : null}{a.paths.slice(0, 3).map((p, i) => <div key={i} className={p.decision === "conditional" ? "text-zinc-500" : ""}>{pathText(p)}{p.decision === "conditional" ? " (under a condition)" : ""}</div>)}</Td>
+        </tr>)}</tbody>
+      </table> : null}
+      {r.projects.length ? <div className="mb-2"><div className="mb-0.5 text-zinc-500">Vercel projects</div><div className="flex flex-wrap gap-1">{r.projects.map((p) => <span key={p.project_id} title={`${p.via} · environment variables ${p.env_vars}`} className="rounded border border-zinc-700 px-1.5 py-0.5"><span className="text-zinc-200">{p.name}</span> <span className={levelTone(p.level)}>{LEVEL[p.level] ?? p.level}</span>{p.deploy !== "none" ? <span className="text-zinc-500"> · deploys {p.deploy}</span> : null}</span>)}</div></div> : null}
+      {r.clusters.length ? <div className="mb-2"><div className="mb-0.5 text-zinc-500">Kubernetes clusters</div>{r.clusters.map((c) => <div key={c.cluster_arn}><span className="text-zinc-200">{c.cluster_arn.split("/").pop()}</span> <span className={levelTone(c.level)}>{LEVEL[c.level] ?? c.level}</span> <span className="text-zinc-500">· {c.via}{c.paths[0] ? ` · ${pathText(c.paths[0])}` : ""}</span></div>)}</div> : null}
+      {r.shells.length ? <div className="mb-2"><div className="mb-0.5 text-zinc-500">Shells on {r.shells.length} instance{r.shells.length === 1 ? "" : "s"}</div><div className="flex flex-wrap gap-1">{r.shells.slice(0, 30).map((s) => <span key={s.instance_id} title={`${s.via}${s.runs_as ? ` · runs as ${s.runs_as}` : ""}`} className={`rounded border border-zinc-700 px-1.5 py-0.5 ${s.decision === "conditional" ? "text-zinc-500" : "text-zinc-300"}`}>{s.name ?? s.instance_id}{s.runs_as ? <span className="text-zinc-500"> → {s.runs_as}</span> : null}</span>)}</div></div> : null}
+      {r.roles.length ? <div className="mb-2"><div className="mb-0.5 text-zinc-500">Roles they can assume</div><div className="flex flex-wrap gap-1">{r.roles.slice(0, 30).map((x) => <span key={x.arn} title={x.paths[0] ? pathText(x.paths[0]) : ""} className={`rounded border px-1.5 py-0.5 ${x.admin ? "border-orange-800 text-orange-300" : "border-zinc-700 text-zinc-300"} ${x.decision === "conditional" ? "opacity-60" : ""}`}>{x.name} <span className="text-zinc-500">{acct(x.account_id)}</span></span>)}</div></div> : null}
+      {r.escalation.length ? <div className="mb-2 text-orange-300/90">Can raise their own permissions: {r.escalation.slice(0, 3).map((e) => `${e.principal} (${e.actions.slice(0, 3).join(", ")}${e.actions.length > 3 ? ", …" : ""})`).join("; ")}</div> : null}
+      {r.meta?.scp?.note ? <div className="mb-2 text-zinc-600">{r.meta.scp.note}.</div> : null}
+      <div className="mt-2 border-t border-zinc-800 pt-2">
+        <div className="mb-1 text-zinc-500">Exact check (IAM policy simulator, on every principal they reach)</div>
+        <div className="flex flex-wrap gap-2">
+          <input value={actions} onChange={(e) => setActions(e.target.value)} placeholder="ec2:TerminateInstances, s3:PutObject" className="min-w-[16rem] flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-200" />
+          <input value={resource} onChange={(e) => setResource(e.target.value)} placeholder="resource ARN (optional)" className="min-w-[16rem] flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-200" />
+          <Button onClick={simulate} disabled={simBusy || !actions.trim()}>{simBusy ? "Checking…" : "Check"}</Button>
+        </div>
+        {sim ? <div className="mt-2"><div className="mb-1 text-zinc-200">{sim.summary}</div>{sim.rows.length ? <table className="w-full border-collapse"><tbody>{sim.rows.map((x, i) => <tr key={i} className="border-t border-zinc-800">
+          <Td className="text-zinc-400">{x.principal.split("/").pop()} <span className="text-zinc-600">{acct(x.account_id)}</span></Td><Td>{x.action}</Td>
+          <Td className={x.decision === "allowed" ? "text-orange-300" : x.decision === "error" ? "text-red-300" : "text-zinc-500"}>{x.decision === "error" ? x.error : x.decision}{x.scp_allows === false ? " (SCP)" : x.boundary_allows === false ? " (boundary)" : ""}{x.missing_context.length ? <span className="text-zinc-500"> · depends on {x.missing_context.slice(0, 3).join(", ")}</span> : null}</Td>
+        </tr>)}</tbody></table> : null}</div> : null}
+      </div>
+    </div>
+  );
+}
+
 /** Roles something outside the account may assume: other accounts, pipelines, Vercel projects, identity pools. */
 function RolesSection({ roles, links, acct, open, toggle }: { roles: Role[]; links: OidcLink[]; acct: (id: string | null) => string; open: string | null; toggle: (k: string) => void }) {
   if (!roles.length) return null;
@@ -325,6 +393,7 @@ export function Access() {
               </tr>
               {isOpen && <tr className="bg-zinc-950/40"><td colSpan={6} className="space-y-2 px-3 pb-3 pt-1">
                 {p.identities.length > 1 ? <div className="text-xs text-zinc-500">Matched on {p.matched_by.map((k) => <code key={k} className="mr-1 text-zinc-400">{k}</code>)}(name, email or display name).</div> : null}
+                <ReachBlock personKey={p.key} acct={acct} />
                 {p.identities.map((i) => <IdentityBlock key={i.id} i={i} acct={acct} ic={d.identity_center_console} />)}
               </td></tr>}
             </Fragment>);

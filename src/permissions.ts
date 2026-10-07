@@ -488,6 +488,10 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         // the root user's password and key last use (src/sign_ins.ts); ViewOnlyAccess has GetAccountSummary and List* but not the credential report
         "iam:GenerateCredentialReport", "iam:GetCredentialReport",
         "organizations:DescribeOrganization",
+        // what every principal may do (src/entitlements.ts): the policy documents ViewOnlyAccess does not read, the SCPs'
+        // content, and when each user and role last used each service; iam:SimulatePrincipalPolicy above answers one question exactly
+        "iam:GetAccountAuthorizationDetails", "iam:GetPolicy", "iam:GetPolicyVersion", "iam:GenerateServiceLastAccessedDetails", "iam:GetServiceLastAccessedDetails",
+        "organizations:DescribePolicy",
         // IAM Identity Center (the management account or its delegated administrator answers; elsewhere the calls return nothing and the Identities tab says so)
         "sso:ListInstances", "sso:ListPermissionSets", "sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:GetPermissionsBoundaryForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet", "sso:ListAccountAssignmentsForPrincipal", "sso:ListApplications", "sso:ListApplicationAssignmentsForPrincipal",
         "identitystore:ListUsers", "identitystore:ListGroups", "identitystore:ListGroupMemberships", "identitystore:DescribeUser", "identitystore:DescribeGroup",

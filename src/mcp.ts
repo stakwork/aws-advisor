@@ -683,6 +683,21 @@ export function createFactServer(): McpServer {
     annotations: ro,
   }, (a) => graphQuery(a));
 
+  server.registerTool("access_check", {
+    title: "Can this person or principal do this? (IAM policy simulator)",
+    description: "The exact answer to one access question, evaluated by IAM itself (iam:SimulatePrincipalPolicy) with conditions, permissions boundaries and the organisation's SCPs: can `who` perform these actions, optionally on one resource ARN? `who` is a person (graph id person:<key>, a name or an e-mail): every principal they reach is simulated (their IAM users, the AWSReservedSSO_ role of each Identity Center assignment, the roles a path leads to); or an IAM user or role ARN or name. Use it when the graph's CAN_ACCESS / CAN_ASSUME / CAN_SHELL_INTO / REACHES edges leave the question open (decision conditional, a specific resource, a tag condition). Not covered: resource policies (a bucket or key policy granting access by itself).",
+    inputSchema: {
+      who: z.string().min(1).max(300),
+      actions: z.array(z.string().regex(/^[a-z0-9-]+:[A-Za-z0-9*?]+$/)).min(1).max(20).describe("e.g. ['ssm:StartSession', 'ec2:TerminateInstances']"),
+      resource: z.string().max(2048).optional().describe("one resource ARN, e.g. arn:aws:ec2:us-east-1:<account>:instance/i-…; omit for any resource"),
+      account_id: z.string().regex(/^\d{12}$/).optional().describe("limit a person's check to one account"),
+    },
+    annotations: ro,
+  }, async (a) => {
+    try { const { accessCheck } = await import("./access_simulate.js"); const r = await accessCheck(a.who, a.actions, a.resource ?? null, a.account_id ?? null); return "error" in r ? fail(`${r.error}${r.candidates?.length ? ` (candidates: ${r.candidates.join(", ")})` : ""}`) : text({ ...r, rows: r.rows.map(({ path, ...x }) => ({ ...x, path: path ? path.steps.join(" → ") : undefined })) }); }
+    catch (e: any) { return fail(`access check failed: ${errMsg(e).slice(0, 400)}`); }
+  });
+
   server.registerTool("vercel_projects", {
     title: "Vercel projects, or one in full",
     description: "The Vercel team's projects as the advisor last read them: framework, runtime, repository, latest production deployment and its state, every URL it serves with whether Vercel asks for authentication first (deployment protection), custom domains, firewall, Secure Compute, the stores it uses, env variable names (never values), the last 7 days of metered usage (requests, invocations, errors, bandwidth, builds) and what the project costs at the team's listed rates. With name: that project in full (last 30 deployments, domains, env names, log drains, 30-day usage with a daily series, the cost lines). Says 'not configured' when no Vercel token is saved.",

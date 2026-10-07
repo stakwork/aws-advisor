@@ -175,6 +175,7 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["graph_system", "one system and everything linked to it"],
   ["graph_bill", "the bill as the graph explains it, per system"],
   ["graph_log_groups", "where logs go and which system owns each group or drain"],
+  ["access_check", "can a person, user or role do these actions (on this resource)? IAM's own policy simulator, conditions, boundaries and SCPs included"],
   ["graph_query", "Cypher over the advisor's graph mirror: every provider in one model (AdvisorDeployment, AdvisorEndpoint, KnSystem, KnSystemType)"],
   ["vercel_projects", "the Vercel team's projects: URLs and who may open them, deployments, stores, usage, cost at the team's rates; a name gives the full detail"],
   ["vercel_stores", "the Vercel team's databases, caches and blob stores with plan, usage (Neon compute hours, blob size) and cost at plan"],

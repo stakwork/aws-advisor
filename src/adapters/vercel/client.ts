@@ -52,6 +52,8 @@ export interface VercelEnv { project_id: string; key: string; targets: string[];
 export interface VercelFirewall { project_id: string; enabled: boolean; rules: number; ips: number; version: string | null }
 /** A storage store the team provisioned: a marketplace integration (Neon, Redis, ...) or Vercel's own (blob, KV, edge config), with the projects it is connected to. */
 /** A team member; `email_key` is the e-mail's local part reduced to letters and digits, kept to match the person across providers (the address itself is not kept). */
+/** A member's role on one project, from the project's members or an access group. */
+export interface VercelProjectRole { project_id: string; uid: string; username: string | null; role: string; via: string }
 export interface VercelMember { uid: string; username: string | null; role: string | null; confirmed: boolean; mfa: boolean | null; github: string | null; joined_at: string | null; email_key?: string | null; access_groups?: number; joined_from?: string | null }
 export interface VercelLogDrain { id: string; name: string | null; status: string | null; sources: string[]; environments: string[]; sampling_rate: number | null; format: string | null; host: string | null; project_ids: string[]; created_at: string | null; created_from: string | null }
 export interface VercelStore { id: string; name: string; type: string; kind: "database" | "cache" | "storage" | "other"; product: string | null; product_slug: string | null; status: string | null; plan: string | null; region: string | null; created_at: string | null; projects: { project_id: string; name: string | null; environments: string[]; env_var_names: string[]; env_var_prefix: string | null }[]; details: VercelStoreDetails }
@@ -124,6 +126,27 @@ export class VercelClient {
   /** The caller's own tokens (the API lists no one else's): name, scope, expiry, last activity. */
   async tokens(): Promise<VercelToken[]> { try { const r = await this.get<any>("/v5/user/tokens"); return (Array.isArray(r?.tokens) ? r.tokens : []).map(tokenFrom); } catch { return []; } }
   async members(): Promise<VercelMember[]> { if (!this.teamId) return []; try { const r = await this.get<any>(`/v1/teams/${encodeURIComponent(this.teamId)}/members`, { limit: 100 }); return (Array.isArray(r?.members) ? r.members : Array.isArray(r) ? r : []).map(memberFrom); } catch { return []; } }
+  /**
+   * Who holds a role on each project rather than through the team role (https://vercel.com/docs/rbac/access-roles#project-level-roles):
+   * a project's members (contributors with ADMIN, PROJECT_DEVELOPER or PROJECT_VIEWER) and the access groups that grant
+   * projects to their members. Enterprise only: elsewhere both answer with an error and the list is empty.
+   */
+  async projectRoles(projectIds: string[]): Promise<VercelProjectRole[]> {
+    const out: VercelProjectRole[] = [];
+    for (const id of projectIds) {
+      try { const r = await this.get<any>(`/v1/projects/${encodeURIComponent(id)}/members`, { limit: 100 }); for (const m of Array.isArray(r?.members) ? r.members : []) if (m?.uid && m?.role) out.push({ project_id: id, uid: String(m.uid), username: str(m.username), role: String(m.role), via: "project" }); }
+      catch { /* not an Enterprise team, or the token may not list project members */ }
+    }
+    try {
+      const groups = await this.get<any>("/v1/access-groups", { limit: 100 });
+      for (const g of Array.isArray(groups?.accessGroups) ? groups.accessGroups : []) {
+        const gid = String(g.accessGroupId ?? g.id ?? ""); if (!gid) continue;
+        const [projects, members] = await Promise.all([this.get<any>(`/v1/access-groups/${encodeURIComponent(gid)}/projects`, { limit: 100 }), this.get<any>(`/v1/access-groups/${encodeURIComponent(gid)}/members`, { limit: 100 })]);
+        for (const p of Array.isArray(projects?.projects) ? projects.projects : []) for (const m of Array.isArray(members?.members) ? members.members : []) if (p?.projectId && m?.uid) out.push({ project_id: String(p.projectId), uid: String(m.uid), username: str(m.username), role: String(p.role ?? "PROJECT_VIEWER"), via: `access group ${g.name ?? gid}` });
+      }
+    } catch { /* access groups are Enterprise only */ }
+    return out;
+  }
   /** Where the team's logs are drained to: the drain's name, sources, environments, sampling and the projects it covers (the destination URL is kept as its host only). */
   async logDrains(): Promise<VercelLogDrain[]> { try { const r = await this.get<any>("/v1/log-drains"); return (Array.isArray(r) ? r : Array.isArray(r?.drains) ? r.drains : []).map(logDrainFrom); } catch { return []; } }
   async stores(): Promise<VercelStore[]> { try { const r = await this.get<any>("/v1/storage/stores"); return (Array.isArray(r?.stores) ? r.stores : []).map(storeFrom); } catch { return []; } }

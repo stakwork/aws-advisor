@@ -69,7 +69,8 @@ test("personRows: one person across providers, keyed on the Identity Center user
   const pat = r.persons.find((p) => !p.machine)!;
   assert.equal(pat.id, alone.persons[0].id, "the IAM user joining does not move the id");
   assert.equal(pat.id, "person:patlee");
-  assert.deepEqual([pat.identities, pat.mfa, pat.keys, pat.name], [2, "none", 1, "Pat Lee"]);
+  assert.deepEqual([pat.identities, pat.name], [2, "Pat Lee"]);
+  assert.ok(!("mfa" in pat) && !("admin" in pat) && !("keys" in pat), "MFA, admin and keys stay on each identity");
   assert.deepEqual(r.links.filter((l) => l.person_id === pat.id).map((l) => l.kind).sort(), ["iam_user", "sso_user"]);
   const machine = r.persons.find((p) => p.machine)!;
   assert.deepEqual([machine.id, machine.identities], ["person:cideploy", 1]);

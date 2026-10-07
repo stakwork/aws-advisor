@@ -105,6 +105,9 @@ export const CONTROL_SOURCES: Record<string, string[]> = {
   "rule.identity_key_on_laptop": ["https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"],
   "rule.identity_mfa_device_removed": ["https://docs.aws.amazon.com/singlesignon/latest/userguide/how-to-register-device.html", "https://docs.aws.amazon.com/singlesignon/latest/userguide/mfa-configure.html"],
   "rule.identity_role_wide_trust": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html", "https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services", "https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_common-scenarios_third-party.html", "https://docs.aws.amazon.com/cognito/latest/developerguide/identity-pools.html"],
+  "rule.identity_unused_write": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_last-accessed.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#grant-least-privilege", "https://docs.aws.amazon.com/singlesignon/latest/userguide/permissionsetsconcept.html"],
+  "rule.identity_escalation": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_understand-policy-summary-access-level-summaries.html"],
+  "rule.identity_indirect_admin": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_terms-and-concepts.html", "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-getting-started-restrict-access.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html"],
   "rule.identity_unused_outside_role": ["https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_last-accessed.html", "https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html"],
 };
 
@@ -187,6 +190,9 @@ export const RULE_CONTROL: Record<string, string> = {
   identity_mfa_device_removed: "rule.identity_mfa_device_removed",
   identity_role_wide_trust: "rule.identity_role_wide_trust",
   identity_unused_outside_role: "rule.identity_unused_outside_role",
+  identity_unused_write: "rule.identity_unused_write",
+  identity_escalation: "rule.identity_escalation",
+  identity_indirect_admin: "rule.identity_indirect_admin",
   review_s3_lifecycle: "aws_thrifty.control.buckets_with_no_lifecycle",
 };
 

@@ -442,6 +442,10 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   try { await refreshSsoInventory((m) => errors.push(m), (l) => console.log(`[identity-center] ${l}`)); } catch (e: any) { errors.push(`Identity Center: ${e?.message || e}`); }
   // root posture per account and the sign-in fingerprints (device, client, factor), folded onto the IAM and Identity Center rows just written
   try { await refreshSignIns((m) => errors.push(m), (l) => console.log(`[sign-ins] ${l}`)); } catch (e: any) { errors.push(`sign-ins: ${e?.message || e}`); }
+  // what every principal may do (policies, groups, boundaries, SCPs), which services each used, and who each EKS cluster lets in (src/entitlements.ts)
+  try { const { refreshEntitlements, refreshLastAccessed, refreshClusterAccess } = await import("./entitlements.js"); const log = (l: string) => console.log(`[entitlements] ${l}`);
+    await refreshEntitlements((m) => errors.push(m), log); await refreshLastAccessed((m) => errors.push(m), log); await refreshClusterAccess((m) => errors.push(m), log); }
+  catch (e: any) { errors.push(`entitlements: ${e?.message || e}`); }
   // the buckets too (the storage metrics are a few CloudWatch calls per region and account), so an account registered
   // today shows its buckets after this refresh rather than after the next nightly job
   let s3 = 0;

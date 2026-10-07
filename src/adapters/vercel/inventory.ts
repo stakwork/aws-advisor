@@ -22,7 +22,7 @@ export async function readPartners(stores: VercelStore[], clients: PartnerClient
   }
   return { records, errors };
 }
-import type { VercelClient, VercelDeployment, VercelDomain, VercelEnv, VercelFirewall, VercelInvoice, VercelLogDrain, VercelMember, VercelProject, VercelStore, VercelTeam, VercelTeamBilling, VercelTeamSecurity, VercelToken } from "./client.js";
+import type { VercelClient, VercelDeployment, VercelDomain, VercelEnv, VercelFirewall, VercelInvoice, VercelLogDrain, VercelMember, VercelProject, VercelProjectRole, VercelStore, VercelTeam, VercelTeamBilling, VercelTeamSecurity, VercelToken } from "./client.js";
 
 /**
  * The Vercel adapter's storage: the team, its projects with their protection and framework, the recent deployments,
@@ -82,7 +82,7 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
   }
   const stores = await client.stores();
   const invoices = await client.invoices(12);
-  const members = await client.members(); const drains = await client.logDrains(); const tokens = await client.tokens(); const owner = await client.owner();
+  const members = await client.members(); const project_roles = await client.projectRoles(projects.map((p) => p.id)); const drains = await client.logDrains(); const tokens = await client.tokens(); const owner = await client.owner();
   const partners = await readPartners(stores, opts.partners); for (const e of partners.errors) errors.push(e);
   let usage = { types: 0, days: 0, projects: 0 }; try { usage = await refreshUsage(client, team.id, projects.map((p) => p.id)); } catch (e: any) { errors.push(`usage: ${String(e?.message || e).slice(0, 160)}`); }
   db.transaction(() => {
@@ -107,7 +107,7 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
     for (const st of stores) upS.run(st.id, team.id, st.name, st.type, st.kind, st.product, st.product_slug, st.status, st.plan, st.region, st.created_at, JSON.stringify(st.projects), JSON.stringify(st.details), now, now);
     const upPartner = db.prepare("update vercel_stores set partner = ? where id = ?");
     for (const [id, rec] of partners.records) upPartner.run(JSON.stringify(rec), id);
-    db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_extras:${team.id}`, JSON.stringify({ members, log_drains: drains, tokens, token_owner: owner, security: team.security ?? null, read_at: now }));
+    db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_extras:${team.id}`, JSON.stringify({ members, project_roles, log_drains: drains, tokens, token_owner: owner, security: team.security ?? null, read_at: now }));
     db.prepare("update vercel_stores set gone = 1 where team_id = ? and last_seen < ?").run(team.id, now);
     if (team.billing) db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_billing:${team.id}`, JSON.stringify(team.billing));
     const upI = db.prepare(`insert into vercel_invoices(id, team_id, number, status, total, subtotal, tax, currency, created_at, issued_at, paid_at, period_start, period_end, source, hosted_url, pdf_url, groups, line_items, fetched_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -130,8 +130,8 @@ export const listStores = (opts: { projectId?: string; kind?: string; includeGon
   .map((r) => ({ ...r, projects: parse<VercelStore["projects"]>(r.projects, []).map((p) => ({ ...p, env_var_names: p.env_var_names ?? [], env_var_prefix: p.env_var_prefix ?? null })), details: { ...EMPTY_DETAILS, ...parse<Partial<VercelStore["details"]>>(r.details, {}) }, partner: parse<PartnerRecord | null>(r.partner, null), gone: Boolean(r.gone) })).filter((r) => !opts.projectId || r.projects.some((p: { project_id: string }) => p.project_id === opts.projectId));
 export const storeById = (id: string): StoreRow | null => listStores({ includeGone: true }).find((s) => s.id === id) ?? null;
 const EMPTY_DETAILS: VercelStore["details"] = { billing_state: null, quota_exceeded: false, ownership: null, updated_at: null, connected_projects: null, size_bytes: null, object_count: null, access: null, token_expired: null, external_id: null, external_status: null, plan_id: null, plan_scope: null, plan_type: null, plan_description: null, plan_cost: null, plan_lines: [], metadata: {}, secret_names: [], capabilities: {}, product_tags: [], product_description: null, usage_period: null };
-export interface TeamExtras { members: VercelMember[]; log_drains: VercelLogDrain[]; tokens: VercelToken[]; token_owner: { uid: string; username: string | null } | null; security: VercelTeamSecurity | null; read_at: string | null }
-const NO_EXTRAS: TeamExtras = { members: [], log_drains: [], tokens: [], token_owner: null, security: null, read_at: null };
+export interface TeamExtras { members: VercelMember[]; project_roles: VercelProjectRole[]; log_drains: VercelLogDrain[]; tokens: VercelToken[]; token_owner: { uid: string; username: string | null } | null; security: VercelTeamSecurity | null; read_at: string | null }
+const NO_EXTRAS: TeamExtras = { members: [], project_roles: [], log_drains: [], tokens: [], token_owner: null, security: null, read_at: null };
 /** The team's members, log drains, the token owner's tokens and the sign-in guards as the last collection read them. */
 export const teamExtras = (teamId: string): TeamExtras => { const r = db.prepare("select value from settings where key = ?").get(`vercel_extras:${teamId}`) as { value: string } | undefined; return r ? { ...NO_EXTRAS, ...parse<any>(r.value, {}) } : { ...NO_EXTRAS }; };
 export const teamBilling = (teamId: string): VercelTeamBilling | null => { const r = db.prepare("select value from settings where key = ?").get(`vercel_billing:${teamId}`) as { value: string } | undefined; return r ? parse<VercelTeamBilling | null>(r.value, null) : null; };
