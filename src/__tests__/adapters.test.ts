@@ -15,8 +15,8 @@ const types = await import("../adapters/types.js");
 const mirror = await import("../graph_mirror.js");
 const { db } = await import("../db.js");
 
-test("the registry: the adapters (aws, vercel) with their sections, storage and capabilities; stubs with what each needs", () => {
-  assert.deepEqual(reg.adapters().map((a) => a.id), ["aws", "vercel"]);
+test("the registry: the adapters (aws, vercel, local) with their sections, storage and capabilities; stubs with what each needs", () => {
+  assert.deepEqual(reg.adapters().map((a) => a.id), ["aws", "vercel", "local"]);
   const aws = reg.adapterFor("aws")!;
   assert.equal(aws.label, "AWS"); assert.equal(aws.flow.boundary, "account");
   assert.deepEqual(aws.ui.settings.map((s) => s.id), ["access", "permissions", "probes", "benchmarks", "members"]);
@@ -25,7 +25,7 @@ test("the registry: the adapters (aws, vercel) with their sections, storage and 
   assert.equal(reg.adapterFor("gcp"), null);
   const vercel = reg.adapterFor("vercel")!; assert.equal(vercel.flow.boundary, "team"); assert.equal(vercel.capabilities.probes, false); assert.equal(vercel.configured(), false, "no token in this test's environment");
   const list = reg.providers();
-  assert.deepEqual(list.map((p) => [p.id, p.available]), [["aws", true], ["vercel", true], ["gcp", false], ["azure", false], ["cloudflare", false]]);
+  assert.deepEqual(list.map((p) => [p.id, p.available]), [["aws", true], ["vercel", true], ["local", true], ["gcp", false], ["azure", false], ["cloudflare", false]]);
   assert.equal(list.find((p) => p.id === "cloudflare")!.boundary, "account");
   assert.equal(typeof list[0].configured, "boolean");
 });
@@ -35,7 +35,7 @@ test("the AWS adapter emits generic resource nodes from its storage, and the mir
   const aws = reg.adapterFor("aws")!;
   const nodes = aws.resources("123456789012");
   const web = nodes.find((n) => n.id === "i-0abc")!;
-  assert.equal(web.label, "AdvisorCompute"); assert.equal(web.native_type, "ec2_instance"); assert.equal(web.state, "running"); assert.equal(web.name, "web");
+  assert.equal(web.label, "AdvisorBox"); assert.equal(web.props.kind, "vm"); assert.equal(web.compute?.opaque, false); assert.equal(web.native_type, "ec2_instance"); assert.equal(web.state, "running"); assert.equal(web.name, "web");
   assert.equal(types.RESOURCE_LABELS.includes(web.label), true);
   assert.equal(mirror.RESOURCE_LABELS, types.RESOURCE_LABELS);
   assert.equal(typeof mirror.resourceFromEc2, "function"); assert.equal(mirror.genericState("ec2_instance", "stopping"), "stopped");
@@ -60,4 +60,35 @@ test("the account scope: none or 'all' means every account; the primary scope al
   assert.deepEqual(inv.listEc2({ scope: m }).map((r) => r.instance_id), []);
   assert.deepEqual(inv.listEc2({ scope: scope.accountScope({ account: "123456789012" }) }).map((r) => r.instance_id), ["i-0abc"]);
   assert.equal(inv.listEc2({}).length, 2);
+});
+
+test("a Vercel team's projects run on one opaque runtime box with its compute", async () => {
+  const { runtimeBox, runtimeBoxId } = await import("../adapters/vercel/index.js");
+  const box = runtimeBox("team_test", { first: "2026-01-01", last: "2026-10-01", any: true });
+  assert.equal(box.id, runtimeBoxId("team_test")); assert.equal(box.label, "AdvisorBox");
+  assert.deepEqual([box.props.kind, box.props.opaque, box.compute?.opaque, box.compute?.os, box.monthly_usd], ["managed", true, true, null, null]);
+  assert.equal(runtimeBox("team_test", { first: null, last: null, any: false }).state, "unknown", "no live project, nothing known to run");
+});
+
+test("local machines: declared in Settings, a box hosting its OS with a deployment per thing it runs", async () => {
+  const local = reg.adapterFor("local")!;
+  const lm = await import("../adapters/local/index.js");
+  assert.equal(local.configured(), false); assert.deepEqual(await local.accounts(), []);
+  assert.deepEqual(lm.parseMachine({ name: "  " }), { ok: false, error: "a name is needed (letters or digits)" });
+  assert.equal((lm.parseMachine({ name: "x", kind: "phone" }) as any).ok, false);
+  assert.equal((lm.parseMachine({ name: "x", deployments: [{ name: "a", kind: "lambda" }] }) as any).ok, false);
+  const r = await local.onboarding!.add({ name: "Dev Laptop", kind: "laptop", platform: "macos", os: "macOS 26", arch: "arm64", hostname: "dev.example.com",
+    deployments: [{ name: "Hive stack", kind: "compose", url: "http://localhost:3000" }, { name: "hive stack", kind: "service" }, { name: "", kind: "service" }] });
+  assert.equal(r.ok, true);
+  assert.equal(local.configured(), true);
+  const [acc] = await local.accounts(); assert.deepEqual([acc.id, acc.provider, acc.native_type], ["local", "local", "site"]);
+  const nodes = local.resources("local");
+  assert.deepEqual(nodes.map((n) => [n.id, n.label, n.native_type]), [["local:dev-laptop", "AdvisorBox", "local_laptop"], ["local:dev-laptop:hive-stack", "AdvisorDeployment", "local_compose"]], "the duplicate and the unnamed entries are dropped");
+  assert.deepEqual([nodes[0].props.kind, nodes[0].compute?.os, nodes[0].compute?.platform, nodes[0].account_id], ["laptop", "macOS 26", "macos", "local"]);
+  assert.deepEqual([nodes[1].props.platform, nodes[1].props.environment, nodes[1].props.machine_id, nodes[1].props.url], ["local", "development", "local:dev-laptop", "http://localhost:3000"]);
+  assert.equal(local.owns("local:dev-laptop"), true); assert.equal(local.owns("i-0abc"), false);
+  const me = lm.thisMachine(); assert.ok(me.name && me.kernel);
+  assert.equal((await local.onboarding!.remove("local:nope")).ok, false);
+  assert.equal((await local.onboarding!.remove("local:dev-laptop")).ok, true);
+  assert.equal(local.configured(), false);
 });

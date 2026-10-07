@@ -95,7 +95,7 @@ test("the adapter emits an AdvisorDeployment per project with the generic state,
     ["www.example.com", "production", false, true],
     ["web-git-feature-example.vercel.app", "preview", true, false],
   ], "the redirecting apex is left out; the branch domain and the preview deployment ask for SSO");
-  assert.deepEqual(reg.providers().map((p) => [p.id, p.available]), [["aws", true], ["vercel", true], ["gcp", false], ["azure", false], ["cloudflare", false]]);
+  assert.deepEqual(reg.providers().map((p) => [p.id, p.available]), [["aws", true], ["vercel", true], ["local", true], ["gcp", false], ["azure", false], ["cloudflare", false]]);
   assert.ok((await reg.allAccounts()).some((a) => a.provider === "vercel"));
 });
 

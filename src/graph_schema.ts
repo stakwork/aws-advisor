@@ -15,7 +15,7 @@ const BASE = "AdvisorResource";
 
 /**
  * Property names Jarvis reads as the schema's own fields (ApplicationConstant.SCHEMA_KNOWN_PROPERTIES plus ref_id and
- * is_deleted): a node attribute by one of these names would overwrite the field (an AdvisorCompute's `type` is its
+ * is_deleted): a node attribute by one of these names would overwrite the field (an AdvisorBox's `type` is its
  * instance type, an AdvisorRecommendation's `action` is not a Jarvis action list), so they are listed in the
  * description instead.
  */
@@ -25,15 +25,16 @@ const JARVIS_FIELDS = new Set(["type", "parent", "attributes", "icon", "media_ur
 
 /** One line per label for the type_description; a label the mirror starts writing without one gets a generic line until it is added here. */
 const DESCRIPTIONS: Record<string, string> = {
-  AdvisorAccount: "A cloud account, team or project the advisor collects from; resources, runs and scans hang off it with IN_ACCOUNT",
+  AdvisorAccount: "A cloud account, team or project the advisor collects from, or the site of the local machines; resources, runs and scans hang off it with IN_ACCOUNT",
   AdvisorResource: "Base label of every inventoried cloud resource; provider, account_id, native_type and native_id say what it is at the provider",
-  AdvisorCompute: "A virtual machine or container host (EC2 instance)",
+  AdvisorBox: "A machine: a cloud instance (EC2), a platform's hidden runtime (Vercel, opaque) or a local laptop, desktop or server; it HOSTS one AdvisorCompute",
+  AdvisorCompute: "The operating system a box runs: programs, containers, packages and vulnerabilities hang off it, and deployments RUNS_ON it",
   AdvisorDatabase: "A managed database instance or store (RDS, Aurora, DynamoDB, a Vercel Neon store)",
   AdvisorCache: "A managed cache node or group (ElastiCache, a Vercel Redis store)",
   AdvisorLoadBalancer: "A load balancer (application, network, gateway or classic)",
   AdvisorFunction: "A serverless function (Lambda)",
   AdvisorStorage: "Object, block, file or backup storage (S3 bucket, EBS volume, EFS file system, backup vault, a Vercel Blob store)",
-  AdvisorDeployment: "A deployed application environment (Elastic Beanstalk environment, Vercel project)",
+  AdvisorDeployment: "A deployed application environment (Elastic Beanstalk environment, cluster workload, Vercel project, something declared on a local machine); RUNS_ON the compute it runs on",
   AdvisorDnsZone: "A DNS hosted zone",
   AdvisorDnsRecord: "A DNS record in a zone and what it points to",
   AdvisorIdentity: "Who can get in: an IAM user or role, an Identity Center user, the root user, a Vercel team member",

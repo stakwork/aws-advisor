@@ -80,12 +80,15 @@ export function resourceFromEc2(row: any, roles: RoleMap = new Map()): ResourceN
   const observed: ResourceNode["observed"] = [apiObserved(row)];
   if (row.cpu_30d != null || Number(row.cpu_days) > 0) observed.push({ kind: "metrics", status: "ok", last_at: str(row.last_seen), detail: `cpu over ${num(row.cpu_days) ?? "?"} days` });
   if (row.ssm_status != null || row.probe_at != null) observed.push({ kind: "probe", status: row.ssm_status === "Online" ? "ok" : row.probe_at && !row.ssm_status ? "stale" : "offline", last_at: str(row.probe_at), detail: str(row.ssm_status) });
-  const n = base(String(row.instance_id), "AdvisorCompute", "ec2_instance", row, str(row.name), str(row.state), str(row.region), roles, {
-    type: str(row.instance_type), arch: str(snap.architecture), platform: str(row.platform) || (snap.platform_details ? String(snap.platform_details).toLowerCase().includes("windows") ? "windows" : "linux" : null), image_id: str(snap.image_id),
+  const platform = str(row.platform) || (snap.platform_details ? String(snap.platform_details).toLowerCase().includes("windows") ? "windows" : "linux" : null);
+  const n = base(String(row.instance_id), "AdvisorBox", "ec2_instance", row, str(row.name), str(row.state), str(row.region), roles, {
+    kind: "vm", type: str(row.instance_type), arch: str(snap.architecture), platform, image_id: str(snap.image_id),
     private_ips: net.private_ip ? [String(net.private_ip)] : [], public_ip: str(net.public_ip), ipv6: Array.isArray(net.ipv6) ? net.ipv6.map(String) : [], hostname: str(net.public_dns) || str(net.private_dns),
     zone: str(row.az), lifecycle: snap.instance_lifecycle === "spot" ? "spot" : "on_demand", launch_time: str(row.launch_time), cpu_30d: num(row.cpu_30d), ebs_gb: num(row.ebs_gb), volumes: num(row.volumes),
     probe_at: str(row.probe_at), probe_mem_pct: num(row.probe_mem_pct), vpc_id: str(net.vpc_id), subnet_id: str(net.subnet_id), security_groups: Array.isArray(net.security_groups) ? net.security_groups.map((g: any) => String(g?.GroupId ?? g?.group_id ?? g)) : [],
   }, observed);
+  // the operating system as the API knows it; the software probe adds the distribution, version and kernel (src/graph_software.ts)
+  n.compute = { platform, arch: str(snap.architecture), agent_kind: row.ssm_status != null ? "ssm" : null, os: str(row.ssm_platform), opaque: false };
   n.pool = row.pool ? String(row.pool) : poolOf(row.snapshot);
   n.pool_kind = row.pool_kind ? POOL_KIND[String(row.pool_kind)] ?? String(row.pool_kind) : n.pool ? (n.pool.includes("/") ? "node_group" : "asg") : null;
   return n;

@@ -10,13 +10,14 @@ type Concept = { id: string; name: string; description: string; scope: string; s
 
 type GraphInfo = { configured: boolean; uri: string | null; connected: boolean; server?: string | null; error?: string | null; account_id?: string; stats: { nodes: Record<string, number>; relationships: Record<string, number>; total_nodes: number; total_relationships: number } | null };
 
-/** Three Cypher starting points for Neo4j Browser, NavFiber or the agent's graph_query tool. */
+/** Cypher starting points for Neo4j Browser, NavFiber or the agent's graph_query tool. */
 const CYPHER_EXAMPLES: { title: string; cypher: string }[] = [
   { title: "One resource with everything about it", cypher: "MATCH (r:AdvisorResource {id: 'i-0123456789abcdef0'})\nOPTIONAL MATCH (r)-[e]-(x)\nOPTIONAL MATCH (x)-[d:DECIDED_AS]->(c:Concept)\nRETURN r, e, x, d, c" },
   { title: "Every recommendation the team decided, with its Concept", cypher: "MATCH (rec:AdvisorRecommendation)-[:DECIDED_AS]->(c:Concept)\nOPTIONAL MATCH (rec)-[:TARGETS]->(res)\nRETURN rec.status AS status, rec.title AS title, res.id AS resource, c.name AS concept, c.description AS decision\nORDER BY rec.decided_at DESC" },
   { title: "Resources by archetype, with their price", cypher: "MATCH (r:AdvisorResource)-[:HAS_ROLE]->(a:KnArchetype)\nWHERE r.gone = false\nRETURN a.name AS archetype, count(r) AS resources, round(sum(coalesce(r.monthly_usd, 0))) AS monthly_usd, collect(r.name)[..5] AS examples\nORDER BY monthly_usd DESC" },
-  { title: "Ports open to the internet and the program behind them", cypher: "MATCH (r:AdvisorCompute)-[:EXPOSES]->(e:AdvisorEndpoint {kind: 'port', exposure: 'internet'})\nWHERE e.gone = false\nOPTIONAL MATCH (app:AdvisorApp)-[:SERVES]->(e)\nRETURN r.name AS instance, e.port AS port, e.protocol AS protocol, app.name AS program, e.container AS container\nORDER BY e.port" },
-  { title: "Boxes the advisor cannot look inside", cypher: "MATCH (r:AdvisorCompute)\nWHERE r.gone = false AND r.state = 'running' AND NOT (r)-[:OBSERVED_BY]->(:AdvisorTelemetry {kind: 'probe'})\nRETURN r.id AS instance, r.name AS name, r.type AS type, r.monthly_usd AS monthly_usd\nORDER BY monthly_usd DESC" },
+  { title: "Ports open to the internet and the program behind them", cypher: "MATCH (r:AdvisorBox)-[:EXPOSES]->(e:AdvisorEndpoint {kind: 'port', exposure: 'internet'})\nWHERE e.gone = false\nOPTIONAL MATCH (app:AdvisorApp)-[:SERVES]->(e)\nRETURN r.name AS instance, e.port AS port, e.protocol AS protocol, app.name AS program, e.container AS container\nORDER BY e.port" },
+  { title: "Boxes the advisor cannot look inside", cypher: "MATCH (r:AdvisorBox)\nWHERE r.gone = false AND r.state = 'running' AND coalesce(r.opaque, false) = false AND NOT (r)-[:OBSERVED_BY]->(:AdvisorTelemetry {kind: 'probe'})\nRETURN r.id AS instance, r.name AS name, r.type AS type, r.monthly_usd AS monthly_usd\nORDER BY monthly_usd DESC" },
+  { title: "Every machine, its operating system and what runs on it, across providers", cypher: "MATCH (b:AdvisorBox)-[:HOSTS]->(c:AdvisorCompute)\nWHERE b.gone = false\nOPTIONAL MATCH (d:AdvisorDeployment)-[:RUNS_ON]->(c)\nOPTIONAL MATCH (c)-[:RUNS]->(x:AdvisorContainer) WHERE x.gone = false\nRETURN b.provider AS provider, b.kind AS kind, b.name AS machine, coalesce(c.os, c.platform) AS os, collect(DISTINCT d.name) AS deployments, collect(DISTINCT x.name) AS containers\nORDER BY provider, machine" },
 ];
 
 /** The Neo4j mirror: reachable or not, what is in it, resync, and Cypher to copy. Shown even without repo2graph. */

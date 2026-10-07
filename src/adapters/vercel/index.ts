@@ -60,6 +60,24 @@ export function resourceFromProject(p: ProjectRow, teamId: string, usage?: Map<s
   };
 }
 
+/** The id of the one machine a team's projects run on as far as the graph can tell: Vercel never shows it. */
+export const runtimeBoxId = (teamId: string) => `${teamId}/runtime`;
+
+/**
+ * The team's runtime as an opaque AdvisorBox {kind: managed}: the functions and builds run on machines Vercel manages
+ * and never shows, so the graph keeps one box per team (and its AdvisorCompute, opaque too) for the projects to
+ * RUNS_ON (./graph.ts). It costs nothing apart from the projects, whose own bill carries the usage.
+ */
+export function runtimeBox(teamId: string, seen: { first: string | null; last: string | null; any: boolean }): ResourceNode {
+  return {
+    id: runtimeBoxId(teamId), label: "AdvisorBox", native_type: "vercel_runtime", name: "Vercel runtime", state: seen.any ? "running" : "unknown", native_state: null, region: null,
+    role: null, role_confidence: null, protected_prob: null, monthly_usd: null, gone: false, first_seen: seen.first, last_seen: seen.last, pool: null, pool_kind: null,
+    props: { kind: "managed", opaque: true, managed_by: "vercel", platform: "linux", team_id: teamId },
+    compute: { platform: "linux", os: null, opaque: true, managed_by: "vercel" },
+    observed: [{ kind: "api", status: "ok", last_at: seen.last, detail: "inferred: the projects run here; Vercel does not show the machines" }],
+  };
+}
+
 /** A store as the generic model: a database (Neon, ...), a cache (Redis, KV) or object storage (Blob), with the plan and the projects on it. */
 /** The graph id of a team member: the same `<team>/member/<username>` the member findings name. */
 export const memberNodeId = (teamId: string, m: { username: string | null; uid: string }) => `${teamId}/member/${m.username ?? m.uid}`;
@@ -161,8 +179,10 @@ export const vercelAdapter: ProviderAdapter = {
     // exact per-project numbers where they were read, the breakdown estimate otherwise
     const usage = new Map(usageByProject(account, 7).map((u) => [u.project_id, u]));
     for (const p of listProjects(true)) { const t = usageTotals(account, 7, p.id); if (t.requests || t.invocations || t.builds) usage.set(p.id, { project_id: p.id, name: p.name, requests: t.requests, invocations: t.invocations, bandwidth_out_gb: t.bandwidth_out_gb, gb_hours: t.gb_hours, builds: t.builds }); }
-    return [...listProjects(true).map((p) => resourceFromProject(p, account, usage)), ...listStores({ includeGone: true }).map((st) => resourceFromStore(st, account)), ...identitiesOfTeam(account, teamExtras(account))]; },
-  resourceIds: (account) => new Set([account, ...listProjects(true).map((p) => p.id), ...listStores({ includeGone: true }).map((s) => s.id)]),
+    const projects = listProjects(true); const live = projects.filter((p) => !p.gone);
+    const box = runtimeBox(account, { first: projects.map((p) => p.first_seen).filter((x): x is string => Boolean(x)).sort()[0] ?? null, last: live.map((p) => p.last_seen).filter((x): x is string => Boolean(x)).sort().pop() ?? null, any: live.length > 0 });
+    return [...projects.map((p) => resourceFromProject(p, account, usage)), ...(projects.length ? [box] : []), ...listStores({ includeGone: true }).map((st) => resourceFromStore(st, account)), ...identitiesOfTeam(account, teamExtras(account))]; },
+  resourceIds: (account) => new Set([account, runtimeBoxId(account), ...listProjects(true).map((p) => p.id), ...listStores({ includeGone: true }).map((s) => s.id)]),
   owns: (id) => id === vercelAdapter.primaryAccountId() || (vercelConfigured() && /^team_/.test(id)) || Boolean(db.prepare("select 1 from vercel_team where id = ?").get(id)),
   accountOf(resource, details) {
     const d = (details ?? {}) as Record<string, unknown>;

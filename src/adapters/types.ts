@@ -7,9 +7,9 @@
  */
 
 export const AWS = "aws";
-export type ProviderId = "aws" | "gcp" | "azure" | "vercel" | "cloudflare";
+export type ProviderId = "aws" | "gcp" | "azure" | "vercel" | "cloudflare" | "local";
 
-export const RESOURCE_LABELS = ["AdvisorCompute", "AdvisorDatabase", "AdvisorCache", "AdvisorLoadBalancer", "AdvisorFunction", "AdvisorStorage", "AdvisorDeployment", "AdvisorDnsZone", "AdvisorDnsRecord", "AdvisorIdentity",
+export const RESOURCE_LABELS = ["AdvisorBox", "AdvisorDatabase", "AdvisorCache", "AdvisorLoadBalancer", "AdvisorFunction", "AdvisorStorage", "AdvisorDeployment", "AdvisorDnsZone", "AdvisorDnsRecord", "AdvisorIdentity",
   "AdvisorCertificate", "AdvisorMessaging", "AdvisorSecret", "AdvisorAnalytics", "AdvisorStack", "AdvisorBackupPlan", "AdvisorDetector", "AdvisorFilter"] as const;
 export type ResourceLabel = (typeof RESOURCE_LABELS)[number];
 export type GenericState = "running" | "stopped" | "pending" | "terminated" | "available" | "degraded" | "unknown";
@@ -25,6 +25,11 @@ export interface ResourceNode {
   pool: string | null; pool_kind: string | null;
   /** Label-specific properties (type, engine, runtime, ...). */
   props: Record<string, unknown>;
+  /**
+   * An AdvisorBox only: what the adapter knows of the operating system it runs (platform, arch, os, opaque), written on
+   * the AdvisorCompute node the box HOSTS. Every box gets one, known or not; the probe fills in the rest.
+   */
+  compute?: Record<string, unknown>;
   /** The telemetry that covers it: which sources, with their status and last report. */
   observed: { kind: TelemetryKind; status: "ok" | "stale" | "offline"; last_at: string | null; detail: string | null }[];
 }

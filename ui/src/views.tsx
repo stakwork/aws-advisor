@@ -5,6 +5,7 @@ import { VercelOverview } from "./components/vercelOverview";
 import { VercelBill } from "./components/vercelBill";
 import { VercelStores } from "./components/vercelStores";
 import { VercelAccess, VercelChanges, VercelMembers, VercelPartners, VercelProjects } from "./components/vercel";
+import { LocalMachines } from "./components/local";
 import { AwsOverview } from "./pages/Overview";
 import { AwsThisMonth } from "./pages/Bill";
 import { AwsChanges } from "./pages/Changes";
@@ -30,6 +31,8 @@ export const VIEWS: Record<string, (props: any) => ReactNode> = {
   "vercel.stores.storage": () => <VercelStores kind="storage" />,
   "vercel.access": (p: { configured: boolean; onChange: () => void }) => <VercelAccess {...p} />,
   "vercel.partners": () => <VercelPartners />,
+  "local.overview": () => page("Local machines", <LocalMachines />),
+  "local.machines": (p: { configured?: boolean; onChange?: () => void }) => <LocalMachines {...p} />,
 };
 
 /** One view by id, or `fallback` when no provider view has that id. */

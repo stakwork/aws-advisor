@@ -18,7 +18,7 @@ const PAGE = 50;
 const short = (id: string | null | undefined, n = 28) => { const s = String(id ?? ""); return s.length > n ? `${s.slice(0, n)}…` : s; };
 const exposureTone: Record<string, string> = { internet: "text-red-300", network: "text-amber-300", group: "text-amber-200", closed: "text-zinc-400", local: "text-zinc-500" };
 const portsOf = (r: { from_port: number | null; to_port: number | null; protocol: string }) => r.from_port == null ? `all ${r.protocol}` : r.from_port === r.to_port ? `${r.protocol} ${r.from_port}` : `${r.protocol} ${r.from_port}-${r.to_port}`;
-const INVENTORY_TAB: Record<string, string> = { AdvisorCompute: "ec2", AdvisorDatabase: "rds", AdvisorCache: "elasticache", AdvisorLoadBalancer: "elb", AdvisorFunction: "lambda", AdvisorStorage: "s3", AdvisorDeployment: "deployments" };
+const INVENTORY_TAB: Record<string, string> = { AdvisorBox: "ec2", AdvisorDatabase: "rds", AdvisorCache: "elasticache", AdvisorLoadBalancer: "elb", AdvisorFunction: "lambda", AdvisorStorage: "s3", AdvisorDeployment: "deployments" };
 /** A resource by name, linked into the Inventory tab that holds it. */
 function Res({ id, name, label }: { id: string | null | undefined; name?: string | null; label?: string | null }) {
   if (!id) return <span className="text-zinc-600">—</span>;

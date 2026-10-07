@@ -81,7 +81,7 @@ test("resource nodes carry the generic shape with the provider's word in native_
   const roles = new Map([["i-1", { role: "web_or_api", role_confidence: 0.9, protected_prob: 0.1 }], ["prod-db", { role: "database", role_confidence: "0.8" as any, protected_prob: null }]]);
   const ec2 = gm.resourceFromEc2({ instance_id: "i-1", name: "web", instance_type: "m6i.large", state: "running", region: "us-east-1", az: "us-east-1a", monthly_usd: "70.08", cpu_30d: 12.5, cpu_days: 30, ssm_status: "Online", probe_at: "2026-09-19 01:00:00", gone: 0, first_seen: "2026-01-01 00:00:00", last_seen: "2026-09-19 00:00:00",
     snapshot: JSON.stringify({ tags: { "eks:nodegroup-name": "ng", "eks:cluster-name": "c" }, architecture: "arm64", network: { private_ip: "10.0.0.5", public_ip: "203.0.113.9", vpc_id: "vpc-1", subnet_id: "subnet-1", security_groups: [{ GroupId: "sg-1" }] } }) }, roles);
-  assert.equal(ec2.id, "i-1"); assert.equal(ec2.label, "AdvisorCompute"); assert.equal(ec2.native_type, "ec2_instance");
+  assert.equal(ec2.id, "i-1"); assert.equal(ec2.label, "AdvisorBox"); assert.equal(ec2.native_type, "ec2_instance");
   assert.equal(ec2.state, "running"); assert.equal(ec2.native_state, "running");
   assert.deepEqual([ec2.role, ec2.role_confidence, ec2.protected_prob, ec2.monthly_usd, ec2.gone], ["web_or_api", 0.9, 0.1, 70.08, false]);
   assert.equal(ec2.pool, "c/ng"); assert.equal(ec2.pool_kind, "node_group");
@@ -108,7 +108,7 @@ test("resource nodes carry the generic shape with the provider's word in native_
   assert.equal(zone.label, "AdvisorDnsZone"); assert.equal(zone.props.records, 12);
   const rec = gm.resourceFromDnsRecord({ id: "Z1:api.example.com.:A", zone_id: "Z1", name: "API.example.com.", type: "A", ttl: 300, alias: 0, values: JSON.stringify(["203.0.113.9"]), link_state: "unmatched", gone: 0 });
   assert.equal(rec.label, "AdvisorDnsRecord"); assert.equal(rec.props.fqdn, "api.example.com"); assert.deepEqual(rec.props.values, ["203.0.113.9"]); assert.equal(rec.props.link_state, "dangling");
-  for (const n of [ec2, rds, cache, fn, bucket, vol, zone, rec]) assert.deepEqual(Object.keys(n).sort(), Object.keys(ec2).sort(), `${n.label} has the shared shape`);
+  for (const n of [ec2, rds, cache, fn, bucket, vol, zone, rec]) assert.deepEqual(Object.keys(n).sort(), Object.keys(ec2).filter((k) => k !== "compute").sort().concat(n.label === "AdvisorBox" ? ["compute"] : []).sort(), `${n.label} has the shared shape (a box also carries its compute)`);
 });
 
 test("genericState maps every provider word onto the closed list", () => {
@@ -264,7 +264,10 @@ test("live: mirrorAll into the local Neo4j, graphStats, DECIDED_AS to an existin
     assert.equal(byLabel.AdvisorAlert, 2);
     assert.equal(byLabel.AdvisorIncident, 1);
     assert.equal(byLabel.AdvisorResourceRef, 2, "vpc-test and nat-test");
-    assert.equal(byLabel.AdvisorCompute, 3);
+    assert.equal(byLabel.AdvisorBox, 3);
+    assert.equal(byLabel.AdvisorCompute, 3, "every box hosts its operating system");
+    const hosts = await gm.readQuery("MATCH (b:AdvisorBox {id: 'i-test1'})-[:HOSTS]->(c:AdvisorCompute) RETURN c.id AS id, c.platform AS platform, 'AdvisorResource' IN labels(c) AS resource", {}, { rowCap: 2 });
+    assert.deepEqual(hosts.rows, [{ id: "compute:i-test1", platform: hosts.rows[0]?.platform ?? null, resource: false }]);
     assert.equal(byLabel.AdvisorDatabase, 1);
     assert.equal(byLabel.AdvisorCache, 1);
     assert.equal(byLabel.AdvisorNodePool, 1);
@@ -278,7 +281,7 @@ test("live: mirrorAll into the local Neo4j, graphStats, DECIDED_AS to an existin
     const view = await gm.resourceView("i-test2");
     assert.ok(view);
     assert.equal(view.role, "blockchain_node");
-    assert.deepEqual(view.labels, ["AdvisorCompute"]);
+    assert.deepEqual(view.labels, ["AdvisorBox"]);
     assert.ok(view.observed.some((o) => o.kind === "api"));
     assert.equal(view.counts.recommendations, 1);
     assert.equal(view.counts.controls, 1);

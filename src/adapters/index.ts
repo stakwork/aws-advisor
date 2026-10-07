@@ -1,5 +1,6 @@
 import { awsAdapter } from "./aws/index.js";
 import { vercelAdapter } from "./vercel/index.js";
+import { localAdapter } from "./local/index.js";
 import type { AccountRecord, ProviderAdapter, ProviderId, ProviderStub } from "./types.js";
 
 export type { AccountRecord, ProviderAdapter, ProviderId } from "./types.js";
@@ -11,7 +12,7 @@ export type { AccountRecord, ProviderAdapter, ProviderId } from "./types.js";
  */
 
 // read when asked, not at load: the adapters reach modules that reach this registry, and a list built at load could see one not yet initialised
-const list = (): ProviderAdapter[] => [awsAdapter, vercelAdapter];
+const list = (): ProviderAdapter[] => [awsAdapter, vercelAdapter, localAdapter];
 
 /** Providers without an adapter, with what each will need (docs/cloud-ontology.md §8a). */
 export const PROVIDER_STUBS: ProviderStub[] = [

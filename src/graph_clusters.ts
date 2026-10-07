@@ -2,11 +2,13 @@ import { db } from "./db.js";
 import { accountId, enabled, writeCypher } from "./graph_mirror.js";
 import { listClusters, listIngresses, listNetworkPolicies, listServices, listWorkloads, selects } from "./cluster_inventory.js";
 import { AWS } from "./adapters/types.js";
+import { COMPUTE_OF } from "./graph_cypher.js";
 
 /**
  * Clusters and workloads in the graph (docs/cloud-ontology.md §1 AdvisorCluster / AdvisorDeployment, §8 step 4): one
  * AdvisorCluster per EKS or ECS cluster, one AdvisorDeployment per Kubernetes workload or ECS service with RUNS_IN to
- * its cluster, BUILT_FROM one AdvisorImage per container image, SCHEDULED_ON the compute nodes its pods run on, and
+ * its cluster, BUILT_FROM one AdvisorImage per container image, RUNS_ON the operating system (AdvisorCompute) of each
+ * node its pods run on, and
  * EXPOSES endpoints: a Service port (service_endpoint), an Ingress host and path (url). An Ingress or a Service of type
  * LoadBalancer names the balancer AWS created for it; that balancer's listener FORWARDS_TO the endpoint, so the
  * listener's reachability verdicts flow onto it. NetworkPolicies become AdvisorFilter {kind: network_policy} guarding
@@ -58,17 +60,22 @@ MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET 
 WITH d, row
 MERGE (c:AdvisorResource {id: row.cluster_arn}) MERGE (d)-[:RUNS_IN]->(c)
 WITH d, row
-OPTIONAL MATCH (d)-[old:BUILT_FROM|SCHEDULED_ON|GUARDED_BY]->() DELETE old
+OPTIONAL MATCH (d)-[old:BUILT_FROM|SCHEDULED_ON|RUNS_ON|GUARDED_BY]->() DELETE old
 WITH DISTINCT d, row
 FOREACH (img IN row.images |
   MERGE (i:AdvisorResource {id: 'image:' + img}) ON CREATE SET i.first_seen = $now
   SET i:AdvisorImage, i += {name: img, kind: 'container', repository: split(img, ':')[0], tag: CASE WHEN img CONTAINS '@' THEN null WHEN size(split(img, ':')) > 1 THEN split(img, ':')[-1] ELSE 'latest' END, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'container_image', native_id: img, gone: false, last_seen: $now, updated_at: $now}
   MERGE (d)-[:BUILT_FROM]->(i))
-FOREACH (node IN row.nodes |
-  MERGE (n:AdvisorResource {id: node})
-  MERGE (d)-[s:SCHEDULED_ON]->(n) SET s.pods = row.pods_running, s.updated_at = $now)
 FOREACH (pol IN row.policy_ids |
-  MERGE (f:AdvisorFilter {id: pol}) MERGE (d)-[:GUARDED_BY]->(f))`;
+  MERGE (f:AdvisorFilter {id: pol}) MERGE (d)-[:GUARDED_BY]->(f))
+WITH d, row
+CALL {
+  WITH d, row
+  UNWIND row.nodes AS node
+  MATCH (b:AdvisorBox {id: node})
+  ${COMPUTE_OF("b", "os")}
+  MERGE (d)-[s:RUNS_ON]->(os) SET s.via = CASE row.platform WHEN 'ecs' THEN 'ecs' ELSE 'kubernetes' END, s.pods = row.pods_running, s.updated_at = $now
+}`;
 
 const ENDPOINT_CYPHER = `
 UNWIND $rows AS row
@@ -136,12 +143,18 @@ export async function mirrorClusters(): Promise<ClusterGraphCounts | null> {
 
   const policies = listNetworkPolicies();
   const workloads = listWorkloads(undefined, true);
+  // Kubernetes names a pod's node by its hostname (ip-10-0-1-2.ec2.internal), not the instance id: matched to the box by its private DNS name (a live box first, a reused name's latest otherwise)
+  const byDns = new Map<string, string>();
+  for (const r of rows("select instance_id, json_extract(snapshot, '$.network.private_dns') as dns from inventory_ec2 where json_extract(snapshot, '$.network.private_dns') is not null order by gone desc, last_seen asc")) {
+    const dns = String(r.dns).toLowerCase(); byDns.set(dns, String(r.instance_id)); byDns.set(dns.split(".")[0], String(r.instance_id));
+  }
+  const boxOf = (node: string) => /^i-[0-9a-f]+$/.test(node) ? node : byDns.get(node.toLowerCase()) ?? byDns.get(node.toLowerCase().split(".")[0]) ?? null;
   const platformOf = (clusterArn: string) => clusters.find((c) => c.arn === clusterArn)?.kind === "ecs" ? "ecs" : "eks";
   const workloadRows = workloads.map((wl) => ({
     id: wl.id, account_id: clusterAccount.get(wl.cluster_arn) ?? null, cluster_arn: wl.cluster_arn, name: wl.name, kind: wl.kind, namespace: wl.namespace, platform: platformOf(wl.cluster_arn), native_type: wl.kind === "ecs_service" ? "ecs_service" : `kubernetes_${wl.kind}`, uid: wl.uid ?? wl.id,
     environment: /prod/i.test(`${wl.namespace} ${wl.name}`) ? "production" : /stag/i.test(`${wl.namespace} ${wl.name}`) ? "staging" : /dev|test/i.test(`${wl.namespace} ${wl.name}`) ? "development" : null,
     container_count: wl.containers.length, images: wl.images, replicas_desired: wl.replicas_desired, replicas_ready: wl.replicas_ready, revision: wl.revision, strategy: wl.strategy, schedule: wl.schedule, service_account: wl.service_account,
-    labels_kv: Object.entries(wl.labels).map(([k, v]) => `${k}=${v}`), region: clusters.find((c) => c.arn === wl.cluster_arn)?.region ?? null, created: wl.created, pods_running: wl.pods_running, nodes: wl.nodes,
+    labels_kv: Object.entries(wl.labels).map(([k, v]) => `${k}=${v}`), region: clusters.find((c) => c.arn === wl.cluster_arn)?.region ?? null, created: wl.created, pods_running: wl.pods_running, nodes: [...new Set(wl.nodes.map(boxOf).filter((x): x is string => Boolean(x)))],
     policy_ids: policies.filter((p) => p.cluster_arn === wl.cluster_arn && p.namespace === wl.namespace && selects(p.pod_selector, wl.labels)).map((p) => p.id),
     gone: (wl as any).gone ?? false, first_seen: (wl as any).first_seen ?? stamp, last_seen: (wl as any).last_seen ?? stamp,
   }));

@@ -495,7 +495,7 @@ export async function networkDetail(id: string, account: string = accountId()) {
     OPTIONAL MATCH (s)-[:GUARDED_BY]->(acl:AdvisorFilter {kind: 'network_acl'})
     OPTIONAL MATCH (i:AdvisorInterface)-[:IN_SEGMENT]->(s)
     WITH s, t, routes, acl, count(DISTINCT i) AS interfaces
-    OPTIONAL MATCH (c:AdvisorCompute)-[:IN_SEGMENT]->(s) WHERE coalesce(c.gone, false) = false
+    OPTIONAL MATCH (c:AdvisorBox)-[:IN_SEGMENT]->(s) WHERE coalesce(c.gone, false) = false
     RETURN s.id AS id, s.name AS name, s.cidr AS cidr, s.ipv6_cidr AS ipv6_cidr, s.zone AS zone, s.public AS is_public, s.auto_public_ip AS auto_public_ip, s.available_ips AS available_ips, t.id AS route_table, t.main AS main_table, routes, acl.id AS acl, acl.default AS acl_default, interfaces, count(DISTINCT c) AS instances
     ORDER BY s.public DESC, s.zone, s.cidr`, { id }, { rowCap: 500, timeoutMs: 30_000 });
   const gateways = await readQuery(`MATCH (g:AdvisorGateway)-[:IN_NETWORK]->(:AdvisorNetwork {id: $id})
@@ -542,7 +542,7 @@ export async function listSegments(account: string = accountId()) {
     OPTIONAL MATCH (s)-[:GUARDED_BY]->(acl:AdvisorFilter {kind: 'network_acl'})
     OPTIONAL MATCH (i:AdvisorInterface)-[:IN_SEGMENT]->(s)
     WITH s, n, t, routes, acl, count(DISTINCT i) AS interfaces
-    OPTIONAL MATCH (c:AdvisorCompute)-[:IN_SEGMENT]->(s) WHERE coalesce(c.gone, false) = false
+    OPTIONAL MATCH (c:AdvisorBox)-[:IN_SEGMENT]->(s) WHERE coalesce(c.gone, false) = false
     RETURN s.id AS id, s.name AS name, n.id AS network, s.cidr AS cidr, s.ipv6_cidr AS ipv6_cidr, s.zone AS zone, s.region AS region, s.public AS is_public, s.auto_public_ip AS auto_public_ip, s.available_ips AS available_ips, s.default AS is_default,
       t.id AS route_table, t.main AS main_table, routes, acl.id AS acl, acl.default AS acl_default, interfaces, count(DISTINCT c) AS instances
     ORDER BY s.public DESC, n.id, s.zone, s.cidr`, { account }, { rowCap: 2000, timeoutMs: 30_000 });

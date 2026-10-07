@@ -1,12 +1,13 @@
 import { enabled, neoParams, writeCypher } from "../../graph_mirror.js";
 import { listProjects, listStores } from "./inventory.js";
-import { VERCEL, projectEndpoints, storeEndpoints, vercelAdapter } from "./index.js";
+import { VERCEL, projectEndpoints, runtimeBoxId, storeEndpoints, vercelAdapter } from "./index.js";
 
 /**
  * The Vercel adapter's graph layer, on top of the AdvisorDeployment nodes the mirror core writes from
  * `vercelAdapter.resources()`: one AdvisorEndpoint per URL the project serves (production URL, domains, latest
  * deployment URL), EXPOSED by the project and REACHABLE_FROM the internet, the verdict carrying `requires_auth` and
- * the protection that enforces it; the Node runtime as an AdvisorPackage INSTALLED_ON the project. The same shapes
+ * the protection that enforces it; the Node runtime as an AdvisorPackage INSTALLED_ON the project; every project
+ * RUNS_ON the team's opaque runtime (an AdvisorBox and its AdvisorCompute: Vercel never shows the machines). The same shapes
  * as the AWS layers, so "which deployments can the internet open without logging in" is one query across providers.
  */
 
@@ -64,6 +65,14 @@ UNWIND row.subnets AS subnet
 OPTIONAL MATCH (s:AdvisorSegment {id: subnet})
 FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | MERGE (d)-[i:IN_SEGMENT]->(s) SET i.via = 'vercel_secure_compute', i.environments = row.environments, i.updated_at = $now)`;
 
+/** Every live project RUNS_ON the team's runtime (the opaque box and compute the resource pass wrote, ./index.ts runtimeBox). */
+const RUNS_ON_CYPHER = `
+MATCH (d:AdvisorDeployment {provider: $provider, account_id: $account})
+OPTIONAL MATCH (d)-[old:RUNS_ON]->() DELETE old
+WITH DISTINCT d WHERE coalesce(d.gone, false) = false
+MATCH (:AdvisorBox {id: $box})-[:HOSTS]->(c:AdvisorCompute)
+MERGE (d)-[x:RUNS_ON]->(c) SET x.via = 'vercel_functions', x.updated_at = $now`;
+
 export interface VercelGraphCounts { projects: number; endpoints: number; runtimes: number; uses: number; connects: number }
 
 export async function mirrorVercel(): Promise<VercelGraphCounts> {
@@ -72,6 +81,7 @@ export async function mirrorVercel(): Promise<VercelGraphCounts> {
   const projects = listProjects();
   const endpoints = projects.flatMap(projectEndpoints);
   for (let i = 0; i < endpoints.length; i += 250) await writeCypher(ENDPOINT_CYPHER, neoParams({ rows: endpoints.slice(i, i + 250), now, provider: VERCEL, account }));
+  await writeCypher(RUNS_ON_CYPHER, { provider: VERCEL, account, box: runtimeBoxId(account), now });
   const storeEps = listStores().flatMap(storeEndpoints);
   for (let i = 0; i < storeEps.length; i += 250) await writeCypher(STORE_ENDPOINT_CYPHER, neoParams({ rows: storeEps.slice(i, i + 250), now, provider: VERCEL, account }));
   await writeCypher(STALE_ENDPOINTS, { ids: [...endpoints.map((e) => e.id), ...storeEps.map((e) => e.id)], now, provider: VERCEL, account });

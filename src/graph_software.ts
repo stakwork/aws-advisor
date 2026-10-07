@@ -3,18 +3,20 @@ import { accountId, enabled, inBackground, neoParams, writeCypher } from "./grap
 import { resourceAccountIndex } from "./resource_index.js";
 import { ecosystemOf, packageScope, vulnerabilityMatches, type VulnMatch } from "./software_vulns.js";
 import { AWS } from "./adapters/types.js";
+import { COMPUTE_OF } from "./graph_cypher.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
  * installed on each box (src/software_inventory.ts) as AdvisorPackage nodes shared across the fleet, one per
- * (ecosystem, name, version), INSTALLED_ON the compute that has them; the OS and the kernel as packages of their
+ * (ecosystem, name, version), INSTALLED_ON the operating system (AdvisorCompute) the box HOSTS, which also takes the
+ * distribution, version and kernel; the OS and the kernel as packages of their
  * own ecosystems; the versions read from well-known binaries as packages of the `binary` ecosystem; the container
  * images the box runs (RUNS_IMAGE → AdvisorImage, the same nodes cluster workloads are BUILT_FROM); PROVIDES edges
  * from a package to the program (AdvisorApp) it ships, so "which package is this listening process from" is one hop.
  *
  * On top, the knowledge: KnVulnerability nodes (general area, no account_id: an advisory is true everywhere) for the
  * advisories matched (src/software_vulns.ts, from OSV and the Amazon Linux feed), AFFECTS edges to the package
- * versions they match with the fixed version, and the VULNERABLE_TO verdict from each box to each advisory with how
+ * versions they match with the fixed version, and the VULNERABLE_TO verdict from each box's OS to each advisory with how
  * reachable the affected program is. Rebuilt per box after its software probe and whole after each vulnerability scan.
  */
 
@@ -22,7 +24,8 @@ export const SOFTWARE_LABELS = ["AdvisorPackage", "AdvisorImage", "KnVulnerabili
 
 const PACKAGE_CYPHER = `
 UNWIND $rows AS row
-MATCH (c:AdvisorResource {id: row.instance_id})
+MATCH (b:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("b", "c")}
 MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
 SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, native_type: 'package', native_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
@@ -30,11 +33,19 @@ SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen:
 
 const IMAGE_CYPHER = `
 UNWIND $rows AS row
-MATCH (c:AdvisorResource {id: row.instance_id})
+MATCH (b:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("b", "c")}
 MERGE (i:AdvisorResource {id: row.id}) ON CREATE SET i.first_seen = $now
 SET i:AdvisorImage, i += {name: row.image, kind: 'container', repository: row.repository, tag: row.tag, digest: row.digest, created_at: row.created, platform: row.platform, native_type: 'container_image', native_id: row.image, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (c)-[r:RUNS_IMAGE]->(i)
 SET r += {image_id: row.image_id, first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}`;
+
+/** What the probe read of the operating system (/etc/os-release, uname) onto the compute the box hosts. */
+const OS_CYPHER = `
+UNWIND $rows AS row
+MATCH (b:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("b", "c")}
+SET c += {os: row.os, os_id: row.os_id, os_version: row.os_version, kernel: row.kernel, arch: coalesce(row.arch, c.arch), package_manager: row.package_manager, os_collected_at: row.collected_at, updated_at: $now}`;
 
 const PROVIDES_CYPHER = `
 UNWIND $rows AS row
@@ -53,7 +64,8 @@ MERGE (v)-[r:AFFECTS]->(p) SET r += {fixed_in: row.fixed_version, ecosystem: row
 
 const VERDICT_CYPHER = `
 UNWIND $rows AS row
-MATCH (c:AdvisorResource {id: row.instance_id}) MATCH (v:KnVulnerability {id: row.vuln_id})
+MATCH (b:AdvisorResource {id: row.instance_id}) MATCH (v:KnVulnerability {id: row.vuln_id})
+${COMPUTE_OF("b", "c")}
 MERGE (c)-[r:VULNERABLE_TO {package_id: row.package_id}]->(v)
 SET r += {package: row.package, packages: row.packages, version: row.version, fixed_in: row.fixed_version, reachable: row.reachable, criticality: row.criticality, via_endpoint: row.via_endpoint, process: row.process, port: row.port, exposure: row.exposure, computed_at: $now}`;
 
@@ -95,6 +107,8 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     if (o.kernel) pkgRows.push({ instance_id: o.instance_id, id: packageId("kernel", "linux", o.kernel), name: "linux", version: o.kernel, ecosystem: "kernel", source_name: null, source_kind: "uname", advisory_ecosystem: null, scope: "kernel", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, gone: false });
     if (o.os_id) pkgRows.push({ instance_id: o.instance_id, id: packageId("os", o.os_id, o.os_version ?? "unknown"), name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", ecosystem: "os", source_name: o.os_id, source_kind: "os_release", advisory_ecosystem: ecosystemOf(o.package_manager, o.os_id, o.os_version)?.ecosystem ?? null, scope: "tool", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, gone: false });
   }
+  const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
+  for (const b of chunks(osRows)) await w(OS_CYPHER, b);
   for (const b of chunks(pkgRows)) await w(PACKAGE_CYPHER, b);
 
   // the container images the box runs
@@ -127,8 +141,8 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   }
   for (const b of chunks(affects)) await w(AFFECTS_CYPHER, b);
   // a rebuilt verdict replaces the old ones of the same boxes; what no longer matches disappears
-  if (instanceIds) await writeCypher(`UNWIND $ids AS id MATCH (c:AdvisorResource {id: id})-[r:VULNERABLE_TO]->() DELETE r`, { ids: instanceIds });
-  else await writeCypher(`MATCH (c:AdvisorResource {provider: $provider})-[r:VULNERABLE_TO]->() DELETE r`, { provider: AWS });
+  if (instanceIds) await writeCypher(`UNWIND $ids AS id MATCH (c:AdvisorCompute {id: 'compute:' + id})-[r:VULNERABLE_TO]->() DELETE r`, { ids: instanceIds });
+  else await writeCypher(`MATCH (c:AdvisorCompute {provider: $provider})-[r:VULNERABLE_TO]->() DELETE r`, { provider: AWS });
   for (const b of chunks(verdicts)) await w(VERDICT_CYPHER, b);
   // packages nobody has any more, advisories nothing is affected by
   await writeCypher("MATCH (p:AdvisorPackage) WHERE NOT (p)--() DELETE p");

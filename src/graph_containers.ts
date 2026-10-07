@@ -3,10 +3,11 @@ import { accountId, enabled, ensureSchema, inBackground, neoParams, writeCypher 
 import { imageRef } from "./graph_software.js";
 import { rowToContainer } from "./container_inventory.js";
 import { AWS } from "./adapters/types.js";
+import { COMPUTE_OF } from "./graph_cypher.js";
 
 /**
  * The containers of the graph (docs/cloud-ontology.md §2) for the AWS adapter, from src/container_inventory.ts:
- * (:AdvisorResource)-[:RUNS]->(:AdvisorContainer {id: container:<instance>:<name>}) for each container a box runs or
+ * (:AdvisorCompute)-[:RUNS]->(:AdvisorContainer {id: container:<instance>:<name>}) for each container a box's OS runs or
  * ran (gone ones kept so history stays walkable), -[:BUILT_FROM]->(:AdvisorImage) the image it runs now (the same
  * image nodes the software probe and the cluster workloads use, which also take the source repository and revision
  * the image's labels name), -[:SERVES]->(:AdvisorEndpoint) the ports it publishes, and -[:SHIPS_LOGS_TO]->(:KnLogGroup)
@@ -16,13 +17,14 @@ import { AWS } from "./adapters/types.js";
 const CONTAINER_CYPHER = `
 UNWIND $rows AS row
 MATCH (r:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("r", "os")}
 MERGE (c:AdvisorContainer {id: row.id}) ON CREATE SET c.first_seen = row.first_seen
 SET c += {name: row.name, container_id: row.container_id, image: row.image, image_id: row.image_id, state: row.state, health: row.health, exit_code: row.exit_code, oom_killed: row.oom_killed,
   created_at: row.created, started_at: row.started_at, finished_at: row.finished_at, restarts: row.restarts, restart_policy: row.restart_policy, privileged: row.privileged, network_mode: row.network_mode,
   user: row.user, entrypoint: row.entrypoint, networks: row.networks, ports: row.ports, mounts: row.mounts, source_url: row.source_url, revision: row.revision, image_version: row.image_version,
   compose_project: row.compose_project, compose_service: row.compose_service, compose_dir: row.compose_dir, cpu_pct: row.cpu_pct, mem_bytes: row.mem_bytes,
   last_seen: row.last_seen, probes: row.probes, gone: row.gone, resource_id: row.instance_id, provider: $provider, account_id: coalesce(r.account_id, $account), native_type: 'docker_container', native_id: coalesce(row.container_id, row.name), updated_at: $now}
-MERGE (r)-[e:RUNS]->(c) SET e += {first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}
+MERGE (os)-[e:RUNS]->(c) SET e += {first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}
 WITH c, r, row
 OPTIONAL MATCH (c)-[old:BUILT_FROM]->(o) WHERE o.id <> row.image_node DELETE old
 WITH DISTINCT c, r, row WHERE row.image_node IS NOT NULL

@@ -1,5 +1,5 @@
 import { db } from "../../db.js";
-import { OURS, REF_MERGE } from "../../graph_cypher.js";
+import { COMPUTE_OF, OURS, REF_MERGE } from "../../graph_cypher.js";
 import { inventoryIdsOf, tableExistsIn, writeCypher } from "../../graph_mirror.js";
 import { AWS } from "../types.js";
 import { elbEdges, lambdaArn, poolId } from "./resources.js";
@@ -115,6 +115,20 @@ FOREACH (lb IN row.lbs |
   MERGE (d)-[:BACKED_BY]->(b))`;
 
 
+/**
+ * A Beanstalk environment RUNS_ON the operating system of every live box in the group it scales: the same edge a
+ * cluster workload has to its nodes and a Vercel project to the team's runtime. Rebuilt from the IN_POOL edges the
+ * resource pass just wrote, so a box that left the group leaves the environment too.
+ */
+const DEPLOYMENT_RUNS_ON_CYPHER = `
+UNWIND $ids AS id
+MATCH (d:AdvisorDeployment {id: id})
+OPTIONAL MATCH (d)-[old:RUNS_ON]->() DELETE old
+WITH DISTINCT d
+MATCH (d)-[:RUNS_ON_POOL]->(:AdvisorNodePool)<-[:IN_POOL]-(b:AdvisorBox) WHERE coalesce(b.gone, false) = false
+${COMPUTE_OF("b", "os")}
+MERGE (d)-[x:RUNS_ON]->(os) SET x.via = 'beanstalk', x.updated_at = $now`;
+
 /** The resolver's links (src/route53_inventory.ts) as POINTS_TO edges: ec2, balancers, functions and buckets to their nodes; addresses, interfaces, gateways and CloudFront to refs. */
 export async function mirrorDnsLinks(records: any[], account: string, stamp: string): Promise<void> {
   if (!records.length || !tableExists("inventory_route53_link")) return;
@@ -155,6 +169,7 @@ export async function mirrorDeployments(elbRows: any[], account: string, stamp: 
   }
   const rows = [...envs.values()].map((e) => ({ ...e, pool_id: e.asg ? poolId(e.account_id ?? account, e.asg) : null, environment: /prod/i.test(e.name) ? "production" : /stag/i.test(e.name) ? "staging" : /dev|test/i.test(e.name) ? "development" : null }));
   for (const batch of chunks(rows)) await write(DEPLOYMENT_CYPHER, { rows: batch, account, provider: PROVIDER, now: stamp });
+  for (const batch of chunks(rows.map((e) => e.id))) await write(DEPLOYMENT_RUNS_ON_CYPHER, { ids: batch, now: stamp });
   return rows.map((e) => e.id);
 }
 

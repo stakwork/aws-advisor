@@ -1,5 +1,5 @@
 /**
- * The graph is the record: the swarm cost figures land on the instance's AdvisorCompute node (src/graph_mirror.ts
+ * The graph is the record: the swarm cost figures land on the instance's AdvisorBox node (src/graph_mirror.ts
  * keys it by instance id; a swarm is one customer's environment, so the node carries tenant = true), so a graph query about a customer's box sees what it costs, when it was last used and
  * whether it is parked next to its role, pool and recommendations.
  */

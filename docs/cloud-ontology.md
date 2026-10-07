@@ -72,7 +72,7 @@ between them is how a node comes to exist and how long it lives:
 | how it is written | mirrored one to one from the advisor's tables or the provider's API, by id, incrementally (a run, a pass, a probe each write their part) | rebuilt wholesale on every sync from the `Advisor*` nodes and the price and vulnerability catalogues; nothing is written to it directly |
 | scope | per account: carries `account_id`, removed by a wipe of that account | two areas: the **general area** (`KnSystemType`, `KnArchetype`, `KnVulnerability`, `KnPlaybook`, `KnSource`, `KnDestination`) is true in any account, shared, never wiped; **our side** (`KnSystem`, `KnPricingOverlay`, `KnLogGroup`) is per account and rebuilt |
 | who reads it | pages and agents asking "what is there and what happened to it" | pages and agents asking "what does it cost, what is it for, what is it exposed to as a whole" |
-| examples | `AdvisorCompute i-0abc`, `AdvisorEndpoint i-0abc:tcp:22`, `AdvisorAction #412` | `KnSystemType aws|compute|m6i.large|us-east-1`, `KnSystem autoscaled_group:web`, `KnVulnerability CVE-2025-29927` |
+| examples | `AdvisorBox i-0abc`, `AdvisorCompute compute:i-0abc`, `AdvisorEndpoint i-0abc:tcp:22`, `AdvisorAction #412` | `KnSystemType aws|compute|m6i.large|us-east-1`, `KnSystem autoscaled_group:web`, `KnVulnerability CVE-2025-29927` |
 
 The rule of thumb: if deleting it would lose a fact nobody else has, it is `Advisor*`; if it can be recomputed from
 the `Advisor*` nodes and a catalogue, it is `Kn*`. Verdict edges (`REACHABLE_FROM`, `VULNERABLE_TO`) are derived
@@ -158,12 +158,16 @@ Edges every resource may have: `IN_ACCOUNT`, `MEMBER_OF` → `KnSystem` (§5), `
 `RUNS_AS` → `AdvisorIdentity`, `BUILT_FROM` → `AdvisorImage`, `STORES_ON` → `AdvisorStorage` (volumes). Edges in:
 `TARGETS` (recommendations, actions), `ABOUT` (alerts), `FLAGGED` and `SECURITY_FLAGGED` (controls).
 
-### AdvisorCompute
+### AdvisorBox
 
-A machine the customer's software runs on: an instance or VM, whether standalone or a node in a pool.
+A machine the customer's software runs on: an instance or VM, standalone or a node in a pool; the hidden machine a
+platform runs a team's code on; or a local laptop, desktop or server. The box is the hardware side (size, price,
+addresses, network, state, usage, wake); the operating system it runs is the `AdvisorCompute` it `HOSTS` (below), and
+that is where software and deployments attach.
 
 | property | meaning |
 |---|---|
+| `kind` | `vm` (a cloud instance) \| `managed` (a platform's runtime, never shown: one per Vercel team, `opaque: true`, `managed_by`) \| `laptop` \| `desktop` \| `server` (provider `local`, declared in Settings) |
 | `type` | the SKU (`m6i.large`, `e2-standard-2`) |
 | `vcpu` / `memory_mb` | the SKU's size, from the price catalog |
 | `arch` | `x86_64` \| `arm64` |
@@ -230,6 +234,9 @@ container CPU on a box, connections and IOPS on a database, requests on a deploy
 | `wake_profile` | the whole profile as JSON: `front_door` (`dns`, the record is repointed, or `eip`, the address is moved), the `ports` to wake on, the `ready` check that says the box is up, `sleep_mode` (`auto` \| `hibernate` \| `stop`), `min_awake_minutes` before it may sleep again, `hold_seconds` the doorman keeps a request waiting, `wake_with` (which signals count as real use), `after_wake_command` and `before_park_command`, the `filter` (ignored paths and user agents such as crawlers and scanners, `require_host_match`, `max_wakes_per_day`), the `page` shown while waking, `notify` |
 | `wake_updated_at` / `wake_updated_by` | when and who last saved the profile |
 
+Edges beyond the resource ones: `HOSTS` → `AdvisorCompute` (exactly one), `IN_POOL`, `STORES_ON`, `IN_SEGMENT`,
+`EXPOSES` (ports: reachability follows the box's interfaces and filters, so endpoints stay on the box).
+
 **Capability: tenant costing** (needs telemetry `bill`, and `probe` or `metrics` for last use; the swarm cost block, generic name `tenant`):
 
 | property | meaning |
@@ -240,6 +247,33 @@ container CPU on a box, connections and IOPS on a database, requests on a deploy
 | `idle_days` | days since `last_use_at`; null when use was never seen |
 | `parked` | true when the executor has stopped the resource to save its cost (an applied or verified park action) and it is waiting to be woken or released |
 | `nudge` | true when the customer should be asked whether they still need it: running, idle for at least the parking threshold (Settings › Auto-actions, in days), not parked, and no parking proposal already open for it |
+
+### AdvisorCompute
+
+The operating system a box runs, one per box (`id: compute:<box id>`, `box_id`), written with the box by the resource
+mirror. Not an `AdvisorResource`: it costs nothing apart from its box and is `gone` when the box is. What the API knows
+comes from the adapter (`ResourceNode.compute`); the software probe fills in the rest.
+
+| property | meaning |
+|---|---|
+| `platform` | `linux` \| `windows` \| `macos` |
+| `os` / `os_id` / `os_version` | the distribution and version (`Ubuntu 24.04`, `ubuntu`, `24.04`); from `/etc/os-release`, the SSM platform name, or as declared |
+| `kernel` / `arch` / `package_manager` | from `uname` and the probe |
+| `agent_kind` | `ssm` when the box has the agent the probe runs through |
+| `opaque` / `managed_by` | true when the provider never shows the machine (a Vercel team's runtime): nothing is known inside it |
+| `declared` | true when a person declared it (local machines) rather than an API or probe reporting it |
+
+Edges: `HOSTS` ← `AdvisorBox`; `RUNS` → `AdvisorApp`, `AdvisorContainer`; `RUNS_IMAGE` → `AdvisorImage`;
+`INSTALLED_ON` ← `AdvisorPackage`; `VULNERABLE_TO` → `KnVulnerability`; `RUNS_ON {via, pods}` ← `AdvisorDeployment`
+(`via`: `kubernetes` \| `ecs` (the nodes a workload's pods or tasks run on) \| `beanstalk` (the live boxes of the
+environment's group) \| `vercel_functions` (every live project of the team, to its opaque runtime) \| `local`).
+
+**Local machines** (provider `local`, `src/adapters/local/index.ts`): machines outside any cloud account, declared in
+Settings › Accounts › Local machines, all under one `AdvisorAccount {id: local, native_type: site}`. Each is an
+`AdvisorBox {kind: laptop|desktop|server|vm, native_type: local_<kind>, declared}` hosting its compute, and each thing
+it runs is an `AdvisorDeployment {platform: local, workload_kind: compose|service|dev_server|process|container,
+environment (development by default), url, repo, machine_id}` that `RUNS_ON` the compute. Nothing is collected (telemetry
+`api` with native `declared`); removing a machine deletes its nodes rather than marking them gone.
 
 ### AdvisorFunction
 
@@ -287,7 +321,8 @@ Capability blocks: **usage profile** (above) and **capacity pattern** (below, wh
 for Beanstalk).
 
 Edges: `RUNS_IN` → `AdvisorCluster` (Kubernetes, ECS) or `RUNS_ON_POOL` → `AdvisorNodePool` (Beanstalk, a workload
-pinned to a node group); `BUILT_FROM` → `AdvisorImage` (one per container); `EXPOSES` → endpoints (a Service, an
+pinned to a node group); `RUNS_ON` → `AdvisorCompute` (the operating systems it runs on; an opaque one for a Vercel
+project, a declared one for a local deployment); `BUILT_FROM` → `AdvisorImage` (one per container); `EXPOSES` → endpoints (a Service, an
 Ingress path, a URL); `GUARDED_BY` → filters; `BACKED_BY` → `AdvisorLoadBalancer`; `PART_OF` ← `AdvisorFunction`
 (a Vercel function belongs to a deployment); `PART_OF` ← `AdvisorApp` (a container the probe saw on a node, when its
 labels name the workload); `POINTS_TO` ← DNS records; `INSTALLED_ON` ← `AdvisorPackage` (declared packages: a
@@ -478,7 +513,7 @@ Names and where they point. Route 53, Cloud DNS, Azure DNS, Vercel domains, Clou
 | `routing` | `simple` \| `weighted` \| `latency` \| `failover` \| `geo` |
 | `link_state` | what the advisor resolved it to: `resource` \| `external` \| `dangling` \| `unknown` |
 
-Edges: `IN_ZONE` (record → zone); `POINTS_TO` (record → `AdvisorEndpoint` \| `AdvisorLoadBalancer` \| `AdvisorCompute`
+Edges: `IN_ZONE` (record → zone); `POINTS_TO` (record → `AdvisorEndpoint` \| `AdvisorLoadBalancer` \| `AdvisorBox`
 \| `AdvisorDeployment` \| `AdvisorStorage` \| `AdvisorPublicIp`); `DNS_OF` (domain → zone); `SERVES` (domain →
 deployment, Vercel). A `dangling` record is a finding in itself (subdomain takeover).
 
@@ -1405,10 +1440,11 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `IN_ACCOUNT` | resources, telemetry, runs, passes, scans, KnSystem → AdvisorAccount | belongs to the account |
 | `OBSERVED_BY` | resource → AdvisorTelemetry | which sources cover it, with status and last report |
 | `HAS_ROLE` | resource → KnArchetype | the judged workload role; the same node a system reaches with `IS_A` |
-| `IN_POOL` | AdvisorCompute → AdvisorNodePool | member of an autoscaled group |
+| `IN_POOL` | AdvisorBox → AdvisorNodePool | member of an autoscaled group |
 | `PART_OF` | AdvisorNodePool → AdvisorCluster; AdvisorFunction → AdvisorDeployment; AdvisorApp → AdvisorDeployment (an observed container that belongs to a workload); AdvisorStack → AdvisorStack (nested); KnSystem → KnSystem | containment |
 | `RUNS_IN` | AdvisorDeployment → AdvisorCluster | the platform hosting the workload |
-| `SCHEDULED_ON` | AdvisorDeployment → AdvisorCompute | the nodes a workload's pods or tasks run on (`pods`) |
+| `HOSTS` | AdvisorBox → AdvisorCompute | the operating system a machine runs (one each) |
+| `RUNS_ON {via, pods}` | AdvisorDeployment → AdvisorCompute | where a deployment runs: a workload's nodes (`kubernetes`, `ecs`, with `pods`), a Beanstalk group's boxes, a Vercel team's opaque runtime, a local machine; replaces `SCHEDULED_ON` |
 | `FRONTED_BY` | AdvisorEndpoint → AdvisorLoadBalancer \| AdvisorResourceRef | the balancer an Ingress or LoadBalancer Service created for a workload's endpoint |
 | `IN_CLUSTER` | AdvisorFilter (network_policy) → AdvisorCluster | the cluster a NetworkPolicy lives in |
 | `RUNS_ON_POOL` | AdvisorDeployment → AdvisorNodePool | the pool a deployment scales or is pinned to |
@@ -1416,7 +1452,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `BUILT_FROM` | compute, deployment, function, container → AdvisorImage | the image it runs |
 | `USES {environments}` | AdvisorDeployment → AdvisorDatabase, AdvisorCache, AdvisorStorage | the data stores a deployment is connected to (Vercel stores today) |
 | `RUNS_IMAGE` | compute → AdvisorImage | the container images a plain box runs (from the software probe) |
-| `STORES_ON` | AdvisorCompute → AdvisorStorage (block) | attached volume |
+| `STORES_ON` | AdvisorBox → AdvisorStorage (block) | attached volume |
 | `USES_SECRET` | resource → AdvisorSecret | reads a secret or env var |
 | `RUNS_AS` | resource → AdvisorIdentity | the identity it acts with |
 | `GRANTED {via}` | AdvisorIdentity, AdvisorGroup → AdvisorPolicy | permissions: attached, inline or the permissions boundary |
@@ -1426,7 +1462,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `CAN_ACCESS` | AdvisorIdentity → AdvisorAccount, Vercel project, AdvisorCluster | what the identity is granted there (§What a person can touch) |
 | `REACHES` | AdvisorPerson → AdvisorAccount, Vercel project, AdvisorCluster | derived: everything the person reaches through any identity and path, folded per target |
 | `CAN_ASSUME {via, decision}` | AdvisorIdentity, AdvisorRepository → AdvisorIdentity (role) | trust plus the principal's own `sts:AssumeRole` (an Identity Center user's reserved roles: `ASSIGNED` → `PROVISIONED_AS`) |
-| `CAN_SHELL_INTO {via, decision}` | AdvisorIdentity → AdvisorCompute | Session Manager or EC2 Instance Connect |
+| `CAN_SHELL_INTO {via, decision}` | AdvisorIdentity → AdvisorBox | Session Manager or EC2 Instance Connect |
 | `HOLDS_KEY_OF` | AdvisorDeployment (Vercel project) → AdvisorIdentity (iam user) | a static key in the project's variables |
 | `TOUCHED {events, actions, last_at}` | AdvisorIdentity → resource | what it changed in 90 days of CloudTrail writes |
 | `HAS_CREDENTIAL` | AdvisorIdentity → AdvisorCredential | what it proves itself with |
@@ -1436,7 +1472,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `HAS_IDENTITY` | AdvisorPerson → AdvisorIdentity | the identities one person holds across providers (name, email local part or display name match); `kind`, `matched_by` lists the keys |
 | `CREATED` | AdvisorIdentity → resource | from the audit trail |
 | `ENCRYPTS` | AdvisorSecret (key) → storage, database, messaging | the key that encrypts a volume, bucket, file system, vault, database or topic |
-| `RUNS` | resource → AdvisorApp, AdvisorContainer | a program or a Docker container running on it (edge carries the per-instance facts) |
+| `RUNS` | AdvisorCompute → AdvisorApp, AdvisorContainer | a program or a Docker container running on it (edge carries the per-instance facts) |
 | `PROVIDED_BY` | AdvisorApp → AdvisorPackage | the package the program comes from |
 | `INSTALLED_ON` | AdvisorPackage → compute, deployment, function, image | installed software |
 | `CONTAINS` | AdvisorImage → AdvisorPackage | baked in |
@@ -1561,7 +1597,8 @@ verdict edges still exist.
 | generic | AWS | GCP | Azure | Vercel | Cloudflare |
 |---|---|---|---|---|---|
 | Account | account | project | subscription | team | account |
-| Compute | EC2 instance | GCE instance | VM | | |
+| Box | EC2 instance | GCE instance | VM | the team's runtime (opaque) | |
+| Compute | the instance's OS | the instance's OS | the VM's OS | opaque | |
 | Function | Lambda | Cloud Function | Function App | serverless, edge function | Worker |
 | Deployment | Beanstalk env, ECS service, k8s workload on EKS | Cloud Run, k8s workload on GKE | App Service, k8s workload on AKS | project deployment | Pages project |
 | Cluster | EKS, ECS cluster | GKE | AKS | | |
