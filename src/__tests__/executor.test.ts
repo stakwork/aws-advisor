@@ -276,6 +276,27 @@ test("ledger: a proposal seen again keeps its row and date; one that went stale 
   db.exec("delete from actions");
 });
 
+test("retries: three failures in a day hold a change in its own account only; the last attempt is what a retry is judged on", async () => {
+  const { failureHold, lastAttempt } = await import("../executor.js");
+  const { db } = await import("../db.js");
+  db.exec("delete from actions");
+  const ins = db.prepare("insert into actions(kind, resource, region, account_id, dedupe, status, mode, trigger, title, reason) values ('s3_multipart_abort', 'bucket-a', 'us-east-1', ?, 'mpu:bucket-a', ?, 'apply', 'schedule', 'abort after 7 days', 'because')");
+  ins.run(null, "failed"); ins.run(null, "failed");
+  assert.equal(failureHold("mpu:bucket-a", null), null);
+  const third = Number(ins.run(null, "failed").lastInsertRowid);
+  assert.match(failureHold("mpu:bucket-a", null) ?? "", /failed 3 times in the last day/);
+  assert.deepEqual(lastAttempt("mpu:bucket-a", null), { id: third, status: "failed" });
+  // the same bucket name in a member account is another change, with its own count and its own last row
+  assert.equal(failureHold("mpu:bucket-a", "111122223333"), null);
+  assert.equal(lastAttempt("mpu:bucket-a", "111122223333"), null);
+  const refused = Number(ins.run("111122223333", "refused").lastInsertRowid);
+  assert.deepEqual(lastAttempt("mpu:bucket-a", "111122223333"), { id: refused, status: "refused" });
+  // failures older than a day no longer hold it
+  db.prepare("update actions set created_at = datetime('now', '-2 days') where account_id is null").run();
+  assert.equal(failureHold("mpu:bucket-a", null), null);
+  db.exec("delete from actions");
+});
+
 test("gp2 → gp3: the target keeps gp2's performance and the saving nets out the extras", async () => {
   const { gp3Target, gp3Saving } = await import("../actions/ebs_gp3_migrate.js");
   assert.deepEqual(gp3Target(100), { iops: 3000, throughput_mibps: 125 });

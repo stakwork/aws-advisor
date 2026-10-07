@@ -274,21 +274,28 @@ export function executorCreds(): Creds {
   };
 }
 
-/** Who the executor would act as: sts:GetCallerIdentity under the actuator role, with the remedy on failure. */
-export async function actuatorIdentity(timeoutMs = 15_000): Promise<{ ok: true; arn: string } | { ok: false; error: string }> {
-  let creds: Creds;
-  try { creds = executorCreds(); } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
-  if (!config.actRoleArn) return { ok: false, error: "no actuator role configured" };
-  const client = new STSClient({ region: creds.region, credentials: creds.act() });
+/** sts:GetCallerIdentity under one account's actuator role, with the remedy on failure. */
+async function assumeCheck(a: AccountCreds, timeoutMs: number): Promise<{ ok: true; arn: string } | { ok: false; error: string }> {
+  let act: AwsCredentialIdentityProvider;
+  try { act = a.act(); } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+  const client = new STSClient({ region: a.region, credentials: act });
   try {
     const timer = new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`sts:GetCallerIdentity did not answer within ${Math.round(timeoutMs / 1000)}s`)), timeoutMs).unref());
     const r = await Promise.race([client.send(new GetCallerIdentityCommand({})), timer]);
     return { ok: true, arn: r.Arn || "" };
   } catch (e: any) {
     const msg = String(e?.message || e);
-    if (/AccessDenied|not authorized to perform: sts:AssumeRole/i.test(msg)) return { ok: false, error: `${msg}. The advisor's read identity is not allowed to assume ${config.actRoleArn}: put it in the role's trust policy (Auto-actions page shows the JSON).` };
+    if (/AccessDenied|not authorized to perform: sts:AssumeRole/i.test(msg)) return { ok: false, error: `${msg}. The advisor's read identity${a.is_parent ? "" : ` of account ${a.account_id}`} is not allowed to assume the actuator role: put it in the role's trust policy (Auto-actions page shows the JSON).` };
     return { ok: false, error: msg };
   } finally { client.destroy(); }
+}
+
+/** Who the executor would act as: sts:GetCallerIdentity under the actuator role, with the remedy on failure. */
+export async function actuatorIdentity(timeoutMs = 15_000): Promise<{ ok: true; arn: string } | { ok: false; error: string }> {
+  let creds: Creds;
+  try { creds = executorCreds(); } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+  if (!config.actRoleArn) return { ok: false, error: "no actuator role configured" };
+  return assumeCheck(creds.forAccount(null), timeoutMs);
 }
 
 // ---- what the role may do ---------------------------------------------------------------------------------------------
@@ -611,7 +618,14 @@ function closeStale(kind: ActionKind, keep: Set<string>): number[] {
   return ids;
 }
 
-const recentFailures = (dedupe: string) => (db.prepare("select count(*) as n from actions where dedupe = ? and status = 'failed' and datetime(created_at) > datetime('now', '-1 day')").get(dedupe) as { n: number }).n;
+/** Failed attempts at one change (dedupe, per account: the same name in another member is another change) in the last day. */
+const recentFailures = (dedupe: string, accountId: string | null | undefined) => (db.prepare("select count(*) as n from actions where dedupe = ? and coalesce(account_id, '') = coalesce(?, '') and status = 'failed' and datetime(created_at) > datetime('now', '-1 day')").get(dedupe, accountId ?? null) as { n: number }).n;
+/** Why the pass does not try a change now because it failed too often, else null. */
+export const failureHold = (dedupe: string, accountId: string | null | undefined): string | null =>
+  recentFailures(dedupe, accountId) >= FAILURES_BEFORE_REFUSING ? `failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow (Apply on the page tries once more)` : null;
+/** The newest row of a change when it is a failed or refused attempt: the pass writes a new row for a retry only. */
+export const lastAttempt = (dedupe: string, accountId: string | null | undefined) =>
+  (db.prepare("select id, status from actions where dedupe = ? and coalesce(account_id, '') = coalesce(?, '') order by id desc limit 1").get(dedupe, accountId ?? null) as { id: number; status: ActionStatus } | undefined) ?? null;
 
 // ---- apply / verify / revert ------------------------------------------------------------------------------------
 
@@ -633,8 +647,8 @@ async function applyActionInner(id: number, trigger: string): Promise<ActionRow>
   if (paused.paused) throw new Error(`auto-actions are paused by ${paused.by}${paused.reason ? ` (${paused.reason})` : ""}; resume from the page or the chat`);
   const mod = modules.get(row.kind); if (!mod) throw new Error(`no module for ${row.kind}`);
   // The pass stops retrying a change that keeps failing; a person's click is a decision and tries once more (the row says so).
-  if (trigger !== "manual" && recentFailures(row.dedupe) >= FAILURES_BEFORE_REFUSING) {
-    const why = `failed ${FAILURES_BEFORE_REFUSING} times in the last day; not retried until tomorrow (Apply on the page tries once more)`;
+  const why = trigger !== "manual" ? failureHold(row.dedupe, row.account_id) : null;
+  if (why) {
     db.prepare("update actions set status = 'refused', error = ?, trigger = ? where id = ?").run(why, trigger, id);
     logEvent({ action_id: id, kind: row.kind, event: "apply", outcome: "refused", trigger, detail: why });
     return getAction(id)!;
@@ -884,6 +898,15 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
       if (!capsByAccount.has(key)) capsByAccount.set(key, (await actuatorCapabilities(key || null)).caps);
       return capsByAccount.get(key)!;
     };
+    // Whether each account's actuator role can be assumed at all, asked once per pass: an account that cannot act
+    // (no role, or the trust does not let the read identity in) leaves its changes proposed, said once, not one refusal per row.
+    const reach = new Map<string, Promise<string | null>>();
+    const unreachable = (creds: Creds, accountId: string | null | undefined): Promise<string | null> => {
+      const key = accountKey(accountId);
+      if (!reach.has(key)) reach.set(key, assumeCheck(creds.forAccount(key || null), 15_000).then((r) => (r.ok ? null : r.error)));
+      return reach.get(key)!;
+    };
+    const leftBy = new Map<string, { why: string; n: number }>();
     for (const mod of modules.values()) {
       if (opts.kinds && !opts.kinds.includes(mod.kind)) continue;
       const creds = await credsFor(mod.provider); if (!creds) continue;
@@ -897,6 +920,13 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
       const recorded: { row: ActionRow; fresh: boolean; p: Proposal }[] = [];
       for (const p of plan.proposals) {
         keep.add(keepKey(p.dedupe, p.account_id));
+        // A change whose last attempt failed or was refused gets a new row only when this pass will really try it again;
+        // held after repeated failures, or its account cannot act: the failed row stays the record, no copy each hour.
+        const last = mode === "apply" ? lastAttempt(p.dedupe, p.account_id) : null;
+        if (last && (last.status === "failed" || last.status === "refused")) {
+          const why = failureHold(p.dedupe, p.account_id) ?? await unreachable(creds, p.account_id);
+          if (why) { log(`#${last.id} not tried again: ${why}`); continue; }
+        }
         const { row, fresh, revived } = recordProposal(p, mode, trigger);
         touched.add(row.id);
         out.proposed++; if (fresh) out.fresh++;
@@ -917,6 +947,14 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
         }
         const wait = graceLeftMs(row, mod.grace_hours?.() ?? 0);
         if (wait > 0) { const n = `#${row.id} waits ${Math.ceil(wait / 3600000)} h more (grace period; Apply on the page skips it)`; out.notes.push(`${mod.kind}: ${n}`); log(n); continue; }
+        // held and unreachable rows stay proposed and leave the pass's slots to the changes that can go through
+        const hold = failureHold(row.dedupe, row.account_id);
+        if (hold) { log(`#${row.id} waits: ${hold}`); continue; }
+        const cannot = await unreachable(creds, row.account_id);
+        if (cannot) {
+          const k = accountKey(row.account_id); const l = leftBy.get(k) ?? { why: cannot, n: 0 }; l.n++; leftBy.set(k, l);
+          log(`#${row.id} left proposed: the actuator cannot act in ${k ? `account ${k}` : "the main account"}`); continue;
+        }
         if (budget.left <= 0) { log(`cap of ${config.actMaxPerPass} changes per pass reached; #${row.id} waits`); continue; }
         budget.left--;
         const done = await applyAction(row.id, trigger);
@@ -928,6 +966,7 @@ export function runExecutorPass(trigger = "schedule", opts: { kinds?: ActionKind
       const stale = closeStale(mod.kind, keep);
       out.stale += stale.length; for (const id of stale) touched.add(id);
     }
+    for (const [k, l] of leftBy) { const n = `${l.n} change(s) left proposed: the actuator cannot act in ${k ? `account ${k}` : "the main account"}: ${l.why}`; out.notes.push(n); log(n); }
     if (touched.size) mirrorActionsInBackground([...touched]);
     out.took_ms = Date.now() - t0;
     log(`${mode}: ${out.proposed} proposed (${out.fresh} new), ${out.applied} applied, ${out.verified} verified, ${out.failed} failed, ${out.refused} refused, ${out.held} held by Jev, ${out.stale} stale in ${out.took_ms} ms${out.errors.length ? `; errors: ${out.errors.join("; ")}` : ""}`);
