@@ -124,6 +124,7 @@ export function buildSchema(labels: LabelSample[], edges: EdgeSample[]): { nodes
   for (const l of labels) {
     const a: Record<string, string> = {}; const s: string[] = [];
     for (const p of l.props) {
+      if (p.key === "name_inferred") continue; // bookkeeping for the inferred name (graph_mirror backfillJarvisFields), not an attribute
       if (JARVIS_FIELDS.has(p.key)) { s.push(p.key); continue; }
       a[p.key] = `${p.count >= l.total ? "" : "?"}${attrType(p.values)}`;
     }

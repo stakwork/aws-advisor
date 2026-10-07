@@ -347,7 +347,7 @@ const isAdvisorLabel = (l: string) => /^`?(Advisor|Kn)/.test(l);
  * Jarvis read and link goes through it), and the advisor's own nodes (Advisor*, Kn*) Jarvis's Data_Bank and domain
  * labels. Added here, on creation, to each node MERGE of the statement, so no writer has to remember it; MERGE
  * accepts several ON CREATE SET clauses, so one already there is unaffected. A node made any other way, or before
- * this, gets them from the sweep after a sync (backfillRefIds).
+ * this, gets them from the sweep after a sync (backfillJarvisFields).
  */
 export const withRefIds = (cypher: string): string => cypher.replace(NODE_MERGE, (m, v, label) =>
   `${m} ON CREATE SET ${v}.ref_id = randomUUID()${isAdvisorLabel(label) ? `, ${v}:${JARVIS_LABELS}` : ""}`);
@@ -357,6 +357,18 @@ async function write(cypher: string, params: Record<string, unknown> = {}): Prom
   const s = session("WRITE");
   try { await s.executeWrite((tx) => tx.run(withRefIds(cypher), neoParams(params)), { timeout: 60_000 }).catch((e) => { noteFailure(e); throw e; }); }
   finally { await s.close(); }
+  scheduleJarvisSweep();
+}
+
+/** A minute after the last burst of writes, the sweep names what the writes left unnamed (an alert, a stub network) without waiting for the next full sync. */
+let sweepTimer: NodeJS.Timeout | null = null;
+function scheduleJarvisSweep() {
+  if (sweepTimer || process.env.NODE_ENV === "test") return;
+  sweepTimer = setTimeout(() => {
+    sweepTimer = null;
+    backfillJarvisFields().catch((e) => logError("Jarvis fields sweep", e));
+  }, 60_000);
+  sweepTimer.unref();
 }
 
 // ---- schema -------------------------------------------------------------------------------------------------------
@@ -376,19 +388,34 @@ export async function ensureSchema(): Promise<void> {
   await wipeLegacy();
   schemaReady = true;
   // nodes written before ref_id existed: once per process, in the background (a large graph takes a while)
-  void backfillRefIds().then((n) => { if (n) console.log(`[graph] ref_id or Jarvis labels given to ${n} nodes`); }).catch((e) => logError("ref_id backfill", e));
+  void backfillJarvisFields().then((n) => { if (n) console.log(`[graph] ref_id, Jarvis labels or name given to ${n} nodes`); }).catch((e) => logError("Jarvis fields backfill", e));
 }
 
 /**
- * Gives a `ref_id` to every advisor node that has none (Advisor*, Kn*, and the Schema nodes), and the Data_Bank and
- * domain labels to the Advisor* and Kn* ones that lack them, a thousand at a time. Returns how many nodes changed.
+ * The name a node without one is shown under in Jarvis: what it is called elsewhere on the node (a recommendation's or
+ * action's title, a DNS record's fqdn, a person's email, an alert's message), "<Type> <n>" for a numeric id (Run 42,
+ * Alert 7), else the id itself. Cypher over `n`; the type word is the node's specific label without its prefix.
  */
-export async function backfillRefIds(): Promise<number> {
+export const INFERRED_NAME = `left(coalesce(n.title, n.display_name, n.fqdn, n.email, n.message,
+  CASE WHEN toString(n.id) =~ '[0-9]+' THEN
+    head([l IN labels(n) WHERE l <> 'AdvisorResource' AND (l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn') | CASE WHEN l STARTS WITH 'Advisor' THEN substring(l, 7) ELSE substring(l, 2) END] + ['Node']) + ' ' + toString(n.id)
+  END, toString(n.id), n.ref_id), 200)`;
+
+/**
+ * Brings every advisor node up to what Jarvis expects, a thousand at a time: a `ref_id` (Advisor*, Kn*, and the
+ * Schema nodes), the Data_Bank and domain labels (Advisor*, Kn*), and a `name`. A name the writer gave is never
+ * touched; an inferred one is kept in `name_inferred` too, so it follows its source (an alert's message) for as long
+ * as nobody else has named the node. Returns how many nodes changed.
+ */
+export async function backfillJarvisFields(): Promise<number> {
   if (!enabled()) return 0;
   const ours = "any(l IN labels(n) WHERE l STARTS WITH 'Advisor' OR l STARTS WITH 'Kn')";
   const sweeps = [
     `MATCH (n) WHERE n.ref_id IS NULL AND (${ours} OR n:Schema) WITH n LIMIT 1000 SET n.ref_id = randomUUID() RETURN count(*) AS n`,
     `MATCH (n) WHERE ${ours} AND NOT (n:Data_Bank AND n:${DOMAIN_LABEL}) WITH n LIMIT 1000 SET n:${JARVIS_LABELS} RETURN count(*) AS n`,
+    `MATCH (n) WHERE ${ours} AND (n.name IS NULL OR n.name = '' OR n.name = n.name_inferred)
+     WITH n, ${INFERRED_NAME} AS inferred WHERE inferred IS NOT NULL AND (n.name IS NULL OR n.name <> inferred)
+     WITH n, inferred LIMIT 1000 SET n.name = inferred, n.name_inferred = inferred RETURN count(*) AS n`,
   ];
   let total = 0;
   for (const cypher of sweeps) {
@@ -1064,7 +1091,7 @@ export async function mirrorAll(): Promise<MirrorCounts | null> {
   // last, so it reads everything the sync wrote
   let schema: import("./graph_schema.js").SchemaCounts | null = null;
   try { const { mirrorSchema } = await import("./graph_schema.js"); schema = await mirrorSchema(); } catch (e) { logError("schema", e); }
-  try { await backfillRefIds(); } catch (e) { logError("ref_id backfill", e); }
+  try { await backfillJarvisFields(); } catch (e) { logError("Jarvis fields backfill", e); }
   const aws: any = layers[AWS] ?? {};
   return { schema, account_id: mirrored[0]?.primaryAccountId() ?? accountId(), accounts: mirrored.map((a) => ({ provider: a.id, id: a.primaryAccountId() })), knowledge, network: aws.network ?? null, resources, recommendations, runs: runs.length, flagged: ctl.flagged, controls: ctl.controls, playbooks, alerts, incidents, actions, passes,
     apps: Number(aws["apps and ports"]?.apps ?? 0), took_ms: Date.now() - t0 };
