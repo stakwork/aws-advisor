@@ -2,7 +2,9 @@
 import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { actuatorPolicy, actuatorTrustPolicy } from "../permissions.js";
-import { sdkIdentity } from "../steampipe.js";
+import { hostIdentity, sdkIdentity } from "../steampipe.js";
+import { roleAccount } from "../accounts.js";
+import { config } from "../config.js";
 import { consentErrorStatus, runAsPerson } from "../consent.js";
 import { PreviewError, previewAsPerson } from "../preview.js";
 import { actuatorCapabilities, actuatorCapabilitiesByAccount, applyAction, deleteActions, dispatchActionNotifications, executorStatus, getAction, listActions, pauseActions, pauseState, previewActions, resumeActions, revertAction, runExecutorPass, stepAction, verifyAction } from "../executor.js";
@@ -43,8 +45,11 @@ actions.post("/actions/capabilities/recheck", async (req, res) => {
 });
 actions.get("/actions/status", async (_req, res) => {
   const status = await executorStatus();
-  const read = await sdkIdentity(8000);
-  res.json({ ...status, read_identity: read.ok ? read.arn : null, policy: actuatorPolicy(), trust_policy: actuatorTrustPolicy(read.ok ? read.arn.replace(/^arn:aws:sts::(\d+):assumed-role\/([^/]+)\/.*$/, "arn:aws:iam::$1:role/$2") : undefined) });
+  const [read, host] = await Promise.all([sdkIdentity(8000), hostIdentity(8000)]);
+  // the actuator is assumed from the host's own identity when it lives in the host's account (src/executor.ts actuatorMaster)
+  const byHost = Boolean(host && config.actRoleArn && roleAccount(config.actRoleArn) === host.accountId);
+  const readArn = read.ok ? read.arn.replace(/^arn:aws:sts::(\d+):assumed-role\/([^/]+)\/.*$/, "arn:aws:iam::$1:role/$2") : undefined;
+  res.json({ ...status, read_identity: read.ok ? read.arn : null, host_identity: host?.arn ?? null, trust_principal: byHost ? "host" : "read", policy: actuatorPolicy(), trust_policy: actuatorTrustPolicy(byHost ? host!.arn : readArn) });
 });
 // ?status=all (default) | proposed | applied | …, ?kind=<action kind>, ?page (1-based), ?page_size (default 25, max 200),
 // ?id=<row id> without ?page lands on the page holding that row (deep links from Sphinx).

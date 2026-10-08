@@ -107,7 +107,7 @@ export default function Actions() {
         {showPolicy && status && (
           <div className="mt-3 grid gap-3 md:grid-cols-2">
             <div><div className="mb-1 text-xs text-zinc-400">Permissions policy for the actuator role <CopyButton text={JSON.stringify(status.policy, null, 2)} /></div><Code className="max-h-72 overflow-auto">{JSON.stringify(status.policy, null, 2)}</Code></div>
-            <div><div className="mb-1 text-xs text-zinc-400">Trust policy (the advisor's read identity{status.read_identity ? "" : ", once configured"} may assume it) <CopyButton text={JSON.stringify(status.trust_policy, null, 2)} /></div><Code className="max-h-72 overflow-auto">{JSON.stringify(status.trust_policy, null, 2)}</Code>
+            <div><div className="mb-1 text-xs text-zinc-400">Trust policy ({status.trust_principal === "host" ? "the advisor host's own identity may assume it: the role is in the host's account, so the read role never leads to it" : <>the advisor's read identity{status.read_identity ? "" : ", once configured"} may assume it</>}) <CopyButton text={JSON.stringify(status.trust_policy, null, 2)} /></div><Code className="max-h-72 overflow-auto">{JSON.stringify(status.trust_policy, null, 2)}</Code>
               <div className="mt-2 text-xs text-zinc-500">Create the role with these two documents, then paste its ARN into Settings › Auto-actions › Actuator role ARN. "Acts as" above turns green when the assumption works.</div></div>
           </div>
         )}

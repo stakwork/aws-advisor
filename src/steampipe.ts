@@ -226,6 +226,43 @@ export function sdkCredentials(): SdkCredentials & { region: string } {
 }
 
 /**
+ * The identity under the saved role (the host's instance role, the profile or the static key), when Settings
+ * chains a role on top of it; null without a role, where it is the read identity itself. The executor assumes an
+ * actuator role living in this identity's account from it rather than from the read role, so a read-only role
+ * never leads to a writing one.
+ */
+export function sdkHostCredentials(): (SdkCredentials & { region: string }) | null {
+  const meta = credentialsMeta();
+  if (!meta?.roleArn || !hasConnectionFile()) return null;
+  const p = credentialPaths();
+  const keys = meta.mode === "keys" ? readStaticKeys(p) : null;
+  const region = meta.defaultRegion && meta.defaultRegion !== "*" ? meta.defaultRegion : "us-east-1";
+  return { ...sdkCredentialsFor({ ...meta, roleArn: undefined }, p, keys), region };
+}
+
+/** The host identity's IAM ARN (an assumed-role session folded to its role) and account, cached for the process; null when there is none or it cannot be read. */
+let hostIdentityCache: { key: string; at: number; value: { arn: string; accountId: string } | null } | null = null;
+export const hostIdentityCached = () => hostIdentityCache?.value ?? null;
+export async function hostIdentity(timeoutMs = 15_000): Promise<{ arn: string; accountId: string } | null> {
+  const meta = credentialsMeta();
+  const key = `${meta?.mode}|${meta?.profile ?? ""}|${meta?.roleArn ?? ""}`;
+  if (hostIdentityCache && hostIdentityCache.key === key && (hostIdentityCache.value || Date.now() - hostIdentityCache.at < 60_000)) return hostIdentityCache.value;
+  let value: { arn: string; accountId: string } | null = null;
+  const host = (() => { try { return sdkHostCredentials(); } catch { return null; } })();
+  if (host) {
+    const client = new STSClient({ region: host.region, credentials: host.provider });
+    try {
+      const timer = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs).unref());
+      const r = await Promise.race([client.send(new GetCallerIdentityCommand({})), timer]);
+      value = { arn: String(r.Arn || "").replace(/^arn:aws:sts::(\d+):assumed-role\/([^/]+)\/.*$/, "arn:aws:iam::$1:role/$2"), accountId: r.Account || "" };
+    } catch (e: any) { console.error(`[credentials] host identity: ${e?.message || e}`); }
+    finally { client.destroy(); }
+  }
+  hostIdentityCache = { key, at: Date.now(), value };
+  return value;
+}
+
+/**
  * sts:GetCallerIdentity through the SDK provider: proves the SDK side can resolve credentials (a profile
  * that needs `aws sso login`, a host without an instance role, a role that refuses the assumption) and
  * says who the advisor is. Failures come back as a message with the remedy.

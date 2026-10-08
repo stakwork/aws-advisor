@@ -19,7 +19,7 @@ import { IAMClient, SimulatePrincipalPolicyCommand } from "@aws-sdk/client-iam";
 import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { config } from "./config.js";
 import { addColumn, db, getJsonSetting, setSetting } from "./db.js";
-import { credentialsMeta, sdkCredentials } from "./steampipe.js";
+import { credentialsMeta, hostIdentity, hostIdentityCached, sdkCredentials, sdkHostCredentials } from "./steampipe.js";
 import { accountCredentials, actuatorRoleFor, listMembers, roleAccount } from "./accounts.js";
 import { ACTUATOR_NEEDS, PERSON_ONLY_ACTIONS, describeError, explainPermissionError } from "./permissions.js";
 import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
@@ -241,13 +241,34 @@ function closeRecommendation(row: ActionRow): void {
 // ---- credentials ------------------------------------------------------------------------------------------------
 
 /** An account's actuator: its role assumed from its read provider, once. */
+/**
+ * Who assumes an actuator role: the host's own identity (the instance role under the saved read role) when the
+ * actuator lives in the host's account, which is what that role's trust names and keeps the read role read-only;
+ * otherwise `fallback`, the parent's read identity, as the trust policies the advisor prints for a member say.
+ */
+function actuatorMaster(roleArn: string, fallback: AwsCredentialIdentityProvider): AwsCredentialIdentityProvider {
+  return async (props) => {
+    const host = await hostIdentity();
+    if (host && host.accountId === roleAccount(roleArn)) { const h = sdkHostCredentials(); if (h) return h.provider(props); }
+    return fallback(props);
+  };
+}
+
+/** The identity that assumes `roleArn` (its IAM ARN when known), for the remedy of a refused assumption. */
+export function actuatorAssumer(roleArn: string): { arn: string | null; host: boolean } {
+  const host = hostIdentityCached();
+  if (host && host.accountId === roleAccount(roleArn)) return { arn: host.arn, host: true };
+  const meta = credentialsMeta();
+  return { arn: meta?.roleArn || null, host: false };
+}
+
 function accountCreds(a: { account_id: string; name: string; is_parent: boolean; read: AwsCredentialIdentityProvider; region: string; act_role_arn: string; act_master?: AwsCredentialIdentityProvider }): AccountCreds {
   let actProvider: AwsCredentialIdentityProvider | null = null;
   return {
     account_id: a.account_id, name: a.name, is_parent: a.is_parent, read: a.read, region: a.region,
     act: () => {
       if (!a.act_role_arn) throw new NoActuator(a.is_parent ? "no actuator role is configured (Settings > Auto-actions > Actuator role ARN); nothing can be applied" : `member account ${a.name} (${a.account_id}) has no actuator role (Settings > Member accounts); dry runs only there`);
-      if (!actProvider) actProvider = fromTemporaryCredentials({ masterCredentials: a.act_master ?? a.read, params: { RoleArn: a.act_role_arn, RoleSessionName: "aws-advisor-act", DurationSeconds: 900 }, clientConfig: { region: a.region } });
+      if (!actProvider) actProvider = fromTemporaryCredentials({ masterCredentials: actuatorMaster(a.act_role_arn, a.act_master ?? a.read), params: { RoleArn: a.act_role_arn, RoleSessionName: "aws-advisor-act", DurationSeconds: 900 }, clientConfig: { region: a.region } });
       return actProvider;
     },
   };
@@ -268,8 +289,8 @@ export function executorCreds(): Creds {
     try {
       const c = accountCredentials(m.account_id);
       // a member without its own actuator uses the one under Settings > Auto-actions when that role lives in it. Either way the
-      // actuator is assumed from the parent's read identity, the principal every trust policy the advisor prints names
-      // (Settings > Member accounts, the child's setup script), never from the child's read role
+      // actuator is assumed from the host's identity when the role lives in the host's account, else from the parent's read
+      // identity (actuatorMaster), never from the child's read role
       const shared = !m.act_role_arn && roleAccount(config.actRoleArn) === m.account_id;
       accounts.push(accountCreds({ account_id: m.account_id, name: m.name, is_parent: false, read: c.provider, region: c.region, act_role_arn: m.act_role_arn || (shared ? config.actRoleArn : ""), act_master: base.provider })); }
     catch (e: any) { console.error(`[executor] member ${m.account_id}: ${e?.message || e}`); }
@@ -291,7 +312,7 @@ async function assumeCheck(a: AccountCreds, timeoutMs: number): Promise<{ ok: tr
     return { ok: true, arn: r.Arn || "" };
   } catch (e: any) {
     const msg = String(e?.message || e);
-    if (/AccessDenied|not authorized to perform: sts:AssumeRole/i.test(msg)) return { ok: false, error: `${msg}. ${ASSUME_REMEDY(a.is_parent ? null : a.account_id)}` };
+    if (/AccessDenied|not authorized to perform: sts:AssumeRole/i.test(msg)) return { ok: false, error: `${msg}. ${assumeRemedy(actuatorRoleFor(a.is_parent ? null : a.account_id), a.is_parent ? null : a.account_id)}` };
     return { ok: false, error: msg };
   } finally { client.destroy(); }
 }
@@ -442,16 +463,19 @@ export async function actuatorCapabilitiesByAccount(force = false): Promise<{ ac
   return Promise.all(out.map(async (a) => { const c = await actuatorCapabilities(a.is_parent ? null : a.account_id, force); return { ...a, capabilities: c.caps, ...(c.note ? { capabilities_note: c.note } : {}) }; }));
 }
 
-/** Why the actuator role could not be assumed: its trust policy, not its permissions. */
-const ASSUME_REMEDY = (accountId: string | null | undefined) =>
-  `the advisor's read identity (the parent's) is not allowed to assume the actuator role${accountId ? ` of account ${accountId}` : ""}: put that identity in the role's trust policy (Settings > Member accounts or the Auto-actions page shows the JSON). The role's own policy, Auto-park grants included, does not apply until it can be assumed`;
+/** Why the actuator role could not be assumed: its trust policy, not its permissions; names the identity that tried. */
+function assumeRemedy(roleArn: string, accountId: string | null | undefined): string {
+  const who = actuatorAssumer(roleArn);
+  const identity = who.arn ? `${who.host ? "the advisor host's identity" : "the advisor's read identity"} ${who.arn}` : "the advisor's read identity";
+  return `${identity} is not allowed to assume the actuator role${roleArn ? ` ${roleArn}` : accountId ? ` of account ${accountId}` : ""}: put it in the role's trust policy (the Auto-actions page shows the JSON)${who.host ? "" : " and allow it sts:AssumeRole on the role in its own policy when the role is in another account"}. The role's own policy, Auto-park grants included, does not apply until it can be assumed`;
+}
 
 /** The message a denied apply or revert leaves on the row, and what it teaches (about that account's role). */
 function actuatorDenied(e: unknown, kind: string, verb: "apply" | "revert", accountId: string | null | undefined = null): string | null {
   const issue = explainPermissionError(e, `${kind} ${verb}`);
   if (!issue) return null;
   // a failed assume says nothing about what the role may do: no denial learnt, and the remedy is the trust policy
-  if (issue.action === "sts:AssumeRole") return ASSUME_REMEDY(accountId);
+  if (issue.action === "sts:AssumeRole") return assumeRemedy(actuatorRoleFor(accountId), accountId);
   const action = issue.action !== "unknown" ? issue.action : (ACTUATOR_NEEDS[kind]?.[verb] ?? [])[0] ?? "unknown";
   if (action !== "unknown") learnDenial(action, kind, String((e as any)?.message || e), accountId);
   return `the actuator role${accountId ? ` of account ${accountId}` : ""} is not allowed ${action}: add it to the role's policy (the Auto-actions page prints the full policy), or leave this action to a person`;
