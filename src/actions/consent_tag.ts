@@ -10,6 +10,7 @@ import { db } from "../db.js";
 import type { ActionModule, Creds, Proposal } from "../executor.js";
 import { checkGrant, setGrant, type DnsGrant } from "../autopark_grant.js";
 import { patchEc2Tag } from "../inventory.js";
+import { forgetHibernationStatus } from "../hibernation.js";
 
 /** Beanstalk applies a tag change as an environment update; the list shows it only once that is through. A read-back younger than this is inconclusive, not a failure. */
 export const BEANSTALK_TAG_SETTLE_MS = 10 * 60_000;
@@ -37,6 +38,8 @@ async function writeTag(p: Proposal, creds: Creds, value: string | null): Promis
     else await ec2.send(new CreateTagsCommand({ Resources: [p.resource], Tags: [{ Key: tag, Value: value }] }));
     // the page reads tags from the stored snapshot: keep it true now, not at the next collection
     patchEc2Tag(p.resource, tag, value);
+    // the hibernation note reads both tags (advisor:hibernate, and AdvisorAutoPark for the A-record grant): not the cached answer from before the write
+    forgetHibernationStatus(p.resource);
     return value == null ? `DeleteTags: ${tag} removed` : `CreateTags: ${tag}=${value}`;
   } finally { ec2.destroy(); }
 }

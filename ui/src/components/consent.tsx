@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -200,8 +200,9 @@ function HibernationNote({ instanceId, handsOff, autoPark }: { instanceId: strin
   const [msg, setMsg] = useState<{ text: string; err?: boolean; actionId?: number; status?: string } | null>(null);
   const load = (fresh = false) => { setReadErr(""); return api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation${fresh ? "?fresh=1" : ""}`).then(setH).catch((e) => { setH(null); setReadErr(e.message); }); };
   useEffect(() => { setH(undefined); setMsg(null); load(); }, [instanceId]);
-  // the switch just moved: a read that failed before gets another go, so the note does not stay missing until a reload
-  useEffect(() => { if (h === null) load(); }, [autoPark]);
+  // the switch just moved: read again, fresh, since the Auto-park grant decides whether the A records may move with a relaunch
+  const firstAutoPark = useRef(true);
+  useEffect(() => { if (firstAutoPark.current) { firstAutoPark.current = false; return; } load(true); }, [autoPark]);
   const choose = (value: "stop" | "live" | "no" | null) => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation`, { method: "POST", body: JSON.stringify({ value }) })
