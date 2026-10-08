@@ -119,8 +119,10 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
   // the state as EC2 reports it now (the inventory row is as old as its last collection); polled after Stop and Start until it lands
   const [live, setLive] = useState<string | null>(null);
   const [watch, setWatch] = useState<{ from: string; until: number } | null>(null);
-  const readState = () => api(`/inventory/ec2/${encodeURIComponent(instanceId)}/state`).then((s) => { setLive(s.state); onState?.(s.state); return s.state as string; }).catch(() => null);
-  useEffect(() => { setLive(null); setWatch(null); readState(); }, [instanceId]);
+  // when the office-hours pass stops and starts it next (src/park_outlook.ts), read with the state
+  const [park, setPark] = useState<ParkOutlook | null>(null);
+  const readState = () => api(`/inventory/ec2/${encodeURIComponent(instanceId)}/state`).then((s) => { setLive(s.state); setPark(s.park ?? null); onState?.(s.state); return s.state as string; }).catch(() => null);
+  useEffect(() => { setLive(null); setPark(null); setWatch(null); readState(); }, [instanceId]);
   useEffect(() => {
     if (!watch) return;
     let stop = false; let timer: ReturnType<typeof setTimeout> | undefined;
@@ -174,6 +176,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
           </span>
         )}
       </div>
+      {on && !handsOff && !poolKind && park && <NextPark park={park} state={cur} onDue={readState} />}
       {msg && <div className={`mt-1 ${msg.err ? "text-red-300" : "text-zinc-400"}`}>{msg.text}{msg.actionId ? <> · <Link className="text-sky-300 hover:underline" to={`/actions?id=${msg.actionId}`}>row #{msg.actionId}</Link></> : null}</div>}
       {on && grant && !msg && (
         <div className={`mt-1 ${grant.granted === false ? "text-amber-300/90" : "text-zinc-500"}`}>
@@ -182,6 +185,40 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
       )}
       {msg?.actionId && (msg.status === "proposed" || msg.status === "failed") ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setTag(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
       {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} autoPark={on} />}
+    </div>
+  );
+}
+
+type ParkOutlook = { schedule: string | null; source: "tag" | "review" | "profile" | null; sleep_at: string | null; wake_at: string | null; note: string | null };
+
+/** "in 3 h 12 min", "in 2 d 4 h", "in 40 s". */
+const inTime = (ms: number) => {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (ms < 60000) return "in under a minute";
+  if (m < 60) return `in ${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `in ${h} h${m % 60 ? ` ${m % 60} min` : ""}`;
+  return `in ${Math.floor(h / 24)} d${h % 24 ? ` ${h % 24} h` : ""}`;
+};
+const at = (iso: string) => new Date(iso).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+const SOURCE: Record<string, string> = { tag: "advisor:schedule", review: "Jev's window", profile: "the usage profile's window" };
+
+/** Next sleep and wake of an auto-parked box, counting down; reads the state again once the time has passed. */
+function NextPark({ park, state, onDue }: { park: ParkOutlook; state: string; onDue: () => void }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
+  const next = state === "stopped" ? park.wake_at : park.sleep_at;
+  const due = next != null && new Date(next).getTime() <= now;
+  // the pass has run: read the state again a minute later, when the stop or start has landed
+  useEffect(() => { if (!due) return; const t = setTimeout(onDue, 60_000); return () => clearTimeout(t); }, [due, next]);
+  const sleep = park.sleep_at ? <>Next sleep <span className="text-zinc-300">{inTime(new Date(park.sleep_at).getTime() - now)}</span> ({at(park.sleep_at)})</> : null;
+  const wake = park.wake_at ? <>{state === "stopped" ? "Wakes" : "wakes"} <span className="text-zinc-300">{inTime(new Date(park.wake_at).getTime() - now)}</span> ({at(park.wake_at)})</> : null;
+  const parts = state === "stopped" ? [wake, sleep && <>then sleeps again {at(park.sleep_at!)}</>] : [sleep, wake];
+  return (
+    <div className="mt-1 text-zinc-500" title={park.schedule ? `${park.schedule} (${SOURCE[park.source ?? ""] ?? "window"}); the executor pass stops or starts it before the hour the window names` : undefined}>
+      {due ? <>{state === "stopped" ? "Waking" : "Going to sleep"} now…</> : parts.some(Boolean) ? parts.filter(Boolean).map((p, i) => <span key={i}>{i ? " · " : ""}{p}</span>) : <>No sleep scheduled</>}
+      {park.schedule && <span> · {park.schedule}</span>}
+      {park.note && <span className="text-amber-300/80"> · {park.note}</span>}
     </div>
   );
 }
@@ -219,7 +256,7 @@ function HibernationNote({ instanceId, handsOff, autoPark }: { instanceId: strin
     <div className="mt-1.5 border-t border-zinc-800/70 pt-1.5">
       <div className="flex flex-wrap items-center gap-2">
         {h.status === "ready" && <>{chip("border-emerald-900/60 bg-emerald-950/50 text-emerald-300", "Hibernation ready")}<span className="text-zinc-500">parking hibernates it: back in about a minute, memory and containers as they were</span><span className="ml-auto">{btn("Use stop/start instead", "no", "Tag advisor:hibernate=no: parking stops it instead of hibernating it")}</span></>}
-        {(h.status === "guest_not_ready" || h.status === "guest_unknown") && <>{chip("border-amber-900/60 bg-amber-950/50 text-amber-300", h.status === "guest_not_ready" ? "Guest cannot hibernate" : "Guest not checked")}<span className="text-zinc-500">launched with hibernation, but parking stops it (cold start, 2–4 min): {h.reason}{h.status === "guest_unknown" ? "; the next software probe tells" : ""}</span><span className="ml-auto">{btn("Use stop/start", "no", "Tag advisor:hibernate=no: parking stops it, and this note goes away")}</span></>}
+        {(h.status === "guest_not_ready" || h.status === "guest_unknown") && <>{chip("border-amber-900/60 bg-amber-950/50 text-amber-300", h.status === "guest_not_ready" ? "Guest cannot hibernate" : "Guest not checked")}<span className="text-zinc-500">launched with hibernation, but parking stops it (cold start, 2–4 min): {h.reason}</span><span className="ml-auto">{btn("Use stop/start", "no", "Tag advisor:hibernate=no: parking stops it, and this note goes away")}</span></>}
         {h.status === "chosen_stop" && <>{chip("border-zinc-700 bg-zinc-900 text-zinc-300", "Stop/start chosen")}<span className="text-zinc-500">launched for hibernation, but advisor:hibernate=no keeps parking on a plain stop (cold start, 2–4 min)</span><span className="ml-auto">{btn("Hibernate again", null, "Remove advisor:hibernate=no")}</span></>}
         {h.status === "migrating" && <>{chip("border-sky-900/60 bg-sky-950/50 text-sky-300", "Migration under way")}<span className="text-zinc-500">the relaunch with hibernation on is in progress: follow it on the <Link className="text-sky-300 hover:underline" to="/actions">Auto-actions</Link> page</span></>}
         {h.status === "kept_stop" && <>{chip("border-zinc-700 bg-zinc-900 text-zinc-300", "Stop/start kept")}<span className="text-zinc-500">cold start, 2–4 min on a wake; the migration is not suggested</span><span className="ml-auto">{btn("Suggest hibernation again", null, "Remove advisor:hibernate=no")}</span></>}

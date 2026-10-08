@@ -6,7 +6,9 @@
  * whose guest has none of this sits in "stopping" until someone forces the stop (Debian 12 has no agent package).
  *
  * The reading comes from the software probe (src/probes.ts, software/3); a box without that reading falls back to
- * whether an agent package is installed. Unknown is not ready: the stop is a plain one until the probe has looked.
+ * whether an agent package is installed. A missing package proves nothing (Debian answers the sleep button through
+ * logind, with no package), so without the reading and without a package the verdict is unknown, never "cannot".
+ * Unknown is not ready: the stop is a plain one until the probe has looked.
  */
 import { hibernationSetupOf, HIBERNATION_AGENT_PACKAGES, type ProbeHibernation } from "./software_inventory.js";
 
@@ -35,8 +37,9 @@ export function guestReadiness(setup: { probe: ProbeHibernation | null; agent_pa
     return { ready: true, reason: `${handler} hibernates on the sleep button, swap ${gib(swap)}, resume set`, source: "probe" };
   }
   if (setup.agent_package) return { ready: true, reason: `the hibernation agent package (${setup.agent_package}) is installed`, source: "packages" };
-  if (setup.packages_known) return { ready: false, reason: `no hibernation agent installed: ${AGENT_HINT}`, source: "packages" };
-  return { ready: null, reason: "the software probe has not looked inside this box yet", source: "none" };
+  // the software probe ran, but an older one (software/2 and before) that does not read the hibernation setup
+  if (setup.packages_known) return { ready: null, reason: "the software probe in force predates the hibernation check (software/3): update the probe document in Settings > Probes, then probe the box again", source: "none" };
+  return { ready: null, reason: "the software probe has not looked inside this box yet; the next software probe tells", source: "none" };
 }
 
 /** The verdict for one instance, from the local tables. */

@@ -58,7 +58,7 @@ test("a box launched for hibernation whose guest cannot finish it, or was not lo
   }
 });
 
-test("guestReadiness: the probe's reading first, the agent package as fallback, unknown is not ready", async () => {
+test("guestReadiness: the probe's reading first, the agent package as fallback, no package is unknown, not ready", async () => {
   const { guestReadiness } = await import("../guest_hibernation.js");
   const G = 1024 ** 3;
   const base = { kernel_disk: true, cmdline_resume: true, sys_resume: "259:1", agent: null, acpi_sleep_handler: false, logind_suspend_key: "hibernate", swap_active_bytes: 0, swap_file_bytes: 8 * G, mem_bytes: 8 * G };
@@ -74,6 +74,7 @@ test("guestReadiness: the probe's reading first, the agent package as fallback, 
   assert.match(v({ ...base, cmdline_resume: false, sys_resume: "0:0" }).reason, /no resume=/);
   assert.equal(v({ ...base, cmdline_resume: false, sys_resume: "259:1" }).ready, true, "a resume device set at runtime counts");
   assert.deepEqual(v(null, "ec2-hibinit-agent"), { ready: true, reason: "the hibernation agent package (ec2-hibinit-agent) is installed", source: "packages" });
-  assert.equal(v(null, null, true).ready, false);
+  // no reading and no package: a logind setup has no package, so this is unknown, never "cannot"
+  assert.equal(v(null, null, true).ready, null); assert.match(v(null, null, true).reason, /predates the hibernation check/);
   assert.equal(v(null, null, false).ready, null);
 });

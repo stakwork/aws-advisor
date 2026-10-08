@@ -499,7 +499,7 @@ api.get("/inventory/ec2/:id/state", async (req, res) => {
   const { executorCreds } = await import("../executor.js");
   const { patchEc2State } = await import("../inventory.js");
   const id = String(req.params.id);
-  const row = db.prepare("select account_id, region from inventory_ec2 where instance_id = ?").get(id) as { account_id: string | null; region: string | null } | undefined;
+  const row = db.prepare("select account_id, region, pool_kind from inventory_ec2 where instance_id = ?").get(id) as { account_id: string | null; region: string | null; pool_kind: string | null } | undefined;
   if (!row) return res.status(404).json({ error: "not in the inventory" });
   const creds = executorCreds();
   const acct = creds.forAccount(row.account_id || null);
@@ -509,7 +509,11 @@ api.get("/inventory/ec2/:id/state", async (req, res) => {
     if (!inst) return res.status(404).json({ error: "not found by DescribeInstances" });
     const state = inst.State?.Name || "unknown";
     patchEc2State(id, state, inst.PublicIpAddress ?? null, inst.PrivateIpAddress ?? null);
-    res.json({ instance_id: id, state, public_ip: inst.PublicIpAddress ?? null, private_ip: inst.PrivateIpAddress ?? null, checked_at: new Date().toISOString() });
+    // when the office-hours pass stops and starts it next (src/park_outlook.ts); a failure there never fails the state
+    let park = null;
+    try { const { parkOutlook } = await import("../park_outlook.js"); park = await parkOutlook(id, Object.fromEntries((inst.Tags ?? []).map((t) => [t.Key ?? "", t.Value ?? ""])), state, row.pool_kind); }
+    catch (e: any) { console.error(`[park] outlook of ${id}: ${e?.message || e}`); }
+    res.json({ instance_id: id, state, public_ip: inst.PublicIpAddress ?? null, private_ip: inst.PrivateIpAddress ?? null, checked_at: new Date().toISOString(), park });
   } catch (e: any) { res.status(500).json({ error: describeError(e, `state of ${id} (ec2:DescribeInstances)`) }); }
   finally { ec2.destroy(); }
 });
