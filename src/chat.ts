@@ -222,7 +222,7 @@ export function buildAccountPrompt(header: AccountHeader, tools: [string, string
     const v = header.vercel;
     lines.push("", "## The Vercel team in a few numbers (vercel_projects, vercel_stores, vercel_bill, and the graph with account_id = the team id)",
       `- team ${v.name ?? v.team} (${v.team}), ${v.plan ?? "unknown"} plan; ${v.projects} projects${v.production_failed ? `, ${v.production_failed} with the latest production deployment failed` : ""}; ${v.urls_open} URL${v.urls_open === 1 ? "" : "s"} open to anyone; read ${v.read_at ?? "never"}`,
-      `- last invoice ${usd(v.last_invoice_usd)}; this period estimated ${usd(v.estimated_period_usd)}; ${v.attention} item${v.attention === 1 ? "" : "s"} in the attention list`);
+      `- last invoice ${usd(v.last_invoice_usd)}; this month projected ${usd(v.estimated_period_usd)} (subscription and Marketplace invoices); ${v.attention} item${v.attention === 1 ? "" : "s"} in the attention list`);
   }
   lines.push("", "## What you can look up (tools arrive as aws_<name>); pull what the question needs, say what you fetched");
   for (const [n, w] of tools) lines.push(`- ${n}: ${w}`);

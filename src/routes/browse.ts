@@ -46,7 +46,7 @@ browse.get("/spend", auth, (req, res) => {
 // This month against the previous one: the payer's bill, or one linked account's line in it under ?account=.
 browse.get("/spend/compare", auth, async (req, res) => {
   const scope = accountScope(req.query as any);
-  try { res.json(await monthComparison(scope && scope.provider === "aws" && listAccounts().length > 1 ? scope.id : null)); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  try { res.json(await monthComparison(scope && scope.provider === "aws" && listAccounts().length > 1 ? scope.id : null, undefined, req.query.basis === "invoice" ? "invoice" : "amortized")); } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // One Cost Explorer call. Skipped while the last fetch is younger than 6 hours unless ?force=1 (or body.force).

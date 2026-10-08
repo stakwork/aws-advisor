@@ -45,7 +45,7 @@ accounts.get("/accounts/organization", async (_req, res) => {
   }
 });
 accounts.get("/accounts/general", async (_req, res) => { try { res.json(await generalOverview()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
-accounts.get("/accounts/billing", async (_req, res) => { try { res.json(await accountsBilling()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+accounts.get("/accounts/billing", async (req, res) => { try { res.json(await accountsBilling(req.query.basis === "invoice" ? "invoice" : "amortized")); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
 /**
  * Accounts of any provider, through its adapter's onboarding (src/adapters/types.ts ProviderOnboarding): add from the

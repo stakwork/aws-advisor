@@ -7,7 +7,15 @@ export const Card = ({ title, children, className = "" }: { title?: ReactNode; c
   </section>
 );
 
-export const Stat = ({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) => (
+/** A "?" beside a label that explains it: opens on hover, on keyboard focus and on tap; `align` keeps it on screen at the right edge. */
+export const HelpTip = ({ children, align = "left" }: { children: ReactNode; align?: "left" | "right" }) => (
+  <span className="group relative ml-1 inline-flex align-middle normal-case tracking-normal">
+    <button type="button" aria-label="How this is calculated" className="flex h-4 w-4 items-center justify-center rounded-full border border-zinc-600 text-[10px] font-medium leading-none text-zinc-400 hover:border-zinc-400 hover:text-zinc-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400">?</button>
+    <span role="tooltip" className={`invisible absolute top-5 z-20 w-72 max-w-[80vw] rounded-md border border-zinc-700 bg-zinc-950 p-3 text-left text-xs font-normal leading-relaxed text-zinc-300 opacity-0 shadow-lg transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${align === "right" ? "right-0" : "left-0"}`}>{children}</span>
+  </span>
+);
+
+export const Stat = ({ label, value, hint }: { label: ReactNode; value: ReactNode; hint?: ReactNode }) => (
   <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
     <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
     <div className="mt-1 text-2xl font-semibold text-zinc-100">{value}</div>

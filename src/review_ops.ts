@@ -36,15 +36,15 @@ export async function reviewBilling(): Promise<OpsFinding[]> {
     const up = (p.delta_pct ?? 0) >= 10 && (p.delta_usd ?? 0) >= 100;
     const lfl = c.like_for_like ? `; the first ${c.like_for_like.days} days ${usd(c.like_for_like.this_usd)} against ${usd(c.like_for_like.last_usd)} (${pct(c.like_for_like.delta_pct)})` : "";
     out.push({ kind: "bill_month", resource: "bill", resource_name: c.month, severity: up ? "warning" : "info",
-      message: `the bill: ${c.month} projected at ${usd(p.usd)} against ${usd(p.last_month_usd)} in ${c.previous_month} (${pct(p.delta_pct)})${lfl}`, details: { ...p, like_for_like: c.like_for_like } });
+      message: `the bill (amortized): ${c.month} projected at ${usd(p.usd)} against ${usd(p.last_month_usd)} in ${c.previous_month} (${pct(p.delta_pct)})${lfl}`, details: { ...p, like_for_like: c.like_for_like } });
   }
   for (const m of c.movers.filter((x) => x.delta >= 100 && (x.status === "new" || (x.delta_pct ?? 0) >= 25)).slice(0, 5))
     out.push({ kind: "bill_service_up", resource: m.service, resource_name: c.month, severity: "warning", message: `${m.service}: projected ${usd(m.projected)} this month against ${usd(m.last_month)} in ${c.previous_month} (${m.status === "new" ? "new" : pct(m.delta_pct)}, ${usd(m.delta)} more)`, details: { ...m } });
-  // the newest complete day of the payer's bill against the two weeks before it
+  // the newest complete day of the payer's bill against the two weeks before it, amortized: a reservation bought or renewed is not a jump
   const yesterday = new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
-  const days = rows("select day, net_unblended as usd from spend_daily where provider = 'aws' and net_unblended is not null and day < ? order by day desc limit 15", yesterday).reverse().map((r) => ({ day: String(r.day), usd: Number(r.usd) }));
+  const days = rows("select day, amortized as usd from spend_daily where provider = 'aws' and amortized is not null and day < ? order by day desc limit 15", yesterday).reverse().map((r) => ({ day: String(r.day), usd: Number(r.usd) }));
   const j = dayJump(days);
-  if (j) out.push({ kind: "bill_day_jump", resource: "bill", resource_name: j.day, severity: "warning", message: `the bill on ${j.day}: ${usd(j.usd)}, ${j.ratio.toFixed(1)}x the median day of the two weeks before (${usd(j.median)})`, details: j });
+  if (j) out.push({ kind: "bill_day_jump", resource: "bill", resource_name: j.day, severity: "warning", message: `the bill on ${j.day} (amortized): ${usd(j.usd)}, ${j.ratio.toFixed(1)}x the median day of the two weeks before (${usd(j.median)})`, details: j });
   // every account each provider bills: one climbing fast is named
   try {
     const { accountsBilling } = await import("./accounts_overview.js");

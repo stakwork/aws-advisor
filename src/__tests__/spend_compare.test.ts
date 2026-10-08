@@ -55,3 +55,9 @@ test("projectionFactor follows the payer's projection, else the day of the month
   assert.equal(projectionFactor(300, 100, "2026-10-08"), 3);
   assert.equal(projectionFactor(null, null, "2026-10-11"), 31 / 10);
 });
+
+test("accountPace on amortized days compares the same days of both months in the amortized figures", () => {
+  const d = [...days("2026-09-01", 30, () => 5), ...days("2026-10-01", 7, () => 6)];
+  const p = accountPace(d, "2026-10-08", "amortized")!;
+  assert.equal(p.like_for_like!.this_usd, 42); assert.equal(p.like_for_like!.last_usd, 35);
+});

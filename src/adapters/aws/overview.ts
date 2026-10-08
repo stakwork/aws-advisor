@@ -29,7 +29,7 @@ export const awsCost = (primary: () => string): ProviderCost => ({
     return [{ key: "projected", label: "AWS projected", usd: projected, to_total: true, month_to_date_usd: mtd }];
   },
   // every linked account the payer's Cost Explorer bills (unblended), each projected at the payer's pace
-  accounts: async () => (await import("../../spend_compare.js")).awsAccountBilling(),
+  accounts: async (opts) => (await import("../../spend_compare.js")).awsAccountBilling(undefined, opts?.basis ?? "amortized"),
 });
 
 export async function awsAttention(primary: string): Promise<AttentionItem[]> {

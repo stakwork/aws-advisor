@@ -2,6 +2,7 @@ import { config } from "../../config.js";
 import { db } from "../../db.js";
 import type { AccountRecord, ProviderAdapter, ResourceNode, TelemetryKind } from "../types.js";
 import { VercelClient, requiresAuth } from "./client.js";
+import { invoiceMonths, streamOf } from "./bill_months.js";
 import { listDeployments, listDomains, listEnvNames, listInvoices, listProjects, listStores, refreshVercel, storeById, teamBilling, teamExtras, vercelTeam, type ProjectRow, type StoreRow } from "./inventory.js";
 import { storeUsageSeries, usageByProject, usageSeries, usageTotals } from "./usage.js";
 import { projectListCost, storeListCost, vercelRates } from "./pricing.js";
@@ -211,18 +212,20 @@ export const vercelAdapter: ProviderAdapter = {
   // the team's money is its invoices and the period estimate, read with every collection (./inventory.ts, ./pricing.ts)
   cost: {
     refresh: async () => ({ refreshed: false, note: "read with the Vercel collection" }),
-    lastBill: () => { const inv = listInvoices(3).find((i) => i.status === "paid" && i.total != null); return inv ? { month: String(inv.created_at || "").slice(0, 7) || null, usd: Number(inv.total) } : { month: null, usd: null }; },
+    // last month's bill is every invoice issued in it: the subscription and the Marketplace bill separately (./bill_months.ts)
+    lastBill: () => { const m = invoiceMonths(listInvoices(24) as any[], new Date().toISOString().slice(0, 10)); const last = m.months[0]; return last ? { month: last.month, usd: last.usd } : { month: null, usd: null }; },
     month: async () => {
       if (!vercelConfigured()) return [];
       const o = vercelOverview();
-      return [{ key: "period_estimate", label: "Vercel period", usd: o.billing?.estimated_period_usd ?? null, to_total: true }, { key: "stores_at_plan", label: "stores at plan", usd: o.store_stats?.monthly_list_usd ?? null, to_total: true }];
+      // the month's invoices: issued, plus each regular one not issued yet (the stores bill through the Marketplace invoice, so they are in it)
+      return [{ key: "month_projected", label: "Vercel this month", usd: o.billing?.this_month?.projected_usd ?? null, to_total: true, month_to_date_usd: o.billing?.this_month?.month_to_date_usd ?? null }];
     },
-    // one team: the billing period's estimate plus its stores at plan price is the month; last month is the last paid invoice
+    // one team: the invoices issued this month, plus each regular stream not issued yet at its usual amount
     accounts: async () => {
       if (!vercelConfigured()) return [];
-      const o = vercelOverview(); const bill = vercelAdapter.cost!.lastBill(vercelAdapter.primaryAccountId());
-      const parts = [o.billing?.estimated_period_usd, o.store_stats?.monthly_list_usd].filter((v): v is number => v != null);
-      return [{ account: vercelAdapter.primaryAccountId(), month_to_date_usd: null, projected_usd: parts.length ? Math.round(parts.reduce((a, b) => a + b, 0) * 100) / 100 : null, last_month_usd: bill.usd, last_month: bill.month, note: "period estimate and stores at plan; Vercel has no month to date" }];
+      const m = invoiceMonths(listInvoices(24) as any[], new Date().toISOString().slice(0, 10));
+      const note = m.streams.map((x) => x.issued != null ? `${x.stream} ${Math.round(x.issued)} USD issued` : x.expected != null ? `${x.stream} expected ≈ ${Math.round(x.expected)} USD as its last invoice of ${x.from} (${x.breakdown.map((b) => `${b.name} ${Math.round(b.usd)}`).join(", ")})` : null).filter(Boolean).join(" · ");
+      return [{ account: vercelAdapter.primaryAccountId(), month_to_date_usd: m.month_to_date, projected_usd: m.projected, last_month_usd: m.last_month_usd, last_month: m.last_month, history: m.months.slice(0, 6), note }];
     },
   },
   attention: async () => {
@@ -328,18 +331,23 @@ export function storeStats(teamId: string, stores: StoreRow[]) {
 
 /** The team's money: the subscription (plan, seats, period), the recent invoices and what the last one was made of. */
 export function vercelBilling(teamId: string | null) {
-  const b = teamId ? teamBilling(teamId) : null; const invoices = listInvoices(12);
-  const paid = invoices.filter((i) => i.status === "paid" && i.total != null);
+  const b = teamId ? teamBilling(teamId) : null; const invoices = listInvoices(24);
   const last = invoices[0] ?? null;
-  const avg3 = paid.slice(0, 3).length ? paid.slice(0, 3).reduce((n, i) => n + (i.total || 0), 0) / paid.slice(0, 3).length : null;
+  // by month: Vercel bills the subscription on its cycle day and the Marketplace on the 1st, so a month is every invoice issued in it (./bill_months.ts)
+  const m = invoiceMonths(invoices as any[], new Date().toISOString().slice(0, 10));
+  const last3 = m.months.slice(0, 3);
   return {
     plan: b?.plan ?? null, status: b?.status ?? null, currency: b?.currency ?? "usd", period_start: b?.period_start ?? null, period_end: b?.period_end ?? null,
     seats: b?.seats ?? null, seat_usd: b?.seat_usd ?? null, seats_usd_month: b?.seats != null && b?.seat_usd != null ? b.seats * b.seat_usd : null,
-    last_invoice: last ? { number: last.number, status: last.status, total: last.total, created_at: last.created_at, period_start: last.period_start, period_end: last.period_end, hosted_url: last.hosted_url, groups: last.groups, top_items: last.line_items.slice(0, 8) } : null,
-    avg_last_3_usd: avg3 != null ? Math.round(avg3 * 100) / 100 : null,
-    // the period in progress: the subscription (known) plus what infrastructure usage cost on the last paid invoices (the only measure of it the API gives)
-    estimated_period_usd: (() => { const infra = paid.slice(0, 3).map((i) => i.groups.find((g) => /infra/i.test(g.name))?.total).filter((x): x is number => typeof x === "number"); const seatsUsd = b?.seats != null && b?.seat_usd != null ? b.seats * b.seat_usd : null; if (seatsUsd == null && !infra.length) return null; const avgInfra = infra.length ? infra.reduce((n, x) => n + x, 0) / infra.length : 0; return Math.round(((seatsUsd ?? 0) + avgInfra) * 100) / 100; })(),
-    invoices: invoices.map((i) => ({ number: i.number, status: i.status, total: i.total, created_at: i.created_at, hosted_url: i.hosted_url })),
+    last_invoice: last ? { number: last.number, status: last.status, total: last.total, created_at: last.created_at, period_start: last.period_start, period_end: last.period_end, hosted_url: last.hosted_url, groups: last.groups, top_items: last.line_items.slice(0, 8), kind: streamOf(last as any) } : null,
+    /** the average of the last three complete months, every invoice of each */
+    avg_last_3_usd: last3.length ? Math.round((last3.reduce((n, x) => n + x.usd, 0) / last3.length) * 100) / 100 : null,
+    last_month: m.last_month, last_month_usd: m.last_month_usd,
+    /** this month: what is issued, and the projection (each regular stream not issued yet at its last invoice) */
+    this_month: { month_to_date_usd: m.month_to_date, projected_usd: m.projected, streams: m.streams },
+    estimated_period_usd: m.projected,
+    months: m.by_month.slice(0, 12),
+    invoices: invoices.map((i) => ({ number: i.number, status: i.status, total: i.total, created_at: i.created_at, hosted_url: i.hosted_url, kind: streamOf(i as any) })),
   };
 }
 
@@ -359,7 +367,7 @@ export function vercelBill() {
   const billing = vercelBilling(teamId);
   const since = billing.period_start ? String(billing.period_start).slice(0, 10) : undefined;
   const period = { totals: usageTotals(teamId, 60, "", since), series: usageSeries(teamId, 60, "", since), by_project: usageByProject(teamId, 60, since), days_elapsed: billing.period_start ? Math.max(1, Math.round((Date.now() - Date.parse(billing.period_start)) / 86_400_000)) : null, days_total: billing.period_start && billing.period_end ? Math.round((Date.parse(billing.period_end) - Date.parse(billing.period_start)) / 86_400_000) : null };
-  const invoices = listInvoices(12).map((i) => ({ id: i.id, number: i.number, status: i.status, total: i.total, subtotal: i.subtotal, tax: i.tax, created_at: i.created_at, period_start: i.period_start, period_end: i.period_end, hosted_url: i.hosted_url, pdf_url: i.pdf_url, groups: i.groups, line_items: i.line_items }));
+  const invoices = listInvoices(24).map((i) => ({ id: i.id, number: i.number, status: i.status, total: i.total, subtotal: i.subtotal, tax: i.tax, created_at: i.created_at, period_start: i.period_start, period_end: i.period_end, hosted_url: i.hosted_url, pdf_url: i.pdf_url, groups: i.groups, line_items: i.line_items, kind: streamOf(i as any) }));
   // what the last paid invoice charged per unit, by line title: the only rates that are the team's own (the catalogue rates are list)
   const last = invoices.find((i) => i.status === "paid");
   const unit = last ? last.line_items.filter((l) => l.quantity && l.amount).map((l) => ({ title: l.title, unit_usd: Math.round((l.amount / (l.quantity || 1)) * 1e6) / 1e6, quantity: l.quantity, amount: l.amount })) : [];

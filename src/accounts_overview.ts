@@ -132,7 +132,7 @@ export async function generalOverview(): Promise<GeneralOverview> {
  * net bill is given beside them as the figure the invoice will show.
  */
 export interface AccountsBilling {
-  month: string; previous_month: string;
+  month: string; previous_month: string; basis: "amortized" | "invoice";
   lines: import("./spend_compare.js").AccountBillingLine[];
   totals: { month_to_date_usd: number | null; projected_usd: number | null; last_month_usd: number | null; delta_usd: number | null; delta_pct: number | null };
   by_provider: Record<string, { month_to_date_usd: number | null; projected_usd: number | null; last_month_usd: number | null }>;
@@ -140,7 +140,8 @@ export interface AccountsBilling {
   aws_net: { month_to_date_usd: number | null; projected_usd: number | null; basis: string | null; last_month_usd: number | null } | null;
 }
 
-export async function accountsBilling(): Promise<AccountsBilling> {
+export async function accountsBilling(basis: "amortized" | "invoice" = "amortized"): Promise<AccountsBilling> {
+  const { steadyBlend } = await import("./spend_compare.js");
   const { localDay, addDays, monthStart } = await import("./localdate.js");
   const today = localDay(); const month = today.slice(0, 7); const prevMonth = addDays(monthStart(today), -1).slice(0, 7);
   const known = await allAccounts();
@@ -148,9 +149,13 @@ export async function accountsBilling(): Promise<AccountsBilling> {
   for (const a of adapters()) {
     if (!a.cost?.accounts) continue;
     try {
-      for (const l of await a.cost.accounts()) {
+      for (const l of await a.cost.accounts({ basis })) {
         const k = known.find((x) => x.provider === a.id && x.id === l.account);
-        lines.push({ provider: a.id, name: k?.name ?? null, registered: Boolean(k), delta_pct: l.projected_usd != null && l.last_month_usd ? Math.round(((l.projected_usd - l.last_month_usd) / l.last_month_usd) * 1000) / 10 : null, ...l });
+        // the steady-months rule (src/spend_compare.ts steadyBlend): a projection far from months that held steady leans on them
+        const st = l.projected_usd != null && l.history?.length ? steadyBlend(l.projected_usd, l.history) : null;
+        const projected = st ? st.projected : l.projected_usd;
+        lines.push({ provider: a.id, name: k?.name ?? null, registered: Boolean(k), ...l, projected_usd: projected, run_rate_usd: st?.run_rate ?? l.projected_usd, typical_usd: st?.typical ?? null, steady: st?.steady ?? false, blended: st?.blended ?? false,
+          delta_pct: projected != null && l.last_month_usd ? Math.round(((projected - l.last_month_usd) / l.last_month_usd) * 1000) / 10 : null });
       }
     } catch (e: any) { console.error(`[billing] ${a.id}: ${e?.message || e}`); }
   }
@@ -167,7 +172,7 @@ export async function accountsBilling(): Promise<AccountsBilling> {
   }
   const projected = sum(lines.map((l) => l.projected_usd)); const last = sum(lines.map((l) => l.last_month_usd));
   return {
-    month, previous_month: prevMonth, lines, by_provider, aws_net,
+    month, previous_month: prevMonth, basis, lines, by_provider, aws_net,
     totals: { month_to_date_usd: sum(lines.map((l) => l.month_to_date_usd)), projected_usd: projected, last_month_usd: last, delta_usd: projected != null && last != null ? Math.round((projected - last) * 100) / 100 : null, delta_pct: projected != null && last ? Math.round(((projected - last) / last) * 1000) / 10 : null },
   };
 }

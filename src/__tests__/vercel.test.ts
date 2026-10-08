@@ -174,7 +174,8 @@ test("projectDetail and vercelBill: one project in full with its own usage, and 
   db.prepare("insert or replace into vercel_invoices(id, team_id, number, status, total, subtotal, tax, currency, created_at, period_start, period_end, hosted_url, groups, line_items, fetched_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run("inv_1", "team_example123", "A-1", "paid", 61, 60, 1, "usd", day(10), day(40), day(10), "https://vercel.example.com/invoice/inv_1", JSON.stringify([{ name: "Subscription", total: 40 }, { name: "Infrastructure", total: 20 }]), JSON.stringify([{ title: "Pro seats", quantity: 2, amount: 40, group: "Subscription" }, { title: "Bandwidth", quantity: 100, amount: 20, group: "Infrastructure", unit: "GB" }]), "now");
   const bill = ad.vercelBill();
-  assert.equal(bill.billing.plan, "pro"); assert.equal(bill.billing.seats_usd_month, 40); assert.equal(bill.billing.estimated_period_usd, 60, "subscription plus the last invoices' infrastructure");
+  assert.equal(bill.billing.plan, "pro"); assert.equal(bill.billing.seats_usd_month, 40); assert.equal(bill.billing.estimated_period_usd, 61, "the month's invoices: issued this month, or expected at the last one");
+  assert.equal(bill.invoices[0].kind, "marketplace"); assert.equal(bill.billing.months[0].streams.marketplace, 61);
   assert.equal(bill.period.days_elapsed, 3); assert.equal(bill.period.days_total, 30);
   assert.equal(bill.period.totals.requests, 2000, "the two team days in the period (not the per-project rows)"); assert.equal(bill.period.series.length, 2);
   assert.deepEqual(bill.period.by_project.map((p) => [p.name, p.requests]), [["web", 1600], ["api", 400]]);

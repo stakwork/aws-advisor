@@ -140,8 +140,8 @@ export interface ProviderCost {
   lastBill(accountId: string): { month: string | null; usd: number | null };
   /** this month in the provider's own terms (a projection, a period estimate, stores at their plans); `to_total` says whether it adds to the month across providers */
   month(): Promise<{ key: string; label: string; usd: number | null; to_total: boolean; month_to_date_usd?: number | null }[]>;
-  /** each account's line on the bill: this month so far, projected to its end, and last month (every account the provider bills, added to the advisor or not) */
-  accounts?(): Promise<{ account: string; month_to_date_usd: number | null; projected_usd: number | null; last_month_usd: number | null; last_month: string | null; note?: string }[]>;
+  /** each account's line on the bill: this month so far, projected to its end, and last month (every account the provider bills, added to the advisor or not); `basis` amortized spreads commitment fees over the days they cover where the provider has them */
+  accounts?(opts?: { basis?: "amortized" | "invoice" }): Promise<{ account: string; month_to_date_usd: number | null; projected_usd: number | null; last_month_usd: number | null; last_month: string | null; note?: string; history?: { month: string; usd: number }[] }[]>;
 }
 
 /** One line of the "needs attention" list across accounts: whose it is, how urgent, what, and where to look. */

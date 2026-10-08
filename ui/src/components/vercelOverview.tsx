@@ -68,20 +68,20 @@ export function VercelOverview() {
       )}
 
       {d.billing && (
-        <Card title={<span>Billing <span className="font-normal text-zinc-500">· Vercel's invoices (marketplace stores such as Neon bill through them) and the subscription as the team object reports it</span></span>}>
+        <Card title={<span>Billing <span className="font-normal text-zinc-500">· two invoices a month: the subscription (seats, plan, add-ons, usage) on its cycle day and the Marketplace (stores such as Neon) on the 1st</span></span>}>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label="Last invoice" value={d.billing.last_invoice ? usd(d.billing.last_invoice.total) : "—"} hint={d.billing.last_invoice ? `${when(d.billing.last_invoice.created_at)} · ${d.billing.last_invoice.status}${d.billing.last_invoice.number ? ` · ${d.billing.last_invoice.number}` : ""}` : "no invoice read"} />
-            <Stat label="Average, last 3" value={d.billing.avg_last_3_usd != null ? `${usd(d.billing.avg_last_3_usd)}/mo` : "—"} hint="paid invoices" />
-            <Stat label="Subscription" value={d.billing.seats_usd_month != null ? `${usd(d.billing.seats_usd_month)}/mo` : d.billing.plan || "—"} hint={d.billing.seats != null ? `${d.billing.plan} plan · ${d.billing.seats} seats × ${usd(d.billing.seat_usd)}` : d.billing.plan ? `${d.billing.plan} plan` : ""} />
-            <Stat label="Current period" value={d.billing.estimated_period_usd != null ? `~${usd(d.billing.estimated_period_usd)}` : d.billing.period_start ? `${String(d.billing.period_start).slice(5, 10)} → ${String(d.billing.period_end || "").slice(5, 10)}` : "—"} hint={`${d.billing.period_start ? `${String(d.billing.period_start).slice(5, 10)} → ${String(d.billing.period_end || "").slice(5, 10)} · ` : ""}subscription plus the last invoices' infrastructure usage`} />
+            <Stat label="This month, projected" value={d.billing.this_month?.projected_usd != null ? `≈ ${usd(d.billing.this_month.projected_usd)}` : "—"} hint={(d.billing.this_month?.streams || []).map((x: any) => x.issued != null ? `${x.stream === "subscription" ? "Subscription" : "Marketplace"} ${usd(x.issued)} issued` : x.expected != null ? `${x.stream === "subscription" ? "Subscription" : "Marketplace"} ≈ ${usd(x.expected)} expected` : null).filter(Boolean).join(" · ")} />
+            <Stat label="Last month" value={usd(d.billing.last_month_usd)} hint={(() => { const m = (d.billing.months || []).find((x: any) => x.month === d.billing.last_month); return m ? Object.entries(m.streams).sort().reverse().map(([k, v]: any) => `${k === "subscription" ? "Subscription" : "Marketplace"} ${usd(v)}`).join(" · ") : ""; })()} />
+            <Stat label="Average, last 3 months" value={d.billing.avg_last_3_usd != null ? `${usd(d.billing.avg_last_3_usd)}/mo` : "—"} hint="every invoice of each month" />
+            <Stat label="Subscription seats" value={d.billing.seats_usd_month != null ? `${usd(d.billing.seats_usd_month)}/mo` : d.billing.plan || "—"} hint={d.billing.seats != null ? `${d.billing.plan} plan · ${d.billing.seats} seats × ${usd(d.billing.seat_usd)}` : d.billing.plan ? `${d.billing.plan} plan` : ""} />
           </div>
-          {d.billing.last_invoice?.groups?.length > 0 && <div className="mt-3 text-xs text-zinc-400">Last invoice by group: {d.billing.last_invoice.groups.map((g: any) => `${g.name} ${usd(g.total)}`).join(" · ")}</div>}
+          {d.billing.last_invoice?.groups?.length > 0 && <div className="mt-3 text-xs text-zinc-400">Last invoice ({d.billing.last_invoice.kind === "subscription" ? "subscription" : "Marketplace"}) by group: {d.billing.last_invoice.groups.map((g: any) => `${g.name} ${usd(g.total)}`).join(" · ")}</div>}
           {d.billing.last_invoice?.top_items?.length > 0 && (
             <ul className="mt-2 grid gap-x-6 gap-y-0.5 text-xs text-zinc-400 md:grid-cols-2">
               {d.billing.last_invoice.top_items.map((it: any, i: number) => <li key={i} className="flex justify-between gap-2"><span className="truncate">{it.title}{it.quantity ? <span className="text-zinc-600"> × {Math.round(it.quantity)}</span> : null}</span><span className="text-zinc-300">{usd(it.amount)}</span></li>)}
             </ul>
           )}
-          {d.billing.invoices?.length > 1 && <div className="mt-2 text-xs text-zinc-500">Earlier: {d.billing.invoices.slice(1, 6).map((i: any) => `${when(i.created_at).slice(0, 10)} ${usd(i.total)}${i.status !== "paid" ? ` (${i.status})` : ""}`).join(" · ")}</div>}
+          {d.billing.months?.length > 0 && <div className="mt-2 text-xs text-zinc-500">By month: {d.billing.months.slice(0, 6).map((m: any) => `${m.month}${m.partial ? " (so far)" : ""} ${usd(m.usd)} (${Object.entries(m.streams).sort().reverse().map(([k, v]: any) => `${k === "subscription" ? "sub" : "mkt"} ${usd(v)}`).join(" + ")})`).join(" · ")}</div>}
         </Card>
       )}
 
