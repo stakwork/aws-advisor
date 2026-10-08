@@ -134,11 +134,20 @@ export function accountCredentials(accountId: string | null | undefined): { prov
   return { provider: p, region: m.regions?.[0] && m.regions[0] !== "*" ? m.regions[0] : base.region, account_id: m.account_id, is_parent: false };
 }
 
-/** The actuator role for an account: the member's own, or the parent's setting; empty when a member has none (dry runs only there). */
+/** The account an IAM role ARN lives in (arn:aws:iam::<12 digits>:role/...), or null. Pure. */
+export const roleAccount = (arn: string | null | undefined): string | null => /^arn:aws[\w-]*:iam::(\d{12}):role\//.exec(String(arn || ""))?.[1] ?? null;
+
+/**
+ * The actuator role for an account: the member's own; else the one under Settings > Auto-actions when it is the
+ * parent's account or lives in this account (production runs the parent as the management account and the boxes in
+ * a member, so that role is often the member's); empty when nothing fits (dry runs only there).
+ */
 export function actuatorRoleFor(accountId: string | null | undefined): string {
   const parentId = credentialsMeta()?.accountId || "";
   if (!accountId || accountId === parentId) return config.actRoleArn;
-  return listMembers().find((x) => x.account_id === accountId)?.act_role_arn || "";
+  const own = listMembers().find((x) => x.account_id === accountId)?.act_role_arn;
+  if (own) return own;
+  return roleAccount(config.actRoleArn) === accountId ? config.actRoleArn : "";
 }
 
 /** sts:GetCallerIdentity through the member's read role: proves the parent may assume it. Records the result on the member. */

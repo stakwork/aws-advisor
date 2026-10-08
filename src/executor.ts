@@ -20,7 +20,7 @@ import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { config } from "./config.js";
 import { addColumn, db, getJsonSetting, setSetting } from "./db.js";
 import { credentialsMeta, sdkCredentials } from "./steampipe.js";
-import { accountCredentials, actuatorRoleFor, listMembers } from "./accounts.js";
+import { accountCredentials, actuatorRoleFor, listMembers, roleAccount } from "./accounts.js";
 import { ACTUATOR_NEEDS, PERSON_ONLY_ACTIONS, describeError, explainPermissionError } from "./permissions.js";
 import { configured as notifyConfigured, inQuietHours, noteDecision, sendSphinx } from "./notify.js";
 import { canonicalResource } from "./resource_id.js";
@@ -241,13 +241,13 @@ function closeRecommendation(row: ActionRow): void {
 // ---- credentials ------------------------------------------------------------------------------------------------
 
 /** An account's actuator: its role assumed from its read provider, once. */
-function accountCreds(a: { account_id: string; name: string; is_parent: boolean; read: AwsCredentialIdentityProvider; region: string; act_role_arn: string }): AccountCreds {
+function accountCreds(a: { account_id: string; name: string; is_parent: boolean; read: AwsCredentialIdentityProvider; region: string; act_role_arn: string; act_master?: AwsCredentialIdentityProvider }): AccountCreds {
   let actProvider: AwsCredentialIdentityProvider | null = null;
   return {
     account_id: a.account_id, name: a.name, is_parent: a.is_parent, read: a.read, region: a.region,
     act: () => {
       if (!a.act_role_arn) throw new NoActuator(a.is_parent ? "no actuator role is configured (Settings > Auto-actions > Actuator role ARN); nothing can be applied" : `member account ${a.name} (${a.account_id}) has no actuator role (Settings > Member accounts); dry runs only there`);
-      if (!actProvider) actProvider = fromTemporaryCredentials({ masterCredentials: a.read, params: { RoleArn: a.act_role_arn, RoleSessionName: "aws-advisor-act", DurationSeconds: 900 }, clientConfig: { region: a.region } });
+      if (!actProvider) actProvider = fromTemporaryCredentials({ masterCredentials: a.act_master ?? a.read, params: { RoleArn: a.act_role_arn, RoleSessionName: "aws-advisor-act", DurationSeconds: 900 }, clientConfig: { region: a.region } });
       return actProvider;
     },
   };
@@ -265,7 +265,11 @@ export function executorCreds(): Creds {
   const accounts: AccountCreds[] = [parent];
   for (const m of listMembers()) {
     if (!m.enabled) continue;
-    try { const c = accountCredentials(m.account_id); accounts.push(accountCreds({ account_id: m.account_id, name: m.name, is_parent: false, read: c.provider, region: c.region, act_role_arn: m.act_role_arn || "" })); }
+    try {
+      const c = accountCredentials(m.account_id);
+      // a member without its own actuator uses the one under Settings > Auto-actions when that role lives in it, assumed as that page's trust policy says: from the advisor's own identity
+      const shared = !m.act_role_arn && roleAccount(config.actRoleArn) === m.account_id;
+      accounts.push(accountCreds({ account_id: m.account_id, name: m.name, is_parent: false, read: c.provider, region: c.region, act_role_arn: m.act_role_arn || (shared ? config.actRoleArn : ""), act_master: shared ? base.provider : undefined })); }
     catch (e: any) { console.error(`[executor] member ${m.account_id}: ${e?.message || e}`); }
   }
   return {
@@ -432,7 +436,7 @@ export async function actuatorCapabilities(accountId: string | null | undefined 
 /** The capabilities of every account that has an actuator role, for the page: the parent first, then the members. */
 export async function actuatorCapabilitiesByAccount(force = false): Promise<{ account_id: string; name: string; is_parent: boolean; role_arn: string; capabilities: Record<string, Capability>; capabilities_note?: string }[]> {
   const parentId = credentialsMeta()?.accountId || "";
-  const out = [{ account_id: parentId, name: "parent", is_parent: true, role_arn: config.actRoleArn }, ...listMembers().filter((m) => m.enabled).map((m) => ({ account_id: m.account_id, name: m.name, is_parent: false, role_arn: m.act_role_arn || "" }))];
+  const out = [{ account_id: parentId, name: "parent", is_parent: true, role_arn: config.actRoleArn }, ...listMembers().filter((m) => m.enabled).map((m) => ({ account_id: m.account_id, name: m.name, is_parent: false, role_arn: actuatorRoleFor(m.account_id) }))];
   return Promise.all(out.map(async (a) => { const c = await actuatorCapabilities(a.is_parent ? null : a.account_id, force); return { ...a, capabilities: c.caps, ...(c.note ? { capabilities_note: c.note } : {}) }; }));
 }
 

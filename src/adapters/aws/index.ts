@@ -1,4 +1,4 @@
-import { listAccounts } from "../../accounts.js";
+import { actuatorRoleFor, listAccounts } from "../../accounts.js";
 import { config } from "../../config.js";
 import { db } from "../../db.js";
 import { credentialsMeta, hasConnectionFile } from "../../steampipe.js";
@@ -73,7 +73,7 @@ export const awsAdapter: ProviderAdapter = {
     return all.map((a) => ({
       provider: AWS, id: a.is_parent ? parentId : a.account_id, native_type: "account", name: a.name, parent_id: a.is_parent ? null : parentId,
       access: a.is_parent ? accessWords() : `role ${a.role_arn.split("/").pop()} from the parent`,
-      actuator: a.is_parent ? Boolean(config.actRoleArn) : Boolean(a.act_role_arn), enabled: a.enabled,
+      actuator: a.is_parent ? Boolean(config.actRoleArn) : Boolean(actuatorRoleFor(a.account_id)), enabled: a.enabled,
       last_test: a.is_parent ? (credentialsMeta()?.savedAt ? { ok: Boolean(parentId && parentId !== "unknown"), detail: parentId && parentId !== "unknown" ? `connected as account ${parentId}` : "saved, not tested yet", at: credentialsMeta()?.savedAt ?? null } : null)
         : a.last_test ? { ok: a.last_test.ok, detail: a.last_test.ok ? a.last_test.arn ?? null : a.last_test.error ?? null, at: a.last_test.at } : null,
     }));
