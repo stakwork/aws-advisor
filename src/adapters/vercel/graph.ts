@@ -18,7 +18,7 @@ MERGE (e:AdvisorEndpoint {id: row.id}) ON CREATE SET e.first_seen = $now
 SET e += {kind: 'url', resource_id: row.project_id, protocol: 'https', port: 443, hostname: row.hostname, url: row.url, target: row.target, scope: 'all', exposure: 'internet', tls: true, requires_auth: row.requires_auth, protection: row.via, custom_domain: row.domain, gone: false, last_seen: $now, provider: $provider, account_id: $account, native_type: 'vercel_url', native_id: row.hostname, updated_at: $now}
 MERGE (d)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now
 WITH e, row
-MERGE (s:AdvisorSource {id: 'internet'}) ON CREATE SET s.kind = 'internet', s.label = 'the internet', s.cidr = '0.0.0.0/0', s.private = false, s.native_type = 'source', s.native_id = 'internet'
+MERGE (s:AdvisorSource {id: 'internet'}) ON CREATE SET s.kind = 'internet', s.label = 'the internet', s.cidr = '0.0.0.0/0', s.private = false, s.native_type = 'source'
 MERGE (e)-[v:REACHABLE_FROM]->(s) SET v.protocol = 'https', v.port = 443, v.via_rule = null, v.through = ['vercel-edge'], v.note = CASE WHEN row.requires_auth THEN 'served by the Vercel edge; ' + row.via + ' protection asks for authentication first' ELSE 'served by the Vercel edge to anyone' END, v.requires_auth = row.requires_auth, v.computed_at = $now`;
 
 /** A store's network endpoint as the partner reports it (Neon compute host, Redis Cloud public endpoint): the same AdvisorEndpoint + REACHABLE_FROM shape a port on a box gets, with requires_auth and, when the partner limits source addresses, restricted_to. */
@@ -26,10 +26,10 @@ const STORE_ENDPOINT_CYPHER = `
 UNWIND $rows AS row
 MATCH (d:AdvisorResource {id: row.resource_id})
 MERGE (e:AdvisorEndpoint {id: row.id}) ON CREATE SET e.first_seen = $now
-SET e += {kind: 'service_endpoint', resource_id: row.resource_id, protocol: row.protocol, port: row.port, hostname: row.hostname, scope: 'all', exposure: CASE WHEN size(row.restricted_to) > 0 THEN 'network' ELSE 'internet' END, tls: true, requires_auth: row.requires_auth, via: row.via, restricted_to: row.restricted_to, provider: $provider, account_id: $account, native_type: 'endpoint', native_id: row.id, last_seen: $now, gone: false, updated_at: $now}
+SET e += {kind: 'service_endpoint', resource_id: row.resource_id, protocol: row.protocol, port: row.port, hostname: row.hostname, scope: 'all', exposure: CASE WHEN size(row.restricted_to) > 0 THEN 'network' ELSE 'internet' END, tls: true, requires_auth: row.requires_auth, via: row.via, restricted_to: row.restricted_to, provider: $provider, account_id: $account, native_type: 'endpoint', last_seen: $now, gone: false, updated_at: $now}
 MERGE (d)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now
 WITH e, row
-MERGE (s:AdvisorSource {id: 'internet'}) ON CREATE SET s.kind = 'internet', s.label = 'the internet', s.cidr = '0.0.0.0/0', s.private = false, s.native_type = 'source', s.native_id = 'internet'
+MERGE (s:AdvisorSource {id: 'internet'}) ON CREATE SET s.kind = 'internet', s.label = 'the internet', s.cidr = '0.0.0.0/0', s.private = false, s.native_type = 'source'
 MERGE (e)-[v:REACHABLE_FROM]->(s) SET v.protocol = row.protocol, v.port = row.port, v.via_rule = null, v.through = [], v.requires_auth = row.requires_auth, v.note = row.note, v.updated_at = $now`;
 
 const STALE_ENDPOINTS = `
@@ -41,7 +41,7 @@ const RUNTIME_CYPHER = `
 UNWIND $rows AS row
 MATCH (d:AdvisorResource {id: row.project_id})
 MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: 'runtime', source_name: row.name, source_kind: 'deployment_metadata', advisory_ecosystem: null, scope: 'service', native_type: 'package', native_id: row.id, provider: $provider, account_id: $account, updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: 'runtime', source_name: row.name, source_kind: 'deployment_metadata', advisory_ecosystem: null, scope: 'service', native_type: 'package', provider: $provider, account_id: $account, updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(d) SET r += {first_seen: coalesce(r.first_seen, $now), last_seen: $now, gone: false, updated_at: $now}`;
 
 const USES_CYPHER = `

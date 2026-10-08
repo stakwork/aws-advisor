@@ -85,7 +85,7 @@ test("resource nodes carry the generic shape with the provider's word in native_
   assert.equal(ec2.state, "running"); assert.equal(ec2.native_state, "running");
   assert.deepEqual([ec2.role, ec2.role_confidence, ec2.protected_prob, ec2.monthly_usd, ec2.gone], ["web_or_api", 0.9, 0.1, 70.08, false]);
   assert.equal(ec2.pool, "c/ng"); assert.equal(ec2.pool_kind, "node_group");
-  assert.equal(ec2.props.type, "m6i.large"); assert.equal(ec2.props.arch, "arm64"); assert.equal(ec2.props.public_ip, "203.0.113.9"); assert.deepEqual(ec2.props.security_groups, ["sg-1"]); assert.equal(ec2.props.cpu_30d, 12.5);
+  assert.equal(ec2.props.size, "m6i.large"); assert.equal(ec2.props.type, undefined); assert.equal(ec2.props.arch, "arm64"); assert.equal(ec2.props.public_ip, "203.0.113.9"); assert.deepEqual(ec2.props.security_groups, ["sg-1"]); assert.equal(ec2.props.cpu_30d, 12.5);
   assert.deepEqual(ec2.observed.map((o) => [o.kind, o.status]), [["api", "ok"], ["metrics", "ok"], ["probe", "ok"]], "api, CloudWatch and the SSM probe cover it");
   // the pool kind the inventory recorded wins over the tag shape; an offline agent is an offline probe edge
   const asg = gm.resourceFromEc2({ instance_id: "i-2", name: "worker", instance_type: "c6g.large", state: "stopped", region: "us-east-1", pool: "web-asg", pool_kind: "asg", ssm_status: "ConnectionLost", gone: 0, snapshot: "{}" });

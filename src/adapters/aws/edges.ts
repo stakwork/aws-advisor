@@ -35,13 +35,13 @@ OPTIONAL MATCH (old)-[f:FORWARDS_TO]->() DELETE f
 WITH DISTINCT lb, row
 FOREACH (l IN row.listeners |
   MERGE (e:AdvisorEndpoint {id: l.id}) ON CREATE SET e.first_seen = $now
-  SET e += {kind: 'listener', protocol: l.protocol, port: l.port, tls: l.tls, certificates: l.certificates, hostname: lb.dns_name, exposure: CASE WHEN lb.scheme = 'public' THEN 'internet' ELSE 'network' END, resource_id: lb.id, account_id: coalesce(row.account_id, $account), provider: $provider, native_type: 'elb_listener', native_id: l.id, gone: false, last_seen: $now, updated_at: $now}
+  SET e += {kind: 'listener', protocol: l.protocol, port: l.port, tls: l.tls, certificates: l.certificates, hostname: lb.dns_name, exposure: CASE WHEN lb.scheme = 'public' THEN 'internet' ELSE 'network' END, resource_id: lb.id, account_id: coalesce(row.account_id, $account), provider: $provider, native_type: 'elb_listener', gone: false, last_seen: $now, updated_at: $now}
   MERGE (lb)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now)
 WITH lb, row
 FOREACH (e IN row.ec2_edges |
   MERGE (i:AdvisorResource {id: e.target})
   MERGE (t:AdvisorEndpoint {id: e.target + ':tcp:' + toString(coalesce(e.port, 0))})
-    ON CREATE SET t.kind = 'port', t.protocol = 'tcp', t.port = e.port, t.resource_id = e.target, t.provider = $provider, t.native_type = 'instance_port', t.native_id = t.id, t.first_seen = $now, t.gone = false
+    ON CREATE SET t.kind = 'port', t.protocol = 'tcp', t.port = e.port, t.resource_id = e.target, t.provider = $provider, t.native_type = 'instance_port', t.first_seen = $now, t.gone = false
   SET t.last_seen = $now, t.updated_at = $now, t.account_id = coalesce(i.account_id, row.account_id, $account)
   MERGE (i)-[ix:EXPOSES]->(t) ON CREATE SET ix.gone = false
   FOREACH (lid IN CASE WHEN e.listener IS NULL THEN [] ELSE [e.listener] END |
@@ -52,7 +52,7 @@ FOREACH (e IN row.ec2_edges |
 FOREACH (e IN row.ref_edges |
   MERGE (fn:AdvisorResource {id: e.target})
   MERGE (t:AdvisorEndpoint {id: e.target + ':invoke'})
-    ON CREATE SET t.kind = 'url', t.protocol = 'https', t.resource_id = e.target, t.provider = $provider, t.native_type = 'lambda_invoke', t.native_id = t.id, t.first_seen = $now, t.gone = false
+    ON CREATE SET t.kind = 'url', t.protocol = 'https', t.resource_id = e.target, t.provider = $provider, t.native_type = 'lambda_invoke', t.first_seen = $now, t.gone = false
   SET t.last_seen = $now, t.updated_at = $now, t.account_id = coalesce(fn.account_id, row.account_id, $account)
   MERGE (fn)-[fx:EXPOSES]->(t) ON CREATE SET fx.gone = false
   FOREACH (lid IN CASE WHEN e.listener IS NULL THEN [] ELSE [e.listener] END |
@@ -67,7 +67,7 @@ UNWIND $rows AS row
 MATCH (d:AdvisorResource {id: row.id})
 MERGE (e:AdvisorEndpoint {id: row.endpoint_id})
 ON CREATE SET e.first_seen = $now
-SET e += {kind: 'service_endpoint', protocol: 'tcp', port: row.port, hostname: row.host, exposure: CASE WHEN row.publicly_accessible THEN 'internet' ELSE 'network' END, resource_id: row.id, account_id: coalesce(row.account_id, $account), provider: $provider, native_type: 'rds_endpoint', native_id: row.endpoint_id, gone: false, last_seen: $now, updated_at: $now}
+SET e += {kind: 'service_endpoint', protocol: 'tcp', port: row.port, hostname: row.host, exposure: CASE WHEN row.publicly_accessible THEN 'internet' ELSE 'network' END, resource_id: row.id, account_id: coalesce(row.account_id, $account), provider: $provider, native_type: 'rds_endpoint', gone: false, last_seen: $now, updated_at: $now}
 MERGE (d)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now`;
 
 /** A volume's attachment: the instance STORES_ON it. */
@@ -105,7 +105,7 @@ SET d += {name: row.name, platform: 'beanstalk', workload_kind: 'environment', s
 WITH d, row
 OPTIONAL MATCH (d)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
 WITH DISTINCT d, row
-MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
 WITH d, row
 FOREACH (_ IN CASE WHEN row.pool_id IS NULL THEN [] ELSE [1] END |
   MERGE (p:AdvisorNodePool {id: row.pool_id}) SET p.name = row.asg, p.kind = coalesce(p.kind, 'asg'), p.platform = 'beanstalk', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg, p.updated_at = $now

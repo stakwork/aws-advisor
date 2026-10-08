@@ -82,7 +82,7 @@ export function resourceFromEc2(row: any, roles: RoleMap = new Map()): ResourceN
   if (row.ssm_status != null || row.probe_at != null) observed.push({ kind: "probe", status: row.ssm_status === "Online" ? "ok" : row.probe_at && !row.ssm_status ? "stale" : "offline", last_at: str(row.probe_at), detail: str(row.ssm_status) });
   const platform = str(row.platform) || (snap.platform_details ? String(snap.platform_details).toLowerCase().includes("windows") ? "windows" : "linux" : null);
   const n = base(String(row.instance_id), "AdvisorBox", "ec2_instance", row, str(row.name), str(row.state), str(row.region), roles, {
-    kind: "vm", type: str(row.instance_type), arch: str(snap.architecture), platform, image_id: str(snap.image_id),
+    kind: "vm", size: str(row.instance_type), arch: str(snap.architecture), platform, image_id: str(snap.image_id),
     private_ips: net.private_ip ? [String(net.private_ip)] : [], public_ip: str(net.public_ip), ipv6: Array.isArray(net.ipv6) ? net.ipv6.map(String) : [], hostname: str(net.public_dns) || str(net.private_dns),
     zone: str(row.az), lifecycle: snap.instance_lifecycle === "spot" ? "spot" : "on_demand", launch_time: str(row.launch_time), cpu_30d: num(row.cpu_30d), ebs_gb: num(row.ebs_gb), volumes: num(row.volumes),
     probe_at: str(row.probe_at), probe_mem_pct: num(row.probe_mem_pct), vpc_id: str(net.vpc_id), subnet_id: str(net.subnet_id), security_groups: Array.isArray(net.security_groups) ? net.security_groups.map((g: any) => String(g?.GroupId ?? g?.group_id ?? g)) : [],
@@ -100,7 +100,7 @@ export function resourceFromRds(row: any, roles: RoleMap = new Map()): ResourceN
   const observed: ResourceNode["observed"] = [apiObserved(row)];
   if (row.cpu_30d != null || Number(row.cpu_days) > 0) observed.push({ kind: "metrics", status: "ok", last_at: str(row.last_seen), detail: `cpu over ${num(row.cpu_days) ?? "?"} days` });
   return base(String(row.db_instance_identifier), "AdvisorDatabase", "rds_instance", row, str(row.db_instance_identifier), str(row.status), str(row.region), roles, {
-    engine: str(row.engine), engine_version: str(row.engine_version), type: str(row.class), cluster: str(row.cluster), cluster_role: row.cluster ? "member" : "standalone",
+    engine: str(row.engine), engine_version: str(row.engine_version), size: str(row.class), cluster: str(row.cluster), cluster_role: row.cluster ? "member" : "standalone",
     storage_gb: num(row.storage_gb), storage_type: str(row.storage_type), multi_az: bool(row.multi_az), publicly_accessible: net.publicly_accessible == null ? null : Boolean(net.publicly_accessible),
     encrypted: snap.storage_encrypted == null ? null : Boolean(snap.storage_encrypted), backup_retention_days: num(snap.backup_retention_period), deletion_protection: snap.deletion_protection == null ? null : Boolean(snap.deletion_protection),
     endpoint_host: str(net.endpoint), port: num(net.port), vpc_id: str(net.vpc_id), security_groups: Array.isArray(net.security_groups) ? net.security_groups.map(String) : [], cpu_30d: num(row.cpu_30d), created_at: str(row.created),
@@ -110,7 +110,7 @@ export function resourceFromRds(row: any, roles: RoleMap = new Map()): ResourceN
 export function resourceFromElasticache(row: any, roles: RoleMap = new Map()): ResourceNode {
   const net = (safeJson(row.snapshot) || {}).network || {};
   return base(String(row.cache_cluster_id), "AdvisorCache", "elasticache_cluster", row, str(row.cache_cluster_id), str(row.status), str(row.region), roles, {
-    engine: str(row.engine), engine_version: str(row.engine_version), type: str(row.node_type), nodes: num(row.num_nodes), group: str(row.replication_group), created_at: str(row.created),
+    engine: str(row.engine), engine_version: str(row.engine_version), size: str(row.node_type), nodes: num(row.num_nodes), group: str(row.replication_group), created_at: str(row.created),
     security_groups: Array.isArray(net.security_groups) ? net.security_groups.map(String) : [],
   }, [apiObserved(row)]);
 }
@@ -122,7 +122,7 @@ export function resourceFromElb(row: any, roles: RoleMap = new Map()): ResourceN
   const observed: ResourceNode["observed"] = [apiObserved(row)];
   if (Number(row.metric_days) > 0) observed.push({ kind: "metrics", status: "ok", last_at: str(row.last_seen), detail: `requests over ${num(row.metric_days)} days` });
   return base(String(row.arn), "AdvisorLoadBalancer", `elb_${row.kind || "alb"}`, row, str(row.name), str(row.state), str(row.region), roles, {
-    kind: LB_KIND[String(row.kind)] ?? str(row.kind), type: str(row.kind), scheme: row.scheme === "internet-facing" ? "public" : row.scheme ? "internal" : null, native_scheme: str(row.scheme), dns_name: str(row.dns_name),
+    kind: LB_KIND[String(row.kind)] ?? str(row.kind), scheme: row.scheme === "internet-facing" ? "public" : row.scheme ? "internal" : null, native_scheme: str(row.scheme), dns_name: str(row.dns_name),
     targets: Number(row.targets || 0), healthy: Number(row.healthy || 0), unhealthy: Number(row.unhealthy || 0), requests_30d: num(row.requests_30d), gb_30d: num(row.gb_30d),
     asgs: safeJson(row.asgs) || [], ecs_services: safeJson(row.ecs_services) || [], platform_owner: str(row.beanstalk_env), vpc_id: str(row.vpc_id), created_at: str(row.created),
   }, observed);
@@ -148,7 +148,7 @@ export function resourceFromDynamodb(row: any, account: string, roles: RoleMap =
   const onDemand = row.billing_mode === "PAY_PER_REQUEST";
   const id = str(row.arn) || `arn:aws:dynamodb:${row.region}:${row.account_id || account}:table/${row.name}`;
   return base(id, "AdvisorDatabase", "dynamodb_table", row, str(row.name), str(row.status), str(row.region), roles, {
-    engine: "dynamodb", engine_version: null, type: onDemand ? "on-demand" : `provisioned ${num(row.read_capacity)} RCU / ${num(row.write_capacity)} WCU`, kind: "key_value", serverless: true,
+    engine: "dynamodb", engine_version: null, capacity: onDemand ? "on-demand" : `provisioned ${num(row.read_capacity)} RCU / ${num(row.write_capacity)} WCU`, kind: "key_value", serverless: true,
     cluster: null, cluster_role: "standalone", billing_mode: onDemand ? "on_demand" : "provisioned", read_capacity: num(row.read_capacity), write_capacity: num(row.write_capacity),
     indexes: num(row.gsi_count), storage_gb: row.size_bytes == null ? null : Math.round((Number(row.size_bytes) / 1e9) * 100) / 100, storage_type: str(row.table_class), items: num(row.item_count),
     backup_retention_days: Number(row.pitr) ? 35 : 0, point_in_time_recovery: Boolean(Number(row.pitr)), streams: Boolean(Number(row.stream)), publicly_accessible: null, encrypted: true,

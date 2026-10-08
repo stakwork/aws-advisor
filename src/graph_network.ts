@@ -136,7 +136,7 @@ const NETWORK_CYPHER = `
 UNWIND $rows AS row
 MERGE (n:AdvisorNetwork {id: row.id})
 ON CREATE SET n.first_seen = $now
-SET n += {cidr_blocks: row.cidr_blocks, ipv6_blocks: row.ipv6_blocks, default: row.default, flat: false, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'vpc', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET n += {cidr_blocks: row.cidr_blocks, ipv6_blocks: row.ipv6_blocks, default: row.default, flat: false, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'vpc', gone: false, last_seen: $now, updated_at: $now}
 WITH n, row
 OPTIONAL MATCH (n)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
 WITH DISTINCT n, row
@@ -146,7 +146,7 @@ const SEGMENT_CYPHER = `
 UNWIND $rows AS row
 MERGE (s:AdvisorSegment {id: row.id})
 ON CREATE SET s.first_seen = $now
-SET s += {cidr: row.cidr, ipv6_cidr: row.ipv6_cidr, zone: row.zone, public: row.public, auto_public_ip: row.auto_public_ip, available_ips: row.available_ips, default: row.default, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'subnet', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET s += {cidr: row.cidr, ipv6_cidr: row.ipv6_cidr, zone: row.zone, public: row.public, auto_public_ip: row.auto_public_ip, available_ips: row.available_ips, default: row.default, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'subnet', gone: false, last_seen: $now, updated_at: $now}
 WITH s, row
 OPTIONAL MATCH (s)-[o1:IN_NETWORK]->() DELETE o1
 WITH DISTINCT s, row
@@ -162,7 +162,7 @@ const ROUTE_TABLE_CYPHER = `
 UNWIND $rows AS row
 MERGE (t:AdvisorRouteTable {id: row.id})
 ON CREATE SET t.first_seen = $now
-SET t += {main: row.main, routes: row.route_count, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'route_table', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET t += {main: row.main, routes: row.route_count, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'route_table', gone: false, last_seen: $now, updated_at: $now}
 WITH t, row
 OPTIONAL MATCH (t)-[o:ROUTES]->() DELETE o
 WITH DISTINCT t, row
@@ -170,7 +170,7 @@ OPTIONAL MATCH (t)-[o2:IN_NETWORK]->() DELETE o2
 WITH DISTINCT t, row
 FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (t)-[:IN_NETWORK]->(n))
 FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorGateway'] |
-  MERGE (g:AdvisorGateway {id: r.id}) ON CREATE SET g.kind = r.kind, g.provider = $provider, g.account_id = coalesce(row.account_id, $account), g.native_type = r.kind, g.native_id = r.id, g.first_seen = $now, g.updated_at = $now
+  MERGE (g:AdvisorGateway {id: r.id}) ON CREATE SET g.kind = r.kind, g.provider = $provider, g.account_id = coalesce(row.account_id, $account), g.native_type = r.kind, g.first_seen = $now, g.updated_at = $now
   MERGE (t)-[e:ROUTES {destination: r.destination}]->(g) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)
 FOREACH (r IN [x IN row.routes WHERE x.label = 'AdvisorInterface'] |
   MERGE (i:AdvisorInterface {id: r.id}) MERGE (t)-[e:ROUTES {destination: r.destination}]->(i) SET e.state = r.state, e.origin = r.origin, e.updated_at = $now)
@@ -181,14 +181,14 @@ const GATEWAY_CYPHER = `
 UNWIND $rows AS row
 MERGE (g:AdvisorGateway {id: row.id})
 ON CREATE SET g.first_seen = $now
-SET g += {kind: row.kind, state: row.state, public_ip: row.public_ip, public_ips: row.public_ips, private_ip: row.private_ip, service: row.service, endpoint_type: row.endpoint_type, peer_network_id: row.peer_vpc_id, peer_account_id: row.peer_account_id, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET g += {kind: row.kind, state: row.state, public_ip: row.public_ip, public_ips: row.public_ips, private_ip: row.private_ip, service: row.service, endpoint_type: row.endpoint_type, peer_network_id: row.peer_vpc_id, peer_account_id: row.peer_account_id, name: row.name, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, gone: false, last_seen: $now, updated_at: $now}
 WITH g, row
 OPTIONAL MATCH (g)-[o:IN_NETWORK]->() DELETE o
 WITH DISTINCT g, row
 FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (g)-[:IN_NETWORK]->(n))
 FOREACH (_ IN CASE WHEN row.subnet_id IS NULL THEN [] ELSE [1] END | MERGE (s:AdvisorSegment {id: row.subnet_id}) MERGE (g)-[:IN_SEGMENT]->(s))
 FOREACH (_ IN CASE WHEN row.kind = 'peering' AND row.vpc_id IS NOT NULL AND row.peer_vpc_id IS NOT NULL THEN [1] ELSE [] END |
-  MERGE (a:AdvisorNetwork {id: row.vpc_id}) MERGE (b:AdvisorNetwork {id: row.peer_vpc_id}) ON CREATE SET b.provider = $provider, b.native_type = 'vpc', b.native_id = row.peer_vpc_id, b.account_id = coalesce(row.peer_account_id, $account), b.foreign = row.peer_account_id IS NOT NULL AND row.peer_account_id <> $account
+  MERGE (a:AdvisorNetwork {id: row.vpc_id}) MERGE (b:AdvisorNetwork {id: row.peer_vpc_id}) ON CREATE SET b.provider = $provider, b.native_type = 'vpc', b.account_id = coalesce(row.peer_account_id, $account), b.foreign = row.peer_account_id IS NOT NULL AND row.peer_account_id <> $account
   MERGE (a)-[p:PEERS_WITH]->(b) SET p.state = row.state, p.cidrs = row.peer_cidrs, p.via = row.id, p.updated_at = $now
   MERGE (b)-[q:PEERS_WITH]->(a) SET q.state = row.state, q.cidrs = row.cidrs, q.via = row.id, q.updated_at = $now)
 FOREACH (_ IN CASE WHEN row.kind = 'nat' THEN [1] ELSE [] END | MERGE (sys:KnSystem {id: 'nat:' + row.id}) MERGE (g)-[:MEMBER_OF]->(sys))
@@ -198,7 +198,7 @@ const INTERFACE_CYPHER = `
 UNWIND $rows AS row
 MERGE (i:AdvisorInterface {id: row.id})
 ON CREATE SET i.first_seen = $now
-SET i += {private_ips: row.private_ips, public_ip: row.public_ip, ipv6: row.ipv6, mac: row.mac, interface_type: row.interface_type, owner_kind: row.owner_kind, description: row.description, status: row.status, source_dest_check: row.source_dest_check, primary: row.primary, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'network_interface', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET i += {private_ips: row.private_ips, public_ip: row.public_ip, ipv6: row.ipv6, mac: row.mac, interface_type: row.interface_type, owner_kind: row.owner_kind, description: row.description, status: row.status, source_dest_check: row.source_dest_check, primary: row.primary, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'network_interface', gone: false, last_seen: $now, updated_at: $now}
 WITH i, row
 OPTIONAL MATCH (i)-[o:ATTACHED_TO|IN_SEGMENT|IN_NETWORK|WEARS]->() DELETE o
 WITH DISTINCT i, row
@@ -213,7 +213,7 @@ const PUBLIC_IP_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorPublicIp {id: row.id})
 ON CREATE SET p.first_seen = $now
-SET p += {ip: row.ip, kind: 'static', associated: row.associated, allocation_id: row.allocation_id, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'elastic_ip', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET p += {ip: row.ip, kind: 'static', associated: row.associated, allocation_id: row.allocation_id, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'elastic_ip', gone: false, last_seen: $now, updated_at: $now}
 WITH p, row
 OPTIONAL MATCH (p)-[o:ASSIGNED]->() DELETE o
 WITH DISTINCT p, row
@@ -224,7 +224,7 @@ const FILTER_CYPHER = `
 UNWIND $rows AS row
 MERGE (f:AdvisorFilter {id: row.id})
 ON CREATE SET f.first_seen = $now
-SET f += {kind: row.kind, stateful: row.stateful, default_action: 'deny', default: row.default, name: row.name, description: row.description, rules: row.rules, attached: row.attached, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET f += {kind: row.kind, stateful: row.stateful, default_action: 'deny', default: row.default, name: row.name, description: row.description, rules: row.rules, attached: row.attached, region: row.region, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, gone: false, last_seen: $now, updated_at: $now}
 WITH f, row
 OPTIONAL MATCH (f)-[o:IN_NETWORK]->() DELETE o
 WITH DISTINCT f, row
@@ -234,7 +234,7 @@ const RULE_CYPHER = `
 UNWIND $rows AS row
 MERGE (r:AdvisorFilterRule {id: row.id})
 ON CREATE SET r.first_seen = $now
-SET r += {direction: row.direction, action: row.action, protocol: row.protocol, from_port: row.from_port, to_port: row.to_port, priority: row.priority, source_kind: row.source_kind, source: row.source, description: row.description, dormant: row.dormant, filter_id: row.filter_id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: coalesce(row.native_id, row.id), gone: false, last_seen: $now, updated_at: $now}
+SET r += {direction: row.direction, action: row.action, protocol: row.protocol, from_port: row.from_port, to_port: row.to_port, priority: row.priority, source_kind: row.source_kind, source: row.source, description: row.description, dormant: row.dormant, filter_id: row.filter_id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.native_id, gone: false, last_seen: $now, updated_at: $now}
 WITH r, row
 MERGE (f:AdvisorFilter {id: row.filter_id})
 MERGE (f)-[:HAS_RULE]->(r)
@@ -242,7 +242,7 @@ WITH r, row
 OPTIONAL MATCH (r)-[o:FROM]->() DELETE o
 WITH DISTINCT r, row
 FOREACH (s IN CASE WHEN row.source_label = 'AdvisorSource' THEN [row.source_meta] ELSE [] END |
-  MERGE (src:AdvisorSource {id: s.id}) SET src.kind = s.kind, src.label = s.label, src.cidr = s.cidr, src.private = s.private, src.native_type = 'source', src.native_id = s.id, src.updated_at = $now
+  MERGE (src:AdvisorSource {id: s.id}) SET src.kind = s.kind, src.label = s.label, src.cidr = s.cidr, src.private = s.private, src.native_type = 'source', src.updated_at = $now
   MERGE (r)-[:FROM]->(src))
 FOREACH (_ IN CASE WHEN row.source_label = 'AdvisorFilter' THEN [1] ELSE [] END |
   MERGE (g:AdvisorFilter {id: row.source_id}) MERGE (r)-[:FROM]->(g))`;
@@ -268,7 +268,7 @@ MATCH (e:AdvisorEndpoint {id: row.id})
 SET e.exposure = row.exposure, e.reach_reason = row.reason, e.reach_computed_at = $now
 WITH e, row
 FOREACH (x IN [y IN row.reachable_from WHERE y.label = 'AdvisorSource'] |
-  MERGE (s:AdvisorSource {id: x.id}) ON CREATE SET s.kind = x.source_meta.kind, s.label = x.source_meta.label, s.cidr = x.source_meta.cidr, s.private = x.source_meta.private, s.native_type = 'source', s.native_id = x.id
+  MERGE (s:AdvisorSource {id: x.id}) ON CREATE SET s.kind = x.source_meta.kind, s.label = x.source_meta.label, s.cidr = x.source_meta.cidr, s.private = x.source_meta.private, s.native_type = 'source'
   MERGE (e)-[v:REACHABLE_FROM]->(s) SET v.protocol = row.protocol, v.port = row.port, v.via_rule = x.via_rule, v.through = x.through, v.note = x.note, v.requires_auth = false, v.computed_at = $now)
 FOREACH (x IN [y IN row.reachable_from WHERE y.label = 'AdvisorFilter'] |
   MERGE (f:AdvisorFilter {id: x.id})

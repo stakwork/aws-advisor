@@ -150,13 +150,13 @@ UNWIND $rows AS row
 MATCH (i:AdvisorResource {id: row.identity_id})
 MERGE (c:AdvisorCredential {id: row.id}) ON CREATE SET c.first_seen = $now
 SET c += {kind: row.kind, provider: row.provider, name: row.name, state: row.state, observed: row.observed, created_at: row.created_at, last_used_at: row.last_used_at, expires_at: row.expires_at, removed_at: row.removed_at, removed_by: row.removed_by, detail: row.detail,
-  identity_id: row.identity_id, native_type: 'credential', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+  identity_id: row.identity_id, native_type: 'credential', gone: false, last_seen: $now, updated_at: $now}
 MERGE (i)-[h:HAS_CREDENTIAL]->(c) SET h.updated_at = $now`;
 
 const CLIENT_CYPHER = `
 UNWIND $rows AS row
 MERGE (k:AdvisorClient {id: row.id}) ON CREATE SET k.first_seen = $now
-SET k += {client: row.client, platform: row.platform, channel: row.channel, label: row.client + coalesce(' · ' + row.platform, '') + ' · ' + row.channel, native_type: 'client', native_id: row.id, updated_at: $now}`;
+SET k += {client: row.client, platform: row.platform, channel: row.channel, label: row.client + coalesce(' · ' + row.platform, '') + ' · ' + row.channel, native_type: 'client', updated_at: $now}`;
 
 const SIGNS_IN_CYPHER = `
 UNWIND $rows AS row
@@ -171,14 +171,14 @@ MERGE (c)-[u:USED_FROM]->(k) SET u += {events: row.events, last_at: row.last_at,
 const IP_CYPHER = `
 UNWIND $rows AS row
 MATCH (i:AdvisorResource {id: row.identity_id})
-MERGE (s:AdvisorSource {id: 'ip:' + row.ip}) ON CREATE SET s.kind = 'ip', s.label = row.ip, s.cidr = row.ip + CASE WHEN row.ip CONTAINS ':' THEN '/128' ELSE '/32' END, s.private = row.private, s.native_type = 'source', s.native_id = 'ip:' + row.ip
+MERGE (s:AdvisorSource {id: 'ip:' + row.ip}) ON CREATE SET s.kind = 'ip', s.label = row.ip, s.cidr = row.ip + CASE WHEN row.ip CONTAINS ':' THEN '/128' ELSE '/32' END, s.private = row.private, s.native_type = 'source'
 MERGE (i)-[r:SIGNED_IN_FROM]->(s) SET r += {events: row.events, failures: row.failures, first_at: row.first_at, last_at: row.last_at, clients: row.clients, updated_at: $now}`;
 
 const PERSON_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorPerson {id: row.id}) ON CREATE SET p.first_seen = $now
 SET p += {name: row.name, email: row.email, machine: row.machine, status: row.status, last_seen_at: row.last_seen_at, matched_by: row.matched_by, identities: row.identities,
-  native_type: 'person', native_id: row.id, updated_at: $now}
+  native_type: 'person', updated_at: $now}
 // admin, MFA, clients and keys are each identity's (reached through HAS_IDENTITY), not rolled up onto the person
 REMOVE p.admin, p.mfa, p.mfa_weakest_kind, p.platforms, p.channels, p.keys`;
 

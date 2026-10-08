@@ -75,11 +75,11 @@ MERGE (f:AdvisorThreatFinding {id: row.id})
 ON CREATE SET f.first_seen = $now
 SET f += {type: row.type, title: row.title, description: row.description, severity: row.severity_label, native_severity: row.severity, confidence: row.confidence, resource_type: row.resource_type, resource: row.resource_id,
           resource_name: row.resource_name, count: row.count, first_seen_at: row.first_seen_at, last_seen_at: row.last_seen_at, created_at: row.created_at, archived: row.archived, region: row.region, gone: row.gone,
-          provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'guardduty_finding', native_id: row.id, last_seen: $now, updated_at: $now}
+          provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'guardduty_finding', last_seen: $now, updated_at: $now}
 WITH f, row
 OPTIONAL MATCH (f)-[old:IN_ACCOUNT|REPORTED_BY|ABOUT]->() DELETE old
 WITH DISTINCT f, row
-MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.native_id = coalesce(row.account_id, $account), a.kind = 'account', a.updated_at = $now
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.updated_at = $now
 MERGE (f)-[:IN_ACCOUNT]->(a)
 WITH f, row
 FOREACH (_ IN CASE WHEN row.detector_arn IS NULL THEN [] ELSE [1] END | MERGE (d:AdvisorResource {id: row.detector_arn}) MERGE (f)-[:REPORTED_BY]->(d))

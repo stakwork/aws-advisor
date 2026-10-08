@@ -70,11 +70,11 @@ const TARGET = (v: string, id: string) => `OPTIONAL MATCH (${v}_r:AdvisorResourc
 const POLICY_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorPolicy {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, kind: row.kind, account_id: row.account_id, provider: 'aws', native_type: 'iam_policy', native_id: row.id, level: row.level, admin: row.admin, line: row.line, services: row.services, url: row.url, updated_at: $now}`;
+SET p += {name: row.name, kind: row.kind, account_id: row.account_id, provider: 'aws', native_type: 'iam_policy', level: row.level, admin: row.admin, line: row.line, services: row.services, url: row.url, updated_at: $now}`;
 const GROUP_CYPHER = `
 UNWIND $rows AS row
 MERGE (g:AdvisorGroup {id: row.id}) ON CREATE SET g.first_seen = $now
-SET g += {name: row.name, account_id: row.account_id, provider: 'aws', native_type: 'iam_group', native_id: row.id, level: row.level, admin: row.admin, line: row.line, updated_at: $now}`;
+SET g += {name: row.name, account_id: row.account_id, provider: 'aws', native_type: 'iam_group', level: row.level, admin: row.admin, line: row.line, updated_at: $now}`;
 const GRANTED_CYPHER = `
 UNWIND $rows AS row
 OPTIONAL MATCH (i:AdvisorResource {id: row.holder}) OPTIONAL MATCH (g:AdvisorGroup {id: row.holder})
@@ -88,7 +88,7 @@ MERGE (u)-[r:IN_GROUP]->(g) SET r.updated_at = $now`;
 const PERMISSION_SET_CYPHER = `
 UNWIND $rows AS row
 MERGE (s:AdvisorPermissionSet {id: row.id}) ON CREATE SET s.first_seen = $now
-SET s += {name: row.name, account_id: row.account_id, provider: 'aws', native_type: 'permission_set', native_id: row.id, admin: row.admin, level: row.level, line: row.line, accounts: row.accounts, policies: row.policies, updated_at: $now}
+SET s += {name: row.name, account_id: row.account_id, provider: 'aws', native_type: 'permission_set', admin: row.admin, level: row.level, line: row.line, accounts: row.accounts, policies: row.policies, updated_at: $now}
 WITH s, row
 UNWIND row.roles AS ro
 MATCH (r:AdvisorResource {id: ro.arn})

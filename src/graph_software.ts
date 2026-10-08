@@ -27,7 +27,7 @@ UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
 MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, native_type: 'package', native_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, native_type: 'package', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
 SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}`;
 
@@ -55,7 +55,7 @@ MERGE (p)-[r:PROVIDES]->(a) SET r.updated_at = $now`;
 const VULN_CYPHER = `
 UNWIND $rows AS row
 MERGE (v:KnVulnerability {id: row.id}) ON CREATE SET v.first_seen = $now
-SET v += {source: row.source, aliases: row.aliases, cves: row.cves, summary: row.summary, severity: row.severity, cvss: row.score, cvss_vector: row.cvss, attack_vector: row.attack_vector, severity_from: row.severity_from, cwe: row.cwe, published: row.published, modified: row.modified, url: row.url, fetched_at: row.fetched_at, native_type: 'advisory', native_id: row.id, provider: 'osv', updated_at: $now}`;
+SET v += {source: row.source, aliases: row.aliases, cves: row.cves, summary: row.summary, severity: row.severity, cvss: row.score, cvss_vector: row.cvss, attack_vector: row.attack_vector, severity_from: row.severity_from, cwe: row.cwe, published: row.published, modified: row.modified, url: row.url, fetched_at: row.fetched_at, native_type: 'advisory', provider: 'osv', updated_at: $now}`;
 
 const AFFECTS_CYPHER = `
 UNWIND $rows AS row

@@ -56,7 +56,7 @@ export async function mirrorVercelLogs(): Promise<{ drains: number }> {
 UNWIND $rows AS row
 MERGE (g:KnLogGroup {id: row.id}) SET g += {name: row.name, region: null, retention_days: null, stored_gb: null, ingest_gb_day: row.ingest_gb_day, ingest_usd_month: row.ingest_usd_month, storage_usd_month: null,
   owner: row.owner, attributed_by: row.how, candidates: [], tags: null, jev_choice: null, jev_confidence: null, host: row.host, status: row.status, sources: row.sources, environments: row.environments, sampling_rate: row.sampling_rate, format: row.format, all_projects: row.all_projects,
-  provider: $provider, account_id: row.account_id, native_type: 'log_drain', native_id: row.id, gone: false, created_at: row.created_at, updated_at: $now}
+  provider: $provider, account_id: row.account_id, native_type: 'log_drain', gone: false, created_at: row.created_at, updated_at: $now}
 WITH g, row
 OPTIONAL MATCH ()-[old:SHIPS_LOGS_TO]->(g) DELETE old
 WITH DISTINCT g, row

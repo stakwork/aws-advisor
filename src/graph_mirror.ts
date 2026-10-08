@@ -16,9 +16,9 @@ import { alertLevel } from "./alert_level.js";
  *
  * The model is generic; this file is also the AWS adapter's mapping onto it. Every resource node carries the base
  * label `AdvisorResource` plus one specific label (`AdvisorBox`, `AdvisorDatabase`, ...), and the properties
- * `provider`, `native_type` and `native_id`, so an agent reads `kind`-free generic labels and finds the provider's
- * word in `native_*`. Labels are prefixed `Advisor` (records of things that exist) or `Kn` (knowledge, rebuilt from
- * the records: src/graph_knowledge.ts); the Neo4j is shared with stakgraph / repo2graph, whose nodes are never
+ * `provider` and `native_type` (`native_id` too where the provider's id is not the node's id), so an agent reads
+ * `kind`-free generic labels and finds the provider's word in `native_*`. Labels are prefixed `Advisor` (records
+ * of things that exist) or `Kn` (knowledge, rebuilt from the records: src/graph_knowledge.ts); the Neo4j is shared with stakgraph / repo2graph, whose nodes are never
  * touched, and the only foreign label used is `Concept`, MATCHed by id to link a decided recommendation to the
  * team's decision or rule.
  */
@@ -41,13 +41,13 @@ export const LEGACY_LABELS = ["AdvisorRole", "AdvisorPort", "AdvisorPlaybook", "
 
 /** The schema as told to the agent (graph_query tool) and shown in the README. */
 export const SCHEMA_SUMMARY = [
-  "Every node carries namespace = 'advisor' (what the advisor wrote, against the rest of the shared graph), provider (aws), account_id, native_type (the provider's word: ec2_instance, rds_instance, s3_bucket, ...), native_id and updated_at. Resources carry the base label AdvisorResource plus one of: AdvisorBox {kind: vm|managed|laptop|desktop|server, type, arch, platform, private_ips, public_ip, hostname, lifecycle, pool, cpu_30d, launch_time} (the machine: an EC2 instance, a platform's hidden machine, a local computer), AdvisorDatabase {engine, engine_version, type, cluster, storage_gb, storage_type, multi_az, publicly_accessible, encrypted, backup_retention_days, endpoint_host, port, cpu_30d}, AdvisorCache {engine, engine_version, type, nodes, group}, AdvisorLoadBalancer {kind: application|network|gateway|classic, scheme: public|internal, dns_name, targets, healthy, requests_30d, gb_30d, asgs, ecs_services}, AdvisorFunction {runtime, runtime_version, memory_mb, timeout_s, arch, invocations_30d, errors_30d, duration_avg_ms, invocations_month, gb_seconds_month}, AdvisorStorage {kind: object|block, size_gb, objects, class, iops, throughput_mibps, encrypted, versioning, lifecycle_rules, public, attached_to, device}, AdvisorDeployment {platform: beanstalk, workload_kind: environment}, AdvisorDnsZone {private, records}, AdvisorDnsRecord {fqdn, type, ttl, values, alias, routing, link_state}",
+  "Every node carries namespace = 'advisor' (what the advisor wrote, against the rest of the shared graph), provider (aws), account_id, native_type (the provider's word: ec2_instance, rds_instance, s3_bucket, ...), native_id (only where the provider's id differs from id: a pool's name, a pod uid, a rule number) and updated_at. Resources carry the base label AdvisorResource plus one of: AdvisorBox {kind: vm|managed|laptop|desktop|server, size (the instance type, m5.large), arch, platform, private_ips, public_ip, hostname, lifecycle, pool, cpu_30d, launch_time} (the machine: an EC2 instance, a platform's hidden machine, a local computer), AdvisorDatabase {engine, engine_version, size (the instance class; a DynamoDB table has capacity: on-demand | provisioned instead), cluster, storage_gb, storage_type, multi_az, publicly_accessible, encrypted, backup_retention_days, endpoint_host, port, cpu_30d}, AdvisorCache {engine, engine_version, size (the node type), nodes, group}, AdvisorLoadBalancer {kind: application|network|gateway|classic, scheme: public|internal, dns_name, targets, healthy, requests_30d, gb_30d, asgs, ecs_services}, AdvisorFunction {runtime, runtime_version, memory_mb, timeout_s, arch, invocations_30d, errors_30d, duration_avg_ms, invocations_month, gb_seconds_month}, AdvisorStorage {kind: object|block, size_gb, objects, class, iops, throughput_mibps, encrypted, versioning, lifecycle_rules, public, attached_to, device}, AdvisorDeployment {platform: beanstalk, workload_kind: environment}, AdvisorDnsZone {private, records}, AdvisorDnsRecord {fqdn, type, ttl, values, alias, routing, link_state}",
   "Identities: (:AdvisorIdentity {native_type: iam_user, kind: user, name, human (console access), console_access, mfa, admin (AdministratorAccess or an inline Allow * on *), credentials (active access keys), credential_age_days (the oldest active key), last_used_at (password or key), groups, policies (names only), permissions_boundary, access_keys (masked id, status, age, last use), created_at}) -[:IN_ACCOUNT]-> the account; (:AdvisorIdentity {native_type: sso_user, kind: user, human: true, name (the sign-in name), display_name, email, identity_provider (the SCIM issuer when synced from an IdP), mfa: null (no API exposes it), admin (an administrative permission set assigned, directly or through a group), groups, policies (permission set names), accounts (the account ids assigned), assignments ('<account> <permission set> (direct|group x)'), applications, last_used_at (last portal sign-in from CloudTrail, 90 days back at most), sign_ins_30d, failed_sign_ins_30d, activity ('<account> <last write>' from the stored trail)}) an IAM Identity Center user, IN_ACCOUNT of the management account that owns the directory; (:AdvisorIdentity {native_type: root_user, kind: user, name: 'root', human: true, admin: true, mfa, mfa_type (app | passkey | hardware | passkey_or_hardware), credentials (root access keys), password_last_used, key_last_used, last_used_at (last root sign-in), centralized_root_access, root_sessions (members: the organisation manages roots centrally)}) one per account; every identity also carries sign_in_clients ('<client> on <platform> · <channel> · <factors> · <n>× · last <date> · <account>', from CloudTrail sign-ins and stored writes, 90 days), platforms (macOS, iOS, Windows, Linux, AWS Lambda, CloudShell…), channels (console | portal | cli | sdk | iac), factors (password, app = authenticator app, passkey, hardware, sso, access_key, session, console_session) and mfa_type (the strongest second factor registered or seen; Identity Center's comes from sign-ins only); an Identity Center user also has enabled (false when disabled in the directory; state 'stopped') and directory_changes ('<date> <what> by <who>': MFA device removed or registered, disabled, password changed, group membership, from the directory's CloudTrail events, kept a year); (:AdvisorPerson {id: 'person:<match key>', name, email, machine (no identity opens a console), status (active | invited | disabled), last_seen_at, matched_by, identities (count)}) (admin, MFA, sign-in clients and keys are each identity's: follow HAS_IDENTITY)-[:HAS_IDENTITY {kind, matched_by}]->(identity): one per person across providers (IAM users in any account, the Identity Center user, the Vercel member) whose name, email local part or display name match, a single identity included; root users have none; (:AdvisorIdentity {native_type: iam_role, kind: role, human: false, trust (public | federated | cross_account | same_account), trusted_by ('<kind>: <who> [<subjects, repositories, projects>]'; kinds github_actions, vercel, org_account, external_account, public, cognito, eks, oidc…), trusted_services, trust_kinds, trust_risk (alarm | warning), trust_risk_reason, admin, last_used_at, policies}) for every role that is not a pure service role; (:AdvisorIdentity {native_type: team_member, kind: team_member, human: true, platform: 'vercel', role, admin (Owner), mfa, confirmed, github, joined_at}) id '<team>/member/<username>'; (vercel project)-[:RUNS_AS {via: 'vercel_oidc', environments, subjects}]->(iam role) where the role's trust names the project. Credentials and clients: (identity)-[:HAS_CREDENTIAL]->(:AdvisorCredential {kind: password|access_key|mfa_app|passkey|hardware_token|mfa|api_token, provider: aws|vercel, name, state: active|inactive|removed|expired, observed (true: an Identity Center factor seen at sign-in, its device not listable), created_at, last_used_at, expires_at, removed_at, removed_by, detail, gone}); (identity)-[:SIGNS_IN_WITH {events, failures, first_at, last_at, accounts, factors}]->(:AdvisorClient {client: Chrome|Safari|aws-cli|Terraform|AWS SDK (js)…, platform: macOS|iOS|Windows|Linux|AWS Lambda|CloudShell…, channel: console|portal|cli|sdk|iac, label}) a client shared by everyone who uses it, not a device; (:AdvisorCredential)-[:USED_FROM {events, last_at}]->(:AdvisorClient); (identity)-[:SIGNED_IN_FROM {events, failures, first_at, last_at, clients}]->(:AdvisorSource {id: 'ip:<address>', kind: ip, label, cidr, private}) the addresses sign-ins and calls came from (90 days). Example, long-lived keys used from a laptop: MATCH (i:AdvisorIdentity)-[:HAS_CREDENTIAL]->(c:AdvisorCredential {kind: 'access_key', state: 'active'})-[u:USED_FROM]->(k:AdvisorClient) WHERE k.platform IN ['macOS','Windows','Linux'] RETURN i.name, c.name, k.label, u.last_at; one person's ways in across providers: MATCH (p:AdvisorPerson {id: 'person:<key>'})-[:HAS_IDENTITY]->(i)-[:HAS_CREDENTIAL]->(c) RETURN i.native_type, i.name, c.kind, c.state",
   "What people may do (src/entitlements.ts, src/access_paths.ts; levels as the IAM console grades them: list, read, tagging, write, permissions = permissions management, admin): every IAM user and role carries access_level, access_line ('Permissions management on iam; Write on ec2, s3 (named resources)'), write_services, permissions_services (permissions management on IAM, STS, Organizations, Identity Center: who may do what; ['*'] = every service), resource_access_services (permissions management on a service's own resources: a log group's or topic's resource policy, CloudWatch access grants; who may reach that data) and escalation (the permissions-management actions a non-administrator holds: iam:PutUserPolicy, iam:PassRole…); (identity|AdvisorGroup)-[:GRANTED {via: attached|inline|permissions boundary}]->(:AdvisorPolicy {kind: aws_managed|customer_managed|inline, level, admin, line, services, url (AWS's reference page for an AWS-managed policy, else the IAM console page of the policy or of the user/role/group holding an inline one; the statements are not in the graph: use access_check for a verdict)}); (iam user)-[:IN_GROUP]->(:AdvisorGroup {level, line}); (sso user)-[:ASSIGNED {account_id, via: direct|group x}]->(:AdvisorPermissionSet {admin, level, line, accounts, policies})-[:PROVISIONED_AS {account_id}]->(its AWSReservedSSO_ role); (identity)-[:CAN_ACCESS {via, level, admin, line, + per target: write_services (account), deploy, env_vars (Vercel project), namespaces (cluster)}]->(AdvisorAccount | Vercel project | AdvisorCluster) the grants no node states, read directly so they carry no decision (an Identity Center user per assignment, a Vercel member's role per project with deploy production|preview|none and env_vars write|preview|read|none, an EKS access entry or aws-auth mapping with level cluster_admin|admin|edit|view|groups); paths, each with decision allowed|conditional (an administrator's steps inside its own account are not drawn: admin already covers them; its CAN_ASSUME into another account is): (identity)-[:CAN_ASSUME {via}]->(iam role) (the role's trust names it, or its account and the identity's policies allow sts:AssumeRole; an Identity Center user reaches its reserved roles through ASSIGNED → PROVISIONED_AS instead), (:AdvisorRepository {id: 'github:<owner>/<repo>'})-[:CAN_ASSUME {refs (the branches or tags the trust allows)}]->(role), (identity)-[:CAN_SHELL_INTO {via: Session Manager|EC2 Instance Connect, note}]->(instance) (non-administrators only: an administrator can open a shell on every instance of its account, so ask the access_check tool or read admin), (instance)-[:RUNS_AS {via: 'instance profile', profile}]->(role), (Vercel project)-[:HOLDS_KEY_OF {via, names (the variables), targets (environments), note}]->(iam user whose static key is in its variables); (identity)-[:TOUCHED {events, actions, last_at}]->(resource) what it changed in 90 days of CloudTrail writes (the evidence of use; unused access is the identity_unused_write recommendation, dated); (:AdvisorPerson)-[:REACHES {level, admin, line (their own grants, then 'through a path: …' for what only a path adds; a service is marked '(under a condition)' or '(named resources)' when every grant of it is), direct (false: only through a path), paths ('alice (Identity Center) → assumes deployer (trust names account …)'), decision, + per target: write_services (account), deploy, env_vars (project), namespaces (cluster)}]->(account | project | cluster): everything the person reaches through any of their identities and paths, folded per target (derived: CAN_ACCESS is only ever an identity's grant). Example, what one person can touch: MATCH (p:AdvisorPerson {id: 'person:<key>'})-[c:REACHES]->(t) RETURN coalesce(t.name, t.id), c.level, c.line, c.direct, c.paths; who can administer an account: MATCH (p:AdvisorPerson)-[c:REACHES {admin: true}]->(a:AdvisorAccount {id: '<account>'}) RETURN p.name, c.direct, c.paths",
   "Platform services (src/service_inventory.ts), each also an AdvisorResource: (:AdvisorCertificate {native_type: acm_certificate, domains, issuer: acm|private_ca|<imported issuer>, origin: issued|imported|private, status: issued|expired|pending|revoked|failed|inactive, not_before, not_after, days_left, in_use, used_by, key_algorithm, renewal_eligible, wildcard})-[:SECURES]->(the balancer, distribution or API that terminates TLS with it); (:AdvisorMessaging {native_type: sns_topic, kind: topic, fifo, subscriptions, pending, protocols ('lambda 2'), encrypted, kms_key, dlq, messages_30d})-[:DELIVERS_TO {protocol, raw, filtered}]->(function | queue | stream, a ref when not inventoried); (:AdvisorSecret {native_type: kms_key, kind: kms_key, key_id, managed (AWS-managed), key_state: enabled|disabled|pending_deletion|..., usage, spec, origin, rotation_enabled, aliases, multi_region, deletion_at})-[:ENCRYPTS]->(file system | topic | backup vault); (:AdvisorStorage {native_type: efs_file_system, kind: file, size_gb, standard_gb, ia_gb, archive_gb, class: regional|one_zone, performance_mode, throughput_mode, provisioned_mibps, encrypted, mount_targets, automatic_backups})-[:IN_NETWORK]->(AdvisorNetwork), -[:IN_SEGMENT]->(AdvisorSegment), -[:GUARDED_BY]->(AdvisorFilter {kind: security_group}); (:AdvisorStorage {native_type: backup_vault, kind: backup, recovery_points, size_gb, warm_gb, cold_gb, by_type, oldest_at, newest_at, locked, protected_resources}) <-[:BACKED_UP_TO {last_backup_at, resource_type}]-(resource | ref); (:AdvisorBackupPlan {rules, schedules, retention_days, keeps_forever, cold_after_days, copies, vaults, selections, selects_all, last_run_at})-[:STORES_IN]->(vault), -[:PROTECTS]->(resources its selections name by ARN; tag and wildcard selections are words in selections); (:AdvisorAnalytics {native_type: athena_workgroup, kind: query_engine, engine, engine_version, enforce_config, scan_limit_gb, output_location, output_encrypted, metrics_published, scanned_gb_30d})-[:WRITES_TO]->(the results bucket); (:AdvisorStack {native_type: cloudformation_stack, tool: cloudformation, resources, mapped_resources, resource_types, failed_resources, drift: in_sync|drifted|unknown, termination_protection, nested, status_reason, updated_at})-[:MANAGES {logical_id, resource_type}]->(resources and network nodes it created), -[:PART_OF]->(parent stack); (:AdvisorResource:AdvisorFilter {native_type: wafv2_web_acl, kind: web_acl, default_action: allow|block, rules, rule_list, managed_groups, rate_limits, attached, edge (CloudFront scope), logging, requests_30d, blocked_30d}) <-[:GUARDED_BY]-(the balancers and APIs it protects); (:AdvisorDetector {native_type: guardduty_detector, kind: threat_detection, engine, enabled, protections_on, protections_off, publishing_frequency, administrator, findings_open, findings_critical, findings_high, last_finding_at}) <-[:REPORTED_BY]-(:AdvisorThreatFinding {id, type, title, description, severity: low|medium|high|critical, native_severity (1-10), confidence, resource_type, resource, resource_name, count, first_seen_at, last_seen_at, archived, gone})-[:ABOUT]->(resource | :AdvisorResourceRef), -[:IN_ACCOUNT]->(account); findings are kept 90 days",
   "(:AdvisorNotification {id (the event ARN), feed: managed|configured, source (health, billing, ...), event_type, headline, notification_type: ALERT|WARNING|ANNOUNCEMENT|INFORMATIONAL, event_status: HEALTHY|UNHEALTHY, origin_region, related_account, created_at, aggregation, event_count, regions})-[:IN_ACCOUNT]->(:AdvisorAccount) what AWS told the account through User Notifications (the console bell): the AWS-managed feed every account gets (Health, announcements, billing, security), and the account's own configured notifications where a hub is registered; kept 90 days",
   "Accounts: (:AdvisorAccount {id, provider, native_type: account|team|project, kind: account, name, parent_id, role: management|member|standalone, enabled, access (how the advisor reaches it, in words), actuator (it may act there), last_test_ok, last_test_at}); a member of an AWS organisation -[:PART_OF]->(the management account); every resource, run, pass and scan -[:IN_ACCOUNT]-> the account it was collected from (a member's resources hang off the member, not the parent)",
-  "Shared resource properties: id (the provider's id or ARN), name, state (running|stopped|pending|terminated|available|degraded|unknown) and native_state, region, zone, monthly_usd (a month at list), role (the judged archetype), role_confidence, protected_prob, gone, first_seen, last_seen; (:AdvisorResource)-[:IN_ACCOUNT]->(:AdvisorAccount {id, kind: account, provider}); (:AdvisorResource)-[:HAS_ROLE]->(:KnArchetype {id, name, description}); (:AdvisorBox)-[:IN_POOL]->(:AdvisorNodePool {id, name, kind: asg|karpenter|node_group|batch}); (:AdvisorBox)-[:STORES_ON]->(:AdvisorStorage {kind: block}); (:AdvisorDnsRecord)-[:IN_ZONE]->(:AdvisorDnsZone); (:AdvisorDnsRecord)-[:POINTS_TO]->(resource | :AdvisorResourceRef); (:AdvisorDeployment)-[:RUNS_ON_POOL]->(:AdvisorNodePool), -[:BACKED_BY]->(:AdvisorLoadBalancer)",
+  "Shared resource properties: id (the provider's id or ARN), name, state (running|stopped|pending|terminated|available|degraded|unknown) and native_state (only where the provider's word differs), region, zone, monthly_usd (a month at list), role (the judged archetype), role_confidence, protected_prob, gone, first_seen, last_seen; (:AdvisorResource)-[:IN_ACCOUNT]->(:AdvisorAccount {id, kind: account, provider}); (:AdvisorResource)-[:HAS_ROLE]->(:KnArchetype {id, name, description}); (:AdvisorBox)-[:IN_POOL]->(:AdvisorNodePool {id, name, kind: asg|karpenter|node_group|batch}); (:AdvisorBox)-[:STORES_ON]->(:AdvisorStorage {kind: block}); (:AdvisorDnsRecord)-[:IN_ZONE]->(:AdvisorDnsZone); (:AdvisorDnsRecord)-[:POINTS_TO]->(resource | :AdvisorResourceRef); (:AdvisorDeployment)-[:RUNS_ON_POOL]->(:AdvisorNodePool), -[:BACKED_BY]->(:AdvisorLoadBalancer)",
   "Machines and what runs on them: (:AdvisorBox)-[:HOSTS]->(:AdvisorCompute {id: compute:<box id>, box_id, name, state, gone, platform: linux|windows|macos, arch, os (name and version), os_id, os_version, kernel, package_manager, opaque (true when the provider never shows the machine: a platform's runtime), managed_by}) the operating system each box runs, one per box; the box is the machine (size, price, addresses, network, state, usage, wake), the compute is the OS: it RUNS the programs and containers, packages are INSTALLED_ON it, it RUNS_IMAGE the images and is VULNERABLE_TO advisories, and deployments RUNS_ON it ({via: kubernetes|ecs|beanstalk|vercel_functions|local, pods}). A platform that hides its machines (Vercel) gets one opaque box and compute per team that its projects RUNS_ON; a local machine (provider local, AdvisorAccount {kind: site}) is an AdvisorBox {kind: laptop|desktop|server|vm} with its compute and the deployments declared on it",
   "What the advisor can see of a resource is an edge, not a flag: (:AdvisorResource)-[:OBSERVED_BY {since, last_at, status: ok|stale|offline, detail}]->(:AdvisorTelemetry {id, kind: api|metrics|probe, native: steampipe|cloudwatch|ssm_probe}); no probe edge means the advisor cannot look inside the box (a database never has one; an EC2 instance without one has no Systems Manager agent). An EC2 node also carries its health checks: health (ok|impaired|initializing|unknown), health_host, health_instance, health_storage, scheduled_events, health_checked_at",
   "(:AdvisorResource)-[:EXPOSES {gone}]->(:AdvisorEndpoint {id, kind: port|listener|service_endpoint|url, protocol: tcp|udp|http|https|tls, port, hostname, bind, scope: all|loopback|address, exposure: internet|network|group|closed|local, process, container, container_port, tls, first_seen, last_seen, gone}) something listening: a port a probe saw on a box (probe 1.8, exposure from the security group ingress rules: internet = 0.0.0.0/0 or ::/0 lets it in), a balancer listener, a database endpoint, a function URL; (:AdvisorApp)-[:SERVES]->(:AdvisorEndpoint) the program or container behind a port; (:AdvisorEndpoint {kind: listener})-[:FORWARDS_TO {target_group, health}]->(:AdvisorEndpoint) a balancer listener to the instance ports or function it fronts",
@@ -425,6 +425,12 @@ export async function backfillJarvisFields(): Promise<number> {
      WITH n, inferred LIMIT 1000 SET n.name = inferred RETURN count(*) AS n`,
     // the marker an earlier sweep kept beside an inferred name; the name stays, the marker goes
     `MATCH (n) WHERE n.name_inferred IS NOT NULL WITH n LIMIT 1000 REMOVE n.name_inferred RETURN count(*) AS n`,
+    // native_id and native_state are written only where they differ from id and state; copies written before that go
+    `MATCH (n) WHERE ${ours} AND n.native_id IS NOT NULL AND toString(n.native_id) = toString(n.id) WITH n LIMIT 1000 REMOVE n.native_id RETURN count(*) AS n`,
+    `MATCH (n) WHERE ${ours} AND n.native_state IS NOT NULL AND n.native_state = n.state WITH n LIMIT 1000 REMOVE n.native_state RETURN count(*) AS n`,
+    // the instance type, class or node type was `type` before it became `size` (a balancer's and a DynamoDB table's were other words, gone)
+    `MATCH (n) WHERE (n:AdvisorBox OR n:AdvisorDatabase OR n:AdvisorCache OR n:AdvisorLoadBalancer) AND n.type IS NOT NULL WITH n LIMIT 1000
+     SET n.size = CASE WHEN n.native_type IN ['ec2_instance', 'rds_instance', 'elasticache_cluster'] THEN coalesce(n.size, n.type) ELSE n.size END REMOVE n.type RETURN count(*) AS n`,
   ];
   let total = 0;
   for (const cypher of sweeps) {
@@ -541,10 +547,10 @@ const chunks = <T,>(items: T[], size = BATCH): T[][] => { const out: T[][] = [];
 
 /** The account node and its telemetry nodes, for any adapter: the provider's word for the boundary and its sources. */
 async function mirrorAccount(account: string, provider: string, telemetry: Record<TelemetryKind, { native: string }>, nativeType = "account"): Promise<void> {
-  await write("MERGE (a:AdvisorAccount {id: $id}) SET a.account_id = $id, a.provider = $provider, a.native_type = $native_type, a.native_id = $id, a.kind = 'account', a.updated_at = $now", { id: account, provider, native_type: nativeType, now: now() });
+  await write("MERGE (a:AdvisorAccount {id: $id}) SET a.account_id = $id, a.provider = $provider, a.native_type = $native_type, a.kind = 'account', a.updated_at = $now", { id: account, provider, native_type: nativeType, now: now() });
   await mirrorAccountRecords(provider);
   const rows = (Object.keys(telemetry) as TelemetryKind[]).filter((k) => telemetry[k].native !== "none").map((kind) => ({ id: telemetryNodeId(provider, account, kind), kind, native: telemetry[kind].native }));
-  await write(`UNWIND $rows AS row MERGE (t:AdvisorTelemetry {id: row.id}) SET t.kind = row.kind, t.native = row.native, t.provider = $provider, t.account_id = $account, t.native_type = 'telemetry', t.native_id = row.id, t.updated_at = $now
+  await write(`UNWIND $rows AS row MERGE (t:AdvisorTelemetry {id: row.id}) SET t.kind = row.kind, t.native = row.native, t.provider = $provider, t.account_id = $account, t.native_type = 'telemetry', t.updated_at = $now
     WITH t MATCH (a:AdvisorAccount {id: $account}) MERGE (t)-[:IN_ACCOUNT]->(a)`, { rows, account, provider, now: now() });
 }
 
@@ -563,7 +569,7 @@ async function mirrorAccountRecords(provider: string): Promise<void> {
   await write(`
 UNWIND $rows AS row
 MERGE (a:AdvisorAccount {id: row.id})
-SET a += {account_id: row.id, provider: row.provider, native_type: row.native_type, native_id: row.id, kind: row.kind, name: row.name, parent_id: row.parent_id, enabled: row.enabled, access: row.access, actuator: row.actuator, role: row.role, last_test_ok: row.last_test_ok, last_test_at: row.last_test_at, updated_at: $now}
+SET a += {account_id: row.id, provider: row.provider, native_type: row.native_type, kind: row.kind, name: row.name, parent_id: row.parent_id, enabled: row.enabled, access: row.access, actuator: row.actuator, role: row.role, last_test_ok: row.last_test_ok, last_test_at: row.last_test_at, updated_at: $now}
 WITH a, row
 OPTIONAL MATCH (a)-[old:PART_OF]->(:AdvisorAccount) WHERE row.parent_id IS NULL OR old IS NULL DELETE old
 WITH DISTINCT a, row
@@ -639,13 +645,13 @@ UNWIND $rows AS row
 MERGE (r:AdvisorResource {id: row.id})
 SET r:${label}
 SET r += row.props
-SET r += {name: row.name, state: row.state, native_state: row.native_state, region: row.region, role: row.role, role_confidence: row.role_confidence, protected_prob: row.protected_prob,
+SET r += {name: row.name, state: row.state, native_state: CASE WHEN row.native_state = row.state THEN null ELSE row.native_state END, region: row.region, role: row.role, role_confidence: row.role_confidence, protected_prob: row.protected_prob,
           monthly_usd: row.monthly_usd, gone: row.gone, first_seen: row.first_seen, last_seen: row.last_seen, pool: row.pool,
-          provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, updated_at: $now}
+          provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, updated_at: $now}
 WITH r, row
 OPTIONAL MATCH (r)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
 WITH DISTINCT r, row
-MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account), a.updated_at = $now
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.account_id = coalesce(row.account_id, $account), a.updated_at = $now
 MERGE (r)-[:IN_ACCOUNT]->(a)
 WITH r, row
 OPTIONAL MATCH (r)-[oldRole:HAS_ROLE]->(x:KnArchetype) WHERE row.role IS NULL OR x.id <> row.role
@@ -702,7 +708,7 @@ UNWIND $rows AS row
 MERGE (rec:AdvisorRecommendation {id: row.id})
 SET rec += {fingerprint: row.fingerprint, title: row.title, action: row.action, native_action: row.native_action, tier: row.tier, status: row.status, source: row.source, rule: row.rule,
             est_monthly_saving: row.est_monthly_saving, confidence: row.confidence, decided_by: row.decided_by, decided_at: row.decided_at, decision_scope: row.decision_scope,
-            created_at: row.created_at, resource: row.resource, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'recommendation', native_id: toString(row.id), updated_at: $now}
+            created_at: row.created_at, resource: row.resource, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'recommendation', updated_at: $now}
 WITH rec, row
 OPTIONAL MATCH (rec)-[t:TARGETS]->() DELETE t
 WITH DISTINCT rec, row
@@ -744,7 +750,7 @@ export async function mirrorRecommendations(ids?: number[]): Promise<{ recommend
 const FLAG_CYPHER = `
 UNWIND $rows AS row
 MERGE (c:AdvisorControl {id: row.control_id})
-SET c.title = coalesce(row.control_title, c.title, row.control_id), c.framework = row.framework, c.category = row.category, c.provider = $provider, c.native_type = 'control', c.native_id = row.control_id, c.account_id = $account, c.updated_at = $now
+SET c.title = coalesce(row.control_title, c.title, row.control_id), c.framework = row.framework, c.category = row.category, c.provider = $provider, c.native_type = 'control', c.account_id = $account, c.updated_at = $now
 WITH c, row
 // a resource, or the account itself for an account-level finding (a Vercel team's)
 OPTIONAL MATCH (res:AdvisorResource {id: row.resource_id})
@@ -763,11 +769,11 @@ OPTIONAL MATCH (p)-[old:CITES]->() DELETE old
 WITH p, row
 FOREACH (src IN row.source_nodes |
   MERGE (s:KnSource {id: src.id}) ON CREATE SET s.first_seen = $now
-  SET s.kind = src.kind, s.origin = src.origin, s.title = src.title, s.url = src.url, s.hash = src.hash, s.fetched_at = src.fetched_at, s.changed_at = src.changed_at, s.native_type = 'document', s.native_id = src.id, s.provider = $provider, s.updated_at = $now
+  SET s.kind = src.kind, s.origin = src.origin, s.title = src.title, s.url = src.url, s.hash = src.hash, s.fetched_at = src.fetched_at, s.changed_at = src.changed_at, s.native_type = 'document', s.provider = $provider, s.updated_at = $now
   MERGE (p)-[:CITES]->(s))
 WITH p, row
 MERGE (c:AdvisorControl {id: row.control_id})
-SET c.title = coalesce(c.title, row.title), c.framework = coalesce(c.framework, row.framework), c.category = coalesce(c.category, row.category), c.provider = $provider, c.native_type = 'control', c.native_id = row.control_id, c.account_id = $account, c.updated_at = $now
+SET c.title = coalesce(c.title, row.title), c.framework = coalesce(c.framework, row.framework), c.category = coalesce(c.category, row.category), c.provider = $provider, c.native_type = 'control', c.account_id = $account, c.updated_at = $now
 MERGE (c)-[:HAS_PLAYBOOK]->(p)`;
 
 /** The latest completed run of a provider (its rules say which, for its primary account). */
@@ -831,7 +837,7 @@ export async function mirrorRun(runId: number, opts: { controls?: boolean } = {}
   const primary = await mirrorAdapterAccount(adapter);
   const account = row.account_id && adapter.owns(String(row.account_id)) ? String(row.account_id) : primary;
   const node = runNode(row);
-  await write(`MERGE (r:AdvisorRun {id: $row.id}) SET r += $row, r.account_id = $account, r.provider = $provider, r.native_type = $kind, r.native_id = toString($row.id), r.updated_at = $now
+  await write(`MERGE (r:AdvisorRun {id: $row.id}) SET r += $row, r.account_id = $account, r.provider = $provider, r.native_type = $kind, r.updated_at = $now
     WITH r MATCH (a:AdvisorAccount {id: $account}) MERGE (r)-[:IN_ACCOUNT]->(a)`, { row: node, account, provider: adapter.id, kind: adapter.rules?.run_native_type ?? "rules_run", now: now() });
   let flagged = 0;
   if (opts.controls !== false && node.status === "completed" && latestCompletedRunId(adapter) === runId) flagged = (await mirrorControls(runId, { provider: adapter.id, account })).flagged;
@@ -845,7 +851,7 @@ UNWIND $rows AS row
 MERGE (a:AdvisorAlert {id: row.id})
 SET a += {kind: row.kind, level: row.level, message: row.message, created_at: row.created_at, acknowledged: row.acknowledged, acknowledged_by: row.acknowledged_by,
           resource: row.resource, cause_status: row.cause_status, cause: row.cause, cause_actor: row.cause_actor, cause_actor_kind: row.cause_actor_kind, cause_via: row.cause_via,
-          cause_event: row.cause_event, cause_at: row.cause_at, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'alert', native_id: toString(row.id), updated_at: $now}
+          cause_event: row.cause_event, cause_at: row.cause_at, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'alert', updated_at: $now}
 WITH a, row
 FOREACH (_ IN CASE WHEN row.cause_action_id IS NULL THEN [] ELSE [1] END |
   MERGE (x:AdvisorAction {id: row.cause_action_id})
@@ -859,7 +865,7 @@ const INCIDENT_CYPHER = `
 UNWIND $rows AS row
 MERGE (i:AdvisorIncident {id: row.id})
 SET i += {status: row.status, cause: row.cause, confidence: row.confidence, episode_cost_usd: row.episode_cost_usd, monthly_run_rate_usd: row.monthly_run_rate_usd,
-          created_at: row.created_at, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'incident', native_id: toString(row.id), updated_at: $now}
+          created_at: row.created_at, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'incident', updated_at: $now}
 WITH i, row
 MERGE (a:AdvisorAlert {id: row.alert_id})
 MERGE (i)-[:INVESTIGATES]->(a)`;
@@ -892,7 +898,7 @@ MERGE (x:AdvisorAction {id: row.id})
 SET x += {kind: row.kind, status: row.status, mode: row.mode, trigger: row.trigger, title: row.title, reason: row.reason, rollback: row.rollback, est_usd_month: row.est_usd_month,
           result: row.result, error: row.error, resource: row.resource, resource_name: row.resource_name, region: row.region, created_at: row.created_at, seen_at: row.seen_at,
           applied_at: row.applied_at, verified_at: row.verified_at, reverted_at: row.reverted_at, stage: row.stage, new_resource: row.new_resource,
-          bill_verdict: row.bill_verdict, realised_usd_month: row.realised_usd_month, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'executor_action', native_id: toString(row.id), updated_at: $now}
+          bill_verdict: row.bill_verdict, realised_usd_month: row.realised_usd_month, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'executor_action', updated_at: $now}
 WITH x, row
 FOREACH (_ IN CASE WHEN row.new_resource IS NULL THEN [] ELSE [1] END |
   ${REF_MERGE("nr", "row.new_resource", "'instance'", "action")}
@@ -932,7 +938,7 @@ export async function mirrorActions(ids?: number[]): Promise<{ actions: number }
 
 const PASS_CYPHER = `
 MERGE (p:AdvisorPass {id: $pass.id})
-SET p += $pass, p.account_id = $account, p.provider = $provider, p.native_type = 'executor_pass', p.native_id = toString($pass.id), p.updated_at = $now
+SET p += $pass, p.account_id = $account, p.provider = $provider, p.native_type = 'executor_pass', p.updated_at = $now
 WITH p
 MATCH (acc:AdvisorAccount {id: $account}) MERGE (p)-[:IN_ACCOUNT]->(acc)
 WITH p
@@ -974,7 +980,7 @@ export async function mirrorPasses(): Promise<{ passes: number }> {
 const APP_CYPHER = `
 UNWIND $rows AS row
 MERGE (app:AdvisorApp {id: row.name})
-SET app.name = row.name, app.kind = row.kind, app.native_type = 'program', app.native_id = row.name, app.updated_at = $now
+SET app.name = row.name, app.kind = row.kind, app.native_type = 'program', app.updated_at = $now
 WITH app, row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "r")}
@@ -985,7 +991,7 @@ const PORT_CYPHER = `
 UNWIND $rows AS row
 MERGE (p:AdvisorEndpoint {id: row.id})
 SET p += {kind: 'port', resource_id: row.instance_id, protocol: row.proto, port: row.port, bind: row.bind, scope: row.scope, exposure: row.exposure, process: row.process, container: row.container, container_port: row.container_port,
-  first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'instance_port', native_id: row.id, updated_at: $now}
+  first_seen: row.first_seen, last_seen: row.last_seen, probes: row.probes, gone: row.gone, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'instance_port', updated_at: $now}
 WITH p, row
 MATCH (r:AdvisorResource {id: row.instance_id})
 MERGE (r)-[l:EXPOSES]->(p) SET l.gone = row.gone, l.updated_at = $now, p.account_id = coalesce(row.account_id, r.account_id, $account)
@@ -1059,7 +1065,7 @@ export async function mirrorStatusChecks(): Promise<{ instances: number }> {
 const SECURITY_FLAG_CYPHER = `
 UNWIND $rows AS row
 MERGE (c:AdvisorControl {id: row.control_id})
-SET c.title = coalesce(row.control_title, c.title, row.control_id), c.severity = row.severity, c.benchmark = row.benchmark, c.framework = row.framework, c.category = row.category, c.provider = $provider, c.native_type = 'control', c.native_id = row.control_id, c.account_id = $account, c.updated_at = $now
+SET c.title = coalesce(row.control_title, c.title, row.control_id), c.severity = row.severity, c.benchmark = row.benchmark, c.framework = row.framework, c.category = row.category, c.provider = $provider, c.native_type = 'control', c.account_id = $account, c.updated_at = $now
 WITH c, row
 MATCH (r:AdvisorResource {id: row.resource_id})
 MERGE (c)-[f:SECURITY_FLAGGED]->(r)
@@ -1076,7 +1082,7 @@ export async function mirrorComplianceScan(scanId: number): Promise<{ scan: numb
   const row = db.prepare("select id, started_at, finished_at, status, trigger, alarms, new_alarms, resolved, errors, counts from compliance_scans where id = ?").get(scanId) as any;
   if (!row) return { scan: null, flagged: 0 };
   const account = await mirrorAdapterAccount(awsAdapter);
-  await write(`MERGE (s:AdvisorSecurityScan {id: $row.id}) SET s += $row, s.account_id = $account, s.provider = $provider, s.native_type = 'compliance_scan', s.native_id = toString($row.id), s.updated_at = $now
+  await write(`MERGE (s:AdvisorSecurityScan {id: $row.id}) SET s += $row, s.account_id = $account, s.provider = $provider, s.native_type = 'compliance_scan', s.updated_at = $now
     WITH s MATCH (a:AdvisorAccount {id: $account}) MERGE (s)-[:IN_ACCOUNT]->(a)`, { row: { ...row, counts: row.counts || "{}" }, account, provider: AWS, now: now() });
   let flagged = 0;
   const latest = (db.prepare("select id from compliance_scans where status = 'completed' order by id desc limit 1").get() as { id: number } | undefined)?.id;
@@ -1347,7 +1353,7 @@ export async function mirrorCapacityPatterns(): Promise<{ patterns: number; even
   const events = rowsOf("select id, env_id, asg, at, ring, desired, max_size, cpu_avg, action_id, note from capacity_pressure_events where datetime(at) > datetime('now', '-28 days')").map((e) => { const a = envAccount.get(String(e.env_id)) ?? null; return { ...e, account_id: a, pool_id: poolNodeId(AWS, a ?? account, String(e.asg)) }; });
   for (const batch of chunks(events)) await write(`UNWIND $rows AS row
     MERGE (p:AdvisorNodePool {id: row.pool_id}) ON CREATE SET p.name = row.asg, p.kind = 'asg', p.account_id = coalesce(row.account_id, $account), p.provider = $provider, p.native_type = 'autoscaling_pool', p.native_id = row.asg
-    MERGE (e:AdvisorPressureEvent {id: row.id}) SET e += {env_id: row.env_id, at: row.at, ring: row.ring, desired: row.desired, max_size: row.max_size, signal: 'cpu', value: row.cpu_avg, cpu_avg: row.cpu_avg, note: row.note, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'pressure_event', native_id: toString(row.id), updated_at: $now}
+    MERGE (e:AdvisorPressureEvent {id: row.id}) SET e += {env_id: row.env_id, at: row.at, ring: row.ring, desired: row.desired, max_size: row.max_size, signal: 'cpu', value: row.cpu_avg, cpu_avg: row.cpu_avg, note: row.note, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'pressure_event', updated_at: $now}
     MERGE (p)-[:PRESSURED_AT]->(e)
     WITH e, row WHERE row.action_id IS NOT NULL
     MATCH (a:AdvisorAction {id: row.action_id}) MERGE (a)-[:ANSWERED]->(e)`, { rows: batch, account, provider: AWS, now: stamp });
@@ -1363,9 +1369,9 @@ export async function mirrorCloudNotifications(): Promise<{ notifications: numbe
   const rows = rowsOf("select arn, account_id, feed, source, event_type, headline, notification_type, event_status, origin_region, related_account, created_at, aggregation, event_count, regions, configuration_arn from cloud_notifications").map((r) => { let regions: string[] = []; try { regions = JSON.parse(r.regions || "[]"); } catch { /* none */ } return { ...r, regions, account_id: r.account_id ? String(r.account_id) : null }; });
   const stamp = now();
   for (const batch of chunks(rows)) await write(`UNWIND $rows AS row
-    MERGE (n:AdvisorNotification {id: row.arn}) SET n += {feed: row.feed, source: row.source, event_type: row.event_type, headline: row.headline, notification_type: row.notification_type, event_status: row.event_status, origin_region: row.origin_region, related_account: row.related_account, created_at: row.created_at, aggregation: row.aggregation, event_count: row.event_count, regions: row.regions, configuration_arn: row.configuration_arn, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'notification_event', native_id: row.arn, updated_at: $now}
+    MERGE (n:AdvisorNotification {id: row.arn}) SET n += {feed: row.feed, source: row.source, event_type: row.event_type, headline: row.headline, notification_type: row.notification_type, event_status: row.event_status, origin_region: row.origin_region, related_account: row.related_account, created_at: row.created_at, aggregation: row.aggregation, event_count: row.event_count, regions: row.regions, configuration_arn: row.configuration_arn, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'notification_event', updated_at: $now}
     WITH n, row OPTIONAL MATCH (n)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
-    WITH DISTINCT n, row MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.native_id = coalesce(row.account_id, $account), a.kind = 'account', a.updated_at = $now
+    WITH DISTINCT n, row MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.account_id = coalesce(row.account_id, $account), a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.updated_at = $now
     MERGE (n)-[:IN_ACCOUNT]->(a)`, { rows: batch, account, provider: AWS, now: stamp });
   await write("MATCH (n:AdvisorNotification {provider: $provider}) WHERE n.updated_at < $now DETACH DELETE n", { provider: AWS, now: stamp });
   return { notifications: rows.length };
@@ -1385,7 +1391,7 @@ export function mirrorWakeProfile(instanceId: string): void {
     const row = db.prepare("select enabled, profile, updated_at, updated_by from wake_profiles where instance_id = ?").get(instanceId) as { enabled: number; profile: string; updated_at: string; updated_by: string | null } | undefined;
     let domains: string[] = [];
     try { domains = row ? (JSON.parse(row.profile).domains ?? []) : []; } catch { /* kept empty */ }
-    await write(`MERGE (r:AdvisorResource {id: $id}) ON CREATE SET r:AdvisorBox, r.provider = $provider, r.account_id = $account, r.native_type = 'ec2_instance', r.native_id = $id
+    await write(`MERGE (r:AdvisorResource {id: $id}) ON CREATE SET r:AdvisorBox, r.provider = $provider, r.account_id = $account, r.native_type = 'ec2_instance'
       SET r.wake_profile = $profile, r.wake_enabled = $enabled, r.wake_domains = $domains, r.wake_updated_at = $updated_at, r.wake_updated_by = $by, r.updated_at = $now`,
       { id: instanceId, profile: row?.profile ?? null, enabled: row ? Boolean(row.enabled) : null, domains: row ? domains : null, updated_at: row?.updated_at ?? null, by: row?.updated_by ?? null, now: now(), provider: AWS, account: accountResolver()(null, instanceId) ?? accountId() });
   });

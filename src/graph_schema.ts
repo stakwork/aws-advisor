@@ -15,8 +15,8 @@ const BASE = "AdvisorResource";
 
 /**
  * Property names Jarvis reads as the schema's own fields (ApplicationConstant.SCHEMA_KNOWN_PROPERTIES plus ref_id and
- * is_deleted): a node attribute by one of these names would overwrite the field (an AdvisorBox's `type` is its
- * instance type, an AdvisorRecommendation's `action` is not a Jarvis action list), so they are listed in the
+ * is_deleted): a node attribute by one of these names would overwrite the field (a GuardDuty finding's `type`,
+ * an AdvisorRecommendation's `action` is not a Jarvis action list), so they are listed in the
  * description instead.
  */
 const JARVIS_FIELDS = new Set(["type", "parent", "attributes", "icon", "media_url", "source_link", "primary_color", "secondary_color", "shape", "index", "node_key",
@@ -26,7 +26,7 @@ const JARVIS_FIELDS = new Set(["type", "parent", "attributes", "icon", "media_ur
 /** One line per label for the type_description; a label the mirror starts writing without one gets a generic line until it is added here. */
 const DESCRIPTIONS: Record<string, string> = {
   AdvisorAccount: "A cloud account, team or project the advisor collects from, or the site of the local machines; resources, runs and scans hang off it with IN_ACCOUNT",
-  AdvisorResource: "Base label of every inventoried cloud resource; provider, account_id, native_type and native_id say what it is at the provider",
+  AdvisorResource: "Base label of every inventoried cloud resource; provider, account_id and native_type say what it is at the provider (native_id where its id there differs)",
   AdvisorBox: "A machine: a cloud instance (EC2), a platform's hidden runtime (Vercel, opaque) or a local laptop, desktop or server; it HOSTS one AdvisorCompute",
   AdvisorCompute: "The operating system a box runs: programs, containers, packages and vulnerabilities hang off it, and deployments RUNS_ON it",
   AdvisorDatabase: "A managed database instance or store (RDS, Aurora, DynamoDB, a Vercel Neon store)",

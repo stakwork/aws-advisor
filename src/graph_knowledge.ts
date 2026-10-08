@@ -120,7 +120,7 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
     id: `${p.kind}|${p.sku}|${p.region}`, provider: AWS, kind: typeKind(p.kind), native_kind: p.kind, sku: p.sku, region: p.region, engine: p.engine, list_price: p.hourly, price_unit: "USD/hour", unit: "hour", source: "pricing_api", valid_from: String(p.fetched_at).slice(0, 10) }));
   const usage = pricebookCatalog().map((r) => ({ id: `usage|${r.rule}`, provider: AWS, kind: "usage", native_kind: "usage", sku: r.rule, region: "us-east-1", engine: null, list_price: r.unit_price, price_unit: `USD/${r.unit}`, unit: r.unit, source: "pricebook", valid_from: PRICEBOOK_DATE, note: r.note ?? null }));
   await writeCypher(`UNWIND $rows AS row MERGE (t:KnSystemType {id: row.id}) SET t += row, t.updated_at = $now`, { rows: [...skus, ...usage], now });
-  const archetypes = Object.entries(ROLE_OPTIONS).map(([name, description]) => ({ id: name, name, description, native_type: "archetype", native_id: name }));
+  const archetypes = Object.entries(ROLE_OPTIONS).map(([name, description]) => ({ id: name, name, description, native_type: "archetype" }));
   await writeCypher(`UNWIND $rows AS row MERGE (a:KnArchetype {id: row.id}) SET a += row, a.updated_at = $now`, { rows: archetypes, now });
   // the operational patterns used to be KnPattern nodes; they are Concepts now (src/concepts.ts), so any left over go
   await writeCypher(`MATCH (p:KnPattern) DETACH DELETE p`);
@@ -158,12 +158,12 @@ export async function mirrorKnowledge(): Promise<KnowledgeCounts | null> {
   await writeCypher(`
 UNWIND $rows AS row
 MERGE (s:KnSystem {id: row.id})
-SET s += {name: row.name, kind: row.kind, native_kind: row.native_kind, pool_kind: row.pool_kind, archetype: row.archetype, member_count: row.member_count, storage_gb: row.storage_gb, storage_usd_month: row.storage_usd_month, region: row.region, monthly_list_usd: row.monthly_list_usd, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'system', native_id: row.id, gone: false, updated_at: $now}
+SET s += {name: row.name, kind: row.kind, native_kind: row.native_kind, pool_kind: row.pool_kind, archetype: row.archetype, member_count: row.member_count, storage_gb: row.storage_gb, storage_usd_month: row.storage_usd_month, region: row.region, monthly_list_usd: row.monthly_list_usd, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'system', gone: false, updated_at: $now}
 SET s.lambda_memory_mb = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.memory_mb END, s.lambda_arm = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.arm END, s.invocations_month = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.invocations_month END, s.gb_seconds_month = CASE WHEN row.lambda IS NULL THEN null ELSE row.lambda.gb_seconds_month END
 WITH s, row
 OPTIONAL MATCH (s)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
 WITH DISTINCT s, row
-MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account), a.updated_at = $now
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.account_id = coalesce(row.account_id, $account), a.updated_at = $now
 MERGE (s)-[:IN_ACCOUNT]->(a)
 WITH s, row
 OPTIONAL MATCH (s)-[old:IS_A]->() DELETE old
@@ -179,7 +179,7 @@ WITH s, row
 OPTIONAL MATCH (m)-[mo:MEMBER_OF]->(s) WHERE m:AdvisorResource OR m:AdvisorGateway OR m:AdvisorResourceRef DELETE mo
 WITH DISTINCT s, row
 ${LINK_BY_ID({ from: "s", carry: ["row"], list: "row.members", rel: "MEMBER_OF", reverse: true, namedBy: "system" })}
-FOREACH (id IN row.refs | MERGE (ref:AdvisorResource {id: id}) ON CREATE SET ref.account_id = coalesce(row.account_id, $account), ref.provider = $provider, ref.native_type = 'lambda_function', ref.native_id = id MERGE (ref)-[:MEMBER_OF]->(s))
+FOREACH (id IN row.refs | MERGE (ref:AdvisorResource {id: id}) ON CREATE SET ref.account_id = coalesce(row.account_id, $account), ref.provider = $provider, ref.native_type = 'lambda_function' MERGE (ref)-[:MEMBER_OF]->(s))
 WITH s, row
 OPTIONAL MATCH (s)-[po:PART_OF]->() DELETE po
 WITH DISTINCT s, row
@@ -210,7 +210,7 @@ MERGE (o)-[:COVERS]->(t)`, { rows: overlays, now });
 
   // ---- traffic on the edges: NAT to the internet, cross-AZ at account level, log shipping
   // the internet is one node for both layers: where traffic goes (KnDestination) and where it comes from (AdvisorSource, the network layer's label); merged on the shared label so neither layer creates a second one
-  await writeCypher(`MERGE (i:AdvisorSource {id: 'internet'}) SET i:KnDestination, i.name = 'internet', i.kind = 'internet', i.label = 'internet', i.private = false, i.native_type = 'source', i.native_id = 'internet' MERGE (r:KnDestination {id: 'regional'}) SET r.name = 'other AZs and VPCs in the region', r.kind = 'regional'`);
+  await writeCypher(`MERGE (i:AdvisorSource {id: 'internet'}) SET i:KnDestination, i.name = 'internet', i.kind = 'internet', i.label = 'internet', i.private = false, i.native_type = 'source' MERGE (r:KnDestination {id: 'regional'}) SET r.name = 'other AZs and VPCs in the region', r.kind = 'regional'`);
   const natEdges = (db.prepare("select scope_id, median, mean, p95, days from baselines where scope_kind = 'nat' and metric = 'bytes_hour'").all() as any[]).map((b) => ({ id: `nat:${b.scope_id}`, gb_day: (b.mean * 24) / 1e9, gb_day_median: (b.median * 24) / 1e9, p95_gb_hour: b.p95 / 1e9, price_per_gb: 0.045, usd_month: Math.round(((b.mean * 24) / 1e9) * 30 * 0.045 * 100) / 100, window_days: b.days, source: "cloudwatch BytesOutToSource+BytesOutToDestination" }));
   let traffic = 0;
   if (natEdges.length) { await writeCypher(`UNWIND $rows AS row MATCH (s:KnSystem {id: row.id}) MATCH (i:KnDestination {id: 'internet'}) MERGE (s)-[e:TRANSFERS_TO]->(i) SET e += {mechanism: 'nat', gb_day: row.gb_day, gb_day_median: row.gb_day_median, p95_gb_hour: row.p95_gb_hour, price_per_gb: row.price_per_gb, usd_month: row.usd_month, window_days: row.window_days, source: row.source, updated_at: $now}`, { rows: natEdges, now }); traffic += natEdges.length; }
@@ -345,7 +345,7 @@ export async function systemView(idOrName: string) {
     RETURN s AS system, a.description AS archetype_description,
       collect(DISTINCT {type: t.id, sku: t.sku, count: ro.count, list_price: t.list_price, price_unit: t.price_unit, list_usd_month: ro.list_usd_month}) AS runs_on,
       collect(DISTINCT {overlay: o.id, kind: o.kind, discount_rate: o.discount_rate, sku: o.sku, count: o.count, end: o.end}) AS overlays,
-      collect(DISTINCT {id: m.id, name: m.name, type: m.type, state: m.state, cpu_30d: m.cpu_30d, monthly_usd: m.monthly_usd}) AS members,
+      collect(DISTINCT {id: m.id, name: m.name, size: m.size, state: m.state, cpu_30d: m.cpu_30d, monthly_usd: m.monthly_usd}) AS members,
       collect(DISTINCT {to: svc.name, mechanism: tr.mechanism, gb_day: tr.gb_day, price_per_gb: tr.price_per_gb, usd_month: tr.usd_month, source: tr.source}) AS transfers,
       collect(DISTINCT {log_group: g.name, gb_day: sl.gb_day, usd_month: sl.usd_month, retention_days: g.retention_days, stored_gb: g.stored_gb, attributed_by: sl.attributed_by}) AS logs,
       collect(DISTINCT {id: rec.id, title: rec.title, status: rec.status, est_monthly_saving: rec.est_monthly_saving, verdict: rec.verdict, realised_usd_month: rec.realised_usd_month}) AS recommendations

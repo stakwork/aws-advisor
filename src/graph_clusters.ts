@@ -25,23 +25,23 @@ UNWIND $rows AS row
 MERGE (c:AdvisorResource {id: row.id})
 ON CREATE SET c.first_seen = row.first_seen
 SET c:AdvisorCluster
-SET c += {name: row.name, kind: row.kind, version: row.version, platform_version: row.platform_version, state: row.state, native_state: row.native_state, region: row.region, endpoint_public: row.endpoint_public, public_cidrs: row.public_cidrs, endpoint_private: row.endpoint_private,
+SET c += {name: row.name, kind: row.kind, version: row.version, platform_version: row.platform_version, state: row.state, native_state: CASE WHEN row.native_state = row.state THEN null ELSE row.native_state END, region: row.region, endpoint_public: row.endpoint_public, public_cidrs: row.public_cidrs, endpoint_private: row.endpoint_private,
   authentication_mode: row.authentication_mode, access_status: row.access_status, access_error: row.access_error, nodes: row.nodes, workloads: row.workloads, namespaces: row.namespaces, vpc_id: row.vpc_id, security_groups: row.security_groups,
-  provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: row.gone, last_seen: row.last_seen, updated_at: $now}
+  provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, gone: row.gone, last_seen: row.last_seen, updated_at: $now}
 WITH c, row
 OPTIONAL MATCH (c)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
 WITH DISTINCT c, row
-MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (c)-[:IN_ACCOUNT]->(a)
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.account_id = coalesce(row.account_id, $account) MERGE (c)-[:IN_ACCOUNT]->(a)
 WITH c, row
 FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (c)-[:IN_NETWORK]->(n))
 FOREACH (sg IN row.security_groups | MERGE (f:AdvisorFilter {id: sg}) MERGE (c)-[:GUARDED_BY]->(f))
 FOREACH (p IN row.pool_ids | MERGE (np:AdvisorNodePool {id: p}) MERGE (np)-[:PART_OF]->(c))
 FOREACH (_ IN CASE WHEN row.endpoint IS NULL THEN [] ELSE [1] END |
   MERGE (e:AdvisorEndpoint {id: row.id + ':api'}) ON CREATE SET e.first_seen = $now
-  SET e += {kind: 'api', protocol: 'https', port: 443, hostname: row.endpoint_host, url: row.endpoint, tls: true, exposure: CASE WHEN row.endpoint_public AND row.world THEN 'internet' WHEN row.endpoint_public THEN 'network' ELSE 'network' END, reach_reason: row.endpoint_reason, resource_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'eks_api_endpoint', native_id: row.id + ':api', gone: row.gone, last_seen: $now, updated_at: $now}
+  SET e += {kind: 'api', protocol: 'https', port: 443, hostname: row.endpoint_host, url: row.endpoint, tls: true, exposure: CASE WHEN row.endpoint_public AND row.world THEN 'internet' WHEN row.endpoint_public THEN 'network' ELSE 'network' END, reach_reason: row.endpoint_reason, resource_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'eks_api_endpoint', gone: row.gone, last_seen: $now, updated_at: $now}
   MERGE (c)-[x:EXPOSES]->(e) SET x.gone = row.gone, x.updated_at = $now
   FOREACH (cidr IN row.public_cidrs |
-    MERGE (s:AdvisorSource {id: CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr:' + cidr END}) ON CREATE SET s.kind = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr' END, s.label = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE cidr END, s.cidr = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN null ELSE cidr END, s.native_type = 'source', s.native_id = s.id
+    MERGE (s:AdvisorSource {id: CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr:' + cidr END}) ON CREATE SET s.kind = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr' END, s.label = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE cidr END, s.cidr = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN null ELSE cidr END, s.native_type = 'source'
     MERGE (e)-[v:REACHABLE_FROM]->(s) SET v.protocol = 'https', v.port = 443, v.through = ['eks:public-access-cidrs'], v.note = 'the control plane endpoint; the cluster authenticates every request', v.requires_auth = true, v.computed_at = $now))`;
 
 const WORKLOAD_CYPHER = `
@@ -56,7 +56,7 @@ SET d += {name: row.name, platform: row.platform, workload_kind: row.kind, k8s_n
 WITH d, row
 OPTIONAL MATCH (d)-[oldAcc:IN_ACCOUNT]->(oa:AdvisorAccount) WHERE oa.id <> coalesce(row.account_id, $account) DELETE oldAcc
 WITH DISTINCT d, row
-MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.native_id = coalesce(row.account_id, $account), a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
+MERGE (a:AdvisorAccount {id: coalesce(row.account_id, $account)}) ON CREATE SET a.provider = $provider, a.native_type = 'account', a.kind = 'account', a.account_id = coalesce(row.account_id, $account) MERGE (d)-[:IN_ACCOUNT]->(a)
 WITH d, row
 MERGE (c:AdvisorResource {id: row.cluster_arn}) MERGE (d)-[:RUNS_IN]->(c)
 WITH d, row
@@ -81,14 +81,14 @@ const ENDPOINT_CYPHER = `
 UNWIND $rows AS row
 MERGE (d:AdvisorResource {id: row.workload_id})
 MERGE (e:AdvisorEndpoint {id: row.id}) ON CREATE SET e.first_seen = $now
-SET e += {kind: row.kind, protocol: row.protocol, port: row.port, hostname: row.hostname, path: row.path, url: row.url, tls: row.tls, service: row.service, service_type: row.service_type, exposure: row.exposure, reach_reason: row.reason, resource_id: row.workload_id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET e += {kind: row.kind, protocol: row.protocol, port: row.port, hostname: row.hostname, path: row.path, url: row.url, tls: row.tls, service: row.service, service_type: row.service_type, exposure: row.exposure, reach_reason: row.reason, resource_id: row.workload_id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: row.native_type, gone: false, last_seen: $now, updated_at: $now}
 MERGE (d)-[x:EXPOSES]->(e) SET x.gone = false, x.updated_at = $now
 WITH e, row
 OPTIONAL MATCH (e)-[old:FORWARDS_TO]->() DELETE old
 WITH DISTINCT e, row
 FOREACH (t IN row.forwards_to | MERGE (te:AdvisorEndpoint {id: t}) MERGE (e)-[f:FORWARDS_TO]->(te) SET f.updated_at = $now)
 FOREACH (lbh IN row.lb_hostnames |
-  MERGE (lb:AdvisorResource {id: lbh}) ON CREATE SET lb:AdvisorResourceRef, lb.guessed_type = 'load_balancer', lb.named_by = 'cluster', lb.first_named_at = $now, lb.account_id = coalesce(row.account_id, $account), lb.provider = $provider, lb.native_type = 'ref', lb.native_id = lbh
+  MERGE (lb:AdvisorResource {id: lbh}) ON CREATE SET lb:AdvisorResourceRef, lb.guessed_type = 'load_balancer', lb.named_by = 'cluster', lb.first_named_at = $now, lb.account_id = coalesce(row.account_id, $account), lb.provider = $provider, lb.native_type = 'ref'
   FOREACH (_ IN CASE WHEN lb:AdvisorLoadBalancer THEN [1] ELSE [] END |
     MERGE (lb)-[:EXPOSES]->(l:AdvisorEndpoint {kind: 'listener'})
     MERGE (l)-[f:FORWARDS_TO]->(e) SET f.via = 'ingress_controller', f.updated_at = $now
@@ -106,17 +106,17 @@ SET e.exposure = CASE WHEN 'internet' IN srcs THEN 'internet' ELSE e.exposure EN
 const POLICY_CYPHER = `
 UNWIND $rows AS row
 MERGE (f:AdvisorFilter {id: row.id}) ON CREATE SET f.first_seen = $now
-SET f += {kind: 'network_policy', stateful: true, default_action: 'deny', default: false, name: row.name, k8s_namespace: row.namespace, description: row.description, rules: row.rule_count, attached: row.attached, policy_types: row.policy_types, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'kubernetes_network_policy', native_id: row.id, gone: false, last_seen: $now, updated_at: $now}
+SET f += {kind: 'network_policy', stateful: true, default_action: 'deny', default: false, name: row.name, k8s_namespace: row.namespace, description: row.description, rules: row.rule_count, attached: row.attached, policy_types: row.policy_types, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'kubernetes_network_policy', gone: false, last_seen: $now, updated_at: $now}
 WITH f, row
 MERGE (c:AdvisorResource {id: row.cluster_arn}) MERGE (f)-[:IN_CLUSTER]->(c)
 WITH f, row
 OPTIONAL MATCH (f)-[:HAS_RULE]->(old:AdvisorFilterRule) DETACH DELETE old
 WITH DISTINCT f, row
 FOREACH (r IN row.rules |
-  MERGE (fr:AdvisorFilterRule {id: r.id}) SET fr += {direction: r.direction, action: 'allow', protocol: r.protocol, from_port: r.from_port, to_port: r.to_port, priority: null, source_kind: r.source_kind, source: r.source, description: r.description, dormant: false, filter_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'network_policy_rule', native_id: r.id, updated_at: $now}
+  MERGE (fr:AdvisorFilterRule {id: r.id}) SET fr += {direction: r.direction, action: 'allow', protocol: r.protocol, from_port: r.from_port, to_port: r.to_port, priority: null, source_kind: r.source_kind, source: r.source, description: r.description, dormant: false, filter_id: row.id, provider: $provider, account_id: coalesce(row.account_id, $account), native_type: 'network_policy_rule', updated_at: $now}
   MERGE (f)-[:HAS_RULE]->(fr)
   FOREACH (cidr IN CASE WHEN r.cidr IS NULL THEN [] ELSE [r.cidr] END |
-    MERGE (s:AdvisorSource {id: CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr:' + cidr END}) ON CREATE SET s.kind = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr' END, s.label = cidr, s.cidr = cidr, s.native_type = 'source', s.native_id = s.id
+    MERGE (s:AdvisorSource {id: CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr:' + cidr END}) ON CREATE SET s.kind = CASE WHEN cidr IN ['0.0.0.0/0', '::/0'] THEN 'internet' ELSE 'cidr' END, s.label = cidr, s.cidr = cidr, s.native_type = 'source'
     MERGE (fr)-[:FROM]->(s)))`;
 
 export interface ClusterGraphCounts { clusters: number; workloads: number; endpoints: number; policies: number; images: number; took_ms: number }

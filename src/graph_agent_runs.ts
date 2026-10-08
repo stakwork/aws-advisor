@@ -99,7 +99,7 @@ CALL { WITH n, row UNWIND row.about.${field} AS x MATCH (t:${label} {${key}: x})
 const AGENT_RUN_CYPHER = `
 UNWIND $rows AS row
 MERGE (n:AdvisorAgentRun {id: row.id})
-SET n += row.props, n.provider = $provider, n.account_id = $account, n.native_type = 'agent_run', n.native_id = row.id, n.updated_at = $now
+SET n += row.props, n.provider = $provider, n.account_id = $account, n.native_type = 'agent_run', n.updated_at = $now
 WITH n, row
 OPTIONAL MATCH (n)-[old:ABOUT|PRODUCED|RETRY_OF|CONTINUES]->() DELETE old
 WITH DISTINCT n, row

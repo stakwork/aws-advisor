@@ -135,7 +135,7 @@ MATCH (t:KnSystemType {id: tid}) MERGE (o)-[:COVERS]->(t)`, { rows: overlays.map
   if (systems.length) await writeCypher(`
 UNWIND $rows AS row
 MERGE (s:KnSystem {id: row.id})
-SET s += {name: row.name, kind: row.kind, native_kind: row.native_kind, archetype: row.archetype, member_count: row.member_count, region: row.region, monthly_list_usd: row.monthly_list_usd, usage_units: row.usage_units, provider: $provider, account_id: $account, native_type: 'system', native_id: row.id, gone: false, updated_at: $now}
+SET s += {name: row.name, kind: row.kind, native_kind: row.native_kind, archetype: row.archetype, member_count: row.member_count, region: row.region, monthly_list_usd: row.monthly_list_usd, usage_units: row.usage_units, provider: $provider, account_id: $account, native_type: 'system', gone: false, updated_at: $now}
 WITH s, row
 OPTIONAL MATCH (a:AdvisorAccount {id: $account}) FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END | MERGE (s)-[:IN_ACCOUNT]->(a))
 WITH s, row
