@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, currentScope, setScope, usd } from "../api";
 import { Badge, Card, Stat, Td, Th } from "./ui";
+import { AccountsBilling } from "./billing";
 
 /**
  * Overview › Accounts: the general view across every account the advisor is pointed at, one row each, with the
@@ -59,20 +60,18 @@ export function GeneralOverview() {
   const [d, setD] = useState<any>(null);
   useEffect(() => { api("/accounts/general").then(setD).catch(() => setD(null)); }, []);
   if (!d) return null;
-  const m = d.month; const r = d.recommendations;
-  // each provider's parts of the month in its own words (a projection, a period estimate, stores at plan)
-  const monthHint = (m.parts || []).filter((p: any) => p.usd != null).map((p: any) => `${p.label} ${usd(p.usd)}`).join(" · ");
+  const r = d.recommendations;
   const tone = (l: string) => (l === "alarm" ? "text-red-300" : l === "warning" ? "text-orange-300" : "text-zinc-400");
   const open = (a: any) => { setScope(a.account, a.provider); window.location.assign(a.link); };
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <Stat label="This month, all providers" value={m.total_usd != null ? `~${usd(m.total_usd)}` : "—"} hint={monthHint || "no spend read yet"} />
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Stat label="Open recommendations" value={r.open} hint={`${usd(r.saving_usd_month)}/mo claimed · ${Object.entries(r.by_provider).map(([p, b]: any) => `${p.toUpperCase()} ${b.open}`).join(" · ")}`} />
         <Stat label="Alarms" value={<span className={d.counts.alarms ? "text-orange-300" : "text-emerald-300"}>{d.counts.alarms}</span>} hint={`alarm findings of each provider's latest run · ${d.counts.alerts_open} open alerts`} />
         <Stat label="Security" value={<span className={d.counts.security_critical ? "text-red-300" : d.counts.security_high ? "text-orange-300" : "text-emerald-300"}>{d.counts.security_critical} / {d.counts.security_high}</span>} hint="critical / high across accounts" />
         <Stat label="Accounts" value={d.accounts} hint={d.providers.map((p: string) => p.toUpperCase()).join(" · ")} />
       </div>
+      <AccountsBilling />
       <Card title={<span>Needs attention <span className="font-normal text-zinc-500">· across every account; each line says whose</span></span>}>
         {!d.attention.length ? <div className="text-sm text-zinc-500">Nothing open: no alarm findings, no unacknowledged alerts, nothing in any provider's attention list.</div> : (
           <ul className="space-y-1 text-sm">

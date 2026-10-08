@@ -8,7 +8,7 @@ import { credentialsMeta, hasConnectionFile, sdkIdentity } from "../steampipe.js
 import { actuatorTrustPolicy } from "../permissions.js";
 import { servicesByAccount, spendByAccount } from "../spend.js";
 import { adapterFor, allAccounts, providers } from "../adapters/index.js";
-import { accountsOverview , generalOverview } from "../accounts_overview.js";
+import { accountsBilling, accountsOverview, generalOverview } from "../accounts_overview.js";
 
 export const accounts = Router();
 
@@ -45,6 +45,7 @@ accounts.get("/accounts/organization", async (_req, res) => {
   }
 });
 accounts.get("/accounts/general", async (_req, res) => { try { res.json(await generalOverview()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+accounts.get("/accounts/billing", async (_req, res) => { try { res.json(await accountsBilling()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
 /**
  * Accounts of any provider, through its adapter's onboarding (src/adapters/types.ts ProviderOnboarding): add from the

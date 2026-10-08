@@ -217,6 +217,13 @@ export const vercelAdapter: ProviderAdapter = {
       const o = vercelOverview();
       return [{ key: "period_estimate", label: "Vercel period", usd: o.billing?.estimated_period_usd ?? null, to_total: true }, { key: "stores_at_plan", label: "stores at plan", usd: o.store_stats?.monthly_list_usd ?? null, to_total: true }];
     },
+    // one team: the billing period's estimate plus its stores at plan price is the month; last month is the last paid invoice
+    accounts: async () => {
+      if (!vercelConfigured()) return [];
+      const o = vercelOverview(); const bill = vercelAdapter.cost!.lastBill(vercelAdapter.primaryAccountId());
+      const parts = [o.billing?.estimated_period_usd, o.store_stats?.monthly_list_usd].filter((v): v is number => v != null);
+      return [{ account: vercelAdapter.primaryAccountId(), month_to_date_usd: null, projected_usd: parts.length ? Math.round(parts.reduce((a, b) => a + b, 0) * 100) / 100 : null, last_month_usd: bill.usd, last_month: bill.month, note: "period estimate and stores at plan; Vercel has no month to date" }];
+    },
   },
   attention: async () => {
     if (!vercelConfigured()) return [];

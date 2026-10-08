@@ -24,6 +24,12 @@ db.exec(`create table if not exists review_findings (
   unique(day, kind, resource, resource_name)
 )`);
 
+// every run, found something or not: with no findings the day has no rows, and "never ran" looked the same as "nothing stood out"
+db.exec(`create table if not exists review_runs (
+  id integer primary key autoincrement, started_at text not null, finished_at text, day text not null,
+  instances integer, candidates integer, findings text, recommendations integer, alerts integer, errors text, error text
+)`);
+
 const WINDOW_DAYS = 30;
 const insertFinding = db.prepare("insert into review_findings(day, kind, resource, resource_name, severity, message, details) values (?, ?, ?, ?, ?, ?, ?) on conflict(day, kind, resource, resource_name) do update set severity = excluded.severity, message = excluded.message, details = excluded.details");
 const openAlert = db.prepare("select id from alerts where kind = ? and resource = ? and acknowledged = 0 limit 1");
@@ -37,7 +43,33 @@ function alertOnce(kind: string, resource: string, message: string, details: Rec
   return true;
 }
 
+export interface ReviewRun { id: number; started_at: string; finished_at: string | null; day: string; instances: number | null; candidates: number | null; findings: Record<string, number>; recommendations: number | null; alerts: number | null; errors: string[]; error: string | null }
+
+/** The newest run of the review, with what it covered: the card says when it last ran and why it found nothing. */
+export function lastReviewRun(): ReviewRun | null {
+  const r = db.prepare("select * from review_runs order by id desc limit 1").get() as any;
+  return r ? { ...r, findings: safeJson(r.findings || "{}") || {}, errors: safeJson(r.errors || "[]") || [] } : null;
+}
+
+/** Runs the review and records the run (its counts, its errors, or why it failed) in review_runs. */
 export async function runReview(onLog: (s: string) => void = () => {}): Promise<ReviewResult> {
+  const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
+  const id = Number(db.prepare("insert into review_runs(started_at, day) values (?, ?)").run(now(), new Date().toISOString().slice(0, 10)).lastInsertRowid);
+  // the running instances the review could read: the ones with daily roll-ups (src/history.ts) are the ones it reviews
+  const candidates = (db.prepare("select count(*) as n from inventory_ec2 where gone = 0 and state = 'running'").get() as { n: number }).n;
+  try {
+    const r = await reviewOnce(onLog);
+    db.prepare("update review_runs set finished_at = ?, instances = ?, candidates = ?, findings = ?, recommendations = ?, alerts = ?, errors = ? where id = ?").run(now(), r.instances, candidates, JSON.stringify(r.findings), r.recommendations, r.alerts, JSON.stringify(r.errors), id);
+    return r;
+  } catch (e: any) {
+    db.prepare("update review_runs set finished_at = ?, candidates = ?, error = ? where id = ?").run(now(), candidates, String(e?.message || e).slice(0, 2000), id);
+    throw e;
+  } finally {
+    db.prepare("delete from review_runs where started_at < datetime('now', '-90 days')").run();
+  }
+}
+
+async function reviewOnce(onLog: (s: string) => void): Promise<ReviewResult> {
   const t0 = Date.now();
   const day = new Date().toISOString().slice(0, 10);
   const out: ReviewResult = { day, instances: 0, findings: {}, recommendations: 0, alerts: 0, errors: [], took_ms: 0 };

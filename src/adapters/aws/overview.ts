@@ -28,6 +28,8 @@ export const awsCost = (primary: () => string): ProviderCost => ({
     if (projected == null) { try { const { spendSummary } = await import("../../spend.js"); const sp: any = spendSummary(); projected = sp?.month_to_date?.projected_month_end ?? null; mtd = sp?.month_to_date?.usd ?? null; } catch { /* no spend */ } }
     return [{ key: "projected", label: "AWS projected", usd: projected, to_total: true, month_to_date_usd: mtd }];
   },
+  // every linked account the payer's Cost Explorer bills (unblended), each projected at the payer's pace
+  accounts: async () => (await import("../../spend_compare.js")).awsAccountBilling(),
 });
 
 export async function awsAttention(primary: string): Promise<AttentionItem[]> {

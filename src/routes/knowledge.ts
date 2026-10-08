@@ -10,7 +10,7 @@ import { instanceHistory, rollupDaily } from "../history.js";
 import { getReconciliation, lastFullMonth, listReconciliations, reconcileMonth } from "../reconcile.js";
 import { forecastHistory, latestForecast, runForecast } from "../forecast.js";
 import { ScopeKind, baselineSummary, listBaselines, refreshBaselines } from "../baselines.js";
-import { latestReview, runReview } from "../review.js";
+import { lastReviewRun, latestReview, runReview } from "../review.js";
 import { buildObserveBrief, dispatchObservation, latestObservation, listObservations } from "../observe.js";
 import { refreshLogs, topLogGroups } from "../logs.js";
 import { mirrorKnowledgeInBackground } from "../graph_mirror.js";
@@ -175,7 +175,7 @@ knowledge.post("/baselines/refresh", async (_req, res) => {
 // ---- the daily review of the collected statistics ---------------------------------------------------------------
 // the daily review names resources: under one account only its own rows (the day and its history stay as reviewed)
 knowledge.get("/review", (req, res) => {
-  const scope = accountScope(req.query as any); const r = latestReview();
+  const scope = accountScope(req.query as any); const r = { ...latestReview(), last_run: lastReviewRun() };
   if (!scope) return res.json(r);
   const inScope = resourceInScope(scope);
   res.json({ ...r, findings: r.findings.filter((f: any) => inScope(f.resource)), scope: { account: scope.id, total: r.findings.length } });

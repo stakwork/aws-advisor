@@ -124,3 +124,50 @@ export async function generalOverview(): Promise<GeneralOverview> {
     counts: { alarms: accounts.reduce((x, a) => x + a.findings_alarms, 0), warnings: attention.filter((a) => a.level === "warning").length, alerts_open: accounts.reduce((x, a) => x + a.alerts_open, 0), security_critical: sec.critical, security_high: sec.high, vulnerabilities_critical: accounts.reduce((x, a) => x + a.vulnerabilities.critical, 0) },
   };
 }
+
+/**
+ * Billing across every account (GET /api/accounts/billing): each provider's accounts with this month so far, the
+ * month projected and last month, and the totals. AWS lists every linked account the payer's Cost Explorer bills,
+ * including the ones not added to the advisor; its per-account lines are unblended (before credits), so the payer's
+ * net bill is given beside them as the figure the invoice will show.
+ */
+export interface AccountsBilling {
+  month: string; previous_month: string;
+  lines: import("./spend_compare.js").AccountBillingLine[];
+  totals: { month_to_date_usd: number | null; projected_usd: number | null; last_month_usd: number | null; delta_usd: number | null; delta_pct: number | null };
+  by_provider: Record<string, { month_to_date_usd: number | null; projected_usd: number | null; last_month_usd: number | null }>;
+  /** the AWS payer's consolidated net bill: month to date, projected (the forecast, else the run rate) and last month */
+  aws_net: { month_to_date_usd: number | null; projected_usd: number | null; basis: string | null; last_month_usd: number | null } | null;
+}
+
+export async function accountsBilling(): Promise<AccountsBilling> {
+  const { localDay, addDays, monthStart } = await import("./localdate.js");
+  const today = localDay(); const month = today.slice(0, 7); const prevMonth = addDays(monthStart(today), -1).slice(0, 7);
+  const known = await allAccounts();
+  const lines: AccountsBilling["lines"] = [];
+  for (const a of adapters()) {
+    if (!a.cost?.accounts) continue;
+    try {
+      for (const l of await a.cost.accounts()) {
+        const k = known.find((x) => x.provider === a.id && x.id === l.account);
+        lines.push({ provider: a.id, name: k?.name ?? null, registered: Boolean(k), delta_pct: l.projected_usd != null && l.last_month_usd ? Math.round(((l.projected_usd - l.last_month_usd) / l.last_month_usd) * 1000) / 10 : null, ...l });
+      }
+    } catch (e: any) { console.error(`[billing] ${a.id}: ${e?.message || e}`); }
+  }
+  const sum = (xs: (number | null)[]) => { const v = xs.filter((x): x is number => x != null); return v.length ? Math.round(v.reduce((s, x) => s + x, 0) * 100) / 100 : null; };
+  const by_provider: AccountsBilling["by_provider"] = {};
+  for (const p of [...new Set(lines.map((l) => l.provider))]) { const ls = lines.filter((l) => l.provider === p); by_provider[p] = { month_to_date_usd: sum(ls.map((l) => l.month_to_date_usd)), projected_usd: sum(ls.map((l) => l.projected_usd)), last_month_usd: sum(ls.map((l) => l.last_month_usd)) }; }
+  let aws_net: AccountsBilling["aws_net"] = null;
+  if (lines.some((l) => l.provider === "aws")) {
+    try {
+      const { payerProjection } = await import("./spend_compare.js"); const { spendSummary } = await import("./spend.js");
+      const p = await payerProjection(today); const s = spendSummary(today);
+      aws_net = { month_to_date_usd: s.month_to_date.usd, projected_usd: p.usd, basis: p.basis, last_month_usd: s.previous_month.usd };
+    } catch { /* no spend read yet */ }
+  }
+  const projected = sum(lines.map((l) => l.projected_usd)); const last = sum(lines.map((l) => l.last_month_usd));
+  return {
+    month, previous_month: prevMonth, lines, by_provider, aws_net,
+    totals: { month_to_date_usd: sum(lines.map((l) => l.month_to_date_usd)), projected_usd: projected, last_month_usd: last, delta_usd: projected != null && last != null ? Math.round((projected - last) * 100) / 100 : null, delta_pct: projected != null && last ? Math.round(((projected - last) / last) * 1000) / 10 : null },
+  };
+}

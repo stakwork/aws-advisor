@@ -24,6 +24,31 @@ addColumn("spend_by_account_monthly", "provider", "text");
 addColumn("spend_by_account_service_monthly", "provider", "text");
 db.exec("update spend_by_account_monthly set provider = 'aws' where provider is null; update spend_by_account_service_monthly set provider = 'aws' where provider is null");
 
+/** Each linked account's day, from the first of the previous month: a member's month projected from its recent days (a charge posted on the 1st is not a run rate) and compared day for day with last month (src/spend_compare.ts). */
+db.exec(`create table if not exists spend_by_account_daily (provider text not null default 'aws', day text not null, account_id text not null, usd real not null, fetched_at text not null, primary key (provider, day, account_id))`);
+
+/** The stored days per linked account since `from`, oldest first. */
+export function spendByAccountDaily(from: string): { day: string; account_id: string; usd: number }[] {
+  return db.prepare("select day, account_id, usd from spend_by_account_daily where provider = ? and day >= ? order by day").all(AWS, from) as { day: string; account_id: string; usd: number }[];
+}
+
+/** One Cost Explorer call: unblended cost per linked account per day, from the first of the previous month (aws_cost_by_account_daily). Errors are returned, not thrown. */
+export async function refreshSpendByAccountDaily(log: (l: string) => void = () => {}): Promise<{ rows: number; error?: string }> {
+  const sql = `select linked_account_id as account_id, to_char(period_start at time zone 'UTC', 'YYYY-MM-DD') as day, sum(unblended_cost_amount) as usd
+    from ${S}.aws_cost_by_account_daily where period_start >= date_trunc('month', now() - interval '1 month') group by 1, 2 order by 2, 1`;
+  let rows: { account_id: string | null; day: string; usd: string | null }[];
+  try { rows = await query(sql); } catch (e) { const error = describeError(e, "spend by account per day (aws_cost_by_account_daily)"); log(`by account per day failed: ${error}`); return { rows: 0, error }; }
+  const at = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const up = db.prepare("insert into spend_by_account_daily(provider, day, account_id, usd, fetched_at) values ('aws', ?, ?, ?, ?) on conflict(provider, day, account_id) do update set usd = excluded.usd, fetched_at = excluded.fetched_at");
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) { if (!r.account_id) continue; up.run(r.day, String(r.account_id), Number(r.usd ?? 0), at); n++; }
+    db.prepare("delete from spend_by_account_daily where provider = ? and day < date('now', '-100 days')").run(AWS);
+  })();
+  log(`${n} account-day rows stored`);
+  return { rows: n };
+}
+
 export interface AccountServiceSpendRow { month: string; account_id: string; service: string; usd: number }
 /** The last `months` months per linked account and service, biggest first within a month. */
 export function servicesByAccount(months = 3): AccountServiceSpendRow[] {
@@ -137,5 +162,6 @@ export async function refreshSpend(opts: { force?: boolean; onLog?: (line: strin
   log(`${rows.length} days stored (${rows[0]?.day ?? "—"} to ${rows[rows.length - 1]?.day ?? "—"})`);
   await refreshSpendByAccount(log);
   await refreshSpendByAccountService(log);
+  await refreshSpendByAccountDaily(log);
   return { refreshed: true, days: rows.length, fetched_at: fetchedAt };
 }

@@ -3,6 +3,8 @@ import { authMiddleware } from "../auth.js";
 import { config } from "../config.js";
 import { db } from "../db.js";
 import { hasConnectionFile } from "../steampipe.js";
+import { listAccounts } from "../accounts.js";
+import { monthComparison } from "../spend_compare.js";
 import { listAlerts } from "../investigate.js";
 import { postRejectionLearning } from "../learnings.js";
 import { ConceptScope, suggestDecisionScope, syncDecisionConceptInBackground } from "../concepts.js";
@@ -39,6 +41,12 @@ browse.get("/spend", auth, (req, res) => {
   const metric = str(req.query.metric);
   const summary = spendSummary(undefined, metric === "unblended" || metric === "amortized" || metric === "usage_only" ? metric : "net_unblended");
   res.json({ ...summary, series: spendRows(SPEND_DAYS), last_fetch: lastSpendFetch(), min_interval_hours: SPEND_MIN_INTERVAL_MS / 3600_000, days: SPEND_DAYS });
+});
+
+// This month against the previous one: the payer's bill, or one linked account's line in it under ?account=.
+browse.get("/spend/compare", auth, async (req, res) => {
+  const scope = accountScope(req.query as any);
+  try { res.json(await monthComparison(scope && scope.provider === "aws" && listAccounts().length > 1 ? scope.id : null)); } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // One Cost Explorer call. Skipped while the last fetch is younger than 6 hours unless ?force=1 (or body.force).

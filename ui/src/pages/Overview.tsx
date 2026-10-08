@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, usd, when } from "../api";
+import { api, currentScope, usd, when } from "../api";
 import { Badge, Button, Card, Empty, Pager, Stat } from "../components/ui";
 import { IncidentView, InvestigateButton, incidentOfAlertRow } from "../components/incident";
 import { TriageLine, triageOfAlertRow } from "../components/jev";
 import { alertLevel } from "../alertLevel";
 import { ImpactList } from "../components/impact";
 import { AccountsOverview, GeneralOverview } from "../components/accounts";
+import { AccountsBilling, MonthComparison } from "../components/billing";
 import { useScopeInfo } from "../scope";
 import { ScopedPage } from "../views";
 
@@ -160,12 +161,16 @@ function ReviewSummary() {
     finally { setBusy(false); }
   };
   if (!r) return <Empty>Loading…</Empty>;
+  const lr = r.last_run;
+  // a run that started over an hour ago and never finished died with the process
+  const stale = lr && !lr.finished_at && Date.now() - Date.parse(`${lr.started_at.replace(" ", "T")}Z`) > 3600_000;
   const counts: Record<string, number> = {};
   for (const f of r.findings) counts[f.kind] = (counts[f.kind] || 0) + 1;
   return (
     <div className="space-y-1 text-sm">
-      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{r.day ? `${r.day} · ${r.findings.length} observation${r.findings.length === 1 ? "" : "s"}${r.scope && r.scope.total !== r.findings.length ? ` for this account (${r.scope.total} across accounts)` : ""}` : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Reviewing…" : "Run now"}</Button></div>
+      <div className="flex items-center justify-between text-xs text-zinc-500"><span>{r.day ? `${r.day} · ${r.findings.length} observation${r.findings.length === 1 ? "" : "s"}${r.scope && r.scope.total !== r.findings.length ? ` for this account (${r.scope.total} across accounts)` : ""}` : lr ? "nothing found yet" : "not run yet"}</span><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={run} disabled={busy}>{busy ? "Reviewing…" : "Run now"}</Button></div>
       {ran && <div className={`text-xs ${ran.ok ? "text-zinc-400" : "text-red-400"}`}>{ran.text}</div>}
+      {lr && <div className={`text-xs ${lr.error || (!lr.finished_at && stale) ? "text-red-400" : "text-zinc-500"}`}>{lastRunLine(lr, stale)}</div>}
       {r.day && r.findings.length === 0 && <div className="text-zinc-500">Nothing stands out in the statistics.</div>}
       <div className="flex flex-wrap gap-2 text-xs">{Object.entries(counts).map(([k, n]) => <Badge key={k}>{`${n} ${REVIEW_LABEL[k] || k}`}</Badge>)}</div>
       <ul className="space-y-0.5">{r.findings.slice(0, 6).map((f: any) => (
@@ -176,6 +181,16 @@ function ReviewSummary() {
   );
 }
 
+
+/** What the review's last run did: when, how many instances had daily statistics, or how it failed. */
+function lastRunLine(lr: any, stale: boolean): string {
+  const at = `Last run ${when(lr.started_at.replace(" ", "T") + "Z")}`;
+  if (lr.error) return `${at} failed: ${lr.error}`;
+  if (!lr.finished_at) return stale ? `${at} never finished (the server restarted or it hung)` : `${at}, still running…`;
+  const found = Object.values(lr.findings || {}).reduce((t: number, n: any) => t + Number(n || 0), 0);
+  const cover = `${lr.instances} of ${lr.candidates ?? "?"} running instances had daily statistics${lr.instances === 0 ? " (they come from the probe passes: check that probes reach the instances)" : ""}`;
+  return `${at}: ${cover}; ${found} observation${found === 1 ? "" : "s"}${(lr.errors || []).length ? `; errors: ${lr.errors.join("; ")}` : ""}`;
+}
 
 /** A section title on the overview, with a link to the page that holds the full picture. */
 function SectionHeading({ title, to, label = "open →" }: { title: string; to: string; label?: string }) {
@@ -336,6 +351,7 @@ export function AwsOverview() {
       {/* Billing: daily spend (Cost Explorer, at most every 6 h), the last full month, list prices of what runs, and commitments. This month's forecast lives on its own page. */}
       <section className="space-y-4">
         <SectionHeading title="Billing" to="/bill" label="this month →" />
+        {!d.scope && currentScope() === "all" && <AccountsBilling />}
         {d.scope?.consolidated && (
           <div className="space-y-2">
             <div className="text-xs text-zinc-500">This account's own months, from Cost Explorer's per-account view (refreshed with the daily spend). Everything below it is the payer's consolidated bill: Cost Explorer reports the organisation as one.</div>
@@ -356,6 +372,7 @@ export function AwsOverview() {
           <Stat label="Previous month" value={usd(spend?.previous_month?.usd)}
             hint={spend?.previous_month?.usd != null ? `${spend.previous_month.from.slice(0, 7)}${spend.previous_month.complete ? "" : ` · ${spend.previous_month.days} days with data`}` : "for comparison"} />
         </div>
+        <MonthComparison />
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
             <span>{hasSpend ? <>Daily net unblended cost, last {spend.days} days · as of <span className="text-zinc-300">{spend.as_of}</span> · fetched {when(spend.fetched_at)}</> : "No spend data yet: it is fetched at the end of every run and every 6 hours (SPEND_CRON), one Cost Explorer call each time."}</span>
