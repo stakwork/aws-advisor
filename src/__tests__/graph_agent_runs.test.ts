@@ -57,3 +57,8 @@ test("a failed request keeps a short error", () => {
   assert.equal(n.props.error, "timeout");
   assert.equal(n.props.name, "Incident investigation · alert #7");
 });
+
+test("a usage answer shows its verdict with the reasoning, not the bare verdict", () => {
+  assert.equal(g.answerExcerpt(JSON.stringify({ content: { verdict: "keep_running", reasoning: "people log in every weekday from 07:00", confidence: 0.9 } })), "keep_running: people log in every weekday from 07:00");
+  assert.equal(g.answerExcerpt(JSON.stringify({ content: { verdict: "adjust" } })), "adjust");
+});

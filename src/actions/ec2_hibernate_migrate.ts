@@ -26,6 +26,7 @@ import type { AwsCredentialIdentityProvider } from "@aws-sdk/types";
 import { db } from "../db.js";
 import { config } from "../config.js";
 import type { ActionModule, Advance, Creds, Proposal } from "../executor.js";
+import { guestHibernation } from "../guest_hibernation.js";
 import { recordsNamingIp, upsertChange, IP_WAIT_MS, type DnsRecord } from "./schedule_hours.js";
 
 export const KIND = "ec2_hibernate_migrate" as const;
@@ -56,6 +57,8 @@ export interface Candidate {
   auto_park?: boolean;
   /** The A record names that name the box's addresses now (what the relaunch moves). */
   dns_names?: string[];
+  /** Why the guest OS cannot finish a hibernate (src/guest_hibernation.ts), when the software probe saw it cannot: the relaunch keeps the OS as it is. */
+  guest_reason?: string | null;
 }
 
 /** Why an instance cannot be migrated as it is, or null. Pure. */
@@ -65,6 +68,7 @@ export function skipReason(c: Candidate): string | null {
   if (c.migrated_to) return `already migrated to ${c.migrated_to} (this is the stopped original, kept for Revert)`;
   if (c.configured) return `already hibernation-ready (launched with hibernation on); remove the ${HIBERNATE_TAG} tag`;
   if (c.in_flight) return "a migration of it is under way";
+  if (c.guest_reason) return `the guest cannot hibernate (${c.guest_reason}); the relaunch keeps the OS as it is, so fix that first`;
   // the relaunch re-points the A records at the new box, and the actuator may touch exactly the records in the instance's Auto-park grant
   if (c.dns_names?.length && !c.auto_park) return `${c.dns_names.length} A record${c.dns_names.length > 1 ? "s" : ""} (${c.dns_names.join(", ")}) would move to the new box, and the actuator may re-point them only through the Auto-park grant: switch Auto-park on first`;
   if (c.reverted_at) return `a migration was reverted ${c.reverted_at.slice(0, 16)} UTC: not proposed again for ${REVERT_COOLDOWN_DAYS} days (remove the tag to stop it for good)`;
@@ -266,7 +270,8 @@ export const ec2HibernateMigrateAction: ActionModule = {
           const inst = live.get(r.instance_id); if (!inst) continue;
           const name = r.name || r.instance_id;
           const t = types.get(String(inst.InstanceType));
-          const c = candidateFor(inst, t, r.pool_kind, r.instance_id);
+          const guest = guestHibernation(r.instance_id);
+          const c = { ...candidateFor(inst, t, r.pool_kind, r.instance_id), guest_reason: guest.ready === false ? guest.reason : null };
           const why = skipReason(c);
           if (why) {
             if (c.mode || (c.tag_value != null && c.tag_value !== NO_HIBERNATE)) { notes.push(`${name}: ${why}`); log(`${name}: ${why}`); }

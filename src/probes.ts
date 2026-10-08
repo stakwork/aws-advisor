@@ -47,7 +47,7 @@ export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   host: { kind: "host", title: "Host", what: "memory, swap, load, CPUs, uptime, disks and the top processes: the hourly statistics behind the disk, memory and load alerts and the utilisation charts", version: "2.0", sections: ["cpus", "uptime_seconds", "memory", "load", "disks", "top_cpu", "top_mem"], timeout_seconds: 60, cron_key: "probeCron", scope_key: "probeScope", takes_signals: false },
   docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
-  software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, and the images behind the running containers: the inventory a CVE is matched against", version: "1.0", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
+  software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, and the images behind the running containers: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.1", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
 };
 
 // ---- the scripts --------------------------------------------------------------------------------------------------------
@@ -255,8 +255,21 @@ const SOFTWARE_BODY = [
   "# the images behind the running containers: name, id, digest, build date, platform",
   "imgs=\"\"",
   "if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then imgs=$(docker ps --format '{{.Image}}' 2>/dev/null | sort -u | head -60 | while read -r im; do [ -n \"$im\" ] || continue; ins=$(docker image inspect --format '{{.Id}}|{{join .RepoDigests \",\"}}|{{.Created}}|{{.Os}}/{{.Architecture}}' \"$im\" 2>/dev/null | head -n 1); printf '%s\\t%s\\n' \"$im\" \"$ins\"; done | tr -cd '\\11\\12\\40-\\176' | awk -F'\\t' '{ split($2, f, \"|\"); gsub(/[\\\\\"]/,\"\",$1); gsub(/[\\\\\"]/,\"\",f[2]); printf \"%s{\\\"image\\\":\\\"%s\\\",\\\"id\\\":\\\"%s\\\",\\\"digests\\\":\\\"%s\\\",\\\"created\\\":\\\"%s\\\",\\\"platform\\\":\\\"%s\\\"}\", (n++?\",\":\"\"), $1, f[1], f[2], f[3], f[4] }'); fi",
-  "out=$(printf '{\"probe\":\"aws-advisor/software/2\",\"kind\":\"software\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"os\":{\"id\":%s,\"version\":%s,\"name\":%s},\"kernel\":%s,\"arch\":%s,\"package_manager\":%s,\"packages\":[%s],\"binaries\":[%s],\"images\":[%s]}' \\",
-  "  \"$hn\" \"$now\" \"$(jstr \"$os_id\")\" \"$(jstr \"$os_ver\")\" \"$(jstr \"$os_name\")\" \"$(jstr \"$kernel\")\" \"$(jstr \"$arch\")\" \"$(jstr \"$pm\")\" \"$pkgs\" \"$bins\" \"$imgs\")",
+  "# hibernation setup (probe software/3): whether EC2's hibernate can finish in this guest. Read-only: /sys/power, /proc/cmdline, the swap sizes,",
+  "# what answers the ACPI sleep button EC2 presses (the hibernation agent's service enabled, an acpid rule, or logind with HandleSuspendKey=hibernate)",
+  "hz_disk=false; grep -qw disk /sys/power/state 2>/dev/null && hz_disk=true",
+  "hz_cmd=false; grep -q 'resume=' /proc/cmdline 2>/dev/null && hz_cmd=true",
+  "hz_res=$(cat /sys/power/resume 2>/dev/null | tr -cd '0-9:')",
+  "hz_agent=\"\"; for s in hibinit-agent hibagent; do for w in /etc/systemd/system/*.wants/\"$s\".service; do if [ -e \"$w\" ]; then hz_agent=$s; fi; done; [ -n \"$hz_agent\" ] && break; done",
+  "hz_acpi=false; grep -qs 'button/sleep' /etc/acpi/events/* && hz_acpi=true",
+  "hz_key=$( (systemd-analyze cat-config systemd/logind.conf 2>/dev/null || cat /etc/systemd/logind.conf /etc/systemd/logind.conf.d/*.conf 2>/dev/null) | sed -n 's/^[[:space:]]*HandleSuspendKey=[[:space:]]*//p' | tail -n 1 | tr -cd 'a-z-')",
+  "hz_swap=$(awk 'NR>1{s+=$3} END{printf \"%.0f\", s*1024}' /proc/swaps 2>/dev/null)",
+  "hz_file=0; for f in /swap /swapfile; do if [ -f \"$f\" ]; then z=$(stat -c %s \"$f\" 2>/dev/null); [ -n \"$z\" ] && [ \"$z\" -gt \"$hz_file\" ] && hz_file=$z; fi; done",
+  "hz_mem=$(awk '/^MemTotal:/{printf \"%.0f\", $2*1024}' /proc/meminfo 2>/dev/null)",
+  "hib=$(printf '{\"kernel_disk\":%s,\"cmdline_resume\":%s,\"sys_resume\":%s,\"agent\":%s,\"acpi_sleep_handler\":%s,\"logind_suspend_key\":%s,\"swap_active_bytes\":%s,\"swap_file_bytes\":%s,\"mem_bytes\":%s}' \\",
+  "  \"$hz_disk\" \"$hz_cmd\" \"$(jstr \"$hz_res\")\" \"$(jstr \"$hz_agent\")\" \"$hz_acpi\" \"$(jstr \"$hz_key\")\" \"${hz_swap:-0}\" \"$hz_file\" \"${hz_mem:-0}\")",
+  "out=$(printf '{\"probe\":\"aws-advisor/software/3\",\"kind\":\"software\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"os\":{\"id\":%s,\"version\":%s,\"name\":%s},\"kernel\":%s,\"arch\":%s,\"package_manager\":%s,\"packages\":[%s],\"binaries\":[%s],\"images\":[%s],\"hibernation\":%s}' \\",
+  "  \"$hn\" \"$now\" \"$(jstr \"$os_id\")\" \"$(jstr \"$os_ver\")\" \"$(jstr \"$os_name\")\" \"$(jstr \"$kernel\")\" \"$(jstr \"$arch\")\" \"$(jstr \"$pm\")\" \"$pkgs\" \"$bins\" \"$imgs\" \"$hib\")",
 ];
 
 const EMIT = [

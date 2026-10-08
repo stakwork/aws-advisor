@@ -36,6 +36,8 @@ export function answerExcerpt(result: unknown): string | null {
   if (c == null) return null;
   if (typeof c === "string") return clip(c, 500);
   if (Array.isArray(c.recommendations)) return `${c.recommendations.length} recommendation${c.recommendations.length === 1 ? "" : "s"}${c.recommendations.length ? `: ${c.recommendations.slice(0, 3).map((x: any) => clip(x?.title, 80)).filter(Boolean).join("; ")}` : ""}`;
+  // a usage verdict says little alone: keep_running or adjust, then why
+  if (typeof c.verdict === "string" && typeof c.reasoning === "string" && c.reasoning.trim() && typeof c.summary !== "string") return clip(`${c.verdict}: ${c.reasoning}`, 500);
   for (const k of ["summary", "cause", "reply", "answer", "message", "narration", "verdict"]) if (typeof c[k] === "string" && c[k].trim()) return clip(c[k], 500);
   if (Array.isArray(c.playbooks)) return `${c.playbooks.length} playbook${c.playbooks.length === 1 ? "" : "s"}`;
   return null;

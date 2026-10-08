@@ -42,3 +42,16 @@ test("belowBar names the failed checks only under the task's bar", () => {
   assert.deepEqual(belowBar({ ...g, score: 0.5 }, 0.75), ["summary is three sentences or fewer"]);
   assert.equal(belowBar(null, 0.75), null);
 });
+
+test("near_number: a month projection far from the brief's figure fails; a close one, or none, passes", async () => {
+  const { amountsNear } = await import("../rubric.js");
+  const near = "project|on track for|month[- ]end|forecast";
+  assert.deepEqual(amountsNear("October is on track for 17,698 USD, 6.3 % under September (18,879).", near), [17698]);
+  assert.deepEqual(amountsNear("October projects to $20.9k, +10.6% over September.", near), [20900]);
+  assert.deepEqual(amountsNear("Spend is 673 USD/day.", near), []);
+  const rubric = [{ check: "near_number" as const, path: "*", near, facts: "projected_usd", tolerance: 0.05 }];
+  assert.equal(gradeByRubric({ summary: "October is on track for 17,698 USD, 6.3 % under September." }, rubric, { projected_usd: 20877 }).checks[0].pass, false);
+  assert.equal(gradeByRubric({ summary: "October projects to 20,877 USD (+10.6%)." }, rubric, { projected_usd: 20877 }).checks[0].pass, true);
+  assert.equal(gradeByRubric({ summary: "No cost change." }, rubric, { projected_usd: 20877 }).checks[0].pass, true);
+  assert.equal(gradeByRubric({ summary: "October projects to 1 USD." }, rubric, {}).checks[0].pass, true);
+});

@@ -186,7 +186,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
   );
 }
 
-type Hibernation = { status: "ready" | "chosen_stop" | "can_migrate" | "cannot" | "migrating" | "kept_stop"; configured: boolean; tag: string | null; reason: string | null; ram_gib: number | null; instance_type: string | null };
+type Hibernation = { status: "ready" | "guest_not_ready" | "guest_unknown" | "chosen_stop" | "can_migrate" | "cannot" | "migrating" | "kept_stop"; configured: boolean; tag: string | null; reason: string | null; ram_gib: number | null; instance_type: string | null };
 
 /**
  * Whether parking hibernates this box (src/hibernation.ts): ready (back in about a minute, memory kept), or a cold
@@ -219,6 +219,7 @@ function HibernationNote({ instanceId, handsOff, autoPark }: { instanceId: strin
     <div className="mt-1.5 border-t border-zinc-800/70 pt-1.5">
       <div className="flex flex-wrap items-center gap-2">
         {h.status === "ready" && <>{chip("border-emerald-900/60 bg-emerald-950/50 text-emerald-300", "Hibernation ready")}<span className="text-zinc-500">parking hibernates it: back in about a minute, memory and containers as they were</span><span className="ml-auto">{btn("Use stop/start instead", "no", "Tag advisor:hibernate=no: parking stops it instead of hibernating it")}</span></>}
+        {(h.status === "guest_not_ready" || h.status === "guest_unknown") && <>{chip("border-amber-900/60 bg-amber-950/50 text-amber-300", h.status === "guest_not_ready" ? "Guest cannot hibernate" : "Guest not checked")}<span className="text-zinc-500">launched with hibernation, but parking stops it (cold start, 2–4 min): {h.reason}{h.status === "guest_unknown" ? "; the next software probe tells" : ""}</span><span className="ml-auto">{btn("Use stop/start", "no", "Tag advisor:hibernate=no: parking stops it, and this note goes away")}</span></>}
         {h.status === "chosen_stop" && <>{chip("border-zinc-700 bg-zinc-900 text-zinc-300", "Stop/start chosen")}<span className="text-zinc-500">launched for hibernation, but advisor:hibernate=no keeps parking on a plain stop (cold start, 2–4 min)</span><span className="ml-auto">{btn("Hibernate again", null, "Remove advisor:hibernate=no")}</span></>}
         {h.status === "migrating" && <>{chip("border-sky-900/60 bg-sky-950/50 text-sky-300", "Migration under way")}<span className="text-zinc-500">the relaunch with hibernation on is in progress: follow it on the <Link className="text-sky-300 hover:underline" to="/actions">Auto-actions</Link> page</span></>}
         {h.status === "kept_stop" && <>{chip("border-zinc-700 bg-zinc-900 text-zinc-300", "Stop/start kept")}<span className="text-zinc-500">cold start, 2–4 min on a wake; the migration is not suggested</span><span className="ml-auto">{btn("Suggest hibernation again", null, "Remove advisor:hibernate=no")}</span></>}

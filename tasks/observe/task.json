@@ -56,6 +56,14 @@
       "label": "confidence between 0 and 1"
     },
     {
+      "check": "near_number",
+      "path": "*",
+      "near": "project|on track for|month[- ]end|forecast",
+      "facts": "projected_usd",
+      "tolerance": 0.05,
+      "label": "month projection matches the brief"
+    },
+    {
       "check": "max_sentences",
       "path": "summary",
       "max": 3,

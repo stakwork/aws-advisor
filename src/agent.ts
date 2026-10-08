@@ -262,7 +262,7 @@ async function rubricFacts(run: AgentRunRow): Promise<Record<string, any>> {
   if (run.kind === "observe") {
     const { buildObserveBrief } = await import("./observe.js");
     const row = db.prepare("select day from observations where request_id = ? order by id desc limit 1").get(run.request_id) as { day: string } | undefined;
-    if (row) { const f = buildObserveBrief(row.day).facts; return { resources: [...f.review_resources, ...f.alert_resources] }; }
+    if (row) { const f = buildObserveBrief(row.day).facts; return { resources: [...f.review_resources, ...f.alert_resources], projected_usd: f.projected_usd ?? null }; }
   }
   return {};
 }

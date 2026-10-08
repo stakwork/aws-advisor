@@ -24,6 +24,7 @@ test("hibernate: only a tagged, single-interface, EBS-rooted box on a supported 
   assert.match(skipReason({ ...ok, source_dest_check: false })!, /NAT/);
   assert.match(skipReason({ ...ok, instance_store: true })!, /instance-store/);
   assert.match(skipReason({ ...ok, type_supports: false })!, /does not support hibernation/);
+  assert.match(skipReason({ ...ok, guest_reason: "no hibernation agent installed" })!, /the guest cannot hibernate \(no hibernation agent installed\)/);
   assert.match(skipReason({ ...ok, ram_gib: 192 })!, /150 GiB on Linux/);
   assert.match(skipReason({ ...ok, ram_gib: 32, windows: true })!, /16 GiB on Windows/);
   assert.equal(skipReason({ ...ok, hands_off: true }), "tagged advisor:hands-off");

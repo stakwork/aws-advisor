@@ -32,7 +32,7 @@ db.exec(`create table if not exists pass_reports (
 create index if not exists pass_reports_status on pass_reports(status, id)`);
 
 export const SPHINX_MAX_CHARS = 900;
-/** Past-tense claims a narration may only make when the pass actually applied something. */
+/** Past-tense claims a narration may only make when the pass applied something or read back a change (a person's Stop the pass verified). */
 const APPLIED_CLAIMS = /\b(deleted|released|terminated|stopped|archived|trimmed|switched|scheduled for deletion)\b/i;
 
 export interface PassReportRow {
@@ -61,6 +61,17 @@ export function passDigest(result: Pick<PassResult, "mode" | "notes" | "errors">
 }
 
 const usd = (v: number | null | undefined) => (v == null ? "" : ` ≈ ${v.toFixed(2)} USD/month`);
+/** SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) or an ISO string as epoch ms. */
+const ms = (t: string | null | undefined) => (t ? Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(t) ? t : `${t.replace(" ", "T")}Z`) : NaN);
+/** The last failed, refused or reverted row of the same change (dedupe, per account) before this one: a new row that replaces it. */
+const replaced = (r: ActionRow) => db.prepare("select id, status from actions where dedupe = ? and coalesce(account_id, '') = coalesce(?, '') and id < ? and status in ('failed', 'refused', 'reverted') order by id desc limit 1").get(r.dedupe, r.account_id ?? null, r.id) as { id: number; status: string } | undefined;
+/** Whether the pass created the row, proposed it again after it went stale, or found it already open. */
+function rowAge(r: ActionRow, passAt: string): string {
+  const at = ms(passAt);
+  if (ms(r.created_at) >= at) { const prev = replaced(r); return `NEW this pass${prev ? ` (replaces #${prev.id}, ${prev.status})` : ""}`; }
+  if (ms(r.revived_at) >= at) return "PROPOSED AGAIN this pass (was stale)";
+  return "";
+}
 const hours = (ms: number) => `${Math.ceil(ms / 3600000)} h`;
 
 /** The brief: the whole pass as text. Exported for the page and the tests. */
@@ -85,6 +96,7 @@ export function buildPassBrief(result: PassResult, rows: ActionRow[], opts: { pa
     const check = (r as any).check ?? r.facts?.jev ?? null;
     const bits = [
       `#${r.id} [${r.status}] ${r.kind}: ${r.title}${usd(r.est_usd_month)}`,
+      rowAge(r, now),
       r.account_id ? `account ${r.account_id}` : "",
       r.status === "proposed" ? (left > 0 ? `grace: waits ${hours(left)} more before the pass may apply it` : g ? "grace period over" : "") : "",
       check ? `Jev check: ${check.verdict ?? "?"}${check.reason ? ` (${String(check.reason).slice(0, 160)})` : ""}` : "",
@@ -192,7 +204,7 @@ export function completePassReport(run: AgentRunRow, payload: { status: string; 
   const c = payload.result?.content ?? payload.result;
   const content = typeof c === "string" ? safe(c) : c;
   const rows = rowsOfPass(row.pass_at);
-  const counts = db.prepare("select sum(status in ('applied', 'verified') and datetime(applied_at) >= datetime(?)) as applied, count(*) as proposed from actions where datetime(seen_at) >= datetime(?)").get(row.pass_at, row.pass_at) as { applied: number | null; proposed: number };
+  const counts = db.prepare("select sum(status in ('applied', 'verified') and (datetime(applied_at) >= datetime(?) or datetime(verified_at) >= datetime(?))) as applied, count(*) as proposed from actions where datetime(seen_at) >= datetime(?)").get(row.pass_at, row.pass_at, row.pass_at) as { applied: number | null; proposed: number };
   const grade = gradePassReport(content, { row_ids: rows.map((r) => r.id), applied: counts.applied ?? 0, proposed: counts.proposed });
   db.prepare("update pass_reports set status = 'completed', result = ?, error = null, score = ?, grade = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(content), grade.score, JSON.stringify(grade), row.id);
   const held = belowBar(grade, taskFor("pass_report").retry.on_score_below);

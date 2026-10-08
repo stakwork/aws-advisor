@@ -84,6 +84,11 @@ test("software inventory: packages are upserted with history, changes are logged
   const sum = sw.softwareSummary();
   assert.ok(sum.instances >= 1 && sum.changes_7d >= 0);
   assert.equal(sw.recordSoftware(iid, "x", {}), null, "nothing to record");
+  // probe software/3: the hibernation setup is kept on the OS row; an older probe without it leaves it in place
+  assert.deepEqual(sw.hibernationSetupOf(iid), { probe: null, agent_package: null, packages_known: true, collected_at: "2026-10-02T00:00:00Z" });
+  sw.recordSoftware(iid, "2026-10-03T00:00:00Z", { package_manager: "deb", packages: [{ n: "ec2-hibinit-agent", v: "1.0.0-0ubuntu16.24.04.1", a: "all" }], hibernation: { kernel_disk: true, agent: "hibinit-agent" } });
+  sw.recordSoftware(iid, "2026-10-04T00:00:00Z", { package_manager: "deb", packages: [{ n: "ec2-hibinit-agent", v: "1.0.0-0ubuntu16.24.04.1", a: "all" }] });
+  assert.deepEqual(sw.hibernationSetupOf(iid), { probe: { kernel_disk: true, agent: "hibinit-agent" }, agent_package: "ec2-hibinit-agent", packages_known: true, collected_at: "2026-10-04T00:00:00Z" });
   for (const t of ["instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
   db.prepare("delete from inventory_ec2 where instance_id = ?").run(iid);
 });
@@ -105,7 +110,7 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/2");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/3");
     assert.deepEqual(j.packages, expected[name], name);
   }
 });

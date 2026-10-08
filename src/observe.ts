@@ -79,7 +79,7 @@ export function buildObserveBrief(day: string): { text: string; facts: BriefFact
   const openRecs = db.prepare("select count(*) as n, coalesce(sum(est_monthly_saving), 0) as saving from recommendations where status = 'open'").get() as { n: number; saving: number };
   const decided = db.prepare("select id, title, status, decided_at from recommendations where datetime(decided_at) > datetime('now', '-1 day') order by decided_at desc limit 20").all() as any[];
   const lines: string[] = [`# Morning observation for ${day}`, ""];
-  lines.push(`## Spend (Cost Explorer, net)`, `- latest day with data ${spend.latest?.day ?? "?"}: ${usd(spend.latest?.usd)}${spend.latest?.partial ? " (still filling in)" : ""}`, `- last 7 complete days: ${usd(spend.last_7_days.usd)}; month to date ${usd(spend.month_to_date.usd)}, projected ${usd(spend.month_to_date.projected_month_end)}; previous month ${usd(spend.previous_month.usd)}`);
+  lines.push(`## Spend (Cost Explorer, net)`, `- latest day with data ${spend.latest?.day ?? "?"}: ${usd(spend.latest?.usd)}${spend.latest?.partial ? " (still filling in)" : ""}`, `- last 7 complete days: ${usd(spend.last_7_days.usd)}; month to date ${usd(spend.month_to_date.usd)}, projected ${usd(spend.month_to_date.projected_month_end)} (use this projection; do not work out another); previous month ${usd(spend.previous_month.usd)}`);
   const topServices = db.prepare("select scope_id, median, p95 from baselines where scope_kind = 'service' order by median desc limit 8").all() as any[];
   if (topServices.length) lines.push(`- typical per day by service (60-day median, p95): ${topServices.map((s) => `${s.scope_id} ${Math.round(s.median)} (${Math.round(s.p95)})`).join("; ")}`);
   lines.push("", `## Review of the collected statistics (${review.day ?? "not run"}): ${review.findings.length} observation${review.findings.length === 1 ? "" : "s"}`);
@@ -103,7 +103,7 @@ export function buildObserveBrief(day: string): { text: string; facts: BriefFact
   for (const t of trail.by_action.slice(0, 15)) lines.push(`- ${t.n} × ${t.event_source} ${t.event_name} by ${t.username ?? "?"}${t.resources.length ? ` on ${t.resources.slice(0, 4).join(", ")}${t.resources.length > 4 ? ", …" : ""}` : ""}${t.errors ? ` (${t.errors} failed)` : ""}`);
   const natBase = (db.prepare("select scope_id, median, p95, days from baselines where scope_kind = 'nat' and metric = 'bytes_hour'").all() as any[]).map((b) => `${b.scope_id} median ${(b.median / 1e9).toFixed(2)} GB/h, p95 ${(b.p95 / 1e9).toFixed(2)} (${b.days} d)`);
   if (natBase.length) lines.push("", `## NAT baselines`, ...natBase.map((s) => `- ${s}`));
-  const facts = { review_resources: review.findings.map((f: any) => f.resource), alert_ids: alerts.map((a) => a.id), alert_resources: alerts.map((a) => a.resource).filter(Boolean), review_count: review.findings.length, alert_count: alerts.length, pools: pools.pools.map((p) => p.name) };
+  const facts = { review_resources: review.findings.map((f: any) => f.resource), alert_ids: alerts.map((a) => a.id), alert_resources: alerts.map((a) => a.resource).filter(Boolean), review_count: review.findings.length, alert_count: alerts.length, pools: pools.pools.map((p) => p.name), projected_usd: spend.month_to_date.projected_month_end ?? null };
   return { text: lines.join("\n"), facts };
 }
 
@@ -135,7 +135,7 @@ export function completeObservation(run: AgentRunRow, payload: { status: string;
   }
   const content = payload.result?.content ?? payload.result;
   const f = buildObserveBrief(row.day).facts;
-  const grade = gradeByRubric(content, taskFor("observe").rubric, { resources: [...f.review_resources, ...f.alert_resources] });
+  const grade = gradeByRubric(content, taskFor("observe").rubric, { resources: [...f.review_resources, ...f.alert_resources], projected_usd: f.projected_usd ?? null });
   db.prepare("update observations set status = 'completed', result = ?, score = ?, grade = ?, finished_at = datetime('now') where id = ?").run(JSON.stringify(content), grade.score, JSON.stringify(grade), row.id);
   console.log(`[observe] ${row.day}: score ${grade.score.toFixed(2)} (${grade.checks.filter((c) => c.pass).length}/${grade.checks.length})`);
 }

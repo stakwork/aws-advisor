@@ -33,20 +33,28 @@ create table if not exists package_changes (
 create index if not exists package_changes_instance on package_changes(instance_id, id)`);
 // probe software/2 adds the source package (what the distribution advisories name: openssh for openssh-server); older rows have none
 if (!(db.prepare("pragma table_info(instance_packages)").all() as { name: string }[]).some((c) => c.name === "source")) db.exec("alter table instance_packages add column source text");
+// probe software/3 adds the guest's hibernation setup (JSON, ProbeHibernation); src/guest_hibernation.ts reads it
+if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "hibernation")) db.exec("alter table instance_os add column hibernation text");
 
 /** One package as the probe prints it: name, version, architecture and the source package when it differs from the name. */
 export interface ProbePackage { n: string; v: string; a?: string | null; s?: string | null }
 export interface ProbeBinary { name: string; version: string; path?: string | null }
 export interface ProbeImage { image: string; id?: string | null; digests?: string | null; created?: string | null; platform?: string | null }
+/** What the guest has for hibernation (probe software/3): the kernel, the resume target, what answers the sleep button, the swap. */
+export interface ProbeHibernation {
+  kernel_disk?: boolean; cmdline_resume?: boolean; sys_resume?: string | null; agent?: string | null; acpi_sleep_handler?: boolean;
+  logind_suspend_key?: string | null; swap_active_bytes?: number; swap_file_bytes?: number; mem_bytes?: number;
+}
 export interface SoftwareData {
+  hibernation?: ProbeHibernation | null;
   os?: { id?: string | null; version?: string | null; name?: string | null } | null; kernel?: string | null; arch?: string | null; package_manager?: string | null;
   packages?: ProbePackage[]; binaries?: ProbeBinary[]; images?: ProbeImage[];
 }
 
 export interface RecordSoftwareResult { packages: number; added: string[]; removed: string[]; changed: { name: string; from: string; to: string }[]; binaries: number; images: number }
 
-const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id) do update set collected_at = excluded.collected_at, os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages`);
+const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages`);
 const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, ecosystem, name) do update set version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
@@ -85,9 +93,21 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
     for (const i of imgs) { imgSeen.add(i.image); upsertImg.run(instanceId, clean(i.image, 300), i.id == null ? null : clean(i.id, 100), i.digests ? clean(String(i.digests).split(",")[0], 300) : null, i.created == null ? null : clean(i.created, 40), i.platform == null ? null : clean(i.platform, 40), collectedAt, collectedAt); }
     if (Array.isArray(data.images)) db.prepare(`update instance_images set gone = 1 where instance_id = ? and gone = 0${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
     res.images = imgs.length;
-    upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length);
+    upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null);
   })();
   return res;
+}
+
+/** The hibernation agent packages (Amazon Linux, Ubuntu): the fallback signal while a box has no probe software/3 reading. */
+export const HIBERNATION_AGENT_PACKAGES = ["ec2-hibinit-agent", "hibagent", "ec2-hibernate-linux-agent"];
+
+/** What the software probe saw of one box's hibernation setup: its reading, an installed agent package, whether packages were read at all. */
+export function hibernationSetupOf(instanceId: string): { probe: ProbeHibernation | null; agent_package: string | null; packages_known: boolean; collected_at: string | null } {
+  const os = db.prepare("select collected_at, packages, hibernation from instance_os where instance_id = ?").get(instanceId) as { collected_at: string; packages: number; hibernation: string | null } | undefined;
+  let probe: ProbeHibernation | null = null;
+  try { probe = os?.hibernation ? JSON.parse(os.hibernation) : null; } catch { probe = null; }
+  const pkg = db.prepare(`select name from instance_packages where instance_id = ? and gone = 0 and name in (${HIBERNATION_AGENT_PACKAGES.map(() => "?").join(",")}) limit 1`).get(instanceId, ...HIBERNATION_AGENT_PACKAGES) as { name: string } | undefined;
+  return { probe, agent_package: pkg?.name ?? null, packages_known: Boolean(os && os.packages > 0), collected_at: os?.collected_at ?? null };
 }
 
 export interface InstanceSoftware {

@@ -14,7 +14,8 @@ export type RubricCheck =
   | { check: "no_destructive_auto"; path: string; label?: string }             // items at path with tier "auto" must not describe a destructive action
   | { check: "covers"; path: string; facts: string; min_share: number; label?: string } // the text at path (or whole answer when "*") mentions a share of facts[<key>]
   | { check: "unique"; path: string; by: string[]; label?: string }            // no two items at path share the same values of `by`
-  | { check: "flag_consistent"; flag: string; lists: string[]; label?: string }; // flag true => every list empty
+  | { check: "flag_consistent"; flag: string; lists: string[]; label?: string } // flag true => every list empty
+  | { check: "near_number"; path: string; near: string; facts: string; tolerance: number; label?: string }; // every USD amount following `near` (a regex) in a sentence is within tolerance (a share) of facts[<key>]
 
 export interface RubricResult { check: string; pass: boolean; detail: string }
 export interface Grade { score: number; checks: RubricResult[] }
@@ -38,6 +39,20 @@ export function valuesAt(obj: any, path: string): any[] {
   }
   return cur;
 }
+/** A USD amount: "$17,698", "17,698 USD", "17.7k USD". */
+const AMOUNT = /\$\s?(\d[\d,]*(?:\.\d+)?)\s?(k\b)?|(\d[\d,]*(?:\.\d+)?)\s?(k\b)?\s?(?:USD|dollars)\b/i;
+/** The first USD amount within 40 characters after each match of `near`, per sentence (JSON string boundaries end one too). Pure. */
+export function amountsNear(text: string, near: string): number[] {
+  const out: number[] = [];
+  const re = new RegExp(near, "i");
+  for (const sentence of text.split(/[.!?;](?:\s|$)|"/)) {
+    const m = re.exec(sentence); if (!m) continue;
+    const a = AMOUNT.exec(sentence.slice(m.index + m[0].length, m.index + m[0].length + 40)); if (!a) continue;
+    const n = Number((a[1] ?? a[3]).replace(/,/g, "")) * ((a[2] ?? a[4]) ? 1000 : 1);
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
 const nonEmpty = (v: any) => v != null && !(typeof v === "string" && !v.trim()) && !(Array.isArray(v) && !v.length);
 const label = (c: RubricCheck) => c.label || `${c.check} ${"path" in c ? c.path : ""}`.trim();
 
@@ -58,6 +73,14 @@ export function gradeByRubric(result: any, rubric: RubricCheck[], facts: Record<
       case "covers": { const items: string[] = (facts[c.facts] || []).filter(Boolean).map(String); const text = JSON.stringify(c.path === "*" ? result : valuesAt(result, c.path)).toLowerCase(); const hit = [...new Set(items)].filter((f) => text.includes(f.toLowerCase())).length; const total = new Set(items).size; pass = total === 0 || hit >= Math.ceil(total * c.min_share); detail = `${hit}/${total} mentioned`; break; }
       case "unique": { const items = valuesAt(result, c.path); const seen = new Set<string>(); let dup = 0; for (const it of items) { const k = c.by.map((b) => String(it?.[b] ?? "")).join("|"); if (seen.has(k)) dup++; seen.add(k); } pass = dup === 0; detail = dup ? `${dup} duplicate${dup === 1 ? "" : "s"}` : "none"; break; }
       case "flag_consistent": { const flag = Boolean(valuesAt(result, c.flag)[0]); const lists = c.lists.map((l) => valuesAt(result, l).length); pass = !flag || lists.every((n) => n === 0); detail = flag ? `flag set, lists ${lists.join("/")}` : "flag not set"; break; }
+      case "near_number": {
+        const want = Number(facts[c.facts]);
+        if (facts[c.facts] == null || !Number.isFinite(want) || want === 0) { detail = "no figure to compare"; break; }
+        const got = valuesAt(result, c.path).flatMap((v) => amountsNear(typeof v === "string" ? v : JSON.stringify(v), c.near));
+        const off = got.filter((n) => Math.abs(n - want) / Math.abs(want) > c.tolerance);
+        pass = off.length === 0; detail = got.length ? (off.length ? `${off.map((n) => Math.round(n)).join(", ")} vs ${Math.round(want)} in the brief` : `${got.length} matching ${Math.round(want)}`) : "not mentioned";
+        break;
+      }
     }
     checks.push({ check: label(c), pass, detail });
   }

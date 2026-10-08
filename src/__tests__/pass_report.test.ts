@@ -45,3 +45,21 @@ test("pass report rubric: unknown row ids, a deletion claimed in a dry run, a lo
   const applied = gradePassReport({ summary: "1 snapshot deleted (#8).", next: [], waiting: [], left_alone: [], concerns: [], sphinx: "Auto-actions: snapshot #8 deleted." }, { row_ids: [8], applied: 1, proposed: 1 });
   assert.equal(applied.score, 1, JSON.stringify(applied.checks.filter((c) => !c.pass)));
 });
+
+test("pass brief: marks the rows the pass created or brought back, and leaves older open rows unmarked", () => {
+  const brief = buildPassBrief(pass(), [
+    row({ id: 7, created_at: "2026-09-27 09:45:00", seen_at: "2026-09-27 10:45:10" }),
+    row({ id: 8, created_at: "2026-09-27 10:45:20", dedupe: "ecr_lifecycle:us-east-1:repo-new:30" }),
+    row({ id: 9, created_at: "2026-09-20 10:45:00", revived_at: "2026-09-27 10:45:30", dedupe: "ecr_lifecycle:us-east-1:repo-back:30" }),
+  ], { passAt: "2026-09-27T10:45:00.000Z" });
+  assert.doesNotMatch(brief.split("\n").find((l) => l.startsWith("- #7 "))!, /NEW|AGAIN/);
+  assert.match(brief, /#8 \[proposed\][^\n]*NEW this pass/);
+  assert.match(brief, /#9 \[proposed\][^\n]*PROPOSED AGAIN this pass/);
+});
+
+test("pass report rubric: a stop the pass read back is not an invented change", () => {
+  const answer = { summary: "#8 read back as stopped after a person pressed Stop.", sphinx: "#8 is stopped.", next: "", waiting: [], left_alone: [], concerns: [] };
+  const check = (applied: number) => gradePassReport(answer, { row_ids: [8], applied, proposed: 0 }).checks.find((c) => c.check.startsWith("no applied claim"))!;
+  assert.equal(check(0).pass, false);
+  assert.equal(check(1).pass, true);
+});

@@ -5,7 +5,7 @@
 export interface GradeCheck { check: string; pass: boolean; detail: string }
 export interface Grade { score: number; checks: GradeCheck[] }
 
-export interface BriefFacts { review_resources: string[]; alert_ids: number[]; alert_resources: string[]; review_count: number; alert_count: number; pools: string[] }
+export interface BriefFacts { review_resources: string[]; alert_ids: number[]; alert_resources: string[]; review_count: number; alert_count: number; pools: string[]; projected_usd?: number | null }
 
 const hasNumber = (s: unknown) => /\d/.test(String(s ?? ""));
 const FORBIDDEN_AUTO = /\b(terminate|delete|stop|shut ?down|remove|destroy|drop)\b/i;
