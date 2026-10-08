@@ -178,7 +178,8 @@ knowledge.get("/review", (req, res) => {
   const scope = accountScope(req.query as any); const r = { ...latestReview(), last_run: lastReviewRun() };
   if (!scope) return res.json(r);
   const inScope = resourceInScope(scope);
-  res.json({ ...r, findings: r.findings.filter((f: any) => inScope(f.resource)), scope: { account: scope.id, total: r.findings.length } });
+  // an account's own line on the bill names it; the fleet-wide lines (the bill, alerts, recommendations) stay with "all accounts"
+  res.json({ ...r, findings: r.findings.filter((f: any) => f.resource === scope.id || inScope(f.resource)), scope: { account: scope.id, total: r.findings.length } });
 });
 knowledge.post("/review/run", async (_req, res) => {
   const log: string[] = [];

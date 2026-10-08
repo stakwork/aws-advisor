@@ -141,8 +141,13 @@ function CommitmentsList({ fallback }: { fallback: any[] }) {
   );
 }
 
-const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up" };
-/** Yesterday's read of the collected statistics: idle instances, memory pressure, disks filling, idle containers, spend steps. */
+const REVIEW_LABEL: Record<string, string> = { sustained_idle: "idle for days", memory_pressure: "memory pressure", disk_fill: "disk filling", idle_container: "idle container", spend_step: "spend stepped up",
+  bill_month: "month vs last", bill_service_up: "service climbing", bill_day_jump: "day jumped", account_spend_up: "account climbing", probe_gap: "not probed", probe_unreachable: "unreachable", probe_no_host_data: "no host readings",
+  alerts_stale: "stale alerts", alerts_open: "open alerts", alarm_findings: "alarm findings", security_critical: "critical security", recs_open: "open recommendations", recs_waiting: "savings waiting", recs_approved_stuck: "approved, not done",
+  log_step: "log ingestion up", log_no_retention: "logs kept forever", s3_no_lifecycle: "S3 without lifecycle", ebs_overprovisioned_iops: "IOPS unused" };
+/** Where each review observation is looked at in full. */
+const reviewLink = (f: any): string | null => /^i-/.test(f.resource) ? `/inventory?tab=ec2&id=${f.resource}` : /^(bill_|account_spend|spend_step)/.test(f.kind) ? "/bill" : /^probe_/.test(f.kind) ? "/inventory?tab=ec2" : /^alerts_/.test(f.kind) ? "/alerts" : f.kind === "alarm_findings" ? "/findings" : f.kind === "security_critical" ? "/security" : /^recs_/.test(f.kind) ? "/recommendations" : null;
+/** The daily review: the collected statistics (idle instances, memory, disks, containers) and the operation around them (the bill, the probes, what is open, the recommendations). */
 function ReviewSummary() {
   const [r, setR] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -173,10 +178,10 @@ function ReviewSummary() {
       {lr && <div className={`text-xs ${lr.error || (!lr.finished_at && stale) ? "text-red-400" : "text-zinc-500"}`}>{lastRunLine(lr, stale)}</div>}
       {r.day && r.findings.length === 0 && <div className="text-zinc-500">Nothing stands out in the statistics.</div>}
       <div className="flex flex-wrap gap-2 text-xs">{Object.entries(counts).map(([k, n]) => <Badge key={k}>{`${n} ${REVIEW_LABEL[k] || k}`}</Badge>)}</div>
-      <ul className="space-y-0.5">{r.findings.slice(0, 6).map((f: any) => (
-        <li key={f.id} className="flex items-start gap-2 text-xs"><Badge>{f.severity}</Badge><span className="min-w-0 text-zinc-300">{/^i-/.test(f.resource) ? <Link to={`/inventory?tab=ec2&id=${f.resource}`} className="hover:underline">{f.message}</Link> : f.message}</span></li>
+      <ul className="space-y-0.5">{r.findings.slice(0, 8).map((f: any) => (
+        <li key={f.id} className="flex items-start gap-2 text-xs"><Badge>{f.severity}</Badge><span className="min-w-0 text-zinc-300">{reviewLink(f) ? <Link to={reviewLink(f)!} className="hover:underline">{f.message}</Link> : f.message}</span></li>
       ))}</ul>
-      {r.findings.length > 6 && <div className="text-xs text-zinc-500">and {r.findings.length - 6} more in Recommendations and Alerts</div>}
+      {r.findings.length > 8 && <div className="text-xs text-zinc-500">and {r.findings.length - 8} more in Recommendations and Alerts</div>}
     </div>
   );
 }
@@ -188,7 +193,10 @@ function lastRunLine(lr: any, stale: boolean): string {
   if (lr.error) return `${at} failed: ${lr.error}`;
   if (!lr.finished_at) return stale ? `${at} never finished (the server restarted or it hung)` : `${at}, still running…`;
   const found = Object.values(lr.findings || {}).reduce((t: number, n: any) => t + Number(n || 0), 0);
-  const cover = `${lr.instances} of ${lr.candidates ?? "?"} running instances had daily statistics${lr.instances === 0 ? " (they come from the probe passes: check that probes reach the instances)" : ""}`;
+  const c = lr.coverage;
+  // why a quiet review was quiet: the rules need REVIEW_MIN_DAYS (5) days of host probes with memory and load
+  const why = c && lr.instances > 0 && c.judged < lr.instances ? ` (${[c.too_few_days ? `${c.too_few_days} with under 5 days of probes, at most ${c.days_max ?? 0}` : "", c.no_memory_or_load ? `${c.no_memory_or_load} without memory or load readings${c.host_samples_30d === 0 ? ": no host probe samples in 30 days, check the host probe pass (PROBE_CRON)" : ""}` : ""].filter(Boolean).join("; ")}; ${c.judged} could be judged)` : "";
+  const cover = `${lr.instances} of ${lr.candidates ?? "?"} running instances had daily statistics${lr.instances === 0 ? " (they come from the probe passes: check that probes reach the instances)" : why}`;
   return `${at}: ${cover}; ${found} observation${found === 1 ? "" : "s"}${(lr.errors || []).length ? `; errors: ${lr.errors.join("; ")}` : ""}`;
 }
 
@@ -314,7 +322,7 @@ export function AwsOverview() {
           <Card title={<span className="flex items-center justify-between">Morning observation <span className="text-xs font-normal text-zinc-500">{d.scope ? "the agent's read of the day, across every account" : "the agent's read of the day"}</span></span>}>
             <ObservationCard />
           </Card>
-          <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">what the statistics say</span></span>}>
+          <Card title={<span className="flex items-center justify-between">Daily review <span className="text-xs font-normal text-zinc-500">the statistics, the bill, probes, what is open</span></span>}>
             <ReviewSummary />
           </Card>
         </div>

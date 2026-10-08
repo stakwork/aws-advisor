@@ -3,7 +3,7 @@
  * container, baselines, spend per service) and turns what they show into recommendations and alerts with the
  * numbers attached. Runs after the baselines (REVIEW_CRON) and on demand. Deterministic: no model call.
  */
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { S, query } from "./steampipe.js";
 import { credentialGate } from "./gate.js";
 import { describeError } from "./permissions.js";
@@ -13,7 +13,7 @@ import { resourceRole } from "./roles.js";
 import { NATURALLY_IDLE_ROLES, ROLE_CONFIDENCE_THRESHOLD, RecInput, isProtected } from "./rules.js";
 import { upsertRecommendations } from "./collector.js";
 import { recentIngest, topLogGroups } from "./logs.js";
-import { ContainerStat, DISK_URGENT_DAYS, DISK_HORIZON_DAYS, DailyRow, diskForecast, idleContainers, memoryPressure, spendStep, sustainedIdle } from "./review_math.js";
+import { ContainerStat, DISK_URGENT_DAYS, REVIEW_MIN_DAYS, DISK_HORIZON_DAYS, DailyRow, diskForecast, idleContainers, memoryPressure, spendStep, sustainedIdle } from "./review_math.js";
 import { alertInsert } from "./alert_store.js";
 import { AWS } from "./adapters/types.js";
 
@@ -27,15 +27,18 @@ db.exec(`create table if not exists review_findings (
 // every run, found something or not: with no findings the day has no rows, and "never ran" looked the same as "nothing stood out"
 db.exec(`create table if not exists review_runs (
   id integer primary key autoincrement, started_at text not null, finished_at text, day text not null,
-  instances integer, candidates integer, findings text, recommendations integer, alerts integer, errors text, error text
+  instances integer, candidates integer, coverage text, findings text, recommendations integer, alerts integer, errors text, error text
 )`);
+addColumn("review_runs", "coverage", "text");
 
 const WINDOW_DAYS = 30;
 const insertFinding = db.prepare("insert into review_findings(day, kind, resource, resource_name, severity, message, details) values (?, ?, ?, ?, ?, ?, ?) on conflict(day, kind, resource, resource_name) do update set severity = excluded.severity, message = excluded.message, details = excluded.details");
 const openAlert = db.prepare("select id from alerts where kind = ? and resource = ? and acknowledged = 0 limit 1");
 const insertAlert = alertInsert(AWS);
 
-export interface ReviewResult { day: string; instances: number; findings: Record<string, number>; recommendations: number; alerts: number; errors: string[]; took_ms: number }
+/** What the instances' statistics allowed: a review that finds nothing says whether there was enough to judge. */
+export interface ReviewCoverage { too_few_days: number; no_memory_or_load: number; judged: number; days_median: number | null; days_max: number | null; host_samples_30d: number }
+export interface ReviewResult { day: string; instances: number; findings: Record<string, number>; recommendations: number; alerts: number; errors: string[]; took_ms: number; coverage: ReviewCoverage }
 
 function alertOnce(kind: string, resource: string, message: string, details: Record<string, unknown>): boolean {
   if (openAlert.get(kind, resource)) return false;
@@ -43,12 +46,12 @@ function alertOnce(kind: string, resource: string, message: string, details: Rec
   return true;
 }
 
-export interface ReviewRun { id: number; started_at: string; finished_at: string | null; day: string; instances: number | null; candidates: number | null; findings: Record<string, number>; recommendations: number | null; alerts: number | null; errors: string[]; error: string | null }
+export interface ReviewRun { id: number; started_at: string; finished_at: string | null; day: string; instances: number | null; candidates: number | null; coverage: ReviewCoverage | null; findings: Record<string, number>; recommendations: number | null; alerts: number | null; errors: string[]; error: string | null }
 
 /** The newest run of the review, with what it covered: the card says when it last ran and why it found nothing. */
 export function lastReviewRun(): ReviewRun | null {
   const r = db.prepare("select * from review_runs order by id desc limit 1").get() as any;
-  return r ? { ...r, findings: safeJson(r.findings || "{}") || {}, errors: safeJson(r.errors || "[]") || [] } : null;
+  return r ? { ...r, coverage: r.coverage ? safeJson(r.coverage) : null, findings: safeJson(r.findings || "{}") || {}, errors: safeJson(r.errors || "[]") || [] } : null;
 }
 
 /** Runs the review and records the run (its counts, its errors, or why it failed) in review_runs. */
@@ -59,7 +62,7 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
   const candidates = (db.prepare("select count(*) as n from inventory_ec2 where gone = 0 and state = 'running'").get() as { n: number }).n;
   try {
     const r = await reviewOnce(onLog);
-    db.prepare("update review_runs set finished_at = ?, instances = ?, candidates = ?, findings = ?, recommendations = ?, alerts = ?, errors = ? where id = ?").run(now(), r.instances, candidates, JSON.stringify(r.findings), r.recommendations, r.alerts, JSON.stringify(r.errors), id);
+    db.prepare("update review_runs set finished_at = ?, instances = ?, candidates = ?, coverage = ?, findings = ?, recommendations = ?, alerts = ?, errors = ? where id = ?").run(now(), r.instances, candidates, JSON.stringify(r.coverage), JSON.stringify(r.findings), r.recommendations, r.alerts, JSON.stringify(r.errors), id);
     return r;
   } catch (e: any) {
     db.prepare("update review_runs set finished_at = ?, candidates = ?, error = ? where id = ?").run(now(), candidates, String(e?.message || e).slice(0, 2000), id);
@@ -72,7 +75,11 @@ export async function runReview(onLog: (s: string) => void = () => {}): Promise<
 async function reviewOnce(onLog: (s: string) => void): Promise<ReviewResult> {
   const t0 = Date.now();
   const day = new Date().toISOString().slice(0, 10);
-  const out: ReviewResult = { day, instances: 0, findings: {}, recommendations: 0, alerts: 0, errors: [], took_ms: 0 };
+  const hostSamples = (db.prepare("select count(*) as n from instance_metrics where coalesce(kind, 'all') in ('host', 'all') and datetime(collected_at) >= datetime('now', '-30 days')").get() as { n: number }).n;
+  const out: ReviewResult = { day, instances: 0, findings: {}, recommendations: 0, alerts: 0, errors: [], took_ms: 0, coverage: { too_few_days: 0, no_memory_or_load: 0, judged: 0, days_median: null, days_max: null, host_samples_30d: hostSamples } };
+  const dayCounts: number[] = [];
+  // a run recomputes its day whole: what resolved since an earlier run today drops out, and rows without a name do not pile up
+  db.prepare("delete from review_findings where day = ?").run(day);
   const count = (k: string) => { out.findings[k] = (out.findings[k] || 0) + 1; };
   const recs: RecInput[] = [];
 
@@ -91,6 +98,10 @@ async function reviewOnce(onLog: (s: string) => void): Promise<ReviewResult> {
     const cpu = getBaseline("instance", i.instance_id, "cpu_pct");
     // idle
     const idle = sustainedIdle(rows, cpu?.p95 ?? null);
+    dayCounts.push(rows.length);
+    if (rows.length < REVIEW_MIN_DAYS) out.coverage.too_few_days++;
+    else if (idle.mem_avg == null || idle.load_avg == null) out.coverage.no_memory_or_load++;
+    else out.coverage.judged++;
     if (idle.idle && i.pool_kind !== "batch") {
       const prot = isProtected(name, role);
       const naturally = role && NATURALLY_IDLE_ROLES.includes(role.role) && role.role_confidence >= ROLE_CONFIDENCE_THRESHOLD;
@@ -138,7 +149,10 @@ async function reviewOnce(onLog: (s: string) => void): Promise<ReviewResult> {
     out.recommendations = recs.length;
     upsertRecommendations(runId, recs, "rules", undefined, { reconcile: false, provider: AWS });
   }
-  onLog(`instances: ${out.instances} reviewed, ${JSON.stringify(out.findings)}`);
+  dayCounts.sort((a, b) => a - b);
+  out.coverage.days_median = dayCounts.length ? dayCounts[Math.floor(dayCounts.length / 2)] : null;
+  out.coverage.days_max = dayCounts.length ? dayCounts[dayCounts.length - 1] : null;
+  onLog(`instances: ${out.instances} reviewed, ${JSON.stringify(out.findings)}; coverage ${JSON.stringify(out.coverage)}`);
 
   // ---- spend per service: last complete days against the 60-day baseline -------------------------------------
   const gate = await credentialGate("review");
@@ -193,6 +207,14 @@ async function reviewOnce(onLog: (s: string) => void): Promise<ReviewResult> {
     insertFinding.run(day, "ebs_overprovisioned_iops", v.volume_id, v.name, "info", msg, JSON.stringify({ iops: v.iops, iops_max: v.iops_max, read_iops_avg: v.read_iops_avg, write_iops_avg: v.write_iops_avg, extra_usd_month: extra, instance_id: v.instance_id }));
     count("ebs_overprovisioned_iops");
   }
+  // ---- beyond the statistics: the bill, the probes, what is open, the recommendations (src/review_ops.ts) ----------
+  const ops = await import("./review_ops.js");
+  const sections: [string, () => Promise<import("./review_ops.js").OpsFinding[]> | import("./review_ops.js").OpsFinding[]][] = [["billing", ops.reviewBilling], ["probes", ops.reviewProbes], ["open issues", ops.reviewOpenIssues], ["recommendations", ops.reviewRecommendations]];
+  for (const [name, run] of sections) {
+    try { for (const f of await run()) { insertFinding.run(day, f.kind, f.resource, f.resource_name, f.severity, f.message, JSON.stringify(f.details)); count(f.kind); } }
+    catch (e: any) { out.errors.push(`${name}: ${e?.message || e}`); }
+  }
+  if (out.coverage.no_memory_or_load) { insertFinding.run(day, "probe_no_host_data", "probes", "", "info", `probes: ${out.coverage.no_memory_or_load} instances have days of probes but no memory or load readings${out.coverage.host_samples_30d === 0 ? " (no host probe samples in 30 days: check the host probe pass, PROBE_CRON)" : ""}`, JSON.stringify(out.coverage)); count("probe_no_host_data"); }
   db.prepare("delete from review_findings where day < date('now', '-90 days')").run();
   out.took_ms = Date.now() - t0;
   onLog(`${out.recommendations} recommendations, ${out.alerts} new alerts, ${out.took_ms} ms`);
