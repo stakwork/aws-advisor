@@ -8,6 +8,8 @@ import { probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
 import { softwareOn, softwareSummary, wherePackage } from "../software_inventory.js";
 import { containersOn, whereImage } from "../container_inventory.js";
 import { appEvents } from "../instance_apps.js";
+import { proposeProbeDocuments } from "../actions/probe_document.js";
+import { listActions } from "../executor.js";
 
 /**
  * Settings > Probes: what each probe collects, its script (default or edited), its SSM document and whether the
@@ -42,7 +44,18 @@ probes.get("/probes", async (req, res) => {
   const withStatus = req.query.status !== "0";
   let status: Awaited<ReturnType<typeof probeDocumentStatus>> | null = null;
   if (withStatus) { try { status = await probeDocumentStatus(); } catch { status = null; } }
-  res.json({ base_document: config.probeDocument, kinds: PROBE_KINDS.map((k) => ({ ...describe(k), deployed: status?.find((s) => s.kind === k) ?? null })), legacy_rows: Number((db.prepare("select count(*) as n from instance_metrics where coalesce(kind, 'all') = 'all'").get() as any)?.n || 0) });
+  res.json({
+    base_document: config.probeDocument, kinds: PROBE_KINDS.map((k) => ({ ...describe(k), deployed: status?.find((s) => s.kind === k) ?? null })), legacy_rows: Number((db.prepare("select count(*) as n from instance_metrics where coalesce(kind, 'all') = 'all'").get() as any)?.n || 0),
+    // the ledger rows that create or update the documents (src/actions/probe_document.ts): open ones wait for "Run as me"
+    document_rows: listActions({ kind: "probe_document", page_size: 50 }).actions.filter((r) => r.status !== "stale"),
+  });
+});
+
+// One ledger row per account and kind whose document is missing or stale; body.kinds narrows. Nothing is written: each row is applied with "Run as me".
+probes.post("/probes/documents/propose", async (req, res) => {
+  const kinds = Array.isArray(req.body?.kinds) ? req.body.kinds.map(String).filter(isKind) : undefined;
+  try { res.json(await proposeProbeDocuments({ kinds, by: typeof req.body?.by === "string" && req.body.by.trim() ? req.body.by.trim().slice(0, 80) : "a person" })); }
+  catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 probes.get("/probes/:kind/document", (req, res) => {

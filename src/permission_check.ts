@@ -137,7 +137,7 @@ export const CAPABILITIES: Capability[] = [
   { id: "ssm_document", label: `SSM probe documents (${config.probeDocument}-<kind>)`, group: "ssm", actions: ["ssm:DescribeDocument"],
     sdk: async (ctx) => { const { probeDocumentStatus } = await import("./probes_status.js"); const st = await probeDocumentStatus(ctx.region, ctx.creds); const missing = st.filter((d) => d.status === "missing").map((d) => d.name); const stale = st.filter((d) => d.status === "stale").map((d) => d.name);
       if (st.some((d) => d.status === "error")) throw new Error(st.find((d) => d.status === "error")!.error || "DescribeDocument failed");
-      return `${st.filter((d) => d.status === "current").length}/${st.length} current${stale.length ? `; stale: ${stale.join(", ")}` : ""}${missing.length ? `; missing: ${missing.join(", ")} (Settings > Probes has the create commands)` : ""}`; } },
+      return `${st.filter((d) => d.status === "current").length}/${st.length} current${stale.length ? `; stale: ${stale.join(", ")}` : ""}${missing.length ? `; missing: ${missing.join(", ")} (Settings > Probes: Propose create / update, then Run as me)` : ""}`; } },
   { id: "ssm_probe", label: "SSM probe (SendCommand + GetCommandInvocation)", group: "ssm", actions: ["ssm:SendCommand", "ssm:GetCommandInvocation"],
     sdk: async (ctx) => {
       if (!ctx.instanceId) return { skipped: "pass instance_id (an SSM-online Linux instance) to run the real probe once; SendCommand has no dry run" };

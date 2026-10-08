@@ -31,6 +31,7 @@ import { usageScheduleAction } from "./usage_schedule.js";
 import { consentTagAction } from "./consent_tag.js";
 import { ec2HibernateMigrateAction } from "./ec2_hibernate_migrate.js";
 import { readPolicyAction } from "./read_policy.js";
+import { probeDocumentAction } from "./probe_document.js";
 
 registerAction(acuWindowAction, AWS);
 registerAction(snapshotArchiveAction, AWS);
@@ -62,3 +63,4 @@ registerAction(usageScheduleAction, AWS);
 registerAction(consentTagAction, AWS);
 registerAction(ec2HibernateMigrateAction, AWS);
 registerAction(readPolicyAction, AWS);
+registerAction(probeDocumentAction, AWS);

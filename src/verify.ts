@@ -65,7 +65,7 @@ function appliedFromInventory(rec: any): string | null {
 }
 
 /** Ledger kinds that change no cost line by themselves: a tag, a setting, a relaunch. They are not listed as impact. */
-const NO_IMPACT_KINDS = new Set(["consent_tag", "usage_schedule", "s3_request_metrics", "ec2_hibernate_migrate", "read_policy"]);
+const NO_IMPACT_KINDS = new Set(["consent_tag", "usage_schedule", "s3_request_metrics", "ec2_hibernate_migrate", "read_policy", "probe_document"]);
 
 /** One auto-action as a decision: every applied ledger row of one kind on one resource, from its first application. */
 export interface ActionDecision {

@@ -554,7 +554,9 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
 /** Actions a module declares that only a person's own credentials perform ("Run as me"): never in the actuator policy, never counted as its gap. */
 /** Actions the actuator holds only through an instance's Auto-park grant (src/autopark_grant.ts), never in the static policy: the right is scoped to that instance's own records. */
 export const GRANT_ONLY_ACTIONS: ReadonlySet<string> = new Set(["route53:ChangeResourceRecordSets"]);
-export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:AttachUserPolicy", "iam:DetachUserPolicy", "iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy"]);
+export const PERSON_ONLY_ACTIONS: ReadonlySet<string> = new Set(["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:DeletePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:AttachUserPolicy", "iam:DetachUserPolicy", "iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy",
+  // the probe documents are what the fleet runs: written by a person from Settings › Probes (src/actions/probe_document.ts), never by the advisor
+  "ssm:CreateDocument", "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion", "ssm:DeleteDocument", "ssm:AddTagsToResource"]);
 
 export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] }> = {
   acu_window: { apply: ["rds:ModifyDBCluster"], revert: ["rds:ModifyDBCluster"] },
@@ -589,6 +591,8 @@ export const ACTUATOR_NEEDS: Record<string, { apply: string[]; revert: string[] 
   // the AdvisorAutoPark and advisor:hibernate switches are done with a person's credentials ("Run as me"; PERSON_ONLY_ACTIONS are never the actuator's) ("Run as me"): the tag, and for Auto-park the grant on the actuator role
   // the advisor's own read policy, brought up to date from Settings › Permissions with a person's credentials (src/actions/read_policy.ts): never the actuator's
   read_policy: { apply: ["iam:PutRolePolicy", "iam:PutUserPolicy", "iam:AttachRolePolicy", "iam:AttachUserPolicy"], revert: ["iam:PutRolePolicy", "iam:PutUserPolicy", "iam:DeleteRolePolicy", "iam:DeleteUserPolicy", "iam:DetachRolePolicy", "iam:DetachUserPolicy"] },
+  // the probe SSM documents, created or updated from Settings › Probes with a person's credentials (src/actions/probe_document.ts): never the actuator's
+  probe_document: { apply: ["ssm:CreateDocument", "ssm:AddTagsToResource", "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion"], revert: ["ssm:DeleteDocument", "ssm:UpdateDocumentDefaultVersion"] },
   consent_tag: { apply: ["ec2:CreateTags", "elasticbeanstalk:AddTags", ...PERSON_ONLY_ACTIONS], revert: ["ec2:DeleteTags", "elasticbeanstalk:AddTags", "elasticbeanstalk:RemoveTags", ...PERSON_ONLY_ACTIONS] },
   // A staged relaunch: apply, the stages (advance) and the cut-over (step) are all checked as apply.
   ec2_hibernate_migrate: { apply: ["ec2:CreateImage", "ec2:StopInstances", "ec2:RunInstances", "ec2:CreateTags", "iam:PassRole", "ec2:AssociateAddress", "route53:ChangeResourceRecordSets", "elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"],

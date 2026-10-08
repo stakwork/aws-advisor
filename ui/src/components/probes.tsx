@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, when } from "../api";
-import { Badge, Button, Card, Code, CopyButton } from "./ui";
+import { Badge, Button, Card, Code, CopyButton, Td, Th } from "./ui";
+import { RunAsMe } from "./consent";
 
 type Deployed = { status: "current" | "stale" | "missing" | "error"; deployed_description: string | null; deployed_version: string | null; error: string | null } | null;
 type Kind = {
@@ -20,7 +21,9 @@ const statusWord: Record<string, string> = { current: "deployed, current", stale
  * update commands, and the script itself with an editor (saved edits take effect when the document is redeployed).
  */
 export function ProbesCard() {
-  const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number } | null>(null);
+  const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number; document_rows?: any[] } | null>(null);
+  const [proposing, setProposing] = useState(false);
+  const [proposeMsg, setProposeMsg] = useState<{ text: string; err: boolean } | null>(null);
   const [err, setErr] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const [text, setText] = useState("");
@@ -31,8 +34,18 @@ export function ProbesCard() {
   const cur = d?.kinds.find((k) => k.kind === open);
   useEffect(() => { if (cur) setText(cur.script.effective); }, [open, cur?.document.hash]);
   const note = (kind: string, m: string) => setMsg((x) => ({ ...x, [kind]: m }));
-  const save = async (kind: string) => { setBusy(kind); try { await api(`/probes/${kind}/script`, { method: "PUT", body: JSON.stringify({ text }) }); note(kind, "Saved. Redeploy the document (update command below) for the boxes to run it."); await load(); } catch (e: any) { note(kind, e.message); } finally { setBusy(""); } };
+  const save = async (kind: string) => { setBusy(kind); try { await api(`/probes/${kind}/script`, { method: "PUT", body: JSON.stringify({ text }) }); note(kind, "Saved. Redeploy the document (Propose create / update, or the update command below) for the boxes to run it."); await load(); } catch (e: any) { note(kind, e.message); } finally { setBusy(""); } };
   const reset = async (kind: string) => { setBusy(kind); try { await api(`/probes/${kind}/script`, { method: "DELETE" }); note(kind, "Back to the default script. Redeploy the document if it was deployed with the edit."); await load(); } catch (e: any) { note(kind, e.message); } finally { setBusy(""); } };
+  const propose = async () => {
+    setProposing(true); setProposeMsg(null);
+    try {
+      const r = await api("/probes/documents/propose", { method: "POST", body: JSON.stringify({ by: "Settings › Probes" }) });
+      const n = (s: string) => r.results.filter((x: any) => x.status === s).length;
+      const errs = r.results.filter((x: any) => x.status === "error");
+      setProposeMsg({ err: errs.length > 0 && !n("proposed"), text: `${n("proposed")} to create or update, ${n("current")} current${errs.length ? `, ${errs.length} unreadable (${errs[0].name}: ${errs[0].detail})` : ""}` });
+      await load();
+    } catch (e: any) { setProposeMsg({ err: true, text: e.message }); } finally { setProposing(false); }
+  };
   const pass = async (kind: string) => { setBusy(kind); note(kind, "Running the pass…"); try { const r = await api(`/probes/${kind}/pass`, { method: "POST", body: "{}" }); note(kind, `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates in ${Math.round(r.took_ms / 1000)} s${r.failed[0] ? `; first failure: ${r.failed[0].message}` : ""}`); await load(); } catch (e: any) { note(kind, e.message); } finally { setBusy(""); } };
 
   if (err) return <Card title="Probes"><div className="text-sm text-red-300">{err}</div></Card>;
@@ -59,6 +72,33 @@ export function ProbesCard() {
           ))}
         </tbody>
       </table>
+      <div className="mt-4 rounded border border-zinc-800 p-3">
+        <div className="mb-1 text-xs uppercase tracking-wide text-zinc-500">Create or update the documents with your own credentials</div>
+        <p className="text-sm text-zinc-400">
+          The advisor may send these documents but never write them. This reads each account's documents (the parent and every member, in the region the advisor reads it in) and proposes one ledger row per document that is missing or stale:
+          a <code className="text-zinc-200">CreateDocument</code>, or an <code className="text-zinc-200">UpdateDocument</code> whose new version is made the default. You apply each with temporary credentials of your own for that account, previewed first.
+          Revert deletes a document the row created, or puts the previous default version back.
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button type="button" onClick={propose} disabled={proposing}>{proposing ? "Reading the documents…" : `Propose create / update${d.kinds.some((k) => k.deployed && (k.deployed.status === "missing" || k.deployed.status === "stale")) ? ` (${d.kinds.filter((k) => k.deployed && (k.deployed.status === "missing" || k.deployed.status === "stale")).length} here need it)` : ""}`}</Button>
+          {proposeMsg && <span className={`text-xs ${proposeMsg.err ? "text-red-300" : "text-zinc-400"}`}>{proposeMsg.text}</span>}
+        </div>
+        {(d.document_rows || []).length > 0 && (
+          <table className="mt-3 w-full table-fixed">
+            <thead><tr><Th className="w-64">Document · account</Th><Th className="w-24">Status</Th><Th>What</Th><Th className="w-44">Run</Th></tr></thead>
+            <tbody>
+              {(d.document_rows || []).map((r: any) => (
+                <tr key={r.id} className="border-t border-zinc-800 align-top">
+                  <Td className="text-xs"><div className="font-mono text-zinc-200">{r.facts?.name || r.resource_name}</div><div className="text-zinc-500">{r.account_id || "parent"} · {r.region}</div></Td>
+                  <Td><Badge>{r.status}</Badge><div className="mt-0.5 text-xs text-zinc-500">{r.facts?.op}</div></Td>
+                  <Td className="break-words text-xs text-zinc-400">{r.title}{r.error ? <div className="text-red-300">{r.error}</div> : r.result ? <div className="text-zinc-500">{r.result}</div> : null}</Td>
+                  <Td className="text-xs">{r.status === "proposed" || r.status === "failed" ? <RunAsMe actionId={r.id} onDone={() => load()} /> : r.status === "applied" || r.status === "verified" ? <RunAsMe actionId={r.id} verb="revert" onDone={() => load()} /> : <span className="text-zinc-600">—</span>}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
       {d.kinds.some((k) => msg[k.kind]) && <div className="mt-2 space-y-1 text-xs text-zinc-400">{d.kinds.filter((k) => msg[k.kind]).map((k) => <div key={k.kind}><span className="text-zinc-500">{k.title}:</span> {msg[k.kind]}</div>)}</div>}
       {cur && (
         <div className="mt-4 rounded border border-zinc-800 p-3">
@@ -66,7 +106,7 @@ export function ProbesCard() {
             <div className="text-sm text-zinc-200">{cur.title} <span className="text-xs text-zinc-500">· sections {cur.sections.join(", ")} · {cur.timeout_seconds} s timeout · script hash {cur.document.hash}{cur.deployed?.deployed_description ? <> · deployed: {cur.deployed.deployed_description}</> : null}</span></div>
             <div className="flex gap-2"><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => reset(cur.kind)} disabled={!cur.script.edited || busy === cur.kind}>Reset to default</Button><Button className="!px-2 !py-1 !text-xs" onClick={() => save(cur.kind)} disabled={busy === cur.kind || text === cur.script.effective}>Save script</Button></div>
           </div>
-          <div className="mb-2 text-xs text-zinc-500">Create the document once, update it after a version change or an edit (the commands fetch the document from this advisor with your API token):</div>
+          <div className="mb-2 text-xs text-zinc-500">Create the document once, update it after a version change or an edit: "Propose create / update" above does it with your credentials from the page, or run these yourself (they fetch the document from this advisor with your API token):</div>
           <div className="mb-1 flex items-start gap-2"><Code>{cur.document.create_command}</Code><CopyButton text={cur.document.create_command} /></div>
           <div className="mb-3 flex items-start gap-2"><Code>{cur.document.update_command}</Code><CopyButton text={cur.document.update_command} /></div>
           <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} className="h-96 w-full rounded border border-zinc-700 bg-zinc-950 p-2 font-mono text-[11px] leading-snug text-zinc-200" />
