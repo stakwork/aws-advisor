@@ -166,8 +166,20 @@ export function expectedWakeSeconds(instanceId: string): number | null {
   return xs.length ? Math.round(xs[Math.floor(xs.length / 2)]) : null;
 }
 
+/** The wake being decided for a box: requests that arrive while the first one reads the box and starts it share it. */
+const deciding = new Map<string, Promise<Wake>>();
+
 /** Starts the box (dependencies first) unless it is already up or waking; returns the wake in progress. */
-export async function wake(p: StoredProfile, by: string, path: string | null, ua: string | null = null): Promise<Wake> {
+export function wake(p: StoredProfile, by: string, path: string | null, ua: string | null = null): Promise<Wake> {
+  // a page load sends several requests at once: without this each one passed the check below before any recorded its wake, and each started the box
+  const pending = deciding.get(p.instance_id);
+  if (pending) return pending;
+  const w = startWake(p, by, path, ua).finally(() => deciding.delete(p.instance_id));
+  deciding.set(p.instance_id, w);
+  return w;
+}
+
+async function startWake(p: StoredProfile, by: string, path: string | null, ua: string | null): Promise<Wake> {
   const running = wakes.get(p.instance_id);
   if (running && !running.ready_at && !running.error && Date.now() - running.started_at < 15 * 60_000) return running;
   const st = await boxState(p, true);

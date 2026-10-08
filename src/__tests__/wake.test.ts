@@ -73,6 +73,21 @@ test("wake cap: past it the box still wakes, and the over-cap note is written on
   } finally { db.prepare("delete from wake_events where instance_id = ?").run(I); }
 });
 
+test("wake: a burst of requests for a parked box makes one start, not one per request", async () => {
+  const { wake } = await import("../doorman.js");
+  const { db } = await import("../db.js");
+  const { DEFAULT_FILTER } = await import("../wake_profiles.js");
+  const I = "i-0cafe0000000000c3";
+  db.prepare("insert or replace into inventory_ec2(instance_id, name, state, region, snapshot, gone) values (?, 'box-c', 'stopped', 'us-east-1', '{}', 0)").run(I);
+  const p = { instance_id: I, domains: ["app.example.com"], filter: DEFAULT_FILTER, notify: false, wake_with: [], max_wakes_per_day: 6 } as any;
+  try {
+    // no AWS here: the start fails, but the point is how many attempts a burst makes
+    const ws = await Promise.all([1, 2, 3, 4, 5].map(() => wake(p, "visit", "/", "Mozilla/5.0")));
+    assert.equal(new Set(ws).size, 1, "every request shares the one wake");
+    assert.equal((db.prepare("select count(*) as n from wake_events where instance_id = ?").get(I) as any).n, 1);
+  } finally { db.prepare("delete from wake_events where instance_id = ?").run(I); db.prepare("delete from inventory_ec2 where instance_id = ?").run(I); }
+});
+
 test("doorman: unknown hosts, the waiting page, held API calls, the private test page, and the proxy once the box is ready", async () => {
   const { db } = await import("../db.js");
   const { saveProfile, profileForHost, deleteProfile } = await import("../wake_profiles.js");
