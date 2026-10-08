@@ -154,7 +154,7 @@ export function WakeProfilePanel({ instanceId, autoPark }: { instanceId: string;
             <label className="flex items-center gap-2 text-sm text-zinc-300"><input id="wake-hostmatch" type="checkbox" checked={form.filter.require_host_match} onChange={(e) => setIn("filter", { require_host_match: e.target.checked })} /> only requests for one of the domains</label>
             <div><span className={label}>ignored paths</span><input id="wake-paths" className={`${field} font-mono`} value={(form.filter.ignore_paths || []).join(", ")} onChange={(e) => setIn("filter", { ignore_paths: e.target.value.split(/[\s,]+/).filter(Boolean) })} /></div>
             <div><span className={label}>ignored user agents (regular expression)</span><input id="wake-ua" className={`${field} font-mono`} value={form.filter.ignore_user_agents} onChange={(e) => setIn("filter", { ignore_user_agents: e.target.value })} /></div>
-            <div className="w-40"><span className={label}>wakes per day at most</span><input id="wake-max" className={field} value={form.filter.max_wakes_per_day} onChange={(e) => setIn("filter", { max_wakes_per_day: e.target.value })} /></div>
+            <div className="w-40"><span className={label} title="Past this the box still wakes; the chat gets one message that day naming the paths and user agents behind the wakes">alert past N wakes a day</span><input id="wake-max" className={field} value={form.filter.max_wakes_per_day} onChange={(e) => setIn("filter", { max_wakes_per_day: e.target.value })} /></div>
           </div>
         </Row>
         <Row title="Waiting page" hint="what visitors read">

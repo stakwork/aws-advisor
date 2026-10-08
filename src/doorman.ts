@@ -7,7 +7,9 @@
  *    ready a browser gets the waiting page (it polls /__wake/status and reloads when the box answers), and other
  *    requests and WebSocket upgrades are held up to the profile's hold time, then passed through or answered 503 with
  *    Retry-After. A visit wakes the box only when the profile is enabled and the visit passes the wake filter (host
- *    match, ignored paths, scanner user agents, wakes per day). Once the box answers its ready check, requests are
+ *    match, ignored paths, scanner user agents). Past the profile's wakes per day the box still wakes, and the chat gets
+ *    one message that day naming the paths and user agents doing it, so an ignore rule can be added. Once the box
+ *    answers its ready check, requests are
  *    reverse-proxied to its private address (clients whose DNS still points here keep working).
  *  - the test page, /__wake/test/<instance-id>, for a person on the VPN: the same waiting page with a Start button,
  *    whatever the profile's switch says. It is served only to private addresses and never for a profile's own host,
@@ -22,7 +24,7 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 import { DescribeInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
-import { db } from "./db.js";
+import { addColumn, db } from "./db.js";
 import { config } from "./config.js";
 import { executorCreds } from "./executor.js";
 import { getProfile, profileForHost, type StoredProfile, type WakeProfile } from "./wake_profiles.js";
@@ -32,6 +34,7 @@ db.exec(`create table if not exists wake_events (
   by text not null, path text, outcome text not null, detail text, ready_after_s real, action_id integer
 );
 create index if not exists wake_events_instance on wake_events(instance_id, id);`);
+addColumn("wake_events", "ua", "text");
 
 // ---- pure ------------------------------------------------------------------------------------------------------------
 
@@ -45,7 +48,7 @@ export function statusMatches(code: number, expect: string): boolean {
 }
 
 /** Why a request must not wake the box, or null when it may. Pure. */
-export function filterReason(p: Pick<WakeProfile, "filter" | "domains">, req: { host: string; path: string; ua: string }, wakesToday: number): string | null {
+export function filterReason(p: Pick<WakeProfile, "filter" | "domains">, req: { host: string; path: string; ua: string }): string | null {
   const host = req.host.toLowerCase().replace(/:\d+$/, "");
   if (p.filter.require_host_match && !p.domains.some((d) => d === host || (d.startsWith("*.") && host.endsWith(d.slice(1))))) return `host ${host} is not one of the profile's domains`;
   const path = req.path.split("?")[0];
@@ -53,8 +56,18 @@ export function filterReason(p: Pick<WakeProfile, "filter" | "domains">, req: { 
   if (ignored) return `path ${path} is ignored (${ignored})`;
   if (p.filter.ignore_user_agents) { try { if (new RegExp(p.filter.ignore_user_agents, "i").test(req.ua || "")) return "user agent looks like a bot or a scanner"; } catch { /* a bad pattern filters nothing */ } }
   if (!req.ua) return "no user agent";
-  if (wakesToday >= p.filter.max_wakes_per_day) return `already woken ${wakesToday} times today (limit ${p.filter.max_wakes_per_day})`;
   return null;
+}
+
+/** The chat message for a box woken more often than its profile expects in a day, with who did it. Pure. */
+export function overCapMessage(o: { name: string; instance_id: string; wakes: number; cap: number; paths: { v: string; n: number }[]; uas: { v: string; n: number }[]; link: string }): string {
+  const top = (xs: { v: string; n: number }[]) => xs.length ? xs.map((x) => `${x.v} (${x.n})`).join(", ") : "none recorded";
+  return [
+    `🟠 WAKES — ${o.name} woke ${o.wakes} times today (expected at most ${o.cap}). It keeps waking: nothing is refused.`,
+    `Top paths: ${top(o.paths)}`,
+    `Top user agents: ${top(o.uas)}`,
+    `If these are not people, add an ignored path or user agent on the On-demand tab: ${o.link}`,
+  ].join("\n");
 }
 
 /** Whether a client address is private (RFC 1918, loopback, link-local, ULA): who may open the test page. Pure. */
@@ -127,7 +140,25 @@ export async function boxState(p: StoredProfile, fresh = false): Promise<BoxStat
 interface Wake { started_at: number; by: string; error: string | null; action_id: number | null; ready_at: number | null; event_id: number }
 const wakes = new Map<string, Wake>();
 
-export const wakesToday = (instanceId: string) => (db.prepare("select count(*) as n from wake_events where instance_id = ? and outcome in ('started', 'ready') and date(at) = date('now')").get(instanceId) as { n: number }).n;
+export const wakesToday = (instanceId: string) => (db.prepare("select count(*) as n from wake_events where instance_id = ? and outcome = 'started' and date(at) = date('now')").get(instanceId) as { n: number }).n;
+
+/** Once a day, past the profile's wakes per day: a chat message naming the paths and user agents behind today's wakes. */
+export async function noticeOverCap(p: StoredProfile): Promise<void> {
+  const n = wakesToday(p.instance_id);
+  if (n <= p.filter.max_wakes_per_day) return;
+  if (db.prepare("select 1 from wake_events where instance_id = ? and outcome = 'over_cap' and date(at) = date('now')").get(p.instance_id)) return;
+  const id = Number(db.prepare("insert into wake_events(instance_id, by, outcome, detail) values (?, 'doorman', 'over_cap', ?)").run(p.instance_id, `${n} wakes today, expected at most ${p.filter.max_wakes_per_day}`).lastInsertRowid);
+  const top = (col: "path" | "ua") => (db.prepare(`select coalesce(${col}, '(none)') as v, count(*) as n from wake_events where instance_id = ? and outcome = 'started' and date(at) = date('now') group by v order by n desc limit 5`).all(p.instance_id) as { v: string; n: number }[]).map((r) => ({ v: r.v.length > 80 ? `${r.v.slice(0, 77)}...` : r.v, n: r.n }));
+  const row = db.prepare("select name from inventory_ec2 where instance_id = ?").get(p.instance_id) as { name: string | null } | undefined;
+  const name = p.domains[0] || row?.name || p.instance_id;
+  let result = "notifications off for this profile";
+  if (p.notify) {
+    const { sendSphinx } = await import("./notify.js");
+    const r = await sendSphinx(overCapMessage({ name, instance_id: p.instance_id, wakes: n, cap: p.filter.max_wakes_per_day, paths: top("path"), uas: top("ua"), link: `${config.notifyLinkUrl}/inventory?tab=ec2&id=${p.instance_id}` }));
+    result = r.ok ? "sent to the chat" : `chat send failed: ${r.status} ${r.body}`.slice(0, 200);
+  }
+  db.prepare("update wake_events set detail = detail || ' · ' || ? where id = ?").run(result, id);
+}
 
 /** Seconds a wake has taken here before (the median of the last ten that got ready), or null. */
 export function expectedWakeSeconds(instanceId: string): number | null {
@@ -136,11 +167,11 @@ export function expectedWakeSeconds(instanceId: string): number | null {
 }
 
 /** Starts the box (dependencies first) unless it is already up or waking; returns the wake in progress. */
-export async function wake(p: StoredProfile, by: string, path: string | null): Promise<Wake> {
+export async function wake(p: StoredProfile, by: string, path: string | null, ua: string | null = null): Promise<Wake> {
   const running = wakes.get(p.instance_id);
   if (running && !running.ready_at && !running.error && Date.now() - running.started_at < 15 * 60_000) return running;
   const st = await boxState(p, true);
-  const event = (outcome: string, detail: string | null, actionId: number | null = null) => Number(db.prepare("insert into wake_events(instance_id, by, path, outcome, detail, action_id) values (?, ?, ?, ?, ?, ?)").run(p.instance_id, by, path, outcome, detail, actionId).lastInsertRowid);
+  const event = (outcome: string, detail: string | null, actionId: number | null = null) => Number(db.prepare("insert into wake_events(instance_id, by, path, outcome, detail, action_id, ua) values (?, ?, ?, ?, ?, ?, ?)").run(p.instance_id, by, path, outcome, detail, actionId, ua).lastInsertRowid);
   const w: Wake = { started_at: Date.now(), by, error: null, action_id: null, ready_at: null, event_id: 0 };
   if (st.state === "running" || st.state === "pending") { w.event_id = event("already_up", `instance ${st.state}`); wakes.set(p.instance_id, w); return w; }
   wakes.set(p.instance_id, w);
@@ -154,7 +185,7 @@ export async function wake(p: StoredProfile, by: string, path: string | null): P
     const a = await manualPower(p.instance_id, "start", `doorman:${by}`);
     w.action_id = a.id;
     if (a.status === "failed" || a.status === "refused") { w.error = a.error || `start ${a.status}`; w.event_id = event("failed", w.error, a.id); }
-    else w.event_id = event("started", a.result ?? a.status, a.id);
+    else { w.event_id = event("started", a.result ?? a.status, a.id); noticeOverCap(p).catch((e) => console.error(`[doorman] over-cap notice ${p.instance_id}: ${e?.message || e}`)); }
   } catch (e: any) { w.error = String(e?.message || e).slice(0, 300); w.event_id = event("failed", w.error); }
   boxCache.delete(p.instance_id);
   return w;
@@ -302,8 +333,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
   const st = await boxState(p);
   if (st.ready && st.private_ip) { markReady(p); return proxyHttp(req, res, p, st.private_ip); }
 
-  const why = filterReason(p, { host, path: url.pathname, ua: String(req.headers["user-agent"] || "") }, wakesToday(p.instance_id));
-  if (p.enabled && !why) wake(p, "visit", url.pathname).catch((e) => console.error(`[doorman] wake ${p.instance_id}: ${e?.message || e}`));
+  const ua = String(req.headers["user-agent"] || "");
+  const why = filterReason(p, { host, path: url.pathname, ua });
+  if (p.enabled && !why) wake(p, "visit", url.pathname, ua).catch((e) => console.error(`[doorman] wake ${p.instance_id}: ${e?.message || e}`));
   if (wantsPage(String(req.method), req.headers.accept)) {
     res.writeHead(503, { "content-type": "text/html; charset=utf-8", "retry-after": "15", "cache-control": "no-store" });
     return res.end(waitingPage(p, { statusUrl: "/__wake/status", startUrl: null, test: false, name: null }));
@@ -339,8 +371,9 @@ export function createDoorman(): http.Server {
       if (!p) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
       let st = await boxState(p);
       if (!st.ready) {
-        const why = filterReason(p, { host: String(req.headers.host || ""), path: req.url || "/", ua: String(req.headers["user-agent"] || "") }, wakesToday(p.instance_id));
-        if (p.enabled && !why) { wake(p, "visit", req.url || "/").catch(() => {}); st = (await holdUntilReady(p)) ?? st; }
+        const ua = String(req.headers["user-agent"] || "");
+        const why = filterReason(p, { host: String(req.headers.host || ""), path: req.url || "/", ua });
+        if (p.enabled && !why) { wake(p, "visit", req.url || "/", ua).catch(() => {}); st = (await holdUntilReady(p)) ?? st; }
       }
       if (st.ready && st.private_ip) return proxyUpgrade(req, socket as net.Socket, head, p, st.private_ip);
       socket.end("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 15\r\nContent-Length: 0\r\n\r\n");

@@ -25,21 +25,52 @@ test("wake profiles: validation normalises what the form sends and blocks what c
   assert.ok(validateProfile({ enabled: true, domains: ["a.example.com"], ports: [{ port: 22, behaviour: "ignore" }] }, I).errors.some((e) => /at least one port the doorman answers on/.test(e)));
 });
 
-test("wake filter: host, ignored paths, scanners and the daily cap", async () => {
-  const { filterReason, statusMatches, isPrivateAddress, wantsPage } = await import("../doorman.js");
+test("wake filter: host, ignored paths and scanners; the over-cap message", async () => {
+  const { filterReason, statusMatches, isPrivateAddress, wantsPage, overCapMessage } = await import("../doorman.js");
   const p = { domains: ["app.example.com", "*.example.org"], filter: { require_host_match: true, ignore_paths: ["/favicon.ico", "/.git/"], ignore_user_agents: "(bot|curl/)", max_wakes_per_day: 3 } };
   const ua = "Mozilla/5.0 (Macintosh)";
-  assert.equal(filterReason(p, { host: "app.example.com:443", path: "/room/1?x=1", ua }, 0), null);
-  assert.equal(filterReason(p, { host: "meet.example.org", path: "/", ua }, 0), null);
-  assert.match(filterReason(p, { host: "203.0.113.5", path: "/", ua }, 0)!, /not one of the profile's domains/);
-  assert.match(filterReason(p, { host: "app.example.com", path: "/favicon.ico", ua }, 0)!, /ignored/);
-  assert.match(filterReason(p, { host: "app.example.com", path: "/.git/config", ua }, 0)!, /ignored/);
-  assert.match(filterReason(p, { host: "app.example.com", path: "/", ua: "Googlebot/2.1" }, 0)!, /bot or a scanner/);
-  assert.match(filterReason(p, { host: "app.example.com", path: "/", ua: "" }, 0)!, /no user agent/);
-  assert.match(filterReason(p, { host: "app.example.com", path: "/", ua }, 3)!, /3 times today/);
+  assert.equal(filterReason(p, { host: "app.example.com:443", path: "/room/1?x=1", ua }), null);
+  assert.equal(filterReason(p, { host: "meet.example.org", path: "/", ua }), null);
+  assert.match(filterReason(p, { host: "203.0.113.5", path: "/", ua })!, /not one of the profile's domains/);
+  assert.match(filterReason(p, { host: "app.example.com", path: "/favicon.ico", ua })!, /ignored/);
+  assert.match(filterReason(p, { host: "app.example.com", path: "/.git/config", ua })!, /ignored/);
+  assert.match(filterReason(p, { host: "app.example.com", path: "/", ua: "Googlebot/2.1" })!, /bot or a scanner/);
+  assert.match(filterReason(p, { host: "app.example.com", path: "/", ua: "" })!, /no user agent/);
+  const m = overCapMessage({ name: "app.example.com", instance_id: "i-0cafe0000000000c1", wakes: 7, cap: 6, paths: [{ v: "/rtc", n: 5 }], uas: [{ v: "LiveKit/2", n: 7 }], link: "http://10.0.0.9:9034/inventory?tab=ec2&id=i-0cafe0000000000c1" });
+  assert.match(m, /woke 7 times today \(expected at most 6\)/); assert.match(m, /\/rtc \(5\)/); assert.match(m, /LiveKit\/2 \(7\)/);
   assert.ok(statusMatches(204, "200-399")); assert.ok(!statusMatches(404, "200-399")); assert.ok(statusMatches(301, "3xx")); assert.ok(statusMatches(200, "200"));
   assert.ok(isPrivateAddress("10.9.0.4")); assert.ok(isPrivateAddress("::ffff:172.17.0.1")); assert.ok(isPrivateAddress("127.0.0.1")); assert.ok(!isPrivateAddress("203.0.113.9"));
   assert.ok(wantsPage("GET", "text/html,application/xhtml+xml")); assert.ok(!wantsPage("GET", "application/json")); assert.ok(!wantsPage("POST", "text/html"));
+});
+
+test("wake cap: a wake that got ready counts once, not twice", async () => {
+  const { wakesToday } = await import("../doorman.js");
+  const { db } = await import("../db.js");
+  const I = "i-0cafe0000000000c1";
+  const ins = db.prepare("insert into wake_events(instance_id, by, outcome) values (?, 'visit', ?)");
+  try {
+    for (const o of ["started", "ready", "started", "ready", "started", "failed"]) ins.run(I, o);
+    assert.equal(wakesToday(I), 3);
+  } finally { db.prepare("delete from wake_events where instance_id = ?").run(I); }
+});
+
+test("wake cap: past it the box still wakes, and the over-cap note is written once a day", async () => {
+  const { noticeOverCap } = await import("../doorman.js");
+  const { db } = await import("../db.js");
+  const { DEFAULT_FILTER } = await import("../wake_profiles.js");
+  const I = "i-0cafe0000000000c2";
+  const p = { instance_id: I, domains: ["app.example.com"], filter: { ...DEFAULT_FILTER, max_wakes_per_day: 2 }, notify: false } as any;
+  const ins = db.prepare("insert into wake_events(instance_id, by, path, outcome, ua) values (?, 'visit', '/rtc', 'started', 'Mozilla/5.0')");
+  const notes = () => db.prepare("select detail from wake_events where instance_id = ? and outcome = 'over_cap'").all(I) as { detail: string }[];
+  try {
+    ins.run(I); ins.run(I);
+    await noticeOverCap(p);
+    assert.equal(notes().length, 0);
+    ins.run(I);
+    await noticeOverCap(p); ins.run(I); await noticeOverCap(p);
+    assert.equal(notes().length, 1);
+    assert.match(notes()[0].detail, /3 wakes today, expected at most 2 · notifications off/);
+  } finally { db.prepare("delete from wake_events where instance_id = ?").run(I); }
 });
 
 test("doorman: unknown hosts, the waiting page, held API calls, the private test page, and the proxy once the box is ready", async () => {
