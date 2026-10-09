@@ -78,3 +78,18 @@ test("guestReadiness: the probe's reading first, the agent package as fallback, 
   assert.equal(v(null, null, true).ready, null); assert.match(v(null, null, true).reason, /predates the hibernation check/);
   assert.equal(v(null, null, false).ready, null);
 });
+
+test("parseProbeOutput keeps software 3's hibernation section, so the readiness verdict sees it", async () => {
+  const { parseProbeOutput } = await import("../ssm.js");
+  const { guestReadiness } = await import("../guest_hibernation.js");
+  const G = 1024 ** 3;
+  // a Debian box set up by hand: no agent package, logind answers the sleep button, an 8 GiB swap file, resume= set
+  const hib = { kernel_disk: true, cmdline_resume: true, sys_resume: "259:1", agent: null, acpi_sleep_handler: false, logind_suspend_key: "hibernate", swap_active_bytes: 8 * G, swap_file_bytes: 8 * G, mem_bytes: 8 * G - 200 * 1024 ** 2 };
+  const line = JSON.stringify({ probe: "aws-advisor/software/3", kind: "software", hostname: "box", collected_at: "2026-10-09T03:11:11Z", os: { id: "debian", version: "12", name: "Debian GNU/Linux 12" }, kernel: "6.1.0", arch: "x86_64", package_manager: "deb", packages: [{ n: "bash", v: "5.2", a: "amd64" }], binaries: [], images: [], hibernation: hib });
+  const data = parseProbeOutput(`noise\n${line}\n`);
+  assert.deepEqual(data.hibernation, hib);
+  const v = guestReadiness({ probe: data.hibernation!, agent_package: null, packages_known: true });
+  assert.equal(v.ready, true); assert.match(v.reason, /logind \(HandleSuspendKey=hibernate\)/);
+  // software 2 has no section: nothing is invented
+  assert.equal(parseProbeOutput(line.replace(/,"hibernation":\{[^}]*\}/, "")).hibernation, undefined);
+});

@@ -1,3 +1,4 @@
+import type { ProbeHibernation } from "./software_inventory.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
@@ -105,6 +106,8 @@ export interface ProbeResult {
   packages?: { n: string; v: string; a: string | null; s?: string | null }[];
   binaries?: { name: string; version: string; path: string | null }[];
   images?: { image: string; id: string | null; digests: string | null; created: string | null; platform: string | null }[];
+  /** Software 3: the guest's hibernation setup (src/guest_hibernation.ts reads it). */
+  hibernation?: ProbeHibernation | null;
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -144,6 +147,17 @@ const num = (v: unknown, what: string): number => {
   if (!Number.isFinite(n)) throw new ProbeError("bad_output", `probe output: ${what} is not a number`);
   return n;
 };
+
+/** The hibernation section of software 3, typed field by field: booleans, short strings, byte counts. */
+function parseHibernation(h: any): ProbeHibernation {
+  const str = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
+  const bytes = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
+  return {
+    kernel_disk: h.kernel_disk === true, cmdline_resume: h.cmdline_resume === true, sys_resume: str(h.sys_resume, 20), agent: str(h.agent, 40),
+    acpi_sleep_handler: h.acpi_sleep_handler === true, logind_suspend_key: str(h.logind_suspend_key, 30),
+    swap_active_bytes: bytes(h.swap_active_bytes), swap_file_bytes: bytes(h.swap_file_bytes), mem_bytes: bytes(h.mem_bytes),
+  };
+}
 
 /** Parses the command's stdout: tolerates noise before the JSON line and validates the shape. */
 export function parseProbeOutput(stdout: string): ProbeResult {
@@ -207,6 +221,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     package_manager: raw.package_manager === undefined ? undefined : raw.package_manager == null ? null : String(raw.package_manager).slice(0, 20),
     packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,
     binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
+    hibernation: raw.hibernation && typeof raw.hibernation === "object" ? parseHibernation(raw.hibernation) : undefined,
     images: Array.isArray(raw.images) ? raw.images.filter((i: any) => i && typeof i.image === "string" && i.image).slice(0, 200).map((i: any) => ({ image: String(i.image).slice(0, 300), id: i.id == null || i.id === "" ? null : String(i.id).slice(0, 100), digests: i.digests == null || i.digests === "" ? null : String(i.digests).slice(0, 600), created: i.created == null || i.created === "" ? null : String(i.created).slice(0, 40), platform: i.platform == null || i.platform === "" ? null : String(i.platform).slice(0, 40) })) : undefined,
   };
 }
