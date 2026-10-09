@@ -250,7 +250,7 @@ Edges beyond the resource ones: `HOSTS` → `AdvisorCompute` (exactly one), `IN_
 
 ### AdvisorCompute
 
-The operating system a box runs, one per box (`id: compute:<box id>`, `box_id`), written with the box by the resource
+The operating system a box runs, one per box (`id: compute:<box id>`, no `native_type` or `native_id`: the provider has no word for it), written with the box by the resource
 mirror. Not an `AdvisorResource`: it costs nothing apart from its box and is `gone` when the box is. What the API knows
 comes from the adapter (`ResourceNode.compute`); the software probe fills in the rest.
 

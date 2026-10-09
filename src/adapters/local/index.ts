@@ -143,7 +143,7 @@ export const localAdapter: ProviderAdapter = {
       // declared, not observed: the nodes go rather than staying as gone
       try {
         const { writeCypher } = await import("../../graph_mirror.js");
-        await writeCypher(`UNWIND $ids AS id MATCH (n) WHERE n.provider = '${LOCAL}' AND (n.id = id OR n.id = 'compute:' + id OR n.machine_id = id OR n.box_id = id) DETACH DELETE n`, { ids });
+        await writeCypher(`UNWIND $ids AS id MATCH (n) WHERE n.provider = '${LOCAL}' AND (n.id = id OR n.id = 'compute:' + id OR n.machine_id = id) DETACH DELETE n`, { ids });
         // the last machine takes the site (its account and telemetry nodes) with it
         if (!configured()) await writeCypher(`MATCH (n) WHERE n.provider = '${LOCAL}' AND (n:AdvisorAccount OR n:AdvisorTelemetry) DETACH DELETE n`);
       } catch (e: any) { console.error(`[graph] local remove: ${e?.message || e}`); }

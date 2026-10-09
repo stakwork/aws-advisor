@@ -44,5 +44,5 @@ export const computeId = (boxId: string) => `compute:${boxId}`;
  * resource mirror writes it with the box (src/graph_mirror.ts); this keeps a layer that runs first from losing a row.
  */
 export const COMPUTE_OF = (box: string, alias: string) =>
-  `MERGE (${alias}:AdvisorCompute {id: 'compute:' + ${box}.id}) ON CREATE SET ${alias}.first_seen = $now, ${alias}.name = ${box}.name, ${alias}.provider = ${box}.provider, ${alias}.account_id = ${box}.account_id, ${alias}.native_type = 'operating_system', ${alias}.native_id = ${box}.id, ${alias}.box_id = ${box}.id
+  `MERGE (${alias}:AdvisorCompute {id: 'compute:' + ${box}.id}) ON CREATE SET ${alias}.first_seen = $now, ${alias}.name = ${box}.name, ${alias}.provider = ${box}.provider, ${alias}.account_id = ${box}.account_id
 MERGE (${box})-[:HOSTS]->(${alias})`;
