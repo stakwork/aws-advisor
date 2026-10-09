@@ -114,7 +114,7 @@ export function RunAsMe({ actionId, verb = "apply", onDone, compact }: { actionI
 const TRANSIENT = /^(pending|stopping|shutting-down)$/;
 const WATCH_MS = 4 * 60_000;
 
-export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValue, onState }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null; onValue?: (value: string | null) => void; onState?: (state: string) => void }) {
+export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, softwareAt, onValue, onState }: { instanceId: string; name?: string | null; state: string; tags?: Record<string, string> | null; poolKind?: string | null; softwareAt?: string | null; onValue?: (value: string | null) => void; onState?: (state: string) => void }) {
   const [value, setValue] = useState<string | null>(tags?.AdvisorAutoPark ?? null);
   // the state as EC2 reports it now (the inventory row is as old as its last collection); polled after Stop and Start until it lands
   const [live, setLive] = useState<string | null>(null);
@@ -184,7 +184,7 @@ export function AutoParkSwitch({ instanceId, name, state, tags, poolKind, onValu
         </div>
       )}
       {msg?.actionId && (msg.status === "proposed" || msg.status === "failed") ? <RunAsMe actionId={msg.actionId} onDone={(row) => { if (row.status !== "failed") { setMsg({ text: `${row.status}: ${row.result || row.title}`, actionId: row.id, status: row.status }); setTag(row.after?.AdvisorAutoPark ?? null); loadGrant(); } }} /> : null}
-      {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} autoPark={on} />}
+      {!poolKind && <HibernationNote instanceId={instanceId} handsOff={handsOff} autoPark={on} softwareAt={softwareAt} />}
     </div>
   );
 }
@@ -230,7 +230,7 @@ type Hibernation = { status: "ready" | "guest_not_ready" | "guest_unknown" | "ch
  * start with the migration offered, never forced: "Keep stop/start" is a first-class answer and hides the suggestion.
  * Each choice is the advisor:hibernate tag, written as a ledgered consent row (Revert puts it back).
  */
-function HibernationNote({ instanceId, handsOff, autoPark }: { instanceId: string; handsOff: boolean; autoPark: boolean }) {
+function HibernationNote({ instanceId, handsOff, autoPark, softwareAt }: { instanceId: string; handsOff: boolean; autoPark: boolean; softwareAt?: string | null }) {
   const [h, setH] = useState<Hibernation | null | undefined>(undefined);
   const [readErr, setReadErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -240,6 +240,9 @@ function HibernationNote({ instanceId, handsOff, autoPark }: { instanceId: strin
   // the switch just moved: read again, fresh, since the Auto-park grant decides whether the A records may move with a relaunch
   const firstAutoPark = useRef(true);
   useEffect(() => { if (firstAutoPark.current) { firstAutoPark.current = false; return; } load(true); }, [autoPark]);
+  // a new software probe landed: its hibernation reading decides whether the guest can hibernate
+  const firstSoftware = useRef(true);
+  useEffect(() => { if (firstSoftware.current) { firstSoftware.current = false; return; } load(true); }, [softwareAt]);
   const choose = (value: "stop" | "live" | "no" | null) => {
     setBusy(true); setMsg(null);
     api(`/inventory/ec2/${encodeURIComponent(instanceId)}/hibernation`, { method: "POST", body: JSON.stringify({ value }) })

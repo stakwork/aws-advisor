@@ -1135,7 +1135,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
         </div>
         <div className="flex flex-wrap items-center gap-2"><WatchToggle kind="ec2" id={d.instance_id} /></div>
       </div>
-      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} onValue={setAutoParkTag} onState={setLiveState} />
+      <AutoParkSwitch instanceId={d.instance_id} name={d.name} state={d.state} tags={s.tags} poolKind={d.pool_kind} softwareAt={probesAt.software ?? null} onValue={setAutoParkTag} onState={setLiveState} />
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Glance label="At list" value={price?.monthly != null ? `${usd(price.monthly)} / mo` : "—"} hint={price ? `${usd(price.hourly, 4)} / h · ${price.operating_system}` : `no price for ${d.instance_type}`} />

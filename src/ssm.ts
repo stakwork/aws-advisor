@@ -1,4 +1,4 @@
-import type { ProbeHibernation } from "./software_inventory.js";
+import { recordSoftware, type ProbeHibernation } from "./software_inventory.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
@@ -582,14 +582,15 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
     })();
   }
   if (kinds.includes("software")) {
-    void (async () => {
-      try {
-        const { recordSoftware } = await import("./software_inventory.js");
-        const r = recordSoftware(instanceId, collectedAt, data as any);
-        if (r) console.log(`[probe] ${instanceId} software: ${r.packages} packages${r.changed.length ? `, ${r.changed.length} changed (${r.changed.slice(0, 3).map((c) => `${c.name} ${c.from} -> ${c.to}`).join("; ")}${r.changed.length > 3 ? ", ..." : ""})` : ""}${r.added.length ? `, ${r.added.length} added` : ""}${r.removed.length ? `, ${r.removed.length} removed` : ""}, ${r.binaries} program versions, ${r.images} images`);
-        if (r) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
-      } catch (e: any) { console.error(`[probe] software not recorded for ${instanceId}: ${e?.message || e}`); }
-    })();
+    // recorded before the probe call returns, so the page's read right after a probe sees it (the hibernation verdict
+    // comes from instance_os); the cached hibernation status is dropped for the same reason
+    let r: ReturnType<typeof recordSoftware> = null;
+    try { r = recordSoftware(instanceId, collectedAt, data as any); } catch (e: any) { console.error(`[probe] software not recorded for ${instanceId}: ${e?.message || e}`); }
+    import("./hibernation.js").then((m) => m.forgetHibernationStatus(instanceId)).catch(() => { /* nothing cached */ });
+    if (r) {
+      console.log(`[probe] ${instanceId} software: ${r.packages} packages${r.changed.length ? `, ${r.changed.length} changed (${r.changed.slice(0, 3).map((c) => `${c.name} ${c.from} -> ${c.to}`).join("; ")}${r.changed.length > 3 ? ", ..." : ""})` : ""}${r.added.length ? `, ${r.added.length} added` : ""}${r.removed.length ? `, ${r.removed.length} removed` : ""}, ${r.binaries} program versions, ${r.images} images`);
+      import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
+    }
   }
 }
 
