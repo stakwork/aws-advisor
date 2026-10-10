@@ -6,6 +6,7 @@ import { VercelBill } from "./components/vercelBill";
 import { VercelStores } from "./components/vercelStores";
 import { VercelAccess, VercelChanges, VercelMembers, VercelPartners, VercelProjects } from "./components/vercel";
 import { LocalMachines } from "./components/local";
+import { GitHubAccess, GitHubBill, GitHubChanges, GitHubCredentials, GitHubMembers, GitHubOverview, GitHubRepos } from "./components/github";
 import { AwsOverview } from "./pages/Overview";
 import { AwsThisMonth } from "./pages/Bill";
 import { AwsChanges } from "./pages/Changes";
@@ -31,6 +32,13 @@ export const VIEWS: Record<string, (props: any) => ReactNode> = {
   "vercel.stores.storage": () => <VercelStores kind="storage" />,
   "vercel.access": (p: { configured: boolean; onChange: () => void }) => <VercelAccess {...p} />,
   "vercel.partners": () => <VercelPartners />,
+  "github.overview": () => page("Overview", <GitHubOverview />),
+  "github.bill": () => page("Bill", <GitHubBill />),
+  "github.changes": () => page("Changes", <GitHubChanges />),
+  "github.members": () => <GitHubMembers />,
+  "github.repos": () => <GitHubRepos />,
+  "github.credentials": () => <GitHubCredentials />,
+  "github.access": (p: { configured: boolean; onChange: () => void }) => <GitHubAccess {...p} />,
   "local.overview": () => page("Local machines", <LocalMachines />),
   "local.machines": (p: { configured?: boolean; onChange?: () => void }) => <LocalMachines {...p} />,
 };

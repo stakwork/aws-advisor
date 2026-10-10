@@ -146,3 +146,8 @@ export function DetailCell({ id, onClose, title = "Detail", children }: { id: st
     </div>
   );
 }
+
+/** An account id as a page shows it: whole when short (an AWS account, a Vercel team), its two ends around "…" when long (GitHub's node ids), the full id on hover. */
+export const AccountId = ({ id, className = "" }: { id: string; className?: string }) => (
+  <span className={`font-mono ${className}`} title={id}>{id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id}</span>
+);

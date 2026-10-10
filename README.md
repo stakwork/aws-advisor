@@ -1,5 +1,7 @@
 # Cloud Advisor (aws-advisor)
 
+The short version (what it is, what runs and when) is [`docs/overview.md`](docs/overview.md).
+
 A cloud cost and security advisor that lives next to a sphinx-swarm; AWS is the first provider (the graph model is
 provider-neutral, see `docs/cloud-ontology.md`). Names that live inside a provider account keep that provider's
 prefix: the IAM user `aws-advisor-read`, the SSM documents `AwsAdvisorProbe-<kind>`, the setup script; a second

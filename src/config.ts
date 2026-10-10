@@ -47,6 +47,12 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "neonApiKey", env: "NEON_API_KEY", kind: "secret", def: "", group: "Vercel", label: "Neon API key", help: "Optional: a Neon API key (console.neon.tech › Account settings › API keys) reads what Neon knows about the Neon stores: storage, branches, compute endpoints and their autoscaling, consumption this period, the IP allow list. Never shown again." },
   { key: "redisCloudApiKey", env: "REDIS_CLOUD_API_KEY", kind: "secret", def: "", group: "Vercel", label: "Redis Cloud account key", help: "Optional, with the user key: Redis Cloud API keys (app.redislabs.com › Access Management › API Keys) read the database behind each Redis store: memory used and limit, persistence, replication, throughput, the public endpoint and its source IPs." },
   { key: "redisCloudSecretKey", env: "REDIS_CLOUD_SECRET_KEY", kind: "secret", def: "", group: "Vercel", label: "Redis Cloud user key", help: "The secret half of the Redis Cloud API key pair." },
+  { key: "githubCron", env: "GITHUB_CRON", kind: "cron", def: "20 */6 * * *", group: "Schedules", label: "GitHub collection", help: "Reads the org's members, teams, repository access, credentials, installed apps, secret names, Copilot seats and billing usage, then runs the GitHub rules. off = disabled." },
+  { key: "githubOrg", env: "GITHUB_ORG", kind: "string", def: "", group: "GitHub", label: "Organization", help: "The org login (github.com/<org>). Empty = the GitHub adapter is off." },
+  { key: "githubAppId", env: "GITHUB_APP_ID", kind: "string", def: "", group: "GitHub", label: "App id", help: "The id of the read-only GitHub App installed on the org (Org settings › Developer settings › GitHub Apps)." },
+  { key: "githubInstallationId", env: "GITHUB_INSTALLATION_ID", kind: "string", def: "", group: "GitHub", label: "Installation id", help: "The number at the end of the installation's URL (Org settings › GitHub Apps › Configure)." },
+  { key: "githubSeatUsd", env: "GITHUB_SEAT_USD", kind: "number", def: "21", min: 0, max: 1000, group: "GitHub", label: "Seat price (USD/month)", help: "What one seat costs on the org's plan (Enterprise Cloud: 21). GitHub's API gives the seat count, not the price." },
+  { key: "githubAppPrivateKey", env: "GITHUB_APP_PRIVATE_KEY", kind: "secret", def: "", group: "GitHub", label: "App private key", help: "The App's private key (.pem). Pasted on one line it is rebuilt; never shown again." },
   { key: "spendCron", env: "SPEND_CRON", kind: "cron", def: "15 */6 * * *", group: "Schedules", label: "Spend refresh", help: "Cost Explorer, at most every 6 hours." },
   { key: "logsCron", env: "LOGS_CRON", kind: "cron", def: "50 6 * * *", group: "Schedules", label: "Logs and CloudTrail", help: "Log groups, ingestion, write events (3 to 4 minutes)." },
   { key: "baselineCron", env: "BASELINE_CRON", kind: "cron", def: "40 6 * * *", group: "Schedules", label: "Baselines", help: "What is typical per gateway, instance and service." },
@@ -152,7 +158,8 @@ export function validateRuntime(key: string, value: string): string {
       if (key === "actRoleArn" && v && (!ROLE_ARN_RE.test(v) || /\s/.test(v))) throw new Error("arn:aws:iam::<12 digits>:role/<name>, or empty");
       if (key === "doormanPublicIp" && v && !/^(\d{1,3}\.){3}\d{1,3}$/.test(v)) throw new Error("an IPv4 address, or empty");
       if (key === "probeSignals") return serialiseSignals(parseSignals(v));
-      if (v.length > 500) throw new Error("too long"); return v;
+      // a secret may be a whole key file (a GitHub App private key is ~1,700 characters); anything else stays short
+      if (v.length > (spec.kind === "secret" ? 16_000 : 500)) throw new Error(spec.kind === "secret" ? "too long (16,000 characters at most)" : "too long (500 characters at most)"); return v;
   }
 }
 export const isSecretSetting = (key: string) => SPEC.get(key)?.kind === "secret";
@@ -232,6 +239,12 @@ export const config = {
   get neonApiKey(): string { return rt("neonApiKey").trim(); },
   get redisCloudApiKey(): string { return rt("redisCloudApiKey").trim(); },
   get redisCloudSecretKey(): string { return rt("redisCloudSecretKey").trim(); },
+  get githubCron(): string { return rt("githubCron"); },
+  get githubOrg(): string { return rt("githubOrg").trim(); },
+  get githubAppId(): string { return rt("githubAppId").trim(); },
+  get githubInstallationId(): string { return rt("githubInstallationId").trim(); },
+  get githubAppPrivateKey(): string { return rt("githubAppPrivateKey"); },
+  get githubSeatUsd(): number { return rtNum("githubSeatUsd"); },
   get spendCron(): string { return rt("spendCron"); },
   get logsCron(): string { return rt("logsCron"); },
   get baselineCron(): string { return rt("baselineCron"); },

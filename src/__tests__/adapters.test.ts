@@ -15,8 +15,8 @@ const types = await import("../adapters/types.js");
 const mirror = await import("../graph_mirror.js");
 const { db } = await import("../db.js");
 
-test("the registry: the adapters (aws, vercel, local) with their sections, storage and capabilities; stubs with what each needs", () => {
-  assert.deepEqual(reg.adapters().map((a) => a.id), ["aws", "vercel", "local"]);
+test("the registry: the adapters (aws, vercel, github, local) with their sections, storage and capabilities; stubs with what each needs", () => {
+  assert.deepEqual(reg.adapters().map((a) => a.id), ["aws", "vercel", "github", "local"]);
   const aws = reg.adapterFor("aws")!;
   assert.equal(aws.label, "AWS"); assert.equal(aws.flow.boundary, "account");
   assert.deepEqual(aws.ui.settings.map((s) => s.id), ["access", "permissions", "probes", "benchmarks", "members"]);
@@ -25,7 +25,7 @@ test("the registry: the adapters (aws, vercel, local) with their sections, stora
   assert.equal(reg.adapterFor("gcp"), null);
   const vercel = reg.adapterFor("vercel")!; assert.equal(vercel.flow.boundary, "team"); assert.equal(vercel.capabilities.probes, false); assert.equal(vercel.configured(), false, "no token in this test's environment");
   const list = reg.providers();
-  assert.deepEqual(list.map((p) => [p.id, p.available]), [["aws", true], ["vercel", true], ["local", true], ["gcp", false], ["azure", false], ["cloudflare", false]]);
+  assert.deepEqual(list.map((p) => [p.id, p.available]), [["aws", true], ["vercel", true], ["github", true], ["local", true], ["gcp", false], ["azure", false], ["cloudflare", false]]);
   assert.equal(list.find((p) => p.id === "cloudflare")!.boundary, "account");
   assert.equal(typeof list[0].configured, "boolean");
 });

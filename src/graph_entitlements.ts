@@ -202,6 +202,7 @@ export async function mirrorEntitlements(stamp: string): Promise<Record<string, 
   await writeCypher(`MATCH (s)-[r:GRANTED|IN_GROUP|PROVISIONED_AS|CAN_ACCESS|REACHES|CAN_ASSUME|CAN_SHELL_INTO|HOLDS_KEY_OF|TOUCHED]->() WHERE ${OURS("s")} AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
   await writeCypher("MATCH (:AdvisorResource)-[r:ASSIGNED]->(:AdvisorPermissionSet) WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
   await writeCypher(`MATCH (s)-[r:RUNS_AS]->() WHERE ${OURS("s")} AND r.via <> 'vercel_oidc' AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
-  await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR n:AdvisorRepository) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
+  // a repository the GitHub org adapter owns stays (it marks its own gone): only the stubs the OIDC trust alone made go
+  await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR (n:AdvisorRepository AND coalesce(n.source, '') <> 'github_org')) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
   return counts;
 }

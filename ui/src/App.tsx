@@ -69,7 +69,7 @@ function ScopePicker() {
       <span className="text-zinc-500">Looking at</span>
       <select value={accounts.some((a) => a.id === scope) ? scope : "all"} onChange={(e) => change(e.target.value)} className="mt-0.5 w-full !py-1 !text-xs" title="Which account the pages show; every list that knows its account narrows to it">
         <option value="all">All accounts{accounts.length ? ` (${accounts.length})` : ""}</option>
-        {accounts.map((a) => <option key={a.id} value={a.id}>{a.provider.toUpperCase()} · {a.name} · {a.id}</option>)}
+        {accounts.map((a) => <option key={a.id} value={a.id}>{a.provider.toUpperCase()} · {a.name}{a.id !== a.name ? ` · ${a.id.length > 20 ? `${a.id.slice(0, 8)}…${a.id.slice(-6)}` : a.id}` : ""}</option>)}
       </select>
       {current && <div className="mt-1 text-zinc-600">{current.parent_id ? `member of ${current.parent_id}` : "parent account"}</div>}
     </label>

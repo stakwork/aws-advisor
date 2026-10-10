@@ -22,10 +22,12 @@ import { OURS } from "./graph_cypher.js";
 import { allFingerprints, listActors, listDirectoryChanges, listPeople, type Actor, type Person } from "./sign_ins.js";
 import { actorKey, clientKey, foldIps, isPrivateIp, matchKeys, type ClientUse, type IpUse } from "./sign_in_facts.js";
 import { teamExtras, vercelTeam } from "./adapters/vercel/inventory.js";
+import { githubOrgRow, listCredentials, type CredentialStoreRow } from "./adapters/github/inventory.js";
+import { githubIps } from "./adapters/github/actors.js";
 import type { MfaDeviceRow, AccessKeyRow } from "./iam_inventory.js";
 
 export interface CredentialRow {
-  id: string; identity_id: string; kind: "password" | "access_key" | "mfa_app" | "passkey" | "hardware_token" | "mfa" | "api_token"; provider: "aws" | "vercel"; name: string;
+  id: string; identity_id: string; kind: "password" | "access_key" | "mfa_app" | "passkey" | "hardware_token" | "mfa" | "api_token" | "ssh_key" | "deploy_key"; provider: "aws" | "vercel" | "github"; name: string;
   state: "active" | "inactive" | "removed" | "expired" | "unknown"; observed: boolean; created_at: string | null; last_used_at: string | null; expires_at: string | null; removed_at: string | null; removed_by: string | null; detail: string | null;
 }
 export interface ClientRow { id: string; client: string; platform: string | null; channel: string }
@@ -48,6 +50,8 @@ export interface AccessExtras {
   removed: { user_id: string; device_id: string | null; at: string; by: string | null }[];
   tokens: { member_id: string; id: string; name: string | null; created_at: string | null; active_at: string | null; expires_at: string | null }[];
   ips: Map<string, IpUse[]>;
+  /** the GitHub org's credentials as stored (./adapters/github/inventory.ts): held by a person, or by a repository (deploy keys) */
+  github?: { org_id: string; rows: CredentialStoreRow[] };
 }
 
 /** The credential, client and address rows for a set of identities. Pure. */
@@ -84,6 +88,14 @@ export function accessGraphRows(actors: Actor[], x: AccessExtras, now = Date.now
     } else if (a.kind === "vercel_member") {
       if (a.mfa === "mfa") cred({ id: `${a.id}#2fa`, identity_id: a.id, kind: "mfa", provider: "vercel", name: `${a.name} two-factor authentication`, state: "active", created_at: null, last_used_at: null });
       for (const t of x.tokens.filter((t) => t.member_id === a.id)) cred({ id: `${a.id.split("/member/")[0]}/token/${t.id}`, identity_id: a.id, kind: "api_token", provider: "vercel", name: t.name ?? t.id, state: t.expires_at && Date.parse(t.expires_at) < now ? "expired" : "active", created_at: t.created_at, last_used_at: t.active_at, expires_at: t.expires_at });
+    } else if (a.kind === "github_member" || a.kind === "github_collaborator") {
+      if (a.mfa === "mfa") cred({ id: `${a.id}#2fa`, identity_id: a.id, kind: "mfa", provider: "github", name: `${a.name} two-factor authentication`, state: "active", created_at: null, last_used_at: null });
+      for (const c of (x.github?.rows ?? []).filter((c) => c.holder?.toLowerCase() === a.name.toLowerCase() && c.kind !== "deploy_key" && c.kind !== "pat_request")) {
+        const key = c.kind === "ssh_key" || (c.kind === "credential_authorization" && /ssh/i.test(String(c.details.type)));
+        cred({ id: `${x.github!.org_id}/credential/${c.id}`, identity_id: a.id, kind: key ? "ssh_key" : "api_token", provider: "github", name: c.kind === "pat" ? `fine-grained token ${c.name ?? ""}`.trim() : c.kind === "credential_authorization" ? `SSO-authorized ${c.details.type}${c.name ? ` ${c.name}` : ""}` : `${c.name ?? "SSH key"} ${c.fingerprint ?? ""}`.trim(),
+          state: c.expires_at && Date.parse(c.expires_at) < now ? "expired" : "active", created_at: c.created_at, last_used_at: c.last_used_at, expires_at: c.expires_at,
+          detail: c.kind === "pat" ? `${c.details.repository_selection === "all" ? "all repositories" : `${(c.details.repos ?? []).length} repositories`}` : c.kind === "credential_authorization" ? (c.details.scopes ?? []).join(", ") || null : c.fingerprint });
+      }
     }
     // the clients, folded across accounts per identity, and the credential each was used with
     const per = new Map<string, SignsInRow>();
@@ -100,6 +112,8 @@ export function accessGraphRows(actors: Actor[], x: AccessExtras, now = Date.now
     signsIn.push(...per.values());
     for (const u of x.ips.get(a.id) ?? []) ips.push({ identity_id: a.id, ip: u.ip, private: isPrivateIp(u.ip), events: u.events, failures: u.failures, first_at: u.first_at, last_at: u.last_at, clients: u.clients });
   }
+  // deploy keys belong to a repository, not a person: the repository node holds them
+  for (const c of (x.github?.rows ?? []).filter((c) => c.kind === "deploy_key" && c.holder)) cred({ id: `${x.github!.org_id}/credential/${c.id}`, identity_id: `github:${c.holder}`, kind: "deploy_key", provider: "github", name: `deploy key ${c.name ?? c.fingerprint ?? ""}`.trim(), state: c.details.enabled === false ? "inactive" : "active", created_at: c.created_at, last_used_at: c.last_used_at, detail: `${c.details.read_only ? "read-only" : "read and write"}${c.details.added_by ? `, added by ${c.details.added_by}` : ""}${c.fingerprint ? ` · ${c.fingerprint}` : ""}` });
   return { credentials, clients: [...clients.values()], signs_in: signsIn, used_from: [...usedFrom.values()], ips };
 }
 
@@ -138,7 +152,9 @@ export function accessExtras(actors: Actor[]): AccessExtras {
   // the addresses are folded per actor key; the actors carry their node ids
   const byKey = foldIps(allFingerprints()); const ips = new Map<string, IpUse[]>();
   for (const a of actors) { const k = a.kind === "root" ? actorKey("root", "root", a.account_id) : a.kind === "iam_user" ? actorKey("iam_user", a.name, a.account_id) : a.kind === "sso_user" ? actorKey("sso_user", a.name, null) : null; const u = k ? byKey.get(k) : undefined; if (u) ips.set(a.id, u); }
-  return { iam, root, removed, tokens, ips };
+  for (const [id, u] of githubIps()) ips.set(id, u);
+  const org = githubOrgRow();
+  return { iam, root, removed, tokens, ips, github: org ? { org_id: org.node_id, rows: listCredentials(org.node_id) } : undefined };
 }
 
 export const accessGraph = (): AccessGraph => { const actors = listActors(null); return accessGraphRows(actors, accessExtras(actors)); };
@@ -147,7 +163,9 @@ export const accessGraph = (): AccessGraph => { const actors = listActors(null);
 
 const CREDENTIAL_CYPHER = `
 UNWIND $rows AS row
-MATCH (i:AdvisorResource {id: row.identity_id})
+// a person's identity, or a repository (a deploy key)
+OPTIONAL MATCH (ir:AdvisorResource {id: row.identity_id}) OPTIONAL MATCH (rp:AdvisorRepository {id: row.identity_id})
+WITH row, coalesce(ir, rp) AS i WHERE i IS NOT NULL
 MERGE (c:AdvisorCredential {id: row.id}) ON CREATE SET c.first_seen = $now
 SET c += {kind: row.kind, provider: row.provider, name: row.name, state: row.state, observed: row.observed, created_at: row.created_at, last_used_at: row.last_used_at, expires_at: row.expires_at, removed_at: row.removed_at, removed_by: row.removed_by, detail: row.detail,
   identity_id: row.identity_id, native_type: 'credential', gone: false, last_seen: $now, updated_at: $now}

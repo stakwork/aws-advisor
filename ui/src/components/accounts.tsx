@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, currentScope, setScope, usd } from "../api";
-import { Badge, Card, Stat, Td, Th } from "./ui";
+import { AccountId, Badge, Card, Stat, Td, Th } from "./ui";
 import { AccountsBilling } from "./billing";
 
 /**
@@ -32,8 +32,8 @@ export function AccountsOverview() {
             <tr key={a.id} className={`border-t border-zinc-800 ${scope === a.id ? "bg-zinc-900/50" : ""}`}>
               <Td>
                 <div className="text-zinc-100">{a.provider.toUpperCase()} · {a.name}{a.parent_id && <span className="ml-1 text-xs text-zinc-500">member</span>}{!a.enabled && <span className="ml-1 text-xs text-zinc-500">disabled</span>}</div>
-                <div className="font-mono text-[11px] text-zinc-500">{a.id}</div>
-                <div className="text-[11px] text-zinc-600">{a.access}{a.last_test && !a.last_test.ok ? <span className="text-red-300"> · {a.last_test.detail}</span> : null}</div>
+                <div className="text-[11px] text-zinc-500"><AccountId id={a.id} /></div>
+                <div className="text-[11px] text-zinc-600 [overflow-wrap:anywhere]">{a.access}{a.last_test && !a.last_test.ok ? <span className="text-red-300"> · {a.last_test.detail}</span> : null}</div>
               </Td>
               <Td className="text-xs text-zinc-300">
                 {a.resources.ec2_running}/{a.resources.ec2_total} EC2 · {a.resources.rds} RDS · {a.resources.lambda} λ{a.resources.dynamodb ? ` · ${a.resources.dynamodb} tables` : ""} · {a.resources.elb} LB · {a.resources.s3} S3 · {a.resources.ebs_gb} GB EBS{a.resources.clusters ? ` · ${a.resources.clusters} clusters` : ""}

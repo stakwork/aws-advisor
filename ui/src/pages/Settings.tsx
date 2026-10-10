@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, when } from "../api";
-import { Button, Card, Empty } from "../components/ui";
+import { AccountId, Button, Card, Empty } from "../components/ui";
 import { PermissionsCard } from "../components/permissions";
 import { SetupWizard } from "../components/setup";
 import { AgentPrompts } from "../components/prompts";
@@ -158,10 +158,10 @@ export default function Settings() {
                 {accountRows.map((r) => (
                   <tr key={r.id} className="cursor-pointer border-t border-zinc-800/60 hover:bg-zinc-900/60" onClick={() => setQ({ account: r.id, section: r.parent ? "members" : "access" })}>
                     <td className="py-1.5 pr-3">{providerList.find((p) => p.id === r.provider)?.label || r.provider.toUpperCase()} <span className="text-xs text-zinc-500">{r.boundary}</span></td>
-                    <td className="py-1.5 pr-3 font-mono text-zinc-200">{r.id}{r.parent && <div className="font-sans text-[11px] text-zinc-500">member of {r.parent}</div>}</td>
+                    <td className="py-1.5 pr-3 text-zinc-200"><AccountId id={r.id} />{r.parent && <div className="font-sans text-[11px] text-zinc-500">member of {r.parent}</div>}</td>
                     <td className="py-1.5 pr-3">{r.name}</td>
-                    <td className="py-1.5 pr-3 text-xs text-zinc-400">{r.access}</td>
-                    <td className="py-1.5 pr-3 text-xs text-zinc-400">{r.status}</td>
+                    <td className="py-1.5 pr-3 text-xs text-zinc-400 break-words [overflow-wrap:anywhere]">{r.access}</td>
+                    <td className="py-1.5 pr-3 text-xs text-zinc-400 break-words [overflow-wrap:anywhere]">{r.status}</td>
                     <td className="py-1.5 text-right text-xs text-sky-300">open →</td>
                   </tr>
                 ))}
@@ -192,7 +192,7 @@ export default function Settings() {
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <button type="button" className="text-sky-300 hover:underline" onClick={() => setQ({ account: null, section: null })}>← Accounts</button>
             <span className="text-zinc-500">/</span>
-            <span className="text-zinc-200">{providerList.find((p) => p.id === other.provider)?.label || other.provider} {other.native_type.replace(/_/g, " ")} <span className="font-mono">{other.id !== other.provider ? other.id : ""}</span></span>
+            <span className="text-zinc-200">{providerList.find((p) => p.id === other.provider)?.label || other.provider} {other.native_type.replace(/_/g, " ")} {other.name && other.name !== other.id ? <span>{other.name} </span> : null}{other.id !== other.provider ? <AccountId id={other.id} className="text-xs text-zinc-500" /> : null}</span>
           </div>
           <div className="flex flex-wrap gap-1 border-b border-zinc-800" role="tablist">
             {(providerOf(other.provider)?.ui?.settings ?? [{ id: "access", label: "Access", view: "" }]).map((sec) => (
@@ -397,7 +397,7 @@ function OrganizationAccounts({ parent }: { parent?: string }) {
     <div className="mb-3">
       <div className="mb-1 text-xs text-zinc-500">The organisation has {d.accounts.length} account{d.accounts.length === 1 ? "" : "s"}; each child needs its own read role (one script per account).</div>
       <table className="w-full text-sm"><thead><tr className="text-left text-xs text-zinc-500"><th className="py-1 pr-3">Account</th><th className="py-1 pr-3">Name</th><th className="py-1 pr-3">Status</th><th className="py-1 pr-3">In the advisor</th><th /></tr></thead>
-        <tbody>{d.accounts.map((a: any) => <tr key={a.id} className="border-t border-zinc-800/60"><td className="py-1 pr-3 font-mono text-xs">{a.id}</td><td className="py-1 pr-3">{a.name || "—"}{a.email_domain ? <span className="text-xs text-zinc-500"> · {a.email_domain}</span> : null}</td><td className="py-1 pr-3 text-xs text-zinc-400">{a.status || "—"}</td><td className="py-1 pr-3 text-xs">{a.role === "parent" ? <span className="text-zinc-200">parent</span> : a.role === "member" ? <span className="text-emerald-300">member</span> : <span className="text-zinc-500">not registered</span>}</td><td className="py-1 text-right">{a.role === "not registered" && a.status !== "SUSPENDED" && <button type="button" className="text-xs text-sky-300 hover:underline" onClick={() => setQ({ tab: "accounts", account: parent || "", section: "access", setup: "member-role", memberName: a.name || a.id })}>Set up as member</button>}</td></tr>)}</tbody></table>
+        <tbody>{d.accounts.map((a: any) => <tr key={a.id} className="border-t border-zinc-800/60"><td className="py-1 pr-3 text-xs"><AccountId id={a.id} /></td><td className="py-1 pr-3">{a.name || "—"}{a.email_domain ? <span className="text-xs text-zinc-500"> · {a.email_domain}</span> : null}</td><td className="py-1 pr-3 text-xs text-zinc-400">{a.status || "—"}</td><td className="py-1 pr-3 text-xs">{a.role === "parent" ? <span className="text-zinc-200">parent</span> : a.role === "member" ? <span className="text-emerald-300">member</span> : <span className="text-zinc-500">not registered</span>}</td><td className="py-1 text-right">{a.role === "not registered" && a.status !== "SUSPENDED" && <button type="button" className="text-xs text-sky-300 hover:underline" onClick={() => setQ({ tab: "accounts", account: parent || "", section: "access", setup: "member-role", memberName: a.name || a.id })}>Set up as member</button>}</td></tr>)}</tbody></table>
     </div>
   );
 }
@@ -493,7 +493,7 @@ function DataCard({ accounts }: { accounts: { id: string; provider: string; name
         <label className="text-zinc-400">Wipe</label>
         <select className="w-fit rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" value={target} onChange={(e) => setTarget(e.target.value)}>
           <option value="all">everything, every account</option>
-          {accounts.map((a) => <option key={a.id} value={a.id}>{a.provider.toUpperCase()} {a.id}{a.name ? ` · ${a.name}` : ""}</option>)}
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.provider.toUpperCase()} {a.id.length > 20 ? `${a.id.slice(0, 8)}…${a.id.slice(-6)}` : a.id}{a.name ? ` · ${a.name}` : ""}</option>)}
         </select>
         <span className="text-zinc-400">Keeps</span>
         <div className="text-xs text-zinc-400">

@@ -28,6 +28,7 @@ import { mirrorRecommendationsInBackground } from "../graph_mirror.js";
 export const browse = Router();
 import * as playbookGen from "../playbook_gen.js";
 import { accountScope, accountWhere, latestRunIdFor, resourceInScope, rowInScope, stampRowAccounts } from "../scope.js";
+import { adapterFor } from "../adapters/index.js";
 const require_playbook_gen = () => playbookGen;
 const auth = authMiddleware;
 
@@ -125,7 +126,10 @@ browse.get("/playbooks", auth, (req, res) => {
     const all = dedupeFindings(db.prepare(`select id, control_id, status, resource, fingerprint from findings where run_id = ? and status = 'alarm' and ${scopeA.sql} order by id`).all(runId, ...scopeA.params) as any[]);
     for (const f of all) counts.set(f.control_id, (counts.get(f.control_id) || 0) + 1);
   }
-  const playbooks = listPlaybooks().map((p) => ({ ...p, findings: counts.get(p.control_id) || 0 })).sort((a, b) => b.findings - a.findings || a.title.localeCompare(b.title));
+  // an account's page lists its own provider's playbooks only (a GitHub org never sees the AWS controls); every provider's under all accounts
+  const scope = accountScope(req.query as any);
+  const prefixes = scope?.provider ? adapterFor(scope.provider)?.rules?.control_prefixes ?? null : null;
+  const playbooks = listPlaybooks().filter((p) => !prefixes || prefixes.some((x) => p.control_id.startsWith(x))).map((p) => ({ ...p, findings: counts.get(p.control_id) || 0 })).sort((a, b) => b.findings - a.findings || a.title.localeCompare(b.title));
   res.json({ run_id: runId ?? null, count: playbooks.length, playbooks });
 });
 

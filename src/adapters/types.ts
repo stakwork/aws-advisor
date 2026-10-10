@@ -7,7 +7,7 @@
  */
 
 export const AWS = "aws";
-export type ProviderId = "aws" | "gcp" | "azure" | "vercel" | "cloudflare" | "local";
+export type ProviderId = "aws" | "gcp" | "azure" | "vercel" | "github" | "cloudflare" | "local";
 
 export const RESOURCE_LABELS = ["AdvisorBox", "AdvisorDatabase", "AdvisorCache", "AdvisorLoadBalancer", "AdvisorFunction", "AdvisorStorage", "AdvisorDeployment", "AdvisorDnsZone", "AdvisorDnsRecord", "AdvisorIdentity",
   "AdvisorCertificate", "AdvisorMessaging", "AdvisorSecret", "AdvisorAnalytics", "AdvisorStack", "AdvisorBackupPlan", "AdvisorDetector", "AdvisorFilter"] as const;

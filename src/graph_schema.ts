@@ -72,7 +72,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorPolicy: "An IAM policy (AWS managed, customer managed or inline) graded by access level per service",
   AdvisorGroup: "An IAM group: the policies its users share",
   AdvisorPermissionSet: "An Identity Center permission set and the role it is provisioned as in each account",
-  AdvisorRepository: "A source repository whose pipelines may assume a cloud role (GitHub Actions OIDC)",
+  AdvisorRepository: "A source repository: read from the GitHub org (who can access it, its deploy keys and secrets) or named by a cloud role's GitHub Actions OIDC trust (its pipelines may assume the role)",
   AdvisorClient: "A client identities sign in or call with (browser, CLI, SDK, IaC tool) on a platform",
   AdvisorSource: "An address or range traffic and sign-ins come from (the internet, a CIDR, a prefix list)",
   AdvisorNetwork: "A virtual network (VPC)",

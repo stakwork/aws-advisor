@@ -33,6 +33,7 @@ import { actorKey, directoryChange, foldClients, groupPeople, workflowMfa, type 
 import { accountWhere, type AccountScope } from "./scope.js";
 import { teamExtras, vercelTeam } from "./adapters/vercel/inventory.js";
 import { memberNodeId } from "./adapters/vercel/index.js";
+import { githubActors } from "./adapters/github/actors.js";
 import type { VercelToken } from "./adapters/vercel/client.js";
 
 export * from "./sign_in_facts.js";
@@ -253,7 +254,7 @@ export function listRootUsers(scope?: AccountScope | null): RootRow[] {
 
 /** A person or key that can get in, with its MFA and what it was seen using. */
 export interface Actor {
-  kind: "root" | "iam_user" | "sso_user" | "vercel_member"; id: string; name: string; email: string | null; display_name: string | null; account_id: string | null; admin: boolean; console: boolean; keys: number;
+  kind: "root" | "iam_user" | "sso_user" | "vercel_member" | "github_member" | "github_collaborator"; id: string; name: string; email: string | null; display_name: string | null; account_id: string | null; admin: boolean; console: boolean; keys: number;
   mfa: "passkey" | "hardware" | "app" | "mfa" | "passkey_or_hardware" | "none" | "unknown"; mfa_source: "device" | "sign-in" | "account" | null;
   last_seen_at: string | null; clients: ClientUse[];
   /** Identity Center: sign-ins in the window and how many asked for a second factor (context-aware MFA skips a trusted browser) */
@@ -298,6 +299,8 @@ export function listActors(scope?: AccountScope | null): Actor[] {
         status: m.confirmed ? "active" : "invited", changes: [], role: m.role, tokens: own ? x.tokens : undefined });
     }
   }
+  // the GitHub org's members and outside collaborators: under every-account scope or the org's own; matched by login, public name or public e-mail
+  out.push(...githubActors(scope ? scope.id : null));
   return out;
 }
 

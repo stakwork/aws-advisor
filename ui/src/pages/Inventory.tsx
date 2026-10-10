@@ -233,10 +233,10 @@ import { metricLabel } from "./Knowledge";
  * that has a configured provider behind it.
  */
 const TABS = ["ec2", "rds", "elasticache", "lambda", "dynamodb", "elb", "ebs", "s3", "route53", "deployments", "clusters", "identities", "sg", "tags",
-  "certificates", "messaging", "keys", "files", "backups", "analytics", "stacks", "threats"] as const;
+  "certificates", "messaging", "keys", "files", "backups", "analytics", "stacks", "threats", "repositories", "credentials"] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elasticache: "Caches", lambda: "Functions", dynamodb: "Tables", elb: "Load balancers", ebs: "Volumes", s3: "Object storage", route53: "DNS", deployments: "Deployments", clusters: "Clusters", sg: "Filters", tags: "Tags", identities: "Identities",
-  certificates: "Certificates", messaging: "Messaging", keys: "Keys", files: "File systems", backups: "Backups", analytics: "Analytics", stacks: "Stacks", threats: "Threat detection" };
+  certificates: "Certificates", messaging: "Messaging", keys: "Keys", files: "File systems", backups: "Backups", analytics: "Analytics", stacks: "Stacks", threats: "Threat detection", repositories: "Repositories", credentials: "Credentials" };
 /**
  * Which providers draw each tab, and with which view: every provider declares its tabs (src/adapters/types.ts
  * ProviderUi.inventory). "aws.table" is the shared list, search and stats below; any other id is a provider view
@@ -244,7 +244,7 @@ const TAB_LABEL: Record<Tab, string> = { ec2: "Compute", rds: "Databases", elast
  */
 type TabView = { provider: string; view: string; label?: string };
 const TABLE_VIEW = "aws.table";
-const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" , certificates: "id", messaging: "id", keys: "id", files: "id", backups: "id", analytics: "id", stacks: "id", threats: "id" };
+const ID_COLUMN: Record<Tab, string> = { ec2: "instance_id", rds: "db_instance_identifier", elasticache: "cache_cluster_id", lambda: "name", dynamodb: "name", elb: "name", ebs: "volume_id", s3: "name", route53: "id", deployments: "id", clusters: "arn", sg: "group_id", tags: "resource", identities: "arn" , certificates: "id", messaging: "id", keys: "id", files: "id", backups: "id", analytics: "id", stacks: "id", threats: "id", repositories: "id", credentials: "id" };
 
 /** The platform-service tabs: rendered by ServicesPanel from /inventory/services/:tab, not by the table below. */
 const SERVICE_TABS: readonly Tab[] = ["certificates", "messaging", "keys", "files", "backups", "analytics", "stacks", "threats"];
@@ -254,7 +254,8 @@ const SECTIONS: { id: string; label: string; tabs: Tab[] }[] = [
   { id: "compute", label: "Compute", tabs: ["ec2", "lambda", "deployments", "clusters"] },
   { id: "data", label: "Data", tabs: ["rds", "dynamodb", "elasticache", "s3", "ebs", "files", "backups", "analytics", "messaging"] },
   { id: "network", label: "Network", tabs: ["elb", "route53", "sg", "certificates"] },
-  { id: "security", label: "Security", tabs: ["identities", "keys", "threats"] },
+  { id: "security", label: "Security", tabs: ["identities", "credentials", "keys", "threats"] },
+  { id: "code", label: "Code", tabs: ["repositories"] },
   { id: "operations", label: "Operations", tabs: ["stacks", "tags"] },
 ];
 const sectionOf = (t: Tab) => SECTIONS.find((x) => x.tabs.includes(t)) ?? SECTIONS[0];
@@ -888,7 +889,7 @@ export default function Inventory() {
 const tabCount = (s: any, t: Tab): number | null => { const v = t === "identities" ? s?.iam?.users : SERVICE_TABS.includes(t) ? s?.services?.[t]?.total : s?.[t]?.total; return typeof v === "number" ? v : null; };
 
 const COLUMNS: Record<Tab, number> = { ec2: 11, rds: 10, elasticache: 9, lambda: 10, dynamodb: 9, elb: 9, ebs: 10, s3: 8, route53: 6, deployments: 6, clusters: 8, identities: 8, sg: 5, tags: 5,
-  certificates: 8, messaging: 9, keys: 8, files: 9, backups: 8, analytics: 8, stacks: 8, threats: 7 };
+  certificates: 8, messaging: 9, keys: 8, files: 9, backups: 8, analytics: 8, stacks: 8, threats: 7, repositories: 8, credentials: 5 };
 
 /** What a balancer fronts, in one line: the instances (linked), Lambda targets, the Beanstalk environment, ASGs and ECS services. */
 function ElbFronts({ r }: { r: any }) {
