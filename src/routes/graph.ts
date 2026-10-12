@@ -2,6 +2,7 @@ import { Router } from "express";
 import { accountScope } from "../scope.js";
 import { authMiddleware } from "../auth.js";
 import { accountId, enabled, graphStats, graphUriForDisplay, mirrorAll, resourceView, verifyConnection, wipeMirror } from "../graph_mirror.js";
+import { listClaims, markResolutionDone } from "../graph_claims.js";
 import { graphBill, listSystems, logAttributionReport, mirrorKnowledge, systemView } from "../graph_knowledge.js";
 import { filterDetail, listGatewayNodes, listInterfaces, listPublicIps, listSegments, mirrorNetwork, networkDetail, networkOverview } from "../graph_network.js";
 
@@ -74,3 +75,7 @@ graph.get("/graph/network-interfaces", async (req, res) => { if (!enabled()) ret
 graph.get("/graph/network-public-ips", async (req, res) => { if (!enabled()) return off(res); try { res.json({ public_ips: await listPublicIps(accountScope(req.query as any)?.id ?? accountId()) }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 // Rebuild the network layer and every endpoint's verdicts from the current inventory (what the post-run hook does).
 graph.post("/graph/network/sync", async (_req, res) => { if (!enabled()) return off(res); try { res.json(await mirrorNetwork()); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+
+// ---- Claims and their Resolutions (src/graph_claims.ts): the Claims page ------------------------------------------------
+graph.get("/graph/claims", async (_req, res) => { if (!enabled()) return off(res); try { res.json({ claims: await listClaims() }); } catch (e: any) { res.status(502).json({ error: String(e?.message || e).slice(0, 300) }); } });
+graph.post("/graph/resolutions/:id/done", async (req, res) => { if (!enabled()) return off(res); try { const r = await markResolutionDone(req.params.id); r.ok ? res.json({ id: r.id, resolution_status: r.resolution_status, updated_at: r.updated_at }) : res.status(r.status).json({ error: r.error }); } catch (e: any) { res.status(502).json({ error: String(e?.message || e).slice(0, 300) }); } });

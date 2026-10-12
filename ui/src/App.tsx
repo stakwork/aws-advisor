@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import { ConnectionBanner } from "./components/connection";
-import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert, Network as NetworkIcon, Bot } from "lucide-react";
+import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert, Network as NetworkIcon, Bot, ClipboardCheck } from "lucide-react";
 import { api, currentScope, onScopeChange, setScope, signIn, token } from "./api";
 import { useScopeInfo, type Capability } from "./scope";
 import { Gate } from "./components/gate";
@@ -21,6 +21,7 @@ import Agent from "./pages/Agent";
 import Actions from "./pages/Actions";
 import Security from "./pages/Security";
 import Network from "./pages/Network";
+import Claims from "./pages/Claims";
 
 /** The pages, each with the capability it needs; a page the scoped provider cannot serve is hidden here and gated on its route. */
 const nav: { to: string; label: string; icon: any; need?: Capability }[] = [
@@ -32,6 +33,7 @@ const nav: { to: string; label: string; icon: any; need?: Capability }[] = [
   { to: "/inventory", label: "Inventory", icon: Server },
   { to: "/network", label: "Network", icon: NetworkIcon, need: "network" },
   { to: "/recommendations", label: "Recommendations", icon: ListChecks, need: "findings" },
+  { to: "/claims", label: "Claims", icon: ClipboardCheck, need: "findings" },
   { to: "/changes", label: "Changes", icon: History, need: "changes" },
   { to: "/bill", label: "This month", icon: Receipt, need: "bill" },
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
@@ -130,6 +132,7 @@ function AppShell() {
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/network" element={<Gate need="network"><Network /></Gate>} />
           <Route path="/recommendations" element={<Gate need="findings"><Recommendations /></Gate>} />
+          <Route path="/claims" element={<Gate need="findings"><Claims /></Gate>} />
           <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/bill" element={<Gate need="bill"><Bill /></Gate>} />
           <Route path="/changes" element={<Gate need="changes"><Changes /></Gate>} />
