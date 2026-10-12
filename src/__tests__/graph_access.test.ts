@@ -17,7 +17,7 @@ const actor = (o: Partial<any>) => ({ email: null, display_name: null, account_i
 
 test("accessGraphRows: an IAM user's password, MFA device and key, each tied to the client it was used from", () => {
   const arn = `arn:aws:iam::${ACCT}:user/deploy`;
-  const a = actor({ kind: "iam_user", id: arn, name: "deploy", keys: 1, mfa: "passkey", clients: [client({ factors: ["access_key"], keys: ["WXYZ"], events: 40 }), client({ channel: "console", client: "Chrome", factors: ["password", "passkey"], events: 3, via: ["sign-in"] })] });
+  const a = actor({ kind: "iam_user", id: arn, name: "deploy", keys: 1, mfa: "passkey", clients: [client({ factors: ["access_key"], keys: ["WXYZ"], events: 40 }), client({ channel: "console", client: "Chrome", factors: ["password", "passkey"], events: 3, via: ["sign-in"], versions: ["129.0.0.0", "141.0.0.0"], last_version: "141.0.0.0" })] });
   const x = { iam: new Map([[arn, { console: true, password_last_used: now, mfa_devices: [{ serial: `arn:aws:iam::${ACCT}:u2f/user/deploy/key-EXAMPLE`, kind: "passkey" as const, enabled_at: now }], access_keys: [{ id: "AKIA…WXYZ", status: "Active", created: now, last_used: now, service: "s3", region: "us-east-1", age_days: 3 }] }]]),
     root: new Map(), removed: [], tokens: [], ips: new Map([[arn, [{ ip: "198.51.100.7", events: 43, failures: 0, first_at: now, last_at: now, clients: ["aws-cli|macOS|cli"], accounts: [ACCT] }]]]) };
   const r = g.accessGraphRows([a as any], x);
@@ -28,6 +28,11 @@ test("accessGraphRows: an IAM user's password, MFA device and key, each tied to 
   assert.equal(used.get(`${arn}#password>client:Chrome|macOS|console`), 3);
   assert.equal(used.get(`arn:aws:iam::${ACCT}:u2f/user/deploy/key-EXAMPLE>client:Chrome|macOS|console`), 3);
   assert.deepEqual(r.ips.map((i) => [i.ip, i.private, i.events]), [["198.51.100.7", false, 43]]);
+  // the version rides on the node (all seen) and the edges (this identity's, the newest)
+  assert.deepEqual(r.clients.find((c) => c.client === "Chrome")!.versions, ["129.0.0.0", "141.0.0.0"]);
+  const chrome = r.signs_in.find((e) => e.client_id === "client:Chrome|macOS|console")!; assert.equal(chrome.last_version, "141.0.0.0"); assert.deepEqual(chrome.versions, ["129.0.0.0", "141.0.0.0"]);
+  assert.equal(r.used_from.find((u) => u.credential_id === `${arn}#password`)!.last_version, "141.0.0.0");
+  assert.equal(r.signs_in.find((e) => e.client_id === "client:aws-cli|macOS|cli")!.last_version, null, "a client stored before versions were kept has none");
 });
 
 test("accessGraphRows: Identity Center factors are observed, a removed device is its own credential; Vercel 2FA and tokens", () => {

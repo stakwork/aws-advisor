@@ -14,11 +14,12 @@ import { collaboratorId, memberId } from "./index.js";
 /** A GitHub audit log user agent as a client: git and the GitHub CLI by name, browsers as the web, the rest as parseUserAgent reads it. Pure. */
 export function githubClientOf(ua: string | null | undefined): ClientInfo {
   const s = String(ua ?? "").trim();
-  if (/^git\//i.test(s)) return { client: "git", platform: /Apple Git/.test(s) ? "macOS" : /windows/i.test(s) ? "Windows" : null, channel: "cli" };
-  if (/^(GitHub CLI|gh\/)/i.test(s)) return { client: "GitHub CLI", platform: null, channel: "cli" };
-  if (/GitHubDesktop/i.test(s)) return { client: "GitHub Desktop", platform: /Macintosh/.test(s) ? "macOS" : /Windows/.test(s) ? "Windows" : null, channel: "cli" };
-  if (/^(Octokit|octokit)/.test(s)) return { client: "Octokit", platform: null, channel: "sdk" };
-  if (/^Terraform\//i.test(s)) return { client: "Terraform", platform: null, channel: "iac" };
+  const ver = (re: RegExp) => re.exec(s)?.[1] ?? null;
+  if (/^git\//i.test(s)) return { client: "git", platform: /Apple Git/.test(s) ? "macOS" : /windows/i.test(s) ? "Windows" : null, channel: "cli", version: ver(/^git\/([\d.]+)/i) };
+  if (/^(GitHub CLI|gh\/)/i.test(s)) return { client: "GitHub CLI", platform: null, channel: "cli", version: ver(/^(?:GitHub CLI|gh)[\/ ]v?([\d.]+)/i) };
+  if (/GitHubDesktop/i.test(s)) return { client: "GitHub Desktop", platform: /Macintosh/.test(s) ? "macOS" : /Windows/.test(s) ? "Windows" : null, channel: "cli", version: ver(/GitHubDesktop\/([\w.-]+)/i) };
+  if (/^(Octokit|octokit)/.test(s)) return { client: "Octokit", platform: null, channel: "sdk", version: ver(/^octokit[\w.-]*\/([\w.-]+)/i) };
+  if (/^Terraform\//i.test(s)) return { client: "Terraform", platform: null, channel: "iac", version: ver(/^Terraform\/([\w.-]+)/i) };
   return parseUserAgent(s);
 }
 
@@ -31,7 +32,10 @@ export function githubActors(scopeId?: string | null): Actor[] {
     const clients: ClientUse[] = [];
     for (const u of a?.user_agents ?? []) {
       const c = githubClientOf(u.ua); const cur = clients.find((x) => x.client === c.client && x.platform === c.platform && x.channel === c.channel);
-      if (cur) { cur.events += u.events; if (u.last_at > cur.last_at) cur.last_at = u.last_at; } else clients.push({ account_id: orgId, channel: c.channel, client: c.client, platform: c.platform, factors: [], events: u.events, failures: 0, first_at: a!.first_at, last_at: u.last_at, last_ip: null, keys: [], via: ["api"] });
+      if (cur) {
+        cur.events += u.events; if (u.last_at > cur.last_at) { cur.last_at = u.last_at; if (c.version) cur.last_version = c.version; }
+        if (c.version && !cur.versions!.includes(c.version)) cur.versions!.push(c.version);
+      } else clients.push({ account_id: orgId, channel: c.channel, client: c.client, platform: c.platform, factors: [], events: u.events, failures: 0, first_at: a!.first_at, last_at: u.last_at, last_ip: null, keys: [], via: ["api"], versions: c.version ? [c.version] : [], last_version: c.version });
     }
     const held = creds.filter((c) => c.holder?.toLowerCase() === m.login.toLowerCase() && c.kind !== "deploy_key" && c.kind !== "pat_request");
     return {

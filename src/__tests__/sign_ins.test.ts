@@ -19,13 +19,15 @@ const IPHONE_SAFARI = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) Ap
 const CLI_MAC = "aws-cli/2.17.0 md/awscrt#0.20.11 ua/2.0 os/macos#24.0.0 md/arch#arm64 lang/python#3.11.9 md/pyimpl#CPython cfg/retry-mode#standard md/installer#exe md/command#s3.cp";
 
 test("parseUserAgent: browsers, the CLI, SDKs, infrastructure tools, AWS itself", () => {
-  assert.deepEqual(f.parseUserAgent(MAC_CHROME), { client: "Chrome", platform: "macOS", channel: "console" });
-  assert.deepEqual(f.parseUserAgent(IPHONE_SAFARI), { client: "Safari", platform: "iOS", channel: "console" });
-  assert.deepEqual(f.parseUserAgent(CLI_MAC), { client: "aws-cli", platform: "macOS", channel: "cli" });
-  assert.deepEqual(f.parseUserAgent("aws-cli/2.17.0 ua/2.0 os/linux#6.1 exec-env/CloudShell md/command#ec2.describe-instances"), { client: "aws-cli", platform: "CloudShell", channel: "cli" });
-  assert.deepEqual(f.parseUserAgent("APN/1.0 HashiCorp/1.0 Terraform/1.9.5 (+https://www.terraform.io) terraform-provider-aws/5.70.0 aws-sdk-go-v2/1.30 os/linux"), { client: "Terraform", platform: "Linux", channel: "iac" });
-  assert.deepEqual(f.parseUserAgent("aws-sdk-js/3.600.0 ua/2.1 os/linux#5.10 lang/js md/nodejs#20.15 exec-env/AWS_Lambda_nodejs20.x api/s3#3.600.0"), { client: "AWS SDK (js)", platform: "AWS Lambda", channel: "sdk" });
-  assert.deepEqual(f.parseUserAgent("Boto3/1.35.0 md/Botocore#1.35.0 ua/2.0 os/windows#10 md/arch#amd64 lang/python#3.12"), { client: "boto3", platform: "Windows", channel: "sdk" });
+  assert.deepEqual(f.parseUserAgent(MAC_CHROME), { client: "Chrome", platform: "macOS", channel: "console", version: "129.0.0.0" });
+  assert.deepEqual(f.parseUserAgent(IPHONE_SAFARI), { client: "Safari", platform: "iOS", channel: "console", version: "17.6" });
+  assert.deepEqual(f.parseUserAgent(CLI_MAC), { client: "aws-cli", platform: "macOS", channel: "cli", version: "2.17.0" });
+  assert.deepEqual(f.parseUserAgent("aws-cli/2.17.0 ua/2.0 os/linux#6.1 exec-env/CloudShell md/command#ec2.describe-instances"), { client: "aws-cli", platform: "CloudShell", channel: "cli", version: "2.17.0" });
+  assert.deepEqual(f.parseUserAgent("APN/1.0 HashiCorp/1.0 Terraform/1.9.5 (+https://www.terraform.io) terraform-provider-aws/5.70.0 aws-sdk-go-v2/1.30 os/linux"), { client: "Terraform", platform: "Linux", channel: "iac", version: "1.9.5" });
+  assert.deepEqual(f.parseUserAgent("aws-sdk-js/3.600.0 ua/2.1 os/linux#5.10 lang/js md/nodejs#20.15 exec-env/AWS_Lambda_nodejs20.x api/s3#3.600.0"), { client: "AWS SDK (js)", platform: "AWS Lambda", channel: "sdk", version: "3.600.0" });
+  assert.deepEqual(f.parseUserAgent("Boto3/1.35.0 md/Botocore#1.35.0 ua/2.0 os/windows#10 md/arch#amd64 lang/python#3.12"), { client: "boto3", platform: "Windows", channel: "sdk", version: "1.35.0" });
+  assert.equal(f.parseUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.3537.57").version, "141.0.3537.57", "Edge's own version, not Chrome's");
+  assert.equal(f.parseUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:131.0) Gecko/20100101 Firefox/131.0").version, "131.0");
   assert.equal(f.parseUserAgent("console.amazonaws.com").channel, "console");
   assert.equal(f.parseUserAgent("AWS Internal").channel, "aws");
   assert.equal(f.parseUserAgent("ec2.amazonaws.com").channel, "aws");
@@ -99,6 +101,14 @@ test("foldClients: one entry per client, factors from successes only, newest fir
   assert.match(f.clientLine(alice[1]), /^Safari on iOS · portal · password \+ authenticator app · 3× \(1 failed\) · last 2026-09-02/);
 });
 
+test("foldClients: the versions seen and the newest event's, shown in the client line", () => {
+  const t = (d: number) => new Date(Date.UTC(2026, 8, d)).toISOString();
+  const base = { account_id: ACCT, region: "us-east-1", source: "trail" as const, actor_type: "iam_user" as const, actor: "bob", actor_id: null, target: null, source_ip: null, event_name: "PutObject", channel: "console" as const, client: "Chrome", platform: "macOS", factor: "console_session" as const, failed: false };
+  const [c] = f.foldClients([{ ...base, event_id: "2", event_time: t(3), version: "141.0.0.0" }, { ...base, event_id: "1", event_time: t(1), version: "129.0.0.0" }, { ...base, event_id: "3", event_time: t(2), version: null }]).get(f.actorKey("iam_user", "bob", ACCT))!;
+  assert.deepEqual(c.versions, ["129.0.0.0", "141.0.0.0"]); assert.equal(c.last_version, "141.0.0.0");
+  assert.match(f.clientLine(c), /^Chrome 141\.0\.0\.0 on macOS · console/);
+});
+
 test("iamUserMfa: registered devices first, sign-ins second, none when neither", () => {
   assert.deepEqual(f.iamUserMfa(["app", "passkey"], true, []), { mfa: "passkey", mfa_source: "device" });
   assert.deepEqual(f.iamUserMfa([], false, [{ factors: ["app"] } as any]), { mfa: "app", mfa_source: "sign-in" });
@@ -139,7 +149,7 @@ test("readers and graph nodes: the root row, the fold onto identities, the summa
   const ssoNode = resourceFromSsoUser(db.prepare("select * from inventory_sso_user").get());
   assert.equal(ssoNode.props.mfa, true); assert.equal(ssoNode.props.mfa_type, "app");
   const iamNode = resourceFromIamUser(db.prepare("select * from inventory_iam_user").get());
-  assert.deepEqual(iamNode.props.factors, ["access_key"]); assert.match((iamNode.props.sign_in_clients as string[])[0], /^aws-cli on macOS · cli · access key \(…WXYZ\)/);
+  assert.deepEqual(iamNode.props.factors, ["access_key"]); assert.match((iamNode.props.sign_in_clients as string[])[0], /^aws-cli 2\.17\.0 on macOS · cli · access key \(…WXYZ\)/);
 });
 
 test("groupPeople: an IAM user and an Identity Center user of one name are one person; machines and roots apart", () => {

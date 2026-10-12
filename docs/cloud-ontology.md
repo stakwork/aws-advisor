@@ -731,8 +731,11 @@ Identity Center factor `<user id>#factor:<app|passkey|hardware>`, a removed devi
 Vercel token `<team>/token/<id>`, a member's 2FA `<member>#2fa`. Never a secret.
 
 `AdvisorClient`: a client on a platform through a channel (`client`, `platform`, `channel`, `label`), shared by every
-identity that uses it; it is not a device (CloudTrail names none). (identity)-[:SIGNS_IN_WITH {events, failures,
-first_at, last_at, accounts, factors}]->(client); (credential)-[:USED_FROM {events, last_at}]->(client).
+identity that uses it; it is not a device (CloudTrail names none). The version is not part of the node: `versions` on
+the node lists every version seen (`141.0.0.0` for Chrome, `2.17.0` for aws-cli, Safari's from `Version/`), and each
+edge carries what that identity or credential used. (identity)-[:SIGNS_IN_WITH {events, failures, first_at, last_at,
+accounts, factors, versions, last_version}]->(client); (credential)-[:USED_FROM {events, last_at, last_version}]->(client).
+Sign-ins stored before versions were kept have none; API writes are read again from the stored trail and do.
 
 A source address is an `AdvisorSource {kind: ip}` (id `ip:<address>`, `private` for RFC 1918 and similar ranges):
 (identity)-[:SIGNED_IN_FROM {events, failures, first_at, last_at, clients}]->(source). Two identities from one address

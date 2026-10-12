@@ -6,8 +6,10 @@
  *   was seen asking for when its devices cannot be listed (`observed: true`), Vercel 2FA, a Vercel token. Each with its
  *   own lifecycle: state, created, last used, expiry, removal. (identity)-[:HAS_CREDENTIAL]->(credential).
  * - (:AdvisorClient) a client on a platform through a channel (`aws-cli · macOS · cli`, `Chrome · iOS · console`),
- *   shared by everyone who uses it: not a device (CloudTrail names none). (identity)-[:SIGNS_IN_WITH {events,
- *   failures, first_at, last_at, accounts, factors}]->(client) and (credential)-[:USED_FROM {events, last_at}]->(client).
+ *   shared by everyone who uses it: not a device (CloudTrail names none). The node carries every version seen
+ *   (`versions`); each edge the versions that identity used and the newest event's (`last_version`): Chrome 141.0.0.0.
+ *   (identity)-[:SIGNS_IN_WITH {events, failures, first_at, last_at, accounts, factors, versions, last_version}]->(client)
+ *   and (credential)-[:USED_FROM {events, last_at, last_version}]->(client).
  * - (:AdvisorSource {kind: ip}) a source address sign-ins and calls came from: (identity)-[:SIGNED_IN_FROM {events,
  *   failures, first_at, last_at, clients}]->(source). Two identities from one address is a shared person or office.
  * - (:AdvisorPerson) the person (or machine) behind one or more identities across providers, matched by name, e-mail
@@ -30,9 +32,9 @@ export interface CredentialRow {
   id: string; identity_id: string; kind: "password" | "access_key" | "mfa_app" | "passkey" | "hardware_token" | "mfa" | "api_token" | "ssh_key" | "deploy_key"; provider: "aws" | "vercel" | "github"; name: string;
   state: "active" | "inactive" | "removed" | "expired" | "unknown"; observed: boolean; created_at: string | null; last_used_at: string | null; expires_at: string | null; removed_at: string | null; removed_by: string | null; detail: string | null;
 }
-export interface ClientRow { id: string; client: string; platform: string | null; channel: string }
-export interface SignsInRow { identity_id: string; client_id: string; events: number; failures: number; first_at: string; last_at: string; accounts: string[]; factors: string[] }
-export interface UsedFromRow { credential_id: string; client_id: string; events: number; last_at: string }
+export interface ClientRow { id: string; client: string; platform: string | null; channel: string; versions: string[] }
+export interface SignsInRow { identity_id: string; client_id: string; events: number; failures: number; first_at: string; last_at: string; accounts: string[]; factors: string[]; versions: string[]; last_version: string | null }
+export interface UsedFromRow { credential_id: string; client_id: string; events: number; last_at: string; last_version: string | null }
 export interface PersonRow {
   id: string; name: string; email: string | null; machine: boolean; status: Person["status"]; last_seen_at: string | null; matched_by: string[]; identities: number;
 }
@@ -58,7 +60,10 @@ export interface AccessExtras {
 export function accessGraphRows(actors: Actor[], x: AccessExtras, now = Date.now()): AccessGraph {
   const credentials: CredentialRow[] = []; const clients = new Map<string, ClientRow>(); const signsIn: SignsInRow[] = []; const usedFrom = new Map<string, UsedFromRow>(); const ips: IpRow[] = [];
   const cred = (c: Omit<CredentialRow, "observed" | "removed_at" | "removed_by" | "detail" | "expires_at"> & Partial<CredentialRow>) => { credentials.push({ observed: false, removed_at: null, removed_by: null, detail: null, expires_at: null, ...c }); return c.id; };
-  const use = (credentialId: string, c: ClientUse) => { const id = clientNodeId(c); const k = `${credentialId}>${id}`; const cur = usedFrom.get(k); usedFrom.set(k, { credential_id: credentialId, client_id: id, events: (cur?.events ?? 0) + c.events, last_at: !cur || c.last_at > cur.last_at ? c.last_at : cur.last_at }); };
+  const use = (credentialId: string, c: ClientUse) => {
+    const id = clientNodeId(c); const k = `${credentialId}>${id}`; const cur = usedFrom.get(k); const newer = !cur || c.last_at > cur.last_at;
+    usedFrom.set(k, { credential_id: credentialId, client_id: id, events: (cur?.events ?? 0) + c.events, last_at: newer ? c.last_at : cur.last_at, last_version: (newer ? c.last_version : cur.last_version) ?? cur?.last_version ?? c.last_version ?? null });
+  };
   for (const a of actors) {
     // what the identity proves itself with, and which credential each factor of a client points at
     const byFactor = new Map<string, string[]>();
@@ -100,9 +105,12 @@ export function accessGraphRows(actors: Actor[], x: AccessExtras, now = Date.now
     // the clients, folded across accounts per identity, and the credential each was used with
     const per = new Map<string, SignsInRow>();
     for (const c of a.clients) {
-      const id = clientNodeId(c); clients.set(id, { id, client: c.client, platform: c.platform, channel: c.channel });
-      const cur = per.get(id) ?? { identity_id: a.id, client_id: id, events: 0, failures: 0, first_at: c.first_at, last_at: c.last_at, accounts: [], factors: [] };
-      cur.events += c.events; cur.failures += c.failures; if (c.first_at < cur.first_at) cur.first_at = c.first_at; if (c.last_at > cur.last_at) cur.last_at = c.last_at;
+      const id = clientNodeId(c); const node = clients.get(id) ?? { id, client: c.client, platform: c.platform, channel: c.channel, versions: [] }; clients.set(id, node);
+      for (const v of c.versions ?? []) if (!node.versions.includes(v)) node.versions.push(v);
+      const cur = per.get(id) ?? { identity_id: a.id, client_id: id, events: 0, failures: 0, first_at: c.first_at, last_at: c.last_at, accounts: [], factors: [], versions: [], last_version: c.last_version ?? null };
+      cur.events += c.events; cur.failures += c.failures; if (c.first_at < cur.first_at) cur.first_at = c.first_at;
+      if (c.last_at >= cur.last_at) { cur.last_at = c.last_at; if (c.last_version) cur.last_version = c.last_version; }
+      for (const v of c.versions ?? []) if (!cur.versions.includes(v)) cur.versions.push(v);
       if (c.account_id && !cur.accounts.includes(c.account_id)) cur.accounts.push(c.account_id);
       for (const f of c.factors) if (!cur.factors.includes(f)) cur.factors.push(f);
       per.set(id, cur);
@@ -174,17 +182,17 @@ MERGE (i)-[h:HAS_CREDENTIAL]->(c) SET h.updated_at = $now`;
 const CLIENT_CYPHER = `
 UNWIND $rows AS row
 MERGE (k:AdvisorClient {id: row.id}) ON CREATE SET k.first_seen = $now
-SET k += {client: row.client, platform: row.platform, channel: row.channel, label: row.client + coalesce(' · ' + row.platform, '') + ' · ' + row.channel, native_type: 'client', updated_at: $now}`;
+SET k += {client: row.client, platform: row.platform, channel: row.channel, versions: row.versions, label: row.client + coalesce(' · ' + row.platform, '') + ' · ' + row.channel, native_type: 'client', updated_at: $now}`;
 
 const SIGNS_IN_CYPHER = `
 UNWIND $rows AS row
 MATCH (i:AdvisorResource {id: row.identity_id}) MATCH (k:AdvisorClient {id: row.client_id})
-MERGE (i)-[r:SIGNS_IN_WITH]->(k) SET r += {events: row.events, failures: row.failures, first_at: row.first_at, last_at: row.last_at, accounts: row.accounts, factors: row.factors, updated_at: $now}`;
+MERGE (i)-[r:SIGNS_IN_WITH]->(k) SET r += {events: row.events, failures: row.failures, first_at: row.first_at, last_at: row.last_at, accounts: row.accounts, factors: row.factors, versions: row.versions, last_version: row.last_version, updated_at: $now}`;
 
 const USED_FROM_CYPHER = `
 UNWIND $rows AS row
 MATCH (c:AdvisorCredential {id: row.credential_id}) MATCH (k:AdvisorClient {id: row.client_id})
-MERGE (c)-[u:USED_FROM]->(k) SET u += {events: row.events, last_at: row.last_at, updated_at: $now}`;
+MERGE (c)-[u:USED_FROM]->(k) SET u += {events: row.events, last_at: row.last_at, last_version: row.last_version, updated_at: $now}`;
 
 const IP_CYPHER = `
 UNWIND $rows AS row

@@ -45,6 +45,8 @@ db.exec(`create table if not exists sign_in_events (
 )`);
 db.exec("create index if not exists sign_in_events_actor on sign_in_events(actor_type, actor)");
 addColumn("sign_in_events", "workflow", "text");
+// the client's own version (Chrome 141.0.0.0, aws-cli 2.17.0); null on events stored before it was kept
+addColumn("sign_in_events", "version", "text");
 // changes to Identity Center users (MFA device removed, user disabled, password reset…) from the directory's own events
 db.exec(`create table if not exists directory_changes (
   event_id text primary key, event_time text not null, event_name text not null, what text not null, target_user_id text, target_name text, by text, failed integer not null default 0, fetched_at text not null
@@ -138,9 +140,9 @@ export async function refreshSignIns(onError: (m: string) => void = () => {}, on
   const floor = Date.now() - WINDOW_DAYS * 86_400_000;
   const ssoNames = new Map((db.prepare("select user_id, user_name from inventory_sso_user").all() as { user_id: string; user_name: string }[]).map((r) => [r.user_id, r.user_name]));
   const sso = ssoMeta();
-  const ins = db.prepare(`insert into sign_in_events(event_id, account_id, region, event_time, event_name, source, actor_type, actor, actor_id, channel, client, platform, factor, failed, source_ip, target, workflow, fetched_at)
-    values (@event_id, @account_id, @region, @event_time, @event_name, @source, @actor_type, @actor, @actor_id, @channel, @client, @platform, @factor, @failed, @source_ip, @target, @workflow, datetime('now'))
-    on conflict(event_id) do update set channel = excluded.channel, workflow = coalesce(excluded.workflow, sign_in_events.workflow)`);
+  const ins = db.prepare(`insert into sign_in_events(event_id, account_id, region, event_time, event_name, source, actor_type, actor, actor_id, channel, client, platform, version, factor, failed, source_ip, target, workflow, fetched_at)
+    values (@event_id, @account_id, @region, @event_time, @event_name, @source, @actor_type, @actor, @actor_id, @channel, @client, @platform, @version, @factor, @failed, @source_ip, @target, @workflow, datetime('now'))
+    on conflict(event_id) do update set channel = excluded.channel, workflow = coalesce(excluded.workflow, sign_in_events.workflow), version = coalesce(excluded.version, sign_in_events.version)`);
   const insChange = db.prepare(`insert into directory_changes(event_id, event_time, event_name, what, target_user_id, target_name, by, failed, device_id, fetched_at)
     values (@event_id, @event_time, @event_name, @what, @target_user_id, @target_name, @by, @failed, @device_id, datetime('now'))
     on conflict(event_id) do update set target_name = coalesce(excluded.target_name, directory_changes.target_name), device_id = coalesce(excluded.device_id, directory_changes.device_id)`);
@@ -183,7 +185,7 @@ export async function refreshSignIns(onError: (m: string) => void = () => {}, on
           db.transaction(() => {
             for (const ev of evs) {
               if (/directory|identitystore/.test(String(q.AttributeValue))) { const c = directoryChange(ev, ssoNames); if (c) stored += insChange.run({ ...c, failed: c.failed ? 1 : 0, device_id: c.device_id ?? null }).changes; continue; }
-              const s = signInFromEvent({ ...ev, region, account_id: t.account_id }, ssoNames); if (s) stored += ins.run({ ...s, failed: s.failed ? 1 : 0, workflow: s.workflow ?? null }).changes;
+              const s = signInFromEvent({ ...ev, region, account_id: t.account_id }, ssoNames); if (s) stored += ins.run({ ...s, failed: s.failed ? 1 : 0, workflow: s.workflow ?? null, version: s.version ?? null }).changes;
             }
           })();
           const newest = evs.map((e) => e.time).sort().pop(); if (newest) marks[mk] = newest;

@@ -20,38 +20,43 @@ export const FACTOR_WORDS: Record<string, string> = {
   sso: "Identity Center session", federated: "federated", access_key: "access key", session: "temporary credentials", console_session: "console session",
 };
 
-export interface ClientInfo { client: string; platform: string | null; channel: Channel }
+/** `version` is the client's own (Chrome 141.0.0.0, aws-cli 2.17.0); null when the user agent names none. */
+export interface ClientInfo { client: string; platform: string | null; channel: Channel; version: string | null }
 
 /**
  * A CloudTrail user agent as the client, the platform it runs on and the channel. Browsers are the console; the
- * AWS CLI, SDKs and infrastructure tools name themselves and carry `os/<name>` and `exec-env/<where>`. Pure.
+ * AWS CLI, SDKs and infrastructure tools name themselves and carry `os/<name>` and `exec-env/<where>`. The version
+ * is the client's: a browser's from its own token (Safari's from `Version/`), a tool's from `<name>/<version>`. Pure.
  */
 export function parseUserAgent(ua: string | null | undefined): ClientInfo {
   const s = String(ua || "").trim();
-  if (!s) return { client: "unknown", platform: null, channel: "unknown" };
-  if (/^(console|signin)\.amazonaws\.com$/i.test(s)) return { client: "AWS console", platform: null, channel: "console" };
+  if (!s) return { client: "unknown", platform: null, channel: "unknown", version: null };
+  if (/^(console|signin)\.amazonaws\.com$/i.test(s)) return { client: "AWS console", platform: null, channel: "console", version: null };
   // AWS acting for someone: a service name, "AWS Internal", or the access portal's backend federating a person into the
   // console (GetSigninToken, a Java Jersey client whose version placeholder was never filled in)
-  if (s === "AWS Internal" || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.amazonaws\.com$/i.test(s) || /^aws-internal\//i.test(s) || /^Jersey\/\$\{project\.version\}/.test(s)) return { client: "AWS service", platform: null, channel: "aws" };
+  if (s === "AWS Internal" || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.amazonaws\.com$/i.test(s) || /^aws-internal\//i.test(s) || /^Jersey\/\$\{project\.version\}/.test(s)) return { client: "AWS service", platform: null, channel: "aws", version: null };
   const env = /exec-env\/([A-Za-z0-9_.-]+)/.exec(s)?.[1] ?? "";
   const os = (/\bos\/([A-Za-z0-9_]+)/.exec(s)?.[1] ?? "").toLowerCase();
   const platform = /CloudShell/i.test(env) ? "CloudShell" : /^AWS_Lambda/i.test(env) ? "AWS Lambda" : /^AWS_ECS/i.test(env) ? "AWS ECS" : /^AWS_EC2|^EC2/i.test(env) ? "AWS EC2"
     : os === "macos" || os === "darwin" ? "macOS" : os === "linux" ? "Linux" : os === "windows" || os === "win32" ? "Windows" : os === "ios" ? "iOS" : os === "android" ? "Android" : null;
+  const ver = (re: RegExp) => re.exec(s)?.[1] ?? null;
   const browserOs = /iPhone/.test(s) ? "iOS" : /iPad/.test(s) ? "iPadOS" : /Android/.test(s) ? "Android" : /Macintosh|Mac OS X/.test(s) ? "macOS" : /Windows/.test(s) ? "Windows" : /CrOS/.test(s) ? "ChromeOS" : /Linux/.test(s) ? "Linux" : null;
-  if (/console.?mobile|AWSConsoleMobile/i.test(s)) return { client: "AWS Console mobile app", platform: browserOs ?? platform, channel: "console" };
-  if (/Terraform\/|terraform-provider-aws/i.test(s)) return { client: "Terraform", platform, channel: "iac" };
-  if (/pulumi/i.test(s)) return { client: "Pulumi", platform, channel: "iac" };
-  if (/aws-cdk|\bcdk\//i.test(s)) return { client: "AWS CDK", platform, channel: "iac" };
-  if (/^aws-cli\/|\baws-cli\//i.test(s)) return { client: "aws-cli", platform, channel: "cli" };
-  if (/^Boto3\//i.test(s)) return { client: "boto3", platform, channel: "sdk" };
-  if (/^Botocore\//i.test(s)) return { client: "botocore", platform, channel: "sdk" };
+  if (/console.?mobile|AWSConsoleMobile/i.test(s)) return { client: "AWS Console mobile app", platform: browserOs ?? platform, channel: "console", version: ver(/AWSConsoleMobile\/([\w.-]+)/i) };
+  if (/Terraform\/|terraform-provider-aws/i.test(s)) return { client: "Terraform", platform, channel: "iac", version: ver(/Terraform\/([\w.-]+)/i) };
+  if (/pulumi/i.test(s)) return { client: "Pulumi", platform, channel: "iac", version: ver(/pulumi\/([\w.-]+)/i) };
+  if (/aws-cdk|\bcdk\//i.test(s)) return { client: "AWS CDK", platform, channel: "iac", version: ver(/(?:aws-cdk|\bcdk)\/([\w.-]+)/i) };
+  if (/^aws-cli\/|\baws-cli\//i.test(s)) return { client: "aws-cli", platform, channel: "cli", version: ver(/aws-cli\/([\w.-]+)/i) };
+  if (/^Boto3\//i.test(s)) return { client: "boto3", platform, channel: "sdk", version: ver(/^Boto3\/([\w.-]+)/i) };
+  if (/^Botocore\//i.test(s)) return { client: "botocore", platform, channel: "sdk", version: ver(/^Botocore\/([\w.-]+)/i) };
   const sdk = /aws-sdk-(js|nodejs|go|java|ruby|dotnet|php|rust|cpp|kotlin|swift)/i.exec(s)?.[1]?.toLowerCase();
-  if (sdk) return { client: `AWS SDK (${sdk === "nodejs" ? "js" : sdk})`, platform, channel: "sdk" };
+  if (sdk) return { client: `AWS SDK (${sdk === "nodejs" ? "js" : sdk})`, platform, channel: "sdk", version: ver(/aws-sdk-[a-z]+(?:-v\d)?\/([\w.-]+)/i) };
   if (/^Mozilla\//.test(s)) {
     const browser = /Edg\//.test(s) ? "Edge" : /OPR\//.test(s) ? "Opera" : /Firefox\//.test(s) ? "Firefox" : /CriOS\/|Chrome\//.test(s) ? "Chrome" : /Safari\//.test(s) ? "Safari" : "browser";
-    return { client: browser, platform: browserOs, channel: "console" };
+    const version = browser === "Edge" ? ver(/Edg\/([\d.]+)/) : browser === "Opera" ? ver(/OPR\/([\d.]+)/) : browser === "Firefox" ? ver(/Firefox\/([\d.]+)/)
+      : browser === "Chrome" ? ver(/(?:CriOS|Chrome)\/([\d.]+)/) : browser === "Safari" ? ver(/Version\/([\d.]+)/) : null;
+    return { client: browser, platform: browserOs, channel: "console", version };
   }
-  return { client: s.split(/[\/\s]/)[0].slice(0, 40) || "unknown", platform, channel: "sdk" };
+  return { client: s.split(/[\/\s]/)[0].slice(0, 40) || "unknown", platform, channel: "sdk", version: ver(/^[^\/\s]+\/([\w.-]{1,40})/) };
 }
 
 /** Identity Center's CredentialType as a factor. Pure. */
@@ -68,7 +73,7 @@ export function factorOfCredentialType(t: unknown): Factor | null {
 export interface SignIn {
   event_id: string; account_id: string | null; region: string | null; event_time: string; event_name: string; source: "signin" | "sso" | "trail";
   actor_type: "root" | "iam_user" | "sso_user" | "role" | "unknown"; actor: string; actor_id: string | null;
-  channel: Channel; client: string; platform: string | null; factor: Factor | null; failed: boolean; source_ip: string | null; target: string | null;
+  channel: Channel; client: string; platform: string | null; version?: string | null; factor: Factor | null; failed: boolean; source_ip: string | null; target: string | null;
   /** Identity Center's AuthWorkflowID: one sign-in, across its password and second-factor challenges */
   workflow?: string | null;
 }
@@ -97,7 +102,7 @@ const IDC_EVENTS = new Set(["CredentialChallenge", "CredentialVerification", "Us
 export function signInFromEvent(ev: { id: string; name: string; time: string; region: string | null; account_id: string | null; detail: any }, ssoNames: Map<string, string> = new Map()): SignIn | null {
   const d = ev.detail ?? {}; const ui = d.userIdentity ?? {}; const extra = d.additionalEventData ?? {};
   const ua = parseUserAgent(d.userAgent);
-  const base = { event_id: ev.id, account_id: ev.account_id ?? (ui.accountId ? String(ui.accountId) : null), region: ev.region, event_time: ev.time, event_name: ev.name, source_ip: d.sourceIPAddress ? String(d.sourceIPAddress) : null, client: ua.client, platform: ua.platform };
+  const base = { event_id: ev.id, account_id: ev.account_id ?? (ui.accountId ? String(ui.accountId) : null), region: ev.region, event_time: ev.time, event_name: ev.name, source_ip: d.sourceIPAddress ? String(d.sourceIPAddress) : null, client: ua.client, platform: ua.platform, version: ua.version };
   if (ev.name === "ConsoleLogin") {
     const who = actorOf(ui, base.account_id, null, ssoNames);
     const failed = d.responseElements?.ConsoleLogin === "Failure" || Boolean(d.errorMessage) || Boolean(d.errorCode);
@@ -134,7 +139,7 @@ export function signInFromWrite(r: { event_id: string; account_id: string | null
   const who = actorOf({ type: r.identity_type, arn: r.principal_arn, userName: r.username, accountId: r.account_id }, r.account_id, null, new Map());
   if (who.actor_type === "role" || who.actor_type === "unknown") return null;
   const factor: Factor = ua.channel === "console" ? "console_session" : who.actor_type === "sso_user" ? "sso" : r.key_kind === "AKIA" ? "access_key" : "session";
-  return { event_id: `trail:${r.event_id}`, account_id: r.account_id, region: r.region, event_time: r.event_time, event_name: r.event_name, source: "trail", ...who, channel: ua.channel, client: ua.client, platform: ua.platform, factor, failed: Boolean(r.error_code), source_ip: r.source_ip, target: factor === "access_key" && r.key_tail ? `key …${r.key_tail}` : null };
+  return { event_id: `trail:${r.event_id}`, account_id: r.account_id, region: r.region, event_time: r.event_time, event_name: r.event_name, source: "trail", ...who, channel: ua.channel, client: ua.client, platform: ua.platform, version: ua.version, factor, failed: Boolean(r.error_code), source_ip: r.source_ip, target: factor === "access_key" && r.key_tail ? `key …${r.key_tail}` : null };
 }
 
 /** Identity Center sign-ins (one per AuthWorkflowID) and how many of them asked for a second factor. Pure. */
@@ -148,6 +153,8 @@ export function workflowMfa(events: Pick<SignIn, "workflow" | "factor" | "failed
 export interface ClientUse {
   account_id: string | null; channel: Channel; client: string; platform: string | null; factors: string[]; events: number; failures: number;
   first_at: string; last_at: string; last_ip: string | null; keys: string[]; via: ("sign-in" | "api")[];
+  /** the client versions seen, oldest first, and the one on the newest event; absent on rows stored before versions were kept */
+  versions?: string[]; last_version?: string | null;
 }
 export const actorKey = (type: string, name: string, account: string | null) => (type === "sso_user" ? `sso_user|${name.toLowerCase()}` : `${type}|${account ?? ""}|${name}`);
 
@@ -158,10 +165,11 @@ export function foldClients(events: SignIn[]): Map<string, ClientUse[]> {
     const ak = actorKey(e.actor_type, e.actor, e.account_id);
     const ck = `${e.account_id ?? ""}|${e.channel}|${e.client}|${e.platform ?? ""}`;
     const m = byActor.get(ak) ?? new Map<string, ClientUse>(); byActor.set(ak, m);
-    const c = m.get(ck) ?? { account_id: e.account_id, channel: e.channel, client: e.client, platform: e.platform, factors: [], events: 0, failures: 0, first_at: e.event_time, last_at: e.event_time, last_ip: null, keys: [], via: [] };
+    const c = m.get(ck) ?? { account_id: e.account_id, channel: e.channel, client: e.client, platform: e.platform, factors: [], events: 0, failures: 0, first_at: e.event_time, last_at: e.event_time, last_ip: null, keys: [], via: [], versions: [], last_version: null };
     c.events++; if (e.failed) c.failures++;
     if (!e.failed && e.factor && !c.factors.includes(e.factor)) c.factors.push(e.factor);
-    if (e.event_time >= c.last_at) { c.last_at = e.event_time; if (e.source_ip) c.last_ip = e.source_ip; }
+    if (e.event_time >= c.last_at) { c.last_at = e.event_time; if (e.source_ip) c.last_ip = e.source_ip; if (e.version) c.last_version = e.version; }
+    if (e.version && !c.versions!.includes(e.version)) c.versions!.push(e.version);
     const tail = e.target?.startsWith("key …") ? e.target.slice("key …".length) : null;
     if (tail && !c.keys.includes(tail)) c.keys.push(tail);
     const via = e.source === "trail" ? "api" : "sign-in"; if (!c.via.includes(via)) c.via.push(via);
@@ -204,7 +212,7 @@ export function strongestMfa(clients: ClientUse[]): "passkey" | "hardware" | "ap
 }
 
 /** One line per client for the graph and the agent: `aws-cli on macOS · cli · access key · 42× · last 2026-10-04`. Pure. */
-export const clientLine = (c: ClientUse) => `${c.client}${c.platform ? ` on ${c.platform}` : ""} · ${c.channel}${c.factors.length ? ` · ${c.factors.map((f) => FACTOR_WORDS[f] ?? f).join(" + ")}` : ""}${c.keys.length ? ` (${c.keys.map((k) => `…${k}`).join(", ")})` : ""} · ${c.events}×${c.failures ? ` (${c.failures} failed)` : ""} · last ${c.last_at.slice(0, 10)}${c.account_id ? ` · ${c.account_id}` : ""}`;
+export const clientLine = (c: ClientUse) => `${c.client}${c.last_version ? ` ${c.last_version}` : ""}${c.platform ? ` on ${c.platform}` : ""} · ${c.channel}${c.factors.length ? ` · ${c.factors.map((f) => FACTOR_WORDS[f] ?? f).join(" + ")}` : ""}${c.keys.length ? ` (${c.keys.map((k) => `…${k}`).join(", ")})` : ""} · ${c.events}×${c.failures ? ` (${c.failures} failed)` : ""} · last ${c.last_at.slice(0, 10)}${c.account_id ? ` · ${c.account_id}` : ""}`;
 
 /** The root row of a credential report (CSV): password and access key last use, MFA. Pure. */
 export function rootFromCredentialReport(csv: string): { password_last_used: string | null; key_last_used: string | null; mfa_active: boolean | null; keys_active: number } | null {
