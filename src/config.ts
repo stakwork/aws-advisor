@@ -53,6 +53,7 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "githubInstallationId", env: "GITHUB_INSTALLATION_ID", kind: "string", def: "", group: "GitHub", label: "Installation id", help: "The number at the end of the installation's URL (Org settings › GitHub Apps › Configure)." },
   { key: "githubSeatUsd", env: "GITHUB_SEAT_USD", kind: "number", def: "21", min: 0, max: 1000, group: "GitHub", label: "Seat price (USD/month)", help: "What one seat costs on the org's plan (Enterprise Cloud: 21). GitHub's API gives the seat count, not the price." },
   { key: "githubAppPrivateKey", env: "GITHUB_APP_PRIVATE_KEY", kind: "secret", def: "", group: "GitHub", label: "App private key", help: "The App's private key (.pem). Pasted on one line it is rebuilt; never shown again." },
+  { key: "repoTagKeys", env: "REPO_TAG_KEYS", kind: "string", def: "repository,repo,git_repository,source_repo", group: "Inventory", label: "Repository tag keys", help: "Comma-separated tag keys read as a resource's source repository. Applies to functions today (function_facts, BUILT_FROM in the graph); never becomes a node property name, so a key may clash with one (kind, url) safely." },
   { key: "spendCron", env: "SPEND_CRON", kind: "cron", def: "15 */6 * * *", group: "Schedules", label: "Spend refresh", help: "Cost Explorer, at most every 6 hours." },
   { key: "logsCron", env: "LOGS_CRON", kind: "cron", def: "50 6 * * *", group: "Schedules", label: "Logs and CloudTrail", help: "Log groups, ingestion, write events (3 to 4 minutes)." },
   { key: "baselineCron", env: "BASELINE_CRON", kind: "cron", def: "40 6 * * *", group: "Schedules", label: "Baselines", help: "What is typical per gateway, instance and service." },
@@ -158,6 +159,7 @@ export function validateRuntime(key: string, value: string): string {
       if (key === "actRoleArn" && v && (!ROLE_ARN_RE.test(v) || /\s/.test(v))) throw new Error("arn:aws:iam::<12 digits>:role/<name>, or empty");
       if (key === "doormanPublicIp" && v && !/^(\d{1,3}\.){3}\d{1,3}$/.test(v)) throw new Error("an IPv4 address, or empty");
       if (key === "probeSignals") return serialiseSignals(parseSignals(v));
+      if (key === "repoTagKeys") { for (const part of v.split(",").map((s) => s.trim()).filter(Boolean)) if (!/^[A-Za-z0-9_.:/=+@ -]{1,128}$/.test(part)) throw new Error(`"${part}" is not a valid tag key`); return v; }
       // a secret may be a whole key file (a GitHub App private key is ~1,700 characters); anything else stays short
       if (v.length > (spec.kind === "secret" ? 16_000 : 500)) throw new Error(spec.kind === "secret" ? "too long (16,000 characters at most)" : "too long (500 characters at most)"); return v;
   }
@@ -245,6 +247,7 @@ export const config = {
   get githubInstallationId(): string { return rt("githubInstallationId").trim(); },
   get githubAppPrivateKey(): string { return rt("githubAppPrivateKey"); },
   get githubSeatUsd(): number { return rtNum("githubSeatUsd"); },
+  get repoTagKeys(): string { return rt("repoTagKeys") || "repository,repo,git_repository,source_repo"; },
   get spendCron(): string { return rt("spendCron"); },
   get logsCron(): string { return rt("logsCron"); },
   get baselineCron(): string { return rt("baselineCron"); },

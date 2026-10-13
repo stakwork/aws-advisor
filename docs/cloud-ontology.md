@@ -294,6 +294,21 @@ Serverless code: a Lambda, a Vercel serverless or edge function, a Cloud Functio
 Edges: `EXPOSES` → `AdvisorEndpoint` (its URL); `PART_OF` → `AdvisorDeployment` (a Vercel function belongs to a
 deployment); `USES_SECRET`; `RUNS_AS`.
 
+**Function facts** (`function_facts` MCP tool, `src/function_facts.ts`; collected on AWS into `inventory_lambda`,
+`src/lambda_inventory.ts` + `src/adapters/aws/functions.ts`): per-function network config, triggers (both polled
+sources such as queues and streams, and push invokers granted by the function's invoke permissions), execution
+identity, layers, package size, environment variable **names only** (values are never stored or returned anywhere
+in the advisor), log group with its stored bytes, and the repository its stack or a tag names (`repository`,
+`repo`, `git_repository`, `source_repo` by default; configurable in Settings as "Repository tag keys"). The graph
+edges this produces (`RUNS_AS`, `TRIGGERED_BY`, `BUILT_FROM` → `AdvisorRepository`, `SHIPS_LOGS_TO`) are a
+follow-up; today everything is served straight from SQLite, so it works without Neo4j.
+
+> **Region limitation.** `inventory_lambda` is keyed on `(account_id, name)`, not `(account_id, name, region)`,
+> because a Lambda function name is unique per account only on AWS. A function deployed under the same name in two
+> regions of one account therefore has a single row (the refresh detects this and records
+> `facts_missing: {fact: "region_collision", reason: "also in <regions>"}` on the row it keeps, rather than
+> silently dropping one region). Re-keying the table is a breaking schema change and is out of scope for now.
+
 ### AdvisorDeployment
 
 **One unit of deployed software**, not the platform that hosts it: a Kubernetes Deployment, StatefulSet or DaemonSet,

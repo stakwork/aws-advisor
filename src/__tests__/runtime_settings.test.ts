@@ -32,3 +32,18 @@ test("runtime settings: a saved value wins over the environment, a reset falls b
   assert.throws(() => validateRuntime("neo4jUri", "neo4j.sphinx:7687"), /URL/);
   assert.throws(() => validateRuntime("nope", "x"), /unknown setting/);
 });
+
+test("repoTagKeys: comma-separated, each key validated, the getter splits and trims", () => {
+  assert.equal(validateRuntime("repoTagKeys", "repository, repo , git_repository"), "repository, repo , git_repository");
+  assert.throws(() => validateRuntime("repoTagKeys", "repository, bad key!"), /not a valid tag key/);
+  const key = "cfg:repoTagKeys";
+  const before = db.prepare("select value from settings where key = ?").get(key);
+  try {
+    db.prepare("insert into settings(key, value) values (?, ?) on conflict(key) do update set value = excluded.value").run(key, "repository, repo ,custom_key");
+    assert.deepEqual(config.repoTagKeys.split(",").map((s) => s.trim()), ["repository", "repo", "custom_key"]);
+  } finally {
+    db.prepare("delete from settings where key = ?").run(key);
+    if (before) db.prepare("insert into settings(key, value) values (?, ?)").run(key, (before as any).value);
+  }
+  assert.equal(config.repoTagKeys, "repository,repo,git_repository,source_repo");
+});

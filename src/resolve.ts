@@ -296,7 +296,8 @@ volumes, security groups, what depends on it), aws_instance_history for a month 
 containers (the evidence that it is really idle or really busy), aws_baseline for what is typical, aws_cloudtrail_changes
 for who touched the resource recently (a plan must not fight an ongoing change), aws_log_groups when the finding is
 about logs, aws_price_lookup for the real on-demand prices of the current and the
-target SKU, aws_instance_probe or aws_instance_inventory for what runs on an instance, aws_resource_cost_history and
+target SKU, aws_function_facts for a function's network, triggers, identity, layers, package size, log group and
+repository, aws_instance_probe or aws_instance_inventory for what runs on an instance, aws_resource_cost_history and
 aws_findings_for_resource and aws_recommendation_history for history, learn_concept for the full text of a concept id.
 For an RDS or Aurora resource the facts carry "load": fourteen days of I/O, capacity (ACU floor, ceiling, time at
 the ceiling, bursts and their cadence, whether the database fits in the buffer cache), the top statements from

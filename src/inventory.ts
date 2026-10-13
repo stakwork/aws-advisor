@@ -429,7 +429,7 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     }
   })();
 
-  const lambda = await refreshLambdaInventory((m) => errors.push(m));
+  const lambda = await refreshLambdaInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   const dynamodb = await refreshDynamodbInventory((m) => errors.push(m), (l) => console.log(`[inventory] ${l}`));
   console.log(`[inventory] dynamodb: ${dynamodb} table(s)`);
   const ebsVolumes = await refreshEbsInventory((m) => errors.push(m));

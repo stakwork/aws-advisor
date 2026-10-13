@@ -9,6 +9,7 @@
     "cloudtrail_changes",
     "log_groups",
     "price_lookup",
+    "function_facts",
     "cloudwatch_metric",
     "instance_probe",
     "recommendation_history",

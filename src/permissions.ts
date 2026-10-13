@@ -193,6 +193,8 @@ export const TABLE_ACTIONS: Record<string, string> = {
   aws_sns_topic_subscription: "sns:ListSubscriptions",
   aws_efs_file_system: "elasticfilesystem:DescribeFileSystems",
   aws_efs_mount_target: "elasticfilesystem:DescribeMountTargets",
+  // function facts (src/lambda_inventory.ts, src/adapters/aws/functions.ts): what triggers a function
+  aws_lambda_event_source_mapping: "lambda:ListEventSourceMappings",
 };
 
 /** Service names as the AWS SDK prints them in "operation error <Service>: <Operation>" -> IAM prefix. */
@@ -470,6 +472,8 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketPolicyStatus",
         "s3:ListBucketVersions", "s3:ListBucketMultipartUploads", "s3:GetMetricsConfiguration",
         "lambda:GetFunction*",
+        // function facts: what invokes a function (its resource policy) and what polls it (event source mappings)
+        "lambda:GetPolicy", "lambda:ListEventSourceMappings",
         "ecr:DescribeImages", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
         "eks:Describe*", "eks:List*",
         "dynamodb:Describe*", "dynamodb:List*",

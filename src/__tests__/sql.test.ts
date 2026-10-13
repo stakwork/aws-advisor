@@ -32,6 +32,25 @@ test("the vercel connection is readable, qualified like aws_* tables, minus the 
   bad("select * from vercel.vercel_secret");
 });
 
+test("the raw-config guard blocks every known way to read environment_variables / template_body / parameters off aws_lambda_function, aws_lambda_version and aws_cloudformation_stack", () => {
+  ok("select name, runtime, memory_size from aws_lambda_function"); // explicit columns still work
+  ok("select name, status from aws_cloudformation_stack");
+  bad("select name, environment_variables from aws_lambda_function");
+  bad('select name, "environment_variables" from aws_lambda_function'); // quoted bypass
+  bad("select f.* from aws_lambda_function f");
+  bad("select * from aws_lambda_function");
+  bad("select f from aws_lambda_function f"); // bare alias used as a value
+  bad("select to_jsonb(f) from aws_lambda_function f");
+  bad("select row_to_json(f) from aws_lambda_function f");
+  bad("select json_agg(f) from aws_lambda_function f");
+  bad('select * from "aws_lambda_function"'); // quoted table name
+  bad("with x as (select f.* from aws_lambda_function f) select * from x");
+  bad("select name, environment_variables from aws_lambda_version");
+  bad("select name, template_body from aws_cloudformation_stack");
+  bad("select name, parameters from aws_cloudformation_stack");
+  bad("select * from aws_cloudformation_stack");
+});
+
 test("Cost Explorer tables are routed to the parent's connection once members exist; everything else stays on the aggregator", async () => {
   const { routeBillingTables } = await import("../steampipe.js");
   const sql = "select sum(unblended_cost_amount) from advisor.aws_cost_by_account_monthly c join advisor.aws_ec2_instance i on true where exists (select 1 from advisor.aws_cost_usage)";
