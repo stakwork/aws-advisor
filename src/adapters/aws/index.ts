@@ -10,6 +10,7 @@ import { awsOnboarding } from "./onboarding.js";
 import { ALL_BENCHMARKS, DEFAULT_BENCHMARKS } from "../../powerpipe.js";
 import { CONTROL_SOURCES } from "../../playbooks.js";
 import { TELEMETRY, lambdaArn, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRole, resourceFromRootUser, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromService, resourceFromZone, type RoleMap } from "./resources.js";
+import { repoTagKeysList } from "../../function_facts.js";
 
 /**
  * The AWS adapter: Steampipe and the SDK behind the generic model. Credentials and the parent/member registry are
@@ -44,6 +45,7 @@ const AWS_LAYERS: ProviderAdapter["layers"] = [
     { name: "capacity patterns", mirror: async () => (await import("../../graph_mirror.js")).mirrorCapacityPatterns() },
     { name: "network", after_run: true, mirror: async () => (await import("../../graph_network.js")).mirrorNetwork() },
     { name: "clusters", after_run: true, mirror: async () => (await import("../../graph_clusters.js")).mirrorClusters() },
+    { name: "functions", after_run: true, mirror: async () => (await import("../../graph_functions.js")).mirrorFunctions() },
     { name: "threat findings", mirror: async () => (await import("../../graph_services.js")).mirrorThreatFindings() },
     { name: "notifications", mirror: async () => (await import("../../graph_mirror.js")).mirrorCloudNotifications() },
     { name: "software", mirror: async () => (await import("../../graph_software.js")).mirrorSoftware() },
@@ -186,7 +188,7 @@ function rawResources(account: string, roles: ReturnType<typeof roleMap>): Resou
       ...rows("select * from inventory_rds").map((r) => resourceFromRds(r, roles)),
       ...rows("select * from inventory_elasticache").map((r) => resourceFromElasticache(r, roles)),
       ...rows("select * from inventory_elb").map((r) => resourceFromElb(r, roles)),
-      ...rows("select * from inventory_lambda").map((r) => resourceFromLambda(r, account, roles)),
+      ...rows("select * from inventory_lambda").map((r) => resourceFromLambda(r, account, roles, repoTagKeysList())),
       ...rows("select * from inventory_dynamodb").map((r) => resourceFromDynamodb(r, account, roles)),
       ...rows("select * from inventory_s3").map((r) => resourceFromS3(r, roles)),
       ...rows("select * from inventory_ebs").map((r) => resourceFromEbs(r, roles)),

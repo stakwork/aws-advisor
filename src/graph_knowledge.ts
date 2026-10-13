@@ -222,18 +222,41 @@ MERGE (o)-[:COVERS]->(t)`, { rows: overlays, now });
   const observedNames = [...observed.keys()].filter((n) => !have.has(n));
   if (observedNames.length) for (const chunk of Array.from({ length: Math.ceil(observedNames.length / 200) }, (_, i) => observedNames.slice(i * 200, i * 200 + 200)))
     groups.push(...(db.prepare(`select name, region, account_id, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where name in (${chunk.map(() => "?").join(",")})`).all(...chunk) as any[]));
+  // a function's own log group, so SHIPS_LOGS_TO {via: 'function_config'} below has a node to attach to; only when it is storing something (stored_bytes > 0), capped at 500, and only names this pass has not already selected (so the names Jev sees do not grow with the number of functions)
+  const functionLogGroups = new Map<string, { function_id: string; account_id: string | null; region: string | null }[]>();
+  for (const r of db.prepare("select arn, region, account_id, log_group from inventory_lambda where gone = 0 and log_group is not null").all() as any[]) {
+    const list = functionLogGroups.get(r.log_group) ?? [];
+    list.push({ function_id: String(r.arn), account_id: r.account_id ? String(r.account_id) : null, region: r.region ?? null });
+    functionLogGroups.set(r.log_group, list);
+  }
+  const haveAfterObserved = new Set([...have, ...observedNames]);
+  const functionOnlyNames = new Set<string>();
+  const candidateFunctionNames = [...functionLogGroups.keys()].filter((n) => !haveAfterObserved.has(n));
+  if (candidateFunctionNames.length) {
+    const checked: string[] = [];
+    for (const chunk of Array.from({ length: Math.ceil(candidateFunctionNames.length / 200) }, (_, i) => candidateFunctionNames.slice(i * 200, i * 200 + 200)))
+      checked.push(...(db.prepare(`select name from log_groups where stored_bytes > 0 and name in (${chunk.map(() => "?").join(",")})`).all(...chunk) as { name: string }[]).map((r) => r.name));
+    const toAdd = checked.slice(0, 500);
+    for (const n of toAdd) functionOnlyNames.add(n);
+    if (toAdd.length) for (const chunk of Array.from({ length: Math.ceil(toAdd.length / 200) }, (_, i) => toAdd.slice(i * 200, i * 200 + 200)))
+      groups.push(...(db.prepare(`select name, region, account_id, retention_days, stored_bytes, ingest_bytes_day, ingest_days from log_groups where name in (${chunk.map(() => "?").join(",")})`).all(...chunk) as any[]));
+  }
   const tags = logGroupTags();
+  let skippedLogGroupLinks = 0;
   const lg = groups.map((g) => {
     const a = attributeLogGroup(g.name, attribution, tags.get(g.name) || {});
     const t = tags.get(g.name);
+    const groupAccount = g.account_id ? String(g.account_id) : account;
+    const links = (functionLogGroups.get(g.name) || []).filter((l) => { const ok = (l.account_id ?? account) === groupAccount && l.region === g.region; if (!ok) skippedLogGroupLinks++; return ok; });
     return { id: g.name, name: g.name, region: g.region, retention_days: g.retention_days, stored_gb: (g.stored_bytes || 0) / 1e9, ingest_gb_day: g.ingest_bytes_day != null ? g.ingest_bytes_day / 1e9 : null,
       ingest_usd_month: g.ingest_bytes_day != null ? Math.round((g.ingest_bytes_day / 1e9) * 30 * LOG_INGEST_PRICE * 100) / 100 : null, storage_usd_month: Math.round(((g.stored_bytes || 0) / 1e9) * LOG_STORAGE_PRICE * 100) / 100,
       owner: a.owner, how: a.how, candidates: a.candidates, tags: t ? JSON.stringify(t).slice(0, 2000) : null, jev_choice: null as string | null, jev_confidence: null as number | null,
-      observed: (observed.get(g.name) || []).map((o) => ({ instance_id: o.instance_id, via: o.via, source: o.source, at: o.at })), account_id: g.account_id ? String(g.account_id) : account };
+      observed: (observed.get(g.name) || []).map((o) => ({ instance_id: o.instance_id, via: o.via, source: o.source, at: o.at })), function_links: links.map((l) => ({ function_id: l.function_id })), account_id: groupAccount };
   });
-  // the groups the evidence left unowned go to Jev, which picks a system from the name, the tags and the account's systems, or says none
+  if (skippedLogGroupLinks) console.error(`[graph] functions: skipped ${skippedLogGroupLinks} log group link(s): log group node belongs to another account/region`);
+  // the groups the evidence left unowned go to Jev, which picks a system from the name, the tags and the account's systems, or says none; a name added only through the function map keeps its rules-based attribution and never reaches Jev
   let jevAttributed = 0;
-  const unowned = lg.filter((g) => !g.owner);
+  const unowned = lg.filter((g) => !g.owner && !functionOnlyNames.has(g.name));
   if (unowned.length) {
     try {
       const { jevAttributeLogGroups } = await import("./log_attribution_jev.js");
@@ -259,6 +282,8 @@ OPTIONAL MATCH (s:KnSystem {id: row.owner})
 FOREACH (_ IN CASE WHEN s IS NULL THEN [] ELSE [1] END | MERGE (s)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
 FOREACH (_ IN CASE WHEN s IS NULL THEN [1] ELSE [] END | MERGE (a:AdvisorAccount {id: row.account_id}) MERGE (a)-[e:SHIPS_LOGS_TO]->(g) SET e.gb_day = row.ingest_gb_day, e.usd_month = row.ingest_usd_month, e.price_per_gb = ${LOG_INGEST_PRICE}, e.attributed_by = row.how)
 ${LINK_BY_ID({ from: "g", carry: ["row"], list: "row.observed", id: "li.instance_id", rel: "SHIPS_LOGS_TO", reverse: true, set: "e.via = li.via, e.source = li.source, e.observed_at = li.at, e.attributed_by = 'observed'", namedBy: "log_group", guessed: "'instance'" })}
+WITH g, row
+${LINK_BY_ID({ from: "g", carry: ["row"], list: "row.function_links", id: "li.function_id", rel: "SHIPS_LOGS_TO", reverse: true, set: "e.via = 'function_config', e.attributed_by = 'configured', e.updated_at = $now", namedBy: "log_group", guessed: "'function'" })}
 WITH g, row
 UNWIND [o IN row.observed WHERE o.via STARTS WITH 'docker:'] AS o
 MATCH (c:AdvisorContainer {id: 'container:' + o.instance_id + ':' + substring(o.via, 7)})

@@ -110,7 +110,8 @@ SET x = row.props SET x.via = row.via, x.updated_at = $now`;
 const REPOSITORY_CYPHER = `
 UNWIND $rows AS row
 MERGE (r:AdvisorRepository {id: row.id}) ON CREATE SET r.first_seen = $now
-SET r += {name: row.name, provider: 'github', native_type: 'repository', native_id: row.name, updated_at: $now}`;
+SET r += {name: row.name, provider: 'github', native_type: 'repository', native_id: row.name, updated_at: $now}
+REMOVE r.named_by`;
 const PATH_CYPHER = (rel: string) => `
 UNWIND $rows AS row
 OPTIONAL MATCH (f_r:AdvisorResource {id: row.from}) OPTIONAL MATCH (f_p:AdvisorRepository {id: row.from})
@@ -197,12 +198,12 @@ export async function mirrorEntitlements(stamp: string): Promise<Record<string, 
   for (const kind of ["CAN_ASSUME", "CAN_SHELL_INTO", "RUNS_AS", "HOLDS_KEY_OF"]) for (const b of chunks(paths(kind))) await writeCypher(PATH_CYPHER(kind), { rows: b, now: stamp });
   for (const b of chunks(touchedRows)) await writeCypher(TOUCHED_CYPHER, { rows: b, now: stamp });
   for (const b of chunks(personAccess)) await writeCypher(PERSON_ACCESS_CYPHER, { rows: b, now: stamp });
-  // what this pass did not write goes; RUNS_AS from Vercel OIDC is src/adapters/aws/edges.ts's
+  // what this pass did not write goes; RUNS_AS from Vercel OIDC is src/adapters/aws/edges.ts's, RUNS_AS {via: 'execution_identity'} is src/graph_functions.ts's
   // ASSIGNED is only ours when it ends at a permission set: an Elastic IP's ASSIGNED edges are src/graph_network.ts's
   await writeCypher(`MATCH (s)-[r:GRANTED|IN_GROUP|PROVISIONED_AS|CAN_ACCESS|REACHES|CAN_ASSUME|CAN_SHELL_INTO|HOLDS_KEY_OF|TOUCHED]->() WHERE ${OURS("s")} AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
   await writeCypher("MATCH (:AdvisorResource)-[r:ASSIGNED]->(:AdvisorPermissionSet) WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
-  await writeCypher(`MATCH (s)-[r:RUNS_AS]->() WHERE ${OURS("s")} AND r.via <> 'vercel_oidc' AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
-  // a repository the GitHub org adapter owns stays (it marks its own gone): only the stubs the OIDC trust alone made go
-  await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR (n:AdvisorRepository AND coalesce(n.source, '') <> 'github_org')) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
+  await writeCypher(`MATCH (s)-[r:RUNS_AS]->() WHERE ${OURS("s")} AND r.via <> 'vercel_oidc' AND r.via <> 'execution_identity' AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
+  // a repository the GitHub org adapter owns stays (it marks its own gone); one src/graph_functions.ts named by a tag and has since given CAN_ASSUME edges also stays (REPOSITORY_CYPHER above removed its named_by: this pass owns it now); only the stubs the OIDC trust alone made, with nothing else pointing at them, go
+  await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR (n:AdvisorRepository AND coalesce(n.source, '') <> 'github_org' AND coalesce(n.named_by, '') <> 'tag' AND NOT (n)<-[:BUILT_FROM {via: 'function_tag'}]-() AND NOT (n)<-[:BUILT_FROM {via: 'stack_tag'}]-())) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
   return counts;
 }

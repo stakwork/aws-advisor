@@ -5,6 +5,7 @@ import { ingressRulesFor, naclVerdict, reachOf, type IngressRule, type NaclEntry
 import { vpcHasIpv6 } from "./security_groups.js";
 import { allEgressRules, eniOwner, isPublicSubnet, listEips, listEnis, listGateways, listRouteTables, listSubnets, routeTableOf, routeTarget, type EniRow, type GatewayRow, type RouteTableRow, type SubnetRow } from "./network_inventory.js";
 import { AWS } from "./adapters/types.js";
+import { lambdaArn } from "./adapters/aws/resources.js";
 
 /**
  * The network layer of the graph (docs/cloud-ontology.md §3) for the AWS adapter: networks (VPCs), segments
@@ -247,15 +248,28 @@ FOREACH (s IN CASE WHEN row.source_label = 'AdvisorSource' THEN [row.source_meta
 FOREACH (_ IN CASE WHEN row.source_label = 'AdvisorFilter' THEN [1] ELSE [] END |
   MERGE (g:AdvisorFilter {id: row.source_id}) MERGE (r)-[:FROM]->(g))`;
 
-/** Resources that wear filters directly (databases, caches, balancers, and compute without an interface row). */
+/**
+ * Resources that wear filters directly (databases, caches, balancers, and compute without an interface row), plus
+ * every function from `inventory_lambda` (`replace_network: true`, `edge_props` carrying `stale`/`stale_since` from
+ * `facts_missing.config`): a function that leaves its VPC or changes subnets must lose its old `IN_NETWORK` /
+ * `IN_SEGMENT` edges, which a plain MERGE never removes, so `replace_network` rows also clear those two edge types
+ * before writing. `subnet_ids` (a function may sit in several) is merged alongside the single-subnet `subnet_id`
+ * existing rows pass. Existing EC2/RDS/cache/ELB rows pass neither `subnet_ids`, `replace_network` nor `edge_props`
+ * and behave exactly as before.
+ */
 const GUARDED_CYPHER = `
 UNWIND $rows AS row
 MATCH (r:AdvisorResource {id: row.id})
 OPTIONAL MATCH (r)-[o:GUARDED_BY]->() DELETE o
 WITH DISTINCT r, row
+OPTIONAL MATCH (r)-[on:IN_NETWORK]->() WHERE coalesce(row.replace_network, false) DELETE on
+WITH DISTINCT r, row
+OPTIONAL MATCH (r)-[os:IN_SEGMENT]->() WHERE coalesce(row.replace_network, false) DELETE os
+WITH DISTINCT r, row
 FOREACH (sg IN row.groups | MERGE (f:AdvisorFilter {id: sg}) MERGE (r)-[:GUARDED_BY]->(f))
-FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (r)-[:IN_NETWORK]->(n))
-FOREACH (_ IN CASE WHEN row.subnet_id IS NULL THEN [] ELSE [1] END | MERGE (s:AdvisorSegment {id: row.subnet_id}) MERGE (r)-[:IN_SEGMENT]->(s))`;
+FOREACH (_ IN CASE WHEN row.vpc_id IS NULL THEN [] ELSE [1] END | MERGE (n:AdvisorNetwork {id: row.vpc_id}) MERGE (r)-[en:IN_NETWORK]->(n) SET en += coalesce(row.edge_props, {}))
+FOREACH (_ IN CASE WHEN row.subnet_id IS NULL THEN [] ELSE [1] END | MERGE (s:AdvisorSegment {id: row.subnet_id}) MERGE (r)-[es:IN_SEGMENT]->(s) SET es += coalesce(row.edge_props, {}))
+FOREACH (sid IN coalesce(row.subnet_ids, []) | MERGE (s2:AdvisorSegment {id: sid}) MERGE (r)-[es2:IN_SEGMENT]->(s2) SET es2 += coalesce(row.edge_props, {}))`;
 
 const VERDICT_CLEAR_CYPHER = `
 UNWIND $ids AS id
@@ -358,11 +372,22 @@ export async function mirrorNetwork(): Promise<NetworkCounts | null> {
   for (const b of chunks(ruleRows)) await w(RULE_CYPHER, b);
 
   // resources that wear groups directly: databases, caches, balancers; compute joins through its interfaces but also gets the direct edge for one-hop reads
-  const guarded: { id: string; groups: string[]; vpc_id: string | null; subnet_id: string | null }[] = [];
+  const guarded: { id: string; groups: string[]; vpc_id: string | null; subnet_id: string | null; subnet_ids?: string[]; replace_network?: boolean; edge_props?: Record<string, unknown> }[] = [];
   for (const r of rows("select instance_id, snapshot from inventory_ec2 where gone = 0")) { const net = (safeJson(r.snapshot) || {}).network || {}; guarded.push({ id: String(r.instance_id), groups: (Array.isArray(net.security_groups) ? net.security_groups : []).map((g: any) => String(g?.GroupId ?? g?.group_id ?? g)).filter((g: string) => /^sg-/.test(g)), vpc_id: str(net.vpc_id), subnet_id: str(net.subnet_id) }); }
   for (const r of rows("select db_instance_identifier as id, snapshot from inventory_rds where gone = 0")) { const net = (safeJson(r.snapshot) || {}).network || {}; guarded.push({ id: String(r.id), groups: Array.isArray(net.security_groups) ? net.security_groups.map(String) : [], vpc_id: str(net.vpc_id), subnet_id: null }); }
   for (const r of rows("select cache_cluster_id as id, snapshot from inventory_elasticache where gone = 0")) { const net = (safeJson(r.snapshot) || {}).network || {}; guarded.push({ id: String(r.id), groups: Array.isArray(net.security_groups) ? net.security_groups.map(String) : [], vpc_id: null, subnet_id: null }); }
   for (const r of rows("select arn as id, security_groups, vpc_id from inventory_elb where gone = 0")) guarded.push({ id: String(r.id), groups: (safeJson(r.security_groups) || []).map(String), vpc_id: str(r.vpc_id), subnet_id: null });
+  // every function, including ones with no VPC: `replace_network` clears IN_NETWORK/IN_SEGMENT first, so a function that
+  // leaves its VPC or changes subnets loses the old edges rather than keeping them beside the new ones (a plain MERGE never removes an edge)
+  for (const r of rows("select name, arn, region, account_id, vpc_id, subnet_ids, security_group_ids, facts_missing from inventory_lambda where gone = 0")) {
+    const missing = (safeJson(r.facts_missing) || []) as { fact: string; reason: string; since?: string }[];
+    const configMissing = missing.find((m) => m.fact === "config");
+    guarded.push({
+      id: lambdaArn(r, account), groups: (safeJson(r.security_group_ids) || []).map(String), vpc_id: str(r.vpc_id), subnet_id: null,
+      subnet_ids: (safeJson(r.subnet_ids) || []).map(String), replace_network: true,
+      edge_props: configMissing ? { stale: true, stale_since: configMissing.since ?? null } : {},
+    });
+  }
   for (const b of chunks(guarded)) await w(GUARDED_CYPHER, b);
 
   const judged = await mirrorReachability();
