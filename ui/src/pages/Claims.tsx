@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Badge, Button, Card, CopyButton, Empty } from "../components/ui";
 import { Markdown } from "../components/markdown";
@@ -54,7 +55,19 @@ function ResolutionRow({ r, onDone }: { r: Resolution; onDone: (id: string, upda
   );
 }
 
+/** True when the claim passes the "Show fixed" and CVE filters. CVE text is matched against id, name and claim_text (Claim has no cve field). */
+export function claimMatches(c: Claim, showFixed: boolean, cve: string): boolean {
+  if (!showFixed && c.resolutions.length > 0 && c.resolutions.every((r) => r.resolution_status === "fixed")) return false;
+  const q = cve.trim().toLowerCase();
+  if (!q) return true;
+  return [c.id, c.name, c.claim_text].some((f) => (f || "").toLowerCase().includes(q));
+}
+
 export default function Claims() {
+  const [params, setParams] = useSearchParams();
+  const cve = params.get("cve") || "";
+  const [showFixed, setShowFixed] = useState(false);
+  const setCve = (v: string) => setParams((p) => { const n = new URLSearchParams(p); if (v) n.set("cve", v); else n.delete("cve"); return n; }, { replace: true });
   const [claims, setClaims] = useState<Claim[] | null>(null);
   const [err, setErr] = useState("");
   const [off, setOff] = useState(false);
@@ -67,6 +80,8 @@ export default function Claims() {
   const markFixed = (id: string, updatedAt: number) =>
     setClaims((cs) => cs && cs.map((c) => ({ ...c, resolutions: c.resolutions.map((r) => (r.id === id ? { ...r, resolution_status: "fixed", updated_at: updatedAt } : r)) })));
 
+  const shown = claims ? claims.filter((c) => claimMatches(c, showFixed, cve)) : [];
+
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold text-zinc-100">Claims</h1>
@@ -75,7 +90,14 @@ export default function Claims() {
         : err ? <div className="text-sm text-red-300">{err}</div>
         : !claims ? <div className="text-sm text-zinc-500">Loading…</div>
         : claims.length === 0 ? <Empty>No claims with resolutions yet.</Empty>
-        : claims.map((c) => (
+        : <>
+          <div className="flex flex-wrap items-center gap-3">
+            <input value={cve} onChange={(e) => setCve(e.target.value)} placeholder="CVE-2026-35385" aria-label="CVE" className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-200 placeholder-zinc-600" />
+            <label className="flex items-center gap-1 text-xs text-zinc-400"><input type="checkbox" checked={showFixed} onChange={(e) => setShowFixed(e.target.checked)} />Show fixed</label>
+            <span className="text-xs text-zinc-500">{shown.length} of {claims.length} claims</span>
+          </div>
+          {shown.length === 0 && <Empty>No claims match the current filters.</Empty>}
+          {shown.map((c) => (
           <Card key={c.id} title={<span className="flex flex-wrap items-center gap-2">{c.name || c.id} {c.verdict && <Badge>{c.verdict}</Badge>}{c.confidence_score != null && <span className="text-xs font-normal text-zinc-500">confidence {c.confidence_score}</span>}</span>}>
             <div className="space-y-3">
               {c.claim_text && <p className="text-sm text-zinc-300">{c.claim_text}</p>}
@@ -83,7 +105,8 @@ export default function Claims() {
               {c.resolutions.map((r) => <ResolutionRow key={r.id} r={r} onDone={markFixed} />)}
             </div>
           </Card>
-        ))}
+          ))}
+        </>}
     </div>
   );
 }
