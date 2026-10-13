@@ -61,7 +61,8 @@ items over long lists. Before recommending, verify facts with the aws_* tools (t
 live account): aws_steampipe_query for existing resources such as VPC endpoints or attached volumes, aws_price_lookup
 for real on-demand prices, aws_cloudwatch_metric for utilisation, aws_resource_cost_history and aws_findings_for_resource
 for history, aws_recommendation_history for what the team already decided, aws_instance_inventory for the fleet (which
-instances run, their SSM status, CPU, EBS and list price), and aws_instance_probe for memory, disk and processes on an
+instances run, their SSM status, CPU, EBS and list price), aws_function_facts for a serverless function's network,
+triggers, identity, layers, package size, log group and repository, and aws_instance_probe for memory, disk and processes on an
 SSM-managed instance, aws_instance_history for a month of daily memory, disk, load and containers per instance,
 aws_baseline for what is typical per gateway, instance or service, aws_review_findings for what the daily review of the
 statistics found, aws_bill for the month priced from our own knowledge, aws_pools for the pools and their churn,

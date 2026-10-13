@@ -111,7 +111,7 @@ export const countList = (words: (string | null | undefined)[]): string[] => {
 
 const COLUMN_MISSING = /column "?(\w+)"? does not exist/i;
 
-async function selectAvailable(table: string, cols: string[], opts: SelectOpts, onError: (m: string) => void, onLog: (l: string) => void): Promise<any[] | null> {
+export async function selectAvailable(table: string, cols: string[], opts: SelectOpts, onError: (m: string) => void, onLog: (l: string) => void): Promise<any[] | null> {
   let list = [...cols];
   const required = new Set(["region", "account_id", ...(opts.required ?? [])]);
   const context = `${table.replace(/^aws_/, "").replace(/_/g, " ")} inventory (${table})`;

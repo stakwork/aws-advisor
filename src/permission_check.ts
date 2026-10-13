@@ -120,6 +120,15 @@ export const CAPABILITIES: Capability[] = [
   { id: "ssm_managed_instances", label: "SSM managed instances", group: "ssm", actions: ["ssm:DescribeInstanceInformation"], sql: table("aws_ssm_managed_instance") },
   { id: "s3", label: "S3 buckets", group: "benchmarks", actions: ["s3:ListAllMyBuckets"], sql: global("aws_s3_bucket") },
   { id: "lambda", label: "Lambda functions", group: "benchmarks", actions: ["lambda:ListFunctions"], sql: table("aws_lambda_function") },
+  // Zero rows (no function in the region, or every one came back with no policy_std) proves nothing: GetPolicy stays
+  // "unverified" rather than being marked fixed, since a denial on this call looks the same as "no policy set".
+  { id: "lambda_policy", label: "Lambda function policies (GetPolicy, function_facts triggers)", group: "benchmarks", actions: ["lambda:GetPolicy"],
+    sdk: async (ctx) => {
+      const regionQual = `region = '${ctx.region.replace(/'/g, "''")}'`;
+      const { rows } = await queryReadOnly<{ policy_std: unknown }>(`select policy_std from ${ctx.schema}.aws_lambda_function where ${regionQual} limit 1`, { timeoutMs: PROBE_TIMEOUT_MS });
+      if (!rows.length) return { skipped: "no function in this region to probe; GetPolicy is unverified, not confirmed working" };
+      return "policy_std read for at least one function in this region";
+    } },
   { id: "ecr", label: "ECR repositories", group: "benchmarks", actions: ["ecr:DescribeRepositories"], sql: table("aws_ecr_repository") },
   { id: "ecs", label: "ECS clusters", group: "benchmarks", actions: ["ecs:ListClusters", "ecs:DescribeClusters"], sql: table("aws_ecs_cluster") },
   { id: "eks", label: "EKS clusters", group: "benchmarks", actions: ["eks:ListClusters", "eks:DescribeCluster"], sql: table("aws_eks_cluster") },

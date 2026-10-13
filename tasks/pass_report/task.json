@@ -9,7 +9,8 @@
     "instance_inventory",
     "graph_system",
     "graph_query",
-    "price_lookup"
+    "price_lookup",
+    "function_facts"
   ],
   "max_turns": 6,
   "rubric": [

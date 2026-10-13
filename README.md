@@ -468,6 +468,14 @@ Permissions shows the list with when and where it was seen plus one merged IAM p
 app uses, pinned to one region, plus the SSM calls through the SDK) and reports `ok`, `missing` (with the issue
 and its statement), `error` (something other than a denial, such as expired credentials) or `skipped`.
 
+Function facts (`function_facts`, Settings > Repository tag keys) add `lambda:GetPolicy` and
+`lambda:ListEventSourceMappings` to the recommended policy. Two things are by design, not a missing grant:
+
+- A **member account** whose setup predates this policy shows `facts_missing: invoke_permissions` on its
+  functions until setup is re-run there; the rest of a function's facts still refresh.
+- A function whose environment is encrypted with a **customer-managed KMS key** never reports environment
+  variable names: the advisor is never granted `kms:Decrypt`, so this is permanent, not something to fix.
+
 ### Three ways to authenticate
 
 Settings > AWS credentials has three tabs. Each one configures Steampipe and the advisor's own SDK calls (the

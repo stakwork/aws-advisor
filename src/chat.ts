@@ -161,6 +161,7 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["review_findings", "the daily review's observations"],
   ["alert_context", "a watcher alert with its context"],
   ["price_lookup", "on-demand price of an instance or database SKU"],
+  ["function_facts", "a serverless function's network, triggers, identity, layers, package size, log group and repository, by name or id"],
   ["instance_probe", "probe an instance over SSM: processes, disks, memory"],
   ["activity_signals", "is anyone using this box: per container the use-signal patterns matched with sample lines, connections, front door, logins"],
   ["propose_signal_rule", "propose that a use-signal kind is noise (or real) for an image; a person confirms"],
