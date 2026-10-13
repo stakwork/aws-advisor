@@ -39,7 +39,7 @@ when it does nothing (no credentials, already running, and so on).
 
 | Time | Job | What happens |
 |---|---|---|
-| 04:10 | Software probe | Lists installed packages, OS and container images on each server (via AWS SSM) |
+| 04:10 | Software probe | Lists installed packages, OS and container images on each server (via AWS SSM). Keeps only what is installed now: an upgrade replaces the old version and a removed package is deleted, with every change logged on the server's Software tab |
 | 04:40 | Vulnerability match | Checks that software against public advisories (OSV, Amazon Linux) and flags known CVEs |
 | 05:30–05:40 | Host, container and port probes | Memory, disk, processes, containers, logins, open ports and whether they're exposed to the internet |
 | 06:00 | **Collection run** | Standard cost checks plus custom queries; rules draft recommendations with a saving estimate and risk level. The run is compared with yesterday's, and the agent gets it only if something material changed |

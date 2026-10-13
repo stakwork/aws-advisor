@@ -47,6 +47,20 @@ MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
 SET c += {os: row.os, os_id: row.os_id, os_version: row.os_version, kernel: row.kernel, arch: coalesce(row.arch, c.arch), package_manager: row.package_manager, os_collected_at: row.collected_at, updated_at: $now}`;
 
+/** A box's package and image edges the probe no longer reports (an older version, something removed): the node id is
+ *  per version, so an upgrade adds an edge and only this takes the superseded one away. */
+const PRUNE_PACKAGES_CYPHER = `
+UNWIND $rows AS row
+MATCH (p:AdvisorPackage)-[r:INSTALLED_ON]->(c:AdvisorCompute {id: 'compute:' + row.instance_id})
+WHERE NOT p.id IN row.keep
+DELETE r`;
+
+const PRUNE_IMAGES_CYPHER = `
+UNWIND $rows AS row
+MATCH (c:AdvisorCompute {id: 'compute:' + row.instance_id})-[r:RUNS_IMAGE]->(i:AdvisorImage)
+WHERE NOT i.id IN row.keep
+DELETE r`;
+
 const PROVIDES_CYPHER = `
 UNWIND $rows AS row
 MATCH (p:AdvisorPackage {id: row.package_id}) MATCH (a:AdvisorApp {id: row.app})
@@ -117,6 +131,14 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     return { instance_id: i.instance_id, ...imageRef(image), image, digest: i.digest ?? null, created: i.created ?? null, platform: i.platform ?? null, image_id: i.image_id ?? null, first_seen: i.first_seen, last_seen: i.last_seen, gone: Boolean(i.gone) };
   });
   for (const b of chunks(imgRows)) await w(IMAGE_CYPHER, b);
+  // only the boxes the software probe has read (an instance_os row): what they no longer have loses its edge
+  const keepOf = (items: { instance_id: string; id: string }[]) => {
+    const by = new Map<string, string[]>([...os.keys()].map((id) => [id, []]));
+    for (const x of items) by.get(x.instance_id)?.push(x.id);
+    return [...by].map(([instance_id, keep]) => ({ instance_id, keep }));
+  };
+  for (const b of chunks(keepOf(pkgRows), 50)) await w(PRUNE_PACKAGES_CYPHER, b);
+  for (const b of chunks(keepOf(imgRows), 50)) await w(PRUNE_IMAGES_CYPHER, b);
 
   // the program a package ships, where that program is seen running (AdvisorApp nodes are keyed by name)
   const apps = new Set(rows(`select distinct name from instance_apps where gone = 0${where}`, ...args).map((a) => String(a.name)));

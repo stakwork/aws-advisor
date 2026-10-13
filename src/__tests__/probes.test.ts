@@ -63,7 +63,7 @@ test("script overrides: a read-only edit is kept and changes the hash, a dangero
   assert.equal(pr.probeScriptHash("apps"), before);
 });
 
-test("software inventory: packages are upserted with history, changes are logged, what left is marked gone, and a package can be found across the fleet", () => {
+test("software inventory: a newer version replaces the row, what left is deleted, both are logged, and a package can be found across the fleet", () => {
   const iid = "i-0feedfacecafe0010";
   db.prepare("insert or replace into inventory_ec2(instance_id, name, state, snapshot) values (?, 'web-1', 'running', '{}')").run(iid);
   const first = sw.recordSoftware(iid, "2026-10-01T00:00:00Z", { os: { id: "ubuntu", version: "24.04", name: "Ubuntu 24.04 LTS" }, kernel: "6.8.0-45-generic", arch: "x86_64", package_manager: "deb",
@@ -75,17 +75,22 @@ test("software inventory: packages are upserted with history, changes are logged
   const on = sw.softwareOn(iid);
   assert.equal(on.os?.kernel, "6.8.0-45-generic"); assert.equal(on.os?.packages, 2);
   assert.deepEqual(on.packages.map((p) => p.name), ["curl", "openssh-server"]);
-  assert.equal(sw.softwareOn(iid, { includeGone: true }).packages.length, 3);
-  assert.equal(on.binaries.length, 0, "a probe that reports no binaries marks the old ones gone");
+  assert.equal((db.prepare("select count(*) as n from instance_packages where instance_id = ?").get(iid) as any).n, 2, "the removed package is deleted, not kept");
+  assert.equal(on.packages.find((p) => p.name === "openssh-server")?.first_seen, "2026-10-02T00:00:00Z", "since: when this version appeared");
+  assert.equal(on.binaries.length, 0, "a probe that reports no binaries deletes the old ones");
   assert.equal(on.images.length, 0);
-  assert.equal(on.changes[0].name, "openssh-server");
+  assert.deepEqual(on.changes.map((c) => [c.name, c.from_version, c.to_version]).sort(), [["nginx", "1.24.0-2ubuntu7", null], ["openssh-server", "1:9.6p1-3ubuntu13.4", "1:9.6p1-3ubuntu13.5"]]);
+  // a box whose package manager changed (reinstalled): the old manager's packages go too
+  sw.recordSoftware(iid, "2026-10-02T12:00:00Z", { package_manager: "rpm", packages: [{ n: "curl", v: "8.5.0-1.amzn2023", a: "x86_64" }] });
+  assert.deepEqual(sw.softwareOn(iid).packages.map((p) => [p.ecosystem, p.name]), [["rpm", "curl"]]);
+  sw.recordSoftware(iid, "2026-10-02T13:00:00Z", { package_manager: "deb", packages: [{ n: "openssh-server", v: "1:9.6p1-3ubuntu13.5", a: "amd64" }, { n: "curl", v: "8.5.0", a: "amd64" }] });
   const where = sw.wherePackage("openssh");
   assert.ok(where.some((w) => w.instance_id === iid && w.version === "1:9.6p1-3ubuntu13.5" && w.instance_name === "web-1"));
   const sum = sw.softwareSummary();
   assert.ok(sum.instances >= 1 && sum.changes_7d >= 0);
   assert.equal(sw.recordSoftware(iid, "x", {}), null, "nothing to record");
   // probe software/3: the hibernation setup is kept on the OS row; an older probe without it leaves it in place
-  assert.deepEqual(sw.hibernationSetupOf(iid), { probe: null, agent_package: null, packages_known: true, collected_at: "2026-10-02T00:00:00Z" });
+  assert.deepEqual(sw.hibernationSetupOf(iid), { probe: null, agent_package: null, packages_known: true, collected_at: "2026-10-02T13:00:00Z" });
   sw.recordSoftware(iid, "2026-10-03T00:00:00Z", { package_manager: "deb", packages: [{ n: "ec2-hibinit-agent", v: "1.0.0-0ubuntu16.24.04.1", a: "all" }], hibernation: { kernel_disk: true, agent: "hibinit-agent" } });
   sw.recordSoftware(iid, "2026-10-04T00:00:00Z", { package_manager: "deb", packages: [{ n: "ec2-hibinit-agent", v: "1.0.0-0ubuntu16.24.04.1", a: "all" }] });
   assert.deepEqual(sw.hibernationSetupOf(iid), { probe: { kernel_disk: true, agent: "hibinit-agent" }, agent_package: "ec2-hibinit-agent", packages_known: true, collected_at: "2026-10-04T00:00:00Z" });

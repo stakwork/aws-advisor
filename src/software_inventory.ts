@@ -3,9 +3,10 @@ import { db } from "./db.js";
 /**
  * What is installed on the instances, from the software probe (src/probes.ts, kind "software"): the OS and kernel,
  * every package with its version, the versions of well-known programs read from the binaries, and the images behind
- * the running containers. One row per (instance, package) with first and last seen, so a version change is a
- * history, not an overwrite; a package that disappears is marked gone. This is the inventory a vulnerability is
- * matched against (the graph's AdvisorPackage / AdvisorImage nodes come from these tables).
+ * the running containers. One row per (instance, package) holding what is installed now: a newer version replaces
+ * the row and a package, program or image the probe no longer reports is deleted. The history is package_changes:
+ * every version move (from → to) and every removal (to null). This is the inventory a vulnerability is matched
+ * against (the graph's AdvisorPackage / AdvisorImage nodes come from these tables).
  */
 
 db.exec(`create table if not exists instance_os (
@@ -35,6 +36,8 @@ create index if not exists package_changes_instance on package_changes(instance_
 if (!(db.prepare("pragma table_info(instance_packages)").all() as { name: string }[]).some((c) => c.name === "source")) db.exec("alter table instance_packages add column source text");
 // probe software/3 adds the guest's hibernation setup (JSON, ProbeHibernation); src/guest_hibernation.ts reads it
 if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "hibernation")) db.exec("alter table instance_os add column hibernation text");
+// rows marked gone before superseded software was deleted (2026-10-13): the column stays, nothing sets it any more
+db.exec("delete from instance_packages where gone = 1; delete from instance_binaries where gone = 1; delete from instance_images where gone = 1");
 
 /** One package as the probe prints it: name, version, architecture and the source package when it differs from the name. */
 export interface ProbePackage { n: string; v: string; a?: string | null; s?: string | null }
@@ -56,23 +59,24 @@ export interface RecordSoftwareResult { packages: number; added: string[]; remov
 const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages`);
 const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
-  on conflict(instance_id, ecosystem, name) do update set version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
+  on conflict(instance_id, ecosystem, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
-  on conflict(instance_id, name) do update set version = excluded.version, path = excluded.path, last_seen = excluded.last_seen, gone = 0`);
+  on conflict(instance_id, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, path = excluded.path, last_seen = excluded.last_seen, gone = 0`);
 const upsertImg = db.prepare(`insert into instance_images(instance_id, image, image_id, digest, created, platform, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, image) do update set image_id = excluded.image_id, digest = excluded.digest, created = excluded.created, platform = excluded.platform, last_seen = excluded.last_seen, gone = 0`);
 const insertChange = db.prepare("insert into package_changes(instance_id, ecosystem, name, from_version, to_version, at) values (?, ?, ?, ?, ?, ?)");
 
 const clean = (s: unknown, n = 200): string => String(s ?? "").replace(/[^\x20-\x7e]/g, "").slice(0, n);
 
-/** Records one software probe: upserts, marks what left as gone, and keeps a change log of version moves. */
+/** Records one software probe: upserts what is installed, deletes what was superseded or removed, and logs both in package_changes. */
 export function recordSoftware(instanceId: string, collectedAt: string, data: SoftwareData): RecordSoftwareResult | null {
   if (!Array.isArray(data.packages) && !Array.isArray(data.binaries) && !data.os) return null;
   const eco = clean(data.package_manager || "unknown", 20);
   const pkgs = (data.packages ?? []).filter((p) => p && typeof p.n === "string" && p.n).map((p) => ({ name: clean(p.n, 120), version: clean(p.v, 120), arch: p.a == null ? null : clean(p.a, 20), source: p.s == null || !String(p.s).trim() ? null : clean(p.s, 120) }));
   const res: RecordSoftwareResult = { packages: pkgs.length, added: [], removed: [], changed: [], binaries: 0, images: 0 };
   db.transaction(() => {
-    const prev = new Map((db.prepare("select name, version, gone from instance_packages where instance_id = ? and ecosystem = ?").all(instanceId, eco) as { name: string; version: string; gone: number }[]).map((r) => [r.name, r]));
+    const all = db.prepare("select ecosystem, name, version from instance_packages where instance_id = ?").all(instanceId) as { ecosystem: string; name: string; version: string }[];
+    const prev = new Map(all.filter((r) => r.ecosystem === eco).map((r) => [r.name, r]));
     const first = prev.size === 0;
     const seen = new Set<string>();
     for (const p of pkgs) {
@@ -82,16 +86,20 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
       if (!was && !first) res.added.push(p.name);
       else if (was && was.version !== p.version) { res.changed.push({ name: p.name, from: was.version, to: p.version }); insertChange.run(instanceId, eco, p.name, was.version, p.version, collectedAt); }
     }
-    if (pkgs.length) for (const [name, was] of prev) if (!seen.has(name) && !was.gone) { db.prepare("update instance_packages set gone = 1 where instance_id = ? and ecosystem = ? and name = ?").run(instanceId, eco, name); res.removed.push(name); }
+    // what the probe no longer lists is gone from the box (or from a package manager it no longer uses): deleted, the removal logged
+    if (pkgs.length) for (const was of all) if (was.ecosystem !== eco || !seen.has(was.name)) {
+      db.prepare("delete from instance_packages where instance_id = ? and ecosystem = ? and name = ?").run(instanceId, was.ecosystem, was.name);
+      insertChange.run(instanceId, was.ecosystem, was.name, was.version, null, collectedAt); res.removed.push(was.name);
+    }
     const bins = (data.binaries ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.version);
     const binSeen = new Set<string>();
     for (const b of bins) { binSeen.add(b.name); upsertBin.run(instanceId, clean(b.name, 64), clean(b.version, 120), b.path == null ? null : clean(b.path, 200), collectedAt, collectedAt); }
-    if (Array.isArray(data.binaries)) db.prepare(`update instance_binaries set gone = 1 where instance_id = ? and gone = 0${binSeen.size ? ` and name not in (${[...binSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...binSeen);
+    if (Array.isArray(data.binaries)) db.prepare(`delete from instance_binaries where instance_id = ?${binSeen.size ? ` and name not in (${[...binSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...binSeen);
     res.binaries = bins.length;
     const imgs = (data.images ?? []).filter((i) => i && typeof i.image === "string" && i.image);
     const imgSeen = new Set<string>();
     for (const i of imgs) { imgSeen.add(i.image); upsertImg.run(instanceId, clean(i.image, 300), i.id == null ? null : clean(i.id, 100), i.digests ? clean(String(i.digests).split(",")[0], 300) : null, i.created == null ? null : clean(i.created, 40), i.platform == null ? null : clean(i.platform, 40), collectedAt, collectedAt); }
-    if (Array.isArray(data.images)) db.prepare(`update instance_images set gone = 1 where instance_id = ? and gone = 0${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
+    if (Array.isArray(data.images)) db.prepare(`delete from instance_images where instance_id = ?${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
     res.images = imgs.length;
     upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null);
   })();
@@ -119,15 +127,14 @@ export interface InstanceSoftware {
 }
 
 /** Everything the software probe knows about one instance; `q` filters packages by name. */
-export function softwareOn(instanceId: string, opts: { q?: string; includeGone?: boolean; limit?: number } = {}): InstanceSoftware {
-  const gone = opts.includeGone ? "" : " and gone = 0";
+export function softwareOn(instanceId: string, opts: { q?: string; limit?: number } = {}): InstanceSoftware {
   const q = opts.q ? `%${opts.q.toLowerCase()}%` : null;
   const limit = Math.min(5000, Math.max(1, opts.limit ?? 2000));
   return {
     os: (db.prepare("select * from instance_os where instance_id = ?").get(instanceId) as any) ?? null,
-    packages: (db.prepare(`select ecosystem, name, version, arch, source, first_seen, last_seen, gone from instance_packages where instance_id = ?${gone}${q ? " and (lower(name) like ? or lower(source) like ?)" : ""} order by name limit ?`).all(...(q ? [instanceId, q, q, limit] : [instanceId, limit])) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
-    binaries: (db.prepare(`select name, version, path, first_seen, last_seen, gone from instance_binaries where instance_id = ?${gone} order by name`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
-    images: (db.prepare(`select image, image_id, digest, created, platform, first_seen, last_seen, gone from instance_images where instance_id = ?${gone} order by image`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
+    packages: (db.prepare(`select ecosystem, name, version, arch, source, first_seen, last_seen, gone from instance_packages where instance_id = ?${q ? " and (lower(name) like ? or lower(source) like ?)" : ""} order by name limit ?`).all(...(q ? [instanceId, q, q, limit] : [instanceId, limit])) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
+    binaries: (db.prepare(`select name, version, path, first_seen, last_seen, gone from instance_binaries where instance_id = ? order by name`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
+    images: (db.prepare(`select image, image_id, digest, created, platform, first_seen, last_seen, gone from instance_images where instance_id = ? order by image`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
     changes: db.prepare("select ecosystem, name, from_version, to_version, at from package_changes where instance_id = ? order by id desc limit 50").all(instanceId) as any[],
   };
 }

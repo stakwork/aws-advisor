@@ -6,7 +6,7 @@ import { Button, Td, Th } from "./ui";
 /**
  * Inventory › EC2 › Software: what the software probe found on one box (src/software_inventory.ts): the OS and
  * kernel, every installed package with its version and source package, the versions read from well-known binaries,
- * the images behind its containers, the recent version changes, and the advisories matched against it with the
+ * the images behind its containers, the recent version changes and removals, and the advisories matched against it with the
  * advisor's verdict (src/software_vulns.ts). The package list is searchable; a search also matches the source.
  */
 
@@ -20,14 +20,13 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
   const [d, setD] = useState<any>(null);
   const [vulns, setVulns] = useState<any[] | null>(null);
   const [q, setQ] = useState(""); const [qApplied, setQApplied] = useState("");
-  const [gone, setGone] = useState(false);
   const [err, setErr] = useState("");
   const load = () => {
-    const qs = new URLSearchParams(); if (qApplied) qs.set("q", qApplied); if (gone) qs.set("gone", "1"); qs.set("limit", "500");
+    const qs = new URLSearchParams(); if (qApplied) qs.set("q", qApplied); qs.set("limit", "500");
     api(`/instances/${encodeURIComponent(instanceId)}/software?${qs}`).then((r) => { setD(r); setErr(""); }).catch((e) => setErr(e.message));
     api(`/instances/${encodeURIComponent(instanceId)}/vulnerabilities`).then((r) => setVulns(r.matches)).catch(() => setVulns([]));
   };
-  useEffect(() => { load(); }, [instanceId, qApplied, gone, busy]);
+  useEffect(() => { load(); }, [instanceId, qApplied, busy]);
   if (err) return <div className="mt-3 text-sm text-red-300">{err}</div>;
   if (!d) return <div className="mt-3 text-sm text-zinc-500">Loading…</div>;
   const probeButton = <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={onProbe} disabled={busy || !canProbe} title="Run the software probe now (its SSM document has to exist in the account)">{busy ? "Probing…" : "Probe software now"}</Button>;
@@ -39,7 +38,7 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
         <dl className="grid grid-cols-[9.5rem_1fr] gap-x-3 gap-y-0.5 text-sm">
           <dt className="text-zinc-500">OS</dt><dd>{os.os_name || `${os.os_id ?? "?"} ${os.os_version ?? ""}`} <span className="text-zinc-500">({os.os_id} {os.os_version})</span></dd>
           <dt className="text-zinc-500">Kernel</dt><dd className="font-mono text-xs">{os.kernel || "—"} <span className="font-sans text-zinc-500">{os.arch || ""}</span></dd>
-          <dt className="text-zinc-500">Packages</dt><dd>{os.packages} installed via {os.package_manager || "?"}{d.changes?.length ? <span className="text-zinc-500"> · {d.changes.length} recent version changes</span> : null}</dd>
+          <dt className="text-zinc-500">Packages</dt><dd>{os.packages} installed via {os.package_manager || "?"}{d.changes?.length ? <span className="text-zinc-500"> · {d.changes.length} recent changes</span> : null}</dd>
         </dl>
       </Section>
 
@@ -67,7 +66,6 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
       <Section title={`Packages · ${d.packages.length}${d.packages.length >= 500 ? "+" : ""}`} action={
         <span className="flex items-center gap-2 normal-case tracking-normal">
           <form onSubmit={(e) => { e.preventDefault(); setQApplied(q); }}><input className="w-48 !py-0.5 text-xs" placeholder="search name or source" value={q} onChange={(e) => setQ(e.target.value)} /></form>
-          <label className="flex items-center gap-1 text-xs text-zinc-400"><input type="checkbox" checked={gone} onChange={() => setGone(!gone)} /> include removed</label>
         </span>}>
         {!d.packages.length ? <div className="text-xs text-zinc-500">Nothing matches.</div> : (
           <div className="max-h-96 overflow-auto rounded border border-zinc-800">
@@ -75,7 +73,7 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
               <thead className="sticky top-0 bg-zinc-900"><tr><Th>Package</Th><Th>Version</Th><Th>Source</Th><Th>Arch</Th><Th>Since</Th></tr></thead>
               <tbody>
                 {d.packages.map((p: any) => (
-                  <tr key={`${p.ecosystem}-${p.name}`} className={`border-t border-zinc-800/60 ${p.gone ? "text-zinc-600 line-through" : ""}`}>
+                  <tr key={`${p.ecosystem}-${p.name}`} className="border-t border-zinc-800/60">
                     <Td className="font-mono">{p.name}</Td><Td className="font-mono text-zinc-300">{p.version}</Td><Td className="font-mono text-zinc-500">{p.source || ""}</Td><Td className="text-zinc-500">{p.arch || ""}</Td><Td className="whitespace-nowrap text-zinc-500">{when(p.first_seen)}</Td>
                   </tr>
                 ))}
@@ -88,7 +86,7 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
       {d.binaries?.length > 0 && (
         <Section title={`Programs by version flag · ${d.binaries.length}`}>
           <ul className="grid grid-cols-1 gap-x-4 gap-y-0.5 text-xs md:grid-cols-2">
-            {d.binaries.map((b: any) => <li key={b.name} className={b.gone ? "text-zinc-600 line-through" : "text-zinc-300"} title={b.path || ""}><span className="font-mono">{b.name}</span> <span className="text-zinc-500">{b.version}</span></li>)}
+            {d.binaries.map((b: any) => <li key={b.name} className="text-zinc-300" title={b.path || ""}><span className="font-mono">{b.name}</span> <span className="text-zinc-500">{b.version}</span></li>)}
           </ul>
         </Section>
       )}
@@ -96,15 +94,15 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
       {d.images?.length > 0 && (
         <Section title={`Container images running · ${d.images.length}`}>
           <ul className="space-y-0.5 text-xs">
-            {d.images.map((i: any) => <li key={i.image} className={i.gone ? "text-zinc-600 line-through" : "text-zinc-300"}><span className="font-mono">{i.image}</span>{i.created ? <span className="text-zinc-500"> · built {when(i.created)}</span> : null}{i.platform ? <span className="text-zinc-500"> · {i.platform}</span> : null}{i.digest ? <span className="text-zinc-600"> · {String(i.digest).replace(/^.*@/, "").slice(0, 19)}…</span> : null}</li>)}
+            {d.images.map((i: any) => <li key={i.image} className="text-zinc-300"><span className="font-mono">{i.image}</span>{i.created ? <span className="text-zinc-500"> · built {when(i.created)}</span> : null}{i.platform ? <span className="text-zinc-500"> · {i.platform}</span> : null}{i.digest ? <span className="text-zinc-600"> · {String(i.digest).replace(/^.*@/, "").slice(0, 19)}…</span> : null}</li>)}
           </ul>
         </Section>
       )}
 
       {d.changes?.length > 0 && (
-        <Section title={`Version changes · ${d.changes.length}`}>
+        <Section title={`Changes · ${d.changes.length}`}>
           <ul className="space-y-0.5 text-xs text-zinc-400">
-            {d.changes.slice(0, 30).map((c: any, i: number) => <li key={i}>{when(c.at)} · <span className="font-mono text-zinc-300">{c.name}</span> {c.from_version} → {c.to_version}</li>)}
+            {d.changes.slice(0, 30).map((c: any, i: number) => <li key={i}>{when(c.at)} · <span className="font-mono text-zinc-300">{c.name}</span> {c.to_version == null ? <span className="text-zinc-500">{c.from_version} removed</span> : <>{c.from_version} → {c.to_version}</>}</li>)}
           </ul>
         </Section>
       )}

@@ -112,5 +112,5 @@ probes.get("/software/where", (req, res) => {
 probes.get("/instances/:id/software", (req, res) => {
   const id = String(req.params.id);
   if (!/^i-[0-9a-f]{8,17}$/.test(id)) return res.status(400).json({ error: "an EC2 instance id is expected" });
-  res.json({ instance_id: id, ...softwareOn(id, { q: typeof req.query.q === "string" ? req.query.q : undefined, includeGone: req.query.gone === "1", limit: Number(req.query.limit) || undefined }) });
+  res.json({ instance_id: id, ...softwareOn(id, { q: typeof req.query.q === "string" ? req.query.q : undefined, limit: Number(req.query.limit) || undefined }) });
 });
