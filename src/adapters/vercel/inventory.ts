@@ -1,4 +1,5 @@
 import { addColumn, db } from "../../db.js";
+import { billedCharges, focusCharges, type BilledCharge } from "./bill_months.js";
 import { refreshUsage } from "./usage.js";
 import type { NeonClient, PartnerRecord, RedisCloudClient } from "./partners.js";
 
@@ -34,6 +35,9 @@ db.exec(`create table if not exists vercel_team (id text primary key, slug text,
 create table if not exists vercel_invoices (
   id text primary key, team_id text not null, number text, status text, total real, subtotal real, tax real, currency text, created_at text, issued_at text, paid_at text, period_start text, period_end text, source text, hosted_url text, pdf_url text,
   groups text not null default '[]', line_items text not null default '[]', fetched_at text not null
+);
+create table if not exists vercel_billed_charges (
+  id text primary key, team_id text not null, month text not null, stream text not null, total real not null, subtotal real, tax real, credits real, invoice_id text, number text, period_start text, period_end text, status text, created_at text, source text not null, fetched_at text not null
 );
 create table if not exists vercel_projects (
   id text primary key, team_id text not null, name text not null, framework text, node_version text, created_at text, updated_at text, repo text, git_provider text, production_url text,
@@ -82,6 +86,10 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
   }
   const stores = await client.stores();
   const invoices = await client.invoices(12);
+  // /v1/invoices is not guaranteed to carry the Marketplace (Neon) invoices: cross-check against the FOCUS billed charges, and say so when that cannot be done
+  let focus: BilledCharge[] = []; let focusRead = false; let check: BillingCheck = { marketplace_checked: true, note: null, at: now };
+  try { focus = focusCharges(await client.billingCharges(12)); focusRead = true; }
+  catch (e: any) { const msg = String(e?.message || e).slice(0, 200); console.error(`[vercel] billed charges not read: ${msg}`); errors.push(`billing charges: ${msg}`); check = { marketplace_checked: false, note: `the Marketplace (Neon) charges could not be cross-checked (${msg}); the bill may be partial if /v1/invoices omits them`, at: now }; }
   const members = await client.members(); const project_roles = await client.projectRoles(projects.map((p) => p.id)); const drains = await client.logDrains(); const tokens = await client.tokens(); const owner = await client.owner();
   const partners = await readPartners(stores, opts.partners); for (const e of partners.errors) errors.push(e);
   let usage = { types: 0, days: 0, projects: 0 }; try { usage = await refreshUsage(client, team.id, projects.map((p) => p.id)); } catch (e: any) { errors.push(`usage: ${String(e?.message || e).slice(0, 160)}`); }
@@ -112,6 +120,11 @@ export async function refreshVercel(client: VercelClient, opts: { deploymentsPer
     if (team.billing) db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_billing:${team.id}`, JSON.stringify(team.billing));
     const upI = db.prepare(`insert into vercel_invoices(id, team_id, number, status, total, subtotal, tax, currency, created_at, issued_at, paid_at, period_start, period_end, source, hosted_url, pdf_url, groups, line_items, fetched_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(id) do update set status = excluded.status, total = excluded.total, subtotal = excluded.subtotal, tax = excluded.tax, paid_at = excluded.paid_at, hosted_url = excluded.hosted_url, pdf_url = excluded.pdf_url, groups = excluded.groups, line_items = excluded.line_items, fetched_at = excluded.fetched_at`);
+    db.prepare("insert or replace into settings(key, value) values (?, ?)").run(`vercel_billing_check:${team.id}`, JSON.stringify(check));
+    // the billed charges: each month and stream once (an invoice wins over the FOCUS charges); the FOCUS rows already stored stay when this read of them failed
+    db.prepare(`delete from vercel_billed_charges where team_id = ?${focusRead ? "" : " and source = 'invoice'"}`).run(team.id);
+    const upC = db.prepare("insert or replace into vercel_billed_charges(id, team_id, month, stream, total, subtotal, tax, credits, invoice_id, number, period_start, period_end, status, created_at, source, fetched_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    for (const c of billedCharges(invoices as any[], focus)) upC.run(c.id, team.id, c.month, c.stream, c.total, c.subtotal, c.tax, c.credits, c.invoice_id, c.number, c.period_start, c.period_end, c.status, c.created_at, c.source, now);
     for (const i of invoices) upI.run(i.id, team.id, i.number, i.status, i.total, i.subtotal, i.tax, i.currency, i.created_at, i.issued_at, i.paid_at, i.period_start, i.period_end, i.source, i.hosted_url, i.pdf_url, JSON.stringify(i.groups), JSON.stringify(i.line_items), now);
   })();
   return { team, projects: projects.length, deployments: deployments.length, domains: domains.length, env: env.length, stores: stores.length, invoices: invoices.length, members: members.length, log_drains: drains.length, usage, errors, took_ms: Date.now() - t0 };
@@ -136,4 +149,11 @@ const NO_EXTRAS: TeamExtras = { members: [], project_roles: [], log_drains: [], 
 export const teamExtras = (teamId: string): TeamExtras => { const r = db.prepare("select value from settings where key = ?").get(`vercel_extras:${teamId}`) as { value: string } | undefined; return r ? { ...NO_EXTRAS, ...parse<any>(r.value, {}) } : { ...NO_EXTRAS }; };
 export const teamBilling = (teamId: string): VercelTeamBilling | null => { const r = db.prepare("select value from settings where key = ?").get(`vercel_billing:${teamId}`) as { value: string } | undefined; return r ? parse<VercelTeamBilling | null>(r.value, null) : null; };
 export const listInvoices = (limit = 12): VercelInvoice[] => (db.prepare("select * from vercel_invoices order by created_at desc limit ?").all(limit) as any[]).map((r) => ({ ...r, groups: parse(r.groups, []), line_items: parse(r.line_items, []) }));
-export const wipeVercel = (): void => { db.transaction(() => { for (const t of ["vercel_env", "vercel_domains", "vercel_deployments", "vercel_stores", "vercel_invoices", "vercel_usage", "vercel_projects", "vercel_team"]) db.prepare(`delete from ${t}`).run(); db.prepare("delete from settings where key like 'vercel_billing:%' or key like 'vercel_extras:%'").run(); })(); };
+/** The FOCUS charges stored by the last collection (the months and streams the invoices may not carry). */
+export const listFocusCharges = (): BilledCharge[] => db.prepare("select * from vercel_billed_charges where source = 'focus' order by month desc").all() as BilledCharge[];
+/** Every billed charge by usage month and stream: the stored invoices as they are, plus a FOCUS charge only where no invoice covers that month and stream. */
+export const listBilledCharges = (limit = 24): BilledCharge[] => billedCharges(listInvoices(limit) as any[], listFocusCharges()).sort((a, b) => b.month.localeCompare(a.month) || a.stream.localeCompare(b.stream));
+export interface BillingCheck { marketplace_checked: boolean; note: string | null; at: string | null }
+/** Whether the last collection could cross-check the invoices against the FOCUS charges (unknown before the first one). */
+export const billingCheck = (teamId: string): BillingCheck => { const r = db.prepare("select value from settings where key = ?").get(`vercel_billing_check:${teamId}`) as { value: string } | undefined; return r ? parse<BillingCheck>(r.value, { marketplace_checked: false, note: null, at: null }) : { marketplace_checked: false, note: "the Marketplace charges have not been cross-checked yet (no collection has run)", at: null }; };
+export const wipeVercel = (): void => { db.transaction(() => { for (const t of ["vercel_env", "vercel_domains", "vercel_deployments", "vercel_stores", "vercel_invoices", "vercel_billed_charges", "vercel_usage", "vercel_projects", "vercel_team"]) db.prepare(`delete from ${t}`).run(); db.prepare("delete from settings where key like 'vercel_billing:%' or key like 'vercel_billing_check:%' or key like 'vercel_extras:%'").run(); })(); };

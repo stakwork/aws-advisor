@@ -4,6 +4,8 @@
  * returned: the env listing is reduced to names, targets and types before it leaves this module.
  */
 
+import type { FocusRow } from "./bill_months.js";
+
 export const VERCEL_API = "https://api.vercel.com";
 
 export interface VercelClientOptions { token: string; teamId?: string | null; fetchImpl?: typeof fetch; base?: string }
@@ -34,6 +36,14 @@ export function rateUnit(item: string): string {
   return "each";
 }
 export interface VercelInvoice { id: string; number: string | null; status: string | null; total: number | null; subtotal: number | null; tax: number | null; currency: string | null; created_at: string | null; issued_at: string | null; paid_at: string | null; period_start: string | null; period_end: string | null; source: string | null; hosted_url: string | null; pdf_url: string | null; groups: { id: string; name: string; total: number | null }[]; line_items: { title: string; amount: number; quantity: number | null; group: string | null; unit_usd: number | null }[] }
+/** The FOCUS charges answer as JSON lines (or, defensively, one JSON array); a line that is not JSON is skipped. Pure. */
+export function parseFocusLines(text: string): FocusRow[] {
+  const t = text.trim(); if (!t) return [];
+  if (t.startsWith("[")) { try { const a = JSON.parse(t); return Array.isArray(a) ? a : []; } catch { /* fall through to lines */ } }
+  const out: FocusRow[] = [];
+  for (const line of t.split(/\r?\n/)) { const l = line.trim(); if (!l) continue; try { const o = JSON.parse(l); if (o && typeof o === "object") out.push(o); } catch { /* not a charge line */ } }
+  return out;
+}
 export interface VercelProject {
   /** Vercel OIDC federation: the project's functions get a token to assume a cloud role instead of holding static keys */
   oidc?: { enabled: boolean; issuer_mode: string | null } | null;
@@ -80,13 +90,16 @@ export class VercelClient {
   private readonly token: string; private readonly teamId: string | null; private readonly f: typeof fetch; private readonly base: string;
   constructor(o: VercelClientOptions) { this.token = o.token; this.teamId = o.teamId || null; this.f = o.fetchImpl ?? fetch; this.base = o.base ?? VERCEL_API; }
 
-  async get<T = any>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
+  async get<T = any>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> { return (await this.raw(path, params)).json() as Promise<T>; }
+  /** The body as text, for the endpoints that answer with JSON lines. */
+  async getText(path: string, params: Record<string, string | number | undefined> = {}): Promise<string> { return (await this.raw(path, params)).text(); }
+  private async raw(path: string, params: Record<string, string | number | undefined>): Promise<Response> {
     const u = new URL(`${this.base}${path}`);
     if (this.teamId) u.searchParams.set("teamId", this.teamId);
     for (const [k, v] of Object.entries(params)) if (v != null && v !== "") u.searchParams.set(k, String(v));
     const res = await this.f(u.toString(), { headers: { authorization: `Bearer ${this.token}`, "user-agent": "cloud-advisor" }, signal: AbortSignal.timeout(30_000) });
     if (!res.ok) { const body = (await res.text()).slice(0, 300); throw new Error(`Vercel ${path}: HTTP ${res.status}${body ? ` ${body}` : ""}`); }
-    return res.json() as Promise<T>;
+    return res;
   }
 
   /** Follows `pagination.next` until the end; `key` names the array in each page. */
@@ -114,8 +127,22 @@ export class VercelClient {
   async deployments(projectId?: string, limit = 50): Promise<VercelDeployment[]> { return (await this.list<any>("/v6/deployments", "deployments", { projectId }, limit)).map(deploymentFrom); }
   async domains(projectId: string): Promise<VercelDomain[]> { return (await this.list<any>(`/v9/projects/${encodeURIComponent(projectId)}/domains`, "domains")).map((d) => domainFrom(projectId, d)); }
   async env(projectId: string): Promise<VercelEnv[]> { const r = await this.get<any>(`/v9/projects/${encodeURIComponent(projectId)}/env`); return (Array.isArray(r?.envs) ? r.envs : []).map((e: any) => envFrom(projectId, e)); }
-  /** The most recent invoices (Vercel's own billing; marketplace stores bill through it too). */
+  /**
+   * The most recent invoices from `GET /v1/invoices`. Whether this list carries the Marketplace (Neon, ...) invoices is
+   * not guaranteed (Vercel documents those only by id, under /v1/installations/.../billing/invoices), so the bill is
+   * cross-checked against `billingCharges()`. An error reads as no invoices.
+   */
   async invoices(limit = 12): Promise<VercelInvoice[]> { try { const r = await this.get<any>("/v1/invoices", { limit }); return (Array.isArray(r?.data) ? r.data : []).map(invoiceFrom); } catch { return []; } }
+  /**
+   * The team's billed charges (`GET /v1/billing/charges`, FOCUS v1.3 JSON lines: BilledCost, ChargeCategory, ChargePeriodStart,
+   * ServiceProviderName, ...) from the first of the month `months - 1` months ago until now (`from` inclusive, `to` exclusive,
+   * at most a year). Throws when the endpoint refuses (no billing scope, not available on the plan), so the caller can say so.
+   */
+  async billingCharges(months = 12, now = new Date()): Promise<FocusRow[]> {
+    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (months - 1), 1));
+    const text = await this.getText("/v1/billing/charges", { from: from.toISOString(), to: now.toISOString() });
+    return parseFocusLines(text);
+  }
   /** One row per day of a usage type, team-wide (or one project's), with the per-project breakdown in percent. */
   async usage(type: UsageType, from: Date, to: Date, projectId?: string): Promise<UsageDay[]> {
     try { return usageDaysFrom(await this.get("/v2/usage", { type, from: from.toISOString(), to: to.toISOString(), projectId })); } catch { return []; }
@@ -210,9 +237,9 @@ export function teamBillingFrom(b: any): VercelTeamBilling | null {
 export function invoiceFrom(i: any): VercelInvoice {
   const groups = (Array.isArray(i.groups) ? i.groups : []).map((g: any) => ({ id: String(g.id ?? g.name), name: String(g.name ?? g.title ?? g.id), total: money(g.total ?? g.amount) }));
   const lines = (Array.isArray(i.lineItems) ? i.lineItems : []).map((l: any) => ({ title: String(l.title ?? l.description ?? l.billableItem ?? "item"), amount: money(l.amount ?? l.subtotal) ?? 0, quantity: money(l.quantity), group: str(l.group), unit_usd: money(l.unit?.unitAmount ?? l.unit?.defaultUnitAmount ?? l.price?.unitAmount) })).filter((l: any) => l.amount !== 0).sort((a: any, b: any) => b.amount - a.amount).slice(0, 25);
-  const periods = (Array.isArray(i.lineItems) ? i.lineItems : []).map((l: any) => [l.periodStart, l.periodEnd]).filter((p: any) => p[0] && p[1]);
+  const periods = (Array.isArray(i.lineItems) ? i.lineItems : []).map((l: any) => [iso(l.periodStart), iso(l.periodEnd)]).filter((p: any) => p[0] && p[1]);
   return { id: String(i.id), number: str(i.invoiceNumber), status: str(i.status), total: money(i.total), subtotal: money(i.subtotal), tax: money(i.tax), currency: str(i.currency), created_at: iso(i.createdAt), issued_at: iso(i.issuedAt), paid_at: iso(i.statusTransitions?.paidAt),
-    period_start: periods.length ? String(periods.map((p: any) => p[0]).sort()[0]) : null, period_end: periods.length ? String(periods.map((p: any) => p[1]).sort().slice(-1)[0]) : null, source: str(i.invoiceSource), hosted_url: str(typeof i.hostedUrl === "string" ? i.hostedUrl : i.hostedUrl?.url), pdf_url: str(i.pdfDownloadUrl), groups, line_items: lines };
+    period_start: periods.length ? String(periods.map((p: any) => p[0]).sort()[0]) : iso(i.period?.start ?? i.periodStart), period_end: periods.length ? String(periods.map((p: any) => p[1]).sort().slice(-1)[0]) : iso(i.period?.end ?? i.periodEnd), source: str(i.invoiceSource), hosted_url: str(typeof i.hostedUrl === "string" ? i.hostedUrl : i.hostedUrl?.url), pdf_url: str(i.pdfDownloadUrl), groups, line_items: lines };
 }
 
 /** What kind of thing a store is, from Vercel's type and the marketplace product: the generic labels the graph uses. */

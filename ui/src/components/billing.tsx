@@ -50,7 +50,7 @@ const ACCOUNT_FORMULA = <><div className="font-medium text-zinc-100">AWS: spent 
 const PAYER_FORMULA = (basis: string | null) => basis === "forecast"
   ? <><div className="font-medium text-zinc-100">Projected = spent so far + the days left, priced three ways</div><ul className="mt-1 list-disc space-y-0.5 pl-4"><li>what runs now (EC2, RDS, ElastiCache, EBS, S3, Lambda) from the inventory at list price, Savings Plan and reservations taken off</li><li>usage-based lines (transfer, NAT, CloudWatch, requests) at their daily average so far; last month's rates in the first week</li><li>fixed charges (Savings Plan fee, reservation fees, support) as known amounts</li></ul><div className="mt-1">Net unblended, the figure the invoice shows.</div></>
   : <><div className="font-medium text-zinc-100">Projected = average complete day this month × days in the month</div><div className="mt-1">No forecast has been computed for this month yet; it replaces this after the next spend refresh.</div></>;
-const VERCEL_FORMULA = <div className="mt-2"><span className="font-medium text-zinc-100">Vercel: the invoices issued this month + each regular invoice not issued yet at its last amount.</span> Vercel bills twice a month: the subscription (seats, plan, add-ons, infrastructure usage) on its cycle day and the Marketplace (the stores) on the 1st; a month is every invoice issued in it.</div>;
+const VERCEL_FORMULA = <div className="mt-2"><span className="font-medium text-zinc-100">Vercel: the charges billed for this month's usage + each regular stream not billed yet at its last amount.</span> The subscription (seats, plan, add-ons, infrastructure usage) and the Marketplace (the stores) both count to the month they cover.</div>;
 
 const STATUS: Record<string, string> = { new: "new this month", gone: "nothing yet this month", up: "up", down: "down" };
 
@@ -166,7 +166,7 @@ export function AccountsBilling({ title }: { title?: ReactNode }) {
           </tbody>
         </table>
         <div className="mt-2 text-xs text-zinc-500">
-          AWS lines are each linked account's {b.basis === "amortized" ? "amortized cost (reservation and Savings Plan fees spread over the days they cover)" : "unblended cost (fees on the day they are charged)"} from the payer's Cost Explorer, projected from the account's own recent days. Vercel counts its invoices by the month they are issued.
+          AWS lines are each linked account's {b.basis === "amortized" ? "amortized cost (reservation and Savings Plan fees spread over the days they cover)" : "unblended cost (fees on the day they are charged)"} from the payer's Cost Explorer, projected from the account's own recent days. Vercel charges (subscription and Marketplace, e.g. Neon) count to the month of usage, not the month the invoice is issued.
           {net && <> The payer's net bill (after credits and refunds): {usd(net.month_to_date_usd)} so far, ≈ {usd(net.projected_usd)} projected{net.basis === "forecast" ? " by the forecast" : ""}, {usd(net.last_month_usd)} in {prev}.</>}
         </div>
       </Card>

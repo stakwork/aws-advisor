@@ -34,7 +34,7 @@ export const QUERY_ROW_CAP = 200;
 
 /** The specific resource labels; every node with one of these also carries AdvisorResource. */
 
-export const LABELS = ["AdvisorAccount", "AdvisorResource", ...RESOURCE_LABELS, "AdvisorCompute", "AdvisorResourceRef", "AdvisorNodePool", "AdvisorTelemetry", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass", "AdvisorAgentRun", "AdvisorApp", "AdvisorEndpoint", "AdvisorPressureEvent", "AdvisorSecurityScan", "AdvisorPackage", "AdvisorImage", "AdvisorContainer", "AdvisorNotification", "AdvisorThreatFinding", "AdvisorCredential", "AdvisorClient", "AdvisorPerson", "AdvisorPolicy", "AdvisorGroup", "AdvisorPermissionSet", "AdvisorRepository"] as const;
+export const LABELS = ["AdvisorAccount", "AdvisorResource", ...RESOURCE_LABELS, "AdvisorCompute", "AdvisorResourceRef", "AdvisorNodePool", "AdvisorTelemetry", "AdvisorRecommendation", "AdvisorRun", "AdvisorControl", "AdvisorAlert", "AdvisorIncident", "AdvisorAction", "AdvisorPass", "AdvisorAgentRun", "AdvisorApp", "AdvisorEndpoint", "AdvisorPressureEvent", "AdvisorSecurityScan", "AdvisorPackage", "AdvisorImage", "AdvisorContainer", "AdvisorNotification", "AdvisorThreatFinding", "AdvisorCredential", "AdvisorClient", "AdvisorPerson", "AdvisorPolicy", "AdvisorGroup", "AdvisorPermissionSet", "AdvisorRepository", "AdvisorCharge"] as const;
 
 /** v1 labels that no longer exist; removed once per process so a graph written by the old mirror comes clean. */
 export const LEGACY_LABELS = ["AdvisorRole", "AdvisorPort", "AdvisorPlaybook", "KnService", "KnPattern"] as const;
