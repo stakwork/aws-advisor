@@ -21,6 +21,8 @@ export interface RuntimeSpec { key: string; env: string; kind: RuntimeKind; def:
 export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "repo2graphUrl", env: "REPO2GRAPH_URL", kind: "url", def: "", group: "Agent", label: "repo2graph URL", help: "The agent runner. Empty = rules only, no agent." },
   { key: "repo2graphToken", env: "REPO2GRAPH_TOKEN", kind: "secret", def: "", group: "Agent", label: "repo2graph token", help: "boltwall's stakwork_secret (x-api-token)." },
+  { key: "strutUrl", env: "STRUT_URL", kind: "url", def: "", group: "Agent", label: "Strut URL", help: "Strut workflow runner for what-if simulations (advisor_simulate). Empty = the tool answers that it is not configured." },
+  { key: "strutApiKey", env: "STRUT_API_KEY", kind: "secret", def: "", group: "Agent", label: "Strut API key", help: "Sent as a Bearer token. Empty when Strut has no key." },
   { key: "agentModel", env: "AGENT_MODEL", kind: "string", def: "anthropic/claude-opus-5", group: "Agent", label: "Model", help: "repo2graph's provider/model form: anthropic/claude-opus-5, openai/gpt-5, openrouter/…" },
   { key: "agentApiKey", env: "AGENT_API_KEY", kind: "secret", def: "", group: "Agent", label: "Provider API key", help: "Sent per request, so the agent can use a provider or key repo2graph does not hold. Empty = repo2graph's own key." },
   { key: "agentWebSearch", env: "AGENT_WEB_SEARCH", kind: "bool", def: "false", group: "Agent", label: "Web search", help: "Off by default: a search query is an exfiltration channel for anything a hostile tag or probe line injects into a prompt." },
@@ -205,6 +207,8 @@ export const config = {
   // ---- runtime settings: Settings page, then env, then default (see RUNTIME_SETTINGS) ----
   get repo2graphUrl(): string { return rt("repo2graphUrl").replace(/\/$/, ""); },
   get repo2graphToken(): string { return rt("repo2graphToken"); },
+  get strutUrl(): string { return rt("strutUrl").replace(/\/$/, ""); },
+  get strutApiKey(): string { return rt("strutApiKey"); },
   get agentModel(): string { return rt("agentModel") || "anthropic/claude-opus-5"; },
   get agentApiKey(): string { return rt("agentApiKey"); },
   get agentWebSearch(): boolean { return rtBool("agentWebSearch"); },

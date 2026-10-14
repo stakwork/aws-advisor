@@ -181,8 +181,11 @@ export const FACT_TOOLS: [name: string, what: string][] = [
   ["vercel_projects", "the Vercel team's projects: URLs and who may open them, deployments, stores, usage, cost at the team's rates; a name gives the full detail"],
   ["vercel_stores", "the Vercel team's databases, caches and blob stores with plan, usage (Neon compute hours, blob size) and cost at plan"],
   ["vercel_bill", "the Vercel team's subscription, usage this period, invoices and rates"],
+  ["advisor_simulate", "what-if analysis of a change to our infrastructure (move a database to Azure, bridge Vercel and AWS): researches vendor pricing for minutes and returns cost today vs after, a verdict and a report link; changes nothing"],
   ["steampipe_query", "SQL over the live AWS account (and the Vercel team's vercel.* tables) through Steampipe, for anything the tools above do not cover"],
 ];
+
+const SIMULATE_GUIDANCE = 'For "how would this change impact us" or "would it be cheaper to ..." questions call advisor_simulate with the user\'s question, then summarise the comparison, the verdict and the caveats (estimates, open external checks) and link the report.';
 
 export interface VercelHeader { team: string; name: string | null; plan: string | null; projects: number; production_failed: number; urls_open: number; last_invoice_usd: number | null; estimated_period_usd: number | null; attention: number; read_at: string | null }
 export interface AccountHeader { account: string | null; latest_run: string | null; spend_7d: number | null; month_to_date: number | null; projected: number | null; open_alerts: number; open_recs: number; open_saving: number; vercel?: VercelHeader | null }
@@ -227,6 +230,7 @@ export function buildAccountPrompt(header: AccountHeader, tools: [string, string
   }
   lines.push("", "## What you can look up (tools arrive as aws_<name>); pull what the question needs, say what you fetched");
   for (const [n, w] of tools) lines.push(`- ${n}: ${w}`);
+  lines.push(SIMULATE_GUIDANCE);
   lines.push("", "## The conversation so far");
   const past = thread.filter((m) => m.status === "completed" && m.content).slice(-THREAD_CONTEXT);
   if (!past.length) lines.push("- this is the first message");
@@ -277,6 +281,7 @@ export function buildActionPrompt(row: ActionRow, ctx: ActionContext, thread: Pi
     `Other ledger rows on it: ${ctx.other_rows.length ? "" : "none"}`, ...ctx.other_rows.map((o) => `- #${o.id} ${o.kind} ${o.status} (${o.created_at}): ${o.title}${o.error ? ` · error: ${String(o.error).slice(0, 120)}` : ""}`),
     "", "## What you can look up (tools arrive as aws_<name>); pull what the question needs, say what you fetched");
   for (const [n, w] of FACT_TOOLS) lines.push(`- ${n}: ${w}`);
+  lines.push(SIMULATE_GUIDANCE);
   lines.push("", "## The conversation so far");
   const past = thread.filter((m) => m.status === "completed" && m.content).slice(-THREAD_CONTEXT);
   if (!past.length) lines.push("- this is the first message");

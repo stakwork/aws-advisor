@@ -841,6 +841,17 @@ Where the two values come from:
 | ✎ `REPO2GRAPH_URL` | `http://repo2graph.sphinx:3355` | `http://localhost:3355` | `https://repo2graph.<swarm host>` |
 | `REPO2GRAPH_TOKEN` | boltwall's `stakwork_secret`, injected by the swarm | the `BOLTWALL_API_SECRET` value in `sphinx-swarm/.env` | the boltwall node's `stakwork_secret` in that swarm's `vol/stack/config.yaml` |
 
+### What-if simulation (`advisor_simulate`)
+
+The MCP tool `advisor_simulate` (`aws_advisor_simulate` for the agent; `src/mcp_strut.ts`, client in `src/strut.ts`) answers
+"how would this change impact us" by running the Strut workflow `advisor-simulate`: `POST {STRUT_URL}/workflows/advisor-simulate/run`
+with `{input: {question}}`, then polling `GET .../runs/:runId` every 5 s. It takes minutes, researches vendor pages and writes claims
+into Strut's knowledge graph (namespace `advisor-sim`); it changes no infrastructure. The result carries `report` (the HTML report
+link), `comparison` (cost today vs after, or a break-even volume when usage is unmeasured), `estimated_quantities`,
+`open_external_checks` and `run_id`. After ten minutes the tool returns `{status: "running", run_id}`; call it again with `run_id`
+to keep waiting. Configure `STRUT_URL` and, when Strut has a key, `STRUT_API_KEY` (sent as a Bearer token, never logged or returned);
+both are also editable in Settings. Without `STRUT_URL` the tool answers "STRUT_URL is not configured".
+
 `PUBLIC_URL` must be an address repo2graph's container can reach: `http://host.docker.internal:9034` when the
 advisor runs on the Docker host, `http://advisor.sphinx:9034` once it is a swarm node.
 
