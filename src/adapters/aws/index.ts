@@ -154,7 +154,7 @@ export const awsAdapter: ProviderAdapter = {
       { tab: "route53", view: "aws.table", label: "Route 53" }, { tab: "clusters", view: "aws.table", label: "EKS, ECS" }, { tab: "identities", view: "aws.table", label: "IAM users · IAM Identity Center" }, { tab: "sg", view: "aws.table", label: "security groups" },
       { tab: "tags", view: "aws.table", label: "AWS tags" }, { tab: "certificates", view: "aws.table", label: "ACM" }, { tab: "messaging", view: "aws.table", label: "SNS" }, { tab: "keys", view: "aws.table", label: "KMS" },
       { tab: "files", view: "aws.table", label: "EFS" }, { tab: "backups", view: "aws.table", label: "AWS Backup vaults and plans" }, { tab: "analytics", view: "aws.table", label: "Athena workgroups" }, { tab: "stacks", view: "aws.table", label: "CloudFormation" },
-      { tab: "threats", view: "aws.table", label: "GuardDuty" },
+      { tab: "threats", view: "aws.table", label: "GuardDuty" }, { tab: "cdn", view: "aws.table", label: "CloudFront" },
     ],
     settings: [{ id: "access", label: "Access", view: "aws.access" }, { id: "permissions", label: "Permissions", view: "aws.permissions" }, { id: "probes", label: "Probes", view: "aws.probes" }, { id: "benchmarks", label: "Benchmarks", view: "aws.benchmarks" }, { id: "members", label: "Member accounts", view: "aws.members" }],
   },

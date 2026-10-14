@@ -509,6 +509,7 @@ export const recommendedPolicy = (accountId = "*", memberReadRoleName = "aws-adv
         "athena:GetWorkGroup",
         "cloudformation:DescribeStackResources", "cloudformation:DescribeStackResource",
         "wafv2:GetWebACL", "wafv2:GetLoggingConfiguration",
+        "cloudfront:ListDistributions", "cloudfront:GetDistribution", "cloudfront:ListTagsForResource",
         "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource", "guardduty:GetAdministratorAccount",
         // User Notifications (the console bell): the AWS-managed feed and the account's own configurations
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent",
