@@ -1,7 +1,7 @@
 /**
  * The platform services the advisor inventories beyond compute and data stores: certificates (ACM), messaging (SNS),
  * keys (KMS), file systems (EFS), backups (AWS Backup vaults and plans), analytics (Athena workgroups), stacks
- * (CloudFormation), web filters (WAF) and threat detection (GuardDuty). One collector per service in src/services/
+ * (CloudFormation), web filters (WAF), content delivery (CloudFront) and threat detection (GuardDuty). One collector per service in src/services/
  * reads Steampipe (and CloudWatch where a number needs it) and returns rows already in the words of
  * docs/cloud-ontology.md: `props` are the generic node's properties, `links` the edges to other nodes. They share one
  * table, keyed by (native_type, id), so a service is a collector and a mapping, not a schema; the Inventory page reads
@@ -40,6 +40,7 @@ export const SERVICE_TABS = {
   stacks: ["cloudformation_stack"],
   threats: ["guardduty_detector"],
   waf: ["wafv2_web_acl"],
+  cdn: ["cloudfront_distribution"],
 } as const;
 export type ServiceTab = keyof typeof SERVICE_TABS;
 export type NativeType = (typeof SERVICE_TABS)[ServiceTab][number];
@@ -310,6 +311,7 @@ export function serviceSummary(scope?: AccountScope | null): Record<ServiceTab, 
     if (tab === "backups") { s.recovery_points = p.reduce((t, x) => t + (Number(x.recovery_points) || 0), 0); s.size_gb = round2(p.reduce((t, x) => t + (Number(x.size_gb) || 0), 0)); s.protected = p.reduce((t, x) => t + (Number(x.protected_resources) || 0), 0); }
     if (tab === "analytics") s.scanned_gb_30d = round2(p.reduce((t, x) => t + (Number(x.scanned_gb_30d) || 0), 0));
     if (tab === "stacks") { s.drifted = p.filter((x) => x.drift === "drifted").length; s.failed = live.filter((r) => /FAILED|ROLLBACK_COMPLETE$/.test(String(r.state)) && r.state !== "UPDATE_ROLLBACK_COMPLETE").length; s.managed = p.reduce((t, x) => t + (Number(x.resources) || 0), 0); }
+    if (tab === "cdn") { s.disabled = p.filter((x) => x.enabled === false).length; s.no_waf = p.filter((x) => x.enabled !== false && !x.waf_attached).length; s.no_logging = p.filter((x) => x.enabled !== false && x.logging_enabled === false).length; }
     if (tab === "waf") { s.attached = p.reduce((t, x) => t + (Number(x.attached) || 0), 0); s.unattached = p.filter((x) => !Number(x.attached)).length; }
     if (tab === "threats") {
       s.enabled = live.filter((r) => r.props.enabled).length;

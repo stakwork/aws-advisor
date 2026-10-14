@@ -34,6 +34,7 @@ export function genericState(nativeType: string, state: string | null | undefine
     return /_complete$/.test(s) ? "available" : "unknown";
   }
   if (nativeType === "kms_key") return s === "enabled" ? "available" : s === "disabled" || s === "pendingdeletion" || s === "pendingreplicadeletion" ? "stopped" : s === "unavailable" ? "degraded" : /^(creating|updating|pendingimport)$/.test(s) ? "pending" : "unknown";
+  if (nativeType === "cloudfront_distribution") return s === "deployed" ? "available" : s === "disabled" ? "stopped" : s === "inprogress" ? "pending" : "unknown";
   if (nativeType === "acm_certificate") return s === "issued" ? "available" : s === "pending_validation" ? "pending" : /^(expired|revoked|failed|validation_timed_out)$/.test(s) ? "degraded" : s === "inactive" ? "stopped" : "unknown";
   if (/^(available|active|in-use|issued|insync|ok|enabled)$/.test(s)) return "available";
   if (s === "disabled") return "stopped";
@@ -294,7 +295,7 @@ export function guessedType(resource: string): string | null {
 /** The generic label each platform service row lands on (src/service_inventory.ts); WAF is a filter the provider bills. */
 export const SERVICE_LABEL: Record<string, ResourceLabel> = {
   acm_certificate: "AdvisorCertificate", sns_topic: "AdvisorMessaging", kms_key: "AdvisorSecret", efs_file_system: "AdvisorStorage", backup_vault: "AdvisorStorage", backup_plan: "AdvisorBackupPlan",
-  athena_workgroup: "AdvisorAnalytics", cloudformation_stack: "AdvisorStack", wafv2_web_acl: "AdvisorFilter", guardduty_detector: "AdvisorDetector",
+  athena_workgroup: "AdvisorAnalytics", cloudformation_stack: "AdvisorStack", wafv2_web_acl: "AdvisorFilter", guardduty_detector: "AdvisorDetector", cloudfront_distribution: "AdvisorCdn",
 };
 
 /** Neo4j holds primitives and lists of primitives only: a nested object or list of objects becomes its JSON text. Pure. */

@@ -9,7 +9,7 @@ import { DetailCell, Empty, Stat, Td, Th } from "./ui";
  * shape (name, state, props, links, a list price); the columns and the header numbers are per kind. A row opens its
  * properties as the graph holds them and its edges to other nodes.
  */
-export type ServiceTab = "certificates" | "messaging" | "keys" | "files" | "backups" | "analytics" | "stacks" | "threats" | "waf";
+export type ServiceTab = "certificates" | "messaging" | "keys" | "files" | "backups" | "analytics" | "stacks" | "threats" | "waf" | "cdn";
 
 type Col = { h: string; cell: (r: any) => ReactNode; right?: boolean };
 const p = (r: any) => r.props || {};
@@ -88,6 +88,15 @@ const COLUMNS: Record<ServiceTab, Col[]> = {
     { h: "Off", cell: (r) => list(p(r).protections_off, 2) },
     { h: "Last finding", cell: (r) => day(p(r).last_finding_at) },
   ],
+  cdn: [
+    { h: "Hostnames", cell: (r) => list([p(r).domain_name, ...(Array.isArray(p(r).aliases) ? p(r).aliases : [])], 2) },
+    { h: "Status", cell: (r) => warn(p(r).enabled === false, p(r).status ?? r.state) },
+    { h: "Origins", cell: (r) => list(p(r).origins, 2) },
+    { h: "Viewer TLS", cell: (r) => warn(p(r).viewer_protocol === "allow_all", <>{String(p(r).viewer_protocol ?? "—").replace(/_/g, " ")}{p(r).tls_min_version ? <span className="text-zinc-500"> · {p(r).tls_min_version}</span> : null}</>) },
+    { h: "Firewall", cell: (r) => warn(p(r).waf_attached === false, yes(p(r).waf_attached)) },
+    { h: "Tier", cell: (r) => p(r).price_tier ?? "—" },
+    { h: "Logging", cell: (r) => warn(p(r).logging_enabled === false, yes(p(r).logging_enabled)) },
+  ],
   waf: [
     { h: "Default", cell: (r) => p(r).default_action },
     { h: "Rules", cell: (r) => list(p(r).rule_list, 2) },
@@ -111,6 +120,7 @@ function Stats({ tab, s }: { tab: ServiceTab; s: any }) {
     analytics: [["Workgroups", s.total, gone || undefined], ["Scanned 30d", gbs(s.scanned_gb_30d)], ["At list / month", usd(s.monthly_usd, 2), "5 USD per TB scanned"]],
     stacks: [["Stacks", s.total, gone || undefined], ["Resources managed", n(s.managed)], ["Drifted", s.drifted], ["Failed", s.failed]],
     threats: [["Detectors", s.total, `${s.enabled} enabled${gone}`], ["Open findings", s.findings_open], ["Critical · high", `${s.critical} · ${s.high}`], ["Medium · low", `${s.medium} · ${s.low}`]],
+    cdn: [["Distributions", s.total, `${s.disabled} disabled${gone}`], ["No firewall", s.no_waf, "enabled, nothing attached"], ["No access logging", s.no_logging, "enabled, logging off"]],
     waf: [["Web ACLs", s.total, `${s.unattached} attached to nothing${gone}`], ["Resources guarded", s.attached], ["At list / month", usd(s.monthly_usd, 2), "ACL, rules and requests"]],
   }[tab] as [string, ReactNode, ReactNode?][];
   return <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{cards.map(([label, value, hint]) => <Stat key={label} label={label} value={value} hint={hint} />)}</div>;
@@ -120,7 +130,7 @@ function Stats({ tab, s }: { tab: ServiceTab; s: any }) {
 function linkTo(id: string): string | null {
   const tab = /^i-/.test(id) ? "ec2" : /^vol-/.test(id) ? "ebs" : /^sg-/.test(id) ? "sg" : /^arn:aws:elasticloadbalancing:/.test(id) ? "elb" : /^arn:aws:lambda:/.test(id) ? "lambda" : /^arn:aws:dynamodb:/.test(id) ? "dynamodb"
     : /^arn:aws:kms:/.test(id) ? "keys" : /^arn:aws:sns:/.test(id) ? "messaging" : /^arn:aws:acm:/.test(id) ? "certificates" : /^arn:aws:elasticfilesystem:/.test(id) ? "files" : /^arn:aws:backup:/.test(id) ? "backups"
-    : /^arn:aws:cloudformation:/.test(id) ? "stacks" : /^arn:aws:athena:/.test(id) ? "analytics" : null;
+    : /^arn:aws:cloudformation:/.test(id) ? "stacks" : /^arn:aws:athena:/.test(id) ? "analytics" : /^arn:aws:cloudfront:/.test(id) ? "cdn" : null;
   return tab ? `/inventory?tab=${tab}&id=${encodeURIComponent(id)}` : null;
 }
 
@@ -191,7 +201,7 @@ function Findings({ q, gone }: { q: string; gone: boolean }) {
 
 const EMPTY: Record<ServiceTab, string> = {
   certificates: "No certificate in ACM.", messaging: "No SNS topic.", keys: "No KMS key.", files: "No EFS file system.", backups: "No backup vault or plan.", analytics: "No Athena workgroup.",
-  stacks: "No CloudFormation stack.", threats: "GuardDuty is not enabled in any region the advisor reads.", waf: "No WAF web ACL.",
+  stacks: "No CloudFormation stack.", threats: "GuardDuty is not enabled in any region the advisor reads.", waf: "No WAF web ACL.", cdn: "No CloudFront distribution.",
 };
 
 /** One platform-service tab: the header numbers, the rows with the kind's columns, a row opening its properties and edges. */

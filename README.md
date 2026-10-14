@@ -623,6 +623,7 @@ the MCP tools and the AWS Thrifty benchmarks:
         "athena:GetWorkGroup",
         "cloudformation:DescribeStackResources", "cloudformation:DescribeStackResource",
         "wafv2:GetWebACL", "wafv2:GetLoggingConfiguration",
+        "cloudfront:ListDistributions", "cloudfront:GetDistribution", "cloudfront:ListTagsForResource",
         "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:ListFindings", "guardduty:GetFindings", "guardduty:ListTagsForResource", "guardduty:GetAdministratorAccount",
         "notifications:ListNotificationHubs", "notifications:ListManagedNotificationEvents", "notifications:GetManagedNotificationEvent", "notifications:ListManagedNotificationChildEvents", "notifications:ListNotificationEvents", "notifications:GetNotificationEvent"
       ],
@@ -1550,14 +1551,15 @@ read it completely, and only in accounts the refresh saw at all (as `markGone` d
 | Analytics | Athena workgroups | `AdvisorAnalytics {kind: query_engine}` | 5 USD per TB scanned (`ProcessedBytes`, when the workgroup publishes metrics) | `WRITES_TO` → results bucket |
 | Stacks | CloudFormation | `AdvisorStack {tool: cloudformation}` | free | `MANAGES` → resources and network nodes it created; `PART_OF` → parent stack |
 | Filters | WAF web ACLs | `AdvisorFilter {kind: web_acl}` (also an `AdvisorResource`) | 5 USD per ACL, 1 USD per rule, 0.60 USD per million requests | `GUARDED_BY` ← balancers, APIs it protects |
+| CDN | CloudFront distributions | `AdvisorCdn {kind: distribution}` | not priced (billed by traffic and requests) | `GUARDED_BY` → the web ACL attached |
 | Threat detection | GuardDuty | `AdvisorDetector`, `AdvisorThreatFinding` | not priced (billed by events analysed) | finding `REPORTED_BY` → detector, `ABOUT` → resource |
 
 E-mail, SMS and HTTP subscribers of a topic are counted by protocol, never stored. GuardDuty findings live in
 `threat_findings` (90 days, like GuardDuty keeps them) and are mirrored by the `threat findings` layer. The account
 overview adds the services' list price to the account's total. Endpoints: `GET /api/inventory/services/:tab`
-(`certificates`, `messaging`, `keys`, `files`, `backups`, `analytics`, `stacks`, `threats`, `waf`; `q`, `gone`, `type`),
+(`certificates`, `messaging`, `keys`, `files`, `backups`, `analytics`, `stacks`, `threats`, `waf`, `cdn`; `q`, `gone`, `type`),
 `GET /api/inventory/threat-findings` (`q`, `gone`, `archived`, `detector`); the summary carries `services` per tab.
-Reading them needs the ACM, Athena, Backup, CloudFormation, WAF and GuardDuty read actions of the recommended policy;
+Reading them needs the ACM, Athena, Backup, CloudFormation, WAF, CloudFront (`ListDistributions`, `GetDistribution`, `ListTagsForResource`) and GuardDuty read actions of the recommended policy;
 an older read role gets them from Settings › Permissions.
 
 ### Lambda

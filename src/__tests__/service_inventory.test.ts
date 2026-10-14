@@ -151,6 +151,44 @@ test("sns: subscribers counted by protocol, only ARN endpoints become DELIVERS_T
   assert.deepEqual(r.links.find((l) => l.rel === "ENCRYPTS"), { rel: "ENCRYPTS", other: "alias/aws/sns", dir: "in", resolve: "kms_key" });
 });
 
+test("cdn: neutral props from a distribution, TLS and firewall words, tiers and HTTP versions, GUARDED_BY only for a web ACL ARN", async () => {
+  const { cdnRow } = await import("../services/cdn.js");
+  const WAF = `arn:aws:wafv2:us-east-1:${ACCT}:global/webacl/edge/abc`;
+  const arn = `arn:aws:cloudfront::${ACCT}:distribution/E1ABC`;
+  const r = cdnRow({ id: "E1ABC", arn, domain_name: "d111.cloudfront.net", status: "Deployed", enabled: true, http_version: "http2and3", is_ipv6_enabled: true, price_class: "PriceClass_100", web_acl_id: WAF, comment: "site",
+    last_modified_time: "2026-09-01T10:00:00Z", aliases: { Quantity: 1, Items: ["www.example.com"] },
+    origins: { Items: [{ Id: "s3", DomainName: "assets.s3.us-east-1.amazonaws.com" }, { Id: "alb", DomainName: "prod-alb.us-east-1.elb.amazonaws.com" }] },
+    default_cache_behavior: { ViewerProtocolPolicy: "redirect-to-https" }, cache_behaviors: { Items: [{ ViewerProtocolPolicy: "https-only" }] },
+    viewer_certificate: { ACMCertificateArn: `arn:aws:acm:us-east-1:${ACCT}:certificate/abc`, MinimumProtocolVersion: "TLSv1.2_2021", SSLSupportMethod: "sni-only" },
+    logging: { Enabled: true, Bucket: "logs.s3.amazonaws.com" }, restrictions: { GeoRestriction: { RestrictionType: "whitelist", Items: ["US"] } },
+    tags: { Name: "site" }, region: "global", account_id: ACCT });
+  assert.equal(r.native_type, "cloudfront_distribution");
+  assert.equal(r.id, arn);
+  assert.equal(r.name, "www.example.com");
+  assert.equal(r.region, "global");
+  assert.equal(r.monthly_usd, null);
+  assert.deepEqual(r.props.aliases, ["www.example.com"]);
+  assert.deepEqual(r.props.origins, ["assets.s3.us-east-1.amazonaws.com", "prod-alb.us-east-1.elb.amazonaws.com"]);
+  assert.equal(r.props.status, "deployed");
+  assert.equal(r.props.tls_certificate_source, "acm");
+  assert.equal(r.props.tls_min_version, "TLSv1.2_2021");
+  assert.equal(r.props.viewer_protocol, "redirect_to_https");
+  assert.equal(r.props.waf_attached, true);
+  assert.equal(r.props.price_tier, "low");
+  assert.deepEqual(r.props.http_versions, ["http1.1", "http2", "http3"]);
+  assert.equal(r.props.logging_enabled, true);
+  assert.equal(r.props.geo_restriction, "allow");
+  assert.deepEqual(r.links, [{ rel: "GUARDED_BY", other: WAF, dir: "out", known_only: true }]);
+  assert.ok(!Object.keys(r.props).some((k) => /aws|cloudfront/i.test(k)), "no provider word in a property name");
+  const off = cdnRow({ id: "E2", arn: "arn:x", status: "Deployed", enabled: false, web_acl_id: "classic-id", viewer_certificate: { CloudFrontDefaultCertificate: true }, region: "global", account_id: ACCT });
+  assert.equal(off.state, "disabled");
+  assert.equal(off.props.status, "disabled");
+  assert.equal(off.props.tls_certificate_source, "default");
+  assert.equal(off.props.waf_attached, true);
+  assert.deepEqual(off.links, []);
+  assert.equal(off.props.logging_enabled, null);
+});
+
 test("a service row becomes its generic node: label per kind, flat props, generic state", async () => {
   const { resourceFromService, flatProps, genericState } = await import("../adapters/aws/resources.js");
   const base = { id: "arn:aws:wafv2:x", account_id: ACCT, region: R, name: "web", state: "available", gone: 0, first_seen: "2026-10-01", last_seen: "2026-10-02", monthly_usd: 7 };
@@ -159,6 +197,10 @@ test("a service row becomes its generic node: label per kind, flat props, generi
   assert.equal(waf.props.kind, "web_acl");
   assert.ok(waf.observed.some((o) => o.kind === "metrics"));
   assert.equal(resourceFromService({ ...base, native_type: "kms_key", props: "{}" })!.label, "AdvisorSecret");
+  assert.equal(resourceFromService({ ...base, native_type: "cloudfront_distribution", props: "{}" })!.label, "AdvisorCdn");
+  assert.equal(genericState("cloudfront_distribution", "Deployed"), "available");
+  assert.equal(genericState("cloudfront_distribution", "InProgress"), "pending");
+  assert.equal(genericState("cloudfront_distribution", "disabled"), "stopped");
   assert.equal(resourceFromService({ ...base, native_type: "something_else", props: "{}" }), null);
   assert.deepEqual(flatProps({ a: 1, b: ["x", null], c: { k: 1 }, d: [{ k: 1 }] }), { a: 1, b: ["x"], c: '{"k":1}', d: '[{"k":1}]' });
   assert.equal(genericState("cloudformation_stack", "UPDATE_ROLLBACK_COMPLETE"), "available");

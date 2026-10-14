@@ -597,6 +597,30 @@ stack), `*_IN_PROGRESS` `pending`, `*_FAILED` and a rolled-back create `degraded
 resource_type}` → the resources and network nodes it created (never a ref: what the graph has no node for stays a
 count); `PART_OF` → the parent stack.
 
+### AdvisorCdn
+
+A content delivery distribution: CloudFront, Azure Front Door / CDN, Cloud CDN, a Cloudflare zone. A resource; global, so
+`scope` is `global` and it has no region. Not priced at list (the bill is traffic and requests).
+
+| property | meaning |
+|---|---|
+| `kind` / `scope` | `distribution`; `global` |
+| `distribution_id` / `domain_name` / `aliases` | the provider's id; the hostname it assigns; the custom domains it answers to |
+| `enabled` / `status` / `native_status` | on or off; `deployed` \| `pending` \| `disabled`; the provider's word |
+| `origins` / `origin_count` / `behaviors` | origin hostnames; how many; how many path behaviours (default included) |
+| `tls_certificate` / `tls_certificate_source` / `tls_min_version` / `tls_sni_only` | the viewer certificate (id or ARN), `acm` \| `imported` \| `default`, the oldest protocol allowed |
+| `viewer_protocol` | `allow_all` \| `redirect_to_https` \| `https_only` (the weakest behaviour wins) |
+| `waf_attached` / `waf_id` | a web filter is attached, and which |
+| `price_tier` / `native_price_tier` | `all` \| `mid` \| `low` edge locations; the provider's word |
+| `http_versions` / `ipv6_enabled` | `http1.1`, `http2`, `http3` served; IPv6 on |
+| `logging_enabled` / `logging_target` | access logging on, and where it goes |
+| `geo_restriction` / `geo_countries` | `none` \| `allow` \| `deny`; the country codes |
+| `last_modified_at` / `invalidations_in_progress` | last change; cache purges running |
+
+The generic `state` folds the provider's status: deployed `available`, in progress `pending`, a disabled distribution
+`stopped`. Edges: `GUARDED_BY` → the web ACL attached (an `AdvisorFilter`, when inventoried); `SECURES` ← the
+certificate (from the certificate's side).
+
 ### AdvisorDetector / AdvisorThreatFinding
 
 A provider's managed threat detection (GuardDuty, Security Command Center, Defender for Cloud) and what it found.

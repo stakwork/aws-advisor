@@ -45,6 +45,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorStack: "An infrastructure-as-code stack (CloudFormation) and the resources it manages",
   AdvisorBackupPlan: "A backup plan, the vaults it stores in and the resources it protects",
   AdvisorDetector: "A threat detection service (GuardDuty detector)",
+  AdvisorCdn: "A content delivery distribution (CloudFront): hostnames, origins, TLS certificate, attached web filter, price tier, logging",
   AdvisorFilter: "A traffic filter: security group, network ACL or web ACL, with its rules",
   AdvisorFilterRule: "One allow or deny rule of a filter",
   AdvisorResourceRef: "A resource some record names that the inventory has no node for, created on demand",
