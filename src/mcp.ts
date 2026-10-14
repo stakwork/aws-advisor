@@ -816,7 +816,7 @@ export function createFactServer(): McpServer {
 
   server.registerTool("vercel_bill", {
     title: "The Vercel team's bill, usage this period and rates",
-    description: "The subscription (plan, seats, period), the estimate for the period, the metered usage since the period started (requests, invocations, GB-hours, bandwidth, builds, blob, cron, logs) team-wide with the per-project split and a daily series, the invoices with their groups and line items (marketplace stores such as Neon bill through them), and the rates: the team's listed price per metered item, each store's marketplace plan lines, and what the last paid invoice charged per unit. The same prices are KnSystemType nodes in the graph.",
+    description: "The subscription (plan, seats, period), the estimate for the period, the metered usage since the period started (requests, invocations, GB-hours, bandwidth, builds, blob, cron, logs) team-wide with the per-project split and a daily series, the invoices with their groups and line items (Marketplace stores such as Neon are cross-checked against the team's billed charges, since the invoice list is not guaranteed to include them), and the rates: the team's listed price per metered item, each store's marketplace plan lines, and what the last paid invoice charged per unit. The same prices are KnSystemType nodes in the graph.",
     inputSchema: {},
     annotations: ro,
   }, async () => { const v = await import("./adapters/vercel/index.js"); if (!v.vercelAdapter.configured()) return fail("Vercel is not configured on this advisor"); return text(v.vercelBill()); });

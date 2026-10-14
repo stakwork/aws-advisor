@@ -1844,8 +1844,15 @@ Usage is read from `/v2/usage` per type and day (requests with cache hits, bandw
 outcome and GB-hours, builds, blob, cron, data cache, log volume) with Vercel's per-project breakdown: the team's
 Overview shows the last week and month, a daily series and a per-project table, and flags error rates, throttles,
 timeouts, failed builds and a cold edge cache; the project nodes carry `usage_*_7d`.
-Billing is read from Vercel's invoices (`GET /v1/invoices`: totals, status, the groups and line items, with the
-marketplace stores such as Neon billed through them) and from the team's subscription (plan, seats and their price,
+Billing is read from Vercel's invoices (`GET /v1/invoices`: totals, status, the groups and line items; that list is
+not guaranteed to include the Marketplace invoices of stores such as Neon, so it is cross-checked against the team's
+FOCUS charges, `GET /v1/billing/charges`, grouped by month and provider: an invoice wins for its month and stream, a
+charge fills a month and stream with no invoice, and each stored charge says which (`source: invoice | focus`)). Charges
+count to the month of their usage (the invoice's period start), so the Marketplace invoice issued on Oct 5 for September
+is September's; the sum is in whole cents and the tax is included. When the charges endpoint cannot be read the bill
+payload says `marketplace_checked: false` with a note, and the bill page shows a warning. The month's charges are
+written to the graph as `AdvisorCharge` nodes (a month total over a node per stream) and are the actual figure
+the cost provider reports for the month, projecting only a stream not billed yet. Billing also reads the team's subscription (plan, seats and their price,
 the current period): the Overview for the team shows the last invoice, the average of the last three, the
 subscription and the current period; the accounts table shows the last paid invoice as the team's spend.
 This month for a Vercel team (`GET /api/vercel/bill`, `ui/src/components/vercelBill.tsx`) is the bill page the

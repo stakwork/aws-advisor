@@ -1802,7 +1802,7 @@ or the cluster endpoint) and ECS services is new collection.
    project. Environment variables are stored by name, target and type only. Credentials are runtime settings
    (`VERCEL_TOKEN`, `VERCEL_TEAM_ID`); `VERCEL_CRON` collects every 30 minutes. The mirror core gained `mirrorAdapter`
    (account, resources, gone marking, layers for any adapter). Not yet: functions per deployment, usage and plan as
-   `KnSystemType` / `KnPricingOverlay`, framework versions (the API gives the framework name only), the Vercel bill.
+   `KnSystemType` / `KnPricingOverlay`, framework versions (the API gives the framework name only). (The Vercel bill was added later: see `AdvisorCharge` below.)
    Verified against a live team the same day. Added after that: the team's storage stores (`GET /v1/storage/stores`:
    marketplace integrations such as Neon and Redis, Vercel Blob, KV, Edge Config) as `AdvisorDatabase` /
    `AdvisorCache` / `AdvisorStorage` (`native_type: vercel_store`, `product`, `engine`, `plan`, `region`) with a
@@ -1843,6 +1843,14 @@ or the cluster endpoint) and ECS services is new collection.
    (`vercel_projects`, `vercel_stores`, `vercel_bill`) and a schema summary that describes the Vercel shapes and the
    pricing knowledge, so the agent reads the graph the way it is written.
    The partners behind the stores (`src/adapters/vercel/partners.ts`, keys under Settings › Accounts › Vercel ›
+   The Vercel bill (`src/adapters/vercel/billing_graph.ts`, layer "vercel billed charges"): `AdvisorCharge`
+   (`native_type: vercel_billed_charge`) `{kind: stream, month, stream: subscription|marketplace, total_usd (tax included),
+   subtotal_usd, tax_usd, credits_usd, invoice_id, invoice_number, period_start, period_end, source: invoice|focus}`
+   per usage month and stream, and `{kind: month, month, total_usd}` over them (`INCLUDES`); the team's `AdvisorAccount`
+   `BILLED` each. Ids are `vercel:charge:<team>:<month>[:<stream>]` (idempotent). A charge counts to the month of its
+   usage (the invoice's period start; the Marketplace invoice issued Oct 5 for September is September's). The invoices
+   come from `GET /v1/invoices`, which is not guaranteed to carry the Marketplace invoices; `GET /v1/billing/charges`
+   (FOCUS, by month and provider) fills a month and stream with no invoice, never on top of one.
    Partners) add what Vercel does not relay: Neon's storage, branches, compute endpoints with autoscaling and
    suspend timeout, consumption this period and IP allow list; Redis Cloud's memory used against its limit,
    persistence, replication, eviction, throughput, public endpoint, TLS and source IPs. They land flat on the

@@ -68,7 +68,7 @@ function fakeFetch(): typeof fetch {
 test("refreshVercel reads the team, every project page, deployments, domains and env names through the client and stores them; values are not kept", async () => {
   const c = new client.VercelClient({ token: "testtoken_000000000000000000", teamId: "team_example123", fetchImpl: fakeFetch() });
   const r = await inv.refreshVercel(c);
-  assert.equal(r.team.name, "Example"); assert.equal(r.team.plan, "pro"); assert.equal(r.projects, 2); assert.equal(r.deployments, 2); assert.equal(r.domains, 3); assert.equal(r.env, 4); assert.deepEqual(r.errors, []);
+  assert.equal(r.team.name, "Example"); assert.equal(r.team.plan, "pro"); assert.equal(r.projects, 2); assert.equal(r.deployments, 2); assert.equal(r.domains, 3); assert.equal(r.env, 4); assert.deepEqual(r.errors.filter((e) => !e.startsWith("billing charges")), [], "the only error is the charges endpoint this fake does not serve");
   const projects = inv.listProjects();
   assert.deepEqual(projects.map((p) => p.name), ["api", "web"]);
   const web = projects.find((p) => p.id === "prj_abc123")!;
@@ -172,7 +172,7 @@ test("projectDetail and vercelBill: one project in full with its own usage, and 
   // the bill: a period that started three days ago, so only the last three days of team usage count, and a paid invoice with lines
   db.prepare("insert or replace into settings(key, value) values (?, ?)").run("vercel_billing:team_example123", JSON.stringify({ plan: "pro", status: "active", currency: "usd", period_start: new Date(Date.now() - 3 * 86_400_000).toISOString(), period_end: new Date(Date.now() + 27 * 86_400_000).toISOString(), seats: 2, seat_usd: 20 }));
   db.prepare("insert or replace into vercel_invoices(id, team_id, number, status, total, subtotal, tax, currency, created_at, period_start, period_end, hosted_url, groups, line_items, fetched_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run("inv_1", "team_example123", "A-1", "paid", 61, 60, 1, "usd", day(10), day(40), day(10), "https://vercel.example.com/invoice/inv_1", JSON.stringify([{ name: "Subscription", total: 40 }, { name: "Infrastructure", total: 20 }]), JSON.stringify([{ title: "Pro seats", quantity: 2, amount: 40, group: "Subscription" }, { title: "Bandwidth", quantity: 100, amount: 20, group: "Infrastructure", unit: "GB" }]), "now");
+    .run("inv_1", "team_example123", "A-1", "paid", 61, 60, 1, "usd", day(10), `${day(0).slice(0, 7)}-01T00:00:00.000Z`, `${day(0).slice(0, 7)}-28T00:00:00.000Z`, "https://vercel.example.com/invoice/inv_1", JSON.stringify([{ name: "Subscription", total: 40 }, { name: "Infrastructure", total: 20 }]), JSON.stringify([{ title: "Pro seats", quantity: 2, amount: 40, group: "Subscription" }, { title: "Bandwidth", quantity: 100, amount: 20, group: "Infrastructure", unit: "GB" }]), "now");
   const bill = ad.vercelBill();
   assert.equal(bill.billing.plan, "pro"); assert.equal(bill.billing.seats_usd_month, 40); assert.equal(bill.billing.estimated_period_usd, 61, "the month's invoices: issued this month, or expected at the last one");
   assert.equal(bill.invoices[0].kind, "marketplace"); assert.equal(bill.billing.months[0].streams.marketplace, 61);
@@ -421,4 +421,73 @@ test("alerts: a warning finding raises an alert once with its level in the detai
   const closedRow = db.prepare("select acknowledged, acknowledged_by, triage from alerts where kind = 'vercel_member_without_mfa'").get() as any;
   assert.equal(closedRow.acknowledged, 1); assert.equal(closedRow.acknowledged_by, "system"); assert.match(String(closedRow.triage), /rules pass #103/);
   assert.equal(alertLevel({ kind: "vercel_production_deployment_failed", details: JSON.stringify({ level: "alarm" }) }), "alarm");
+});
+
+// ---- the bill by month of usage: invoices from /v1/invoices, cross-checked against the FOCUS charges (/v1/billing/charges) ----
+
+const SUB_INVOICE = { id: "4DD31E2E-0033", invoiceNumber: "4DD31E2E-0033", status: "paid", total: 456.74, subtotal: 418.81, tax: 37.92, currency: "usd", createdAt: "2026-09-21T19:00:00.000Z", invoiceSource: "subscription",
+  groups: [{ id: "devex", name: "Vercel platform", total: 260 }, { id: "managed-infra", name: "Infrastructure usage", total: 178.81 }, { id: "credits", name: "Credits", total: -20 }],
+  lineItems: [{ title: "Pro", amount: 260, periodStart: "2026-09-01T00:00:00.000Z", periodEnd: "2026-10-01T00:00:00.000Z" }] };
+const MKT_INVOICE = { id: "4DD31E2E-0034", invoiceNumber: "4DD31E2E-0034", status: "paid", total: 235.17, subtotal: 215.67, tax: 19.5, currency: "usd", createdAt: "2026-10-05T12:00:00.000Z",
+  lineItems: [{ title: "Neon", amount: 215.67, periodStart: "2026-09-01T00:00:00.000Z", periodEnd: "2026-10-01T00:00:00.000Z" }] };
+const focusLine = (day: string, cost: number, provider: string, category = "Usage") => JSON.stringify({ BilledCost: cost, ChargeCategory: category, ChargePeriodStart: `${day}T00:00:00Z`, ChargePeriodEnd: `${day}T23:59:59Z`, ServiceProviderName: provider, ServiceName: provider === "Vercel" ? "Pro" : "Postgres" });
+const FOCUS_SEPT = [focusLine("2026-09-01", 260, "Vercel", "Purchase"), focusLine("2026-09-10", 178.81, "Vercel"), focusLine("2026-09-10", -20, "Vercel", "Credit"), focusLine("2026-09-30", 37.92, "Vercel", "Tax"), focusLine("2026-09-02", 215.67, "Neon"), focusLine("2026-09-30", 19.5, "Neon", "Tax")].join("\n");
+
+function billFetch(o: { invoices: any[]; charges: string | number }): typeof fetch {
+  const base = fakeFetch();
+  return (async (input: any, init?: any) => {
+    const u = new URL(String(input));
+    if (u.pathname === "/v1/invoices") return new Response(JSON.stringify({ data: o.invoices }), { status: 200 });
+    if (u.pathname === "/v1/billing/charges") { assert.ok(u.searchParams.get("from") && u.searchParams.get("to"), "the charges are asked for a window"); return typeof o.charges === "number" ? new Response("forbidden", { status: o.charges }) : new Response(o.charges, { status: 200 }); }
+    return base(input, init);
+  }) as typeof fetch;
+}
+async function refreshWith(o: Parameters<typeof billFetch>[0]) {
+  const { db } = await import("../db.js"); db.prepare("delete from vercel_invoices").run(); db.prepare("delete from vercel_billed_charges").run();
+  const r = await inv.refreshVercel(new client.VercelClient({ token: "testtoken_000000000000000000", teamId: "team_example123", fetchImpl: billFetch(o) }));
+  const { invoiceMonths } = await import("../adapters/vercel/bill_months.js");
+  return { r, m: invoiceMonths(inv.listBilledCharges(), "2026-10-08") };
+}
+
+test("parseFocusLines reads JSON lines and skips what is not a charge", () => {
+  assert.equal(client.parseFocusLines(`${focusLine("2026-09-01", 1, "Vercel")}\nnot json\n\n${focusLine("2026-09-02", 2, "Neon")}`).length, 2);
+  assert.deepEqual(client.parseFocusLines(""), []);
+});
+
+test("September 2026: the subscription and the Marketplace invoice both count to September, $691.91 exactly, and October holds neither", async () => {
+  const { m } = await refreshWith({ invoices: [SUB_INVOICE, MKT_INVOICE], charges: FOCUS_SEPT });
+  const sep = m.by_month.find((x) => x.month === "2026-09")!;
+  assert.equal(sep.usd, 691.91); assert.deepEqual(sep.streams, { subscription: 456.74, marketplace: 235.17 });
+  assert.equal(m.by_month.find((x) => x.month === "2026-10"), undefined, "the Marketplace period end (exclusive) does not leak into October");
+  assert.equal(m.month_to_date, 0);
+  const stored = inv.listBilledCharges();
+  assert.deepEqual(stored.map((c) => [c.month, c.stream, c.source, c.total]).sort(), [["2026-09", "marketplace", "invoice", 235.17], ["2026-09", "subscription", "invoice", 456.74]], "the invoices win; the FOCUS charges are not added on top");
+  assert.equal(stored.find((c) => c.stream === "marketplace")!.tax, 19.5); assert.equal(stored.find((c) => c.stream === "subscription")!.credits, -20);
+  const { chargeNodes } = await import("../adapters/vercel/billing_graph.js");
+  const nodes = chargeNodes("team_example123", stored);
+  assert.equal(nodes.find((n) => n.kind === "month")!.total, 691.91); assert.equal(nodes.filter((n) => n.kind === "stream").length, 2);
+  assert.deepEqual(chargeNodes("team_example123", stored).map((n) => n.id), nodes.map((n) => n.id), "ids are stable, so a refresh upserts in place");
+});
+
+test("a Marketplace invoice that /v1/invoices does not return still bills September through the FOCUS charges: $691.91", async () => {
+  const { m, r } = await refreshWith({ invoices: [SUB_INVOICE], charges: FOCUS_SEPT });
+  assert.equal(m.by_month.find((x) => x.month === "2026-09")!.usd, 691.91);
+  assert.equal(inv.listBilledCharges().find((c) => c.stream === "marketplace")!.source, "focus");
+  assert.equal(inv.billingCheck("team_example123").marketplace_checked, true);
+  assert.deepEqual(r.errors.filter((e) => e.startsWith("billing charges")), []);
+});
+
+test("with no invoices at all the FOCUS charges alone give both streams, and the bill says the Marketplace was checked", async () => {
+  const { m } = await refreshWith({ invoices: [], charges: FOCUS_SEPT });
+  assert.equal(m.by_month.find((x) => x.month === "2026-09")!.usd, 691.91);
+  assert.equal(ad.vercelBilling("team_example123").marketplace_checked, true);
+});
+
+test("when the charges endpoint fails the bill carries a warning instead of silently showing a partial bill", async () => {
+  const { r } = await refreshWith({ invoices: [SUB_INVOICE], charges: 403 });
+  assert.ok(r.errors.some((e) => e.startsWith("billing charges") && e.includes("403")));
+  const b = ad.vercelBilling("team_example123");
+  assert.equal(b.marketplace_checked, false); assert.match(String(b.marketplace_note), /cross-checked/);
+  assert.equal(ad.vercelBill().billing.marketplace_checked, false);
+  assert.equal(inv.listBilledCharges().length, 1, "the invoice charge is still there");
 });

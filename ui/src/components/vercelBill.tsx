@@ -33,9 +33,11 @@ export function VercelBill() {
         <div className="text-sm text-zinc-500">{d.team?.name || d.team?.slug} · {b.plan} plan{b.status ? ` · ${b.status}` : ""} · period {day(b.period_start)} → {day(b.period_end)}{p.days_elapsed != null && p.days_total ? ` · day ${p.days_elapsed} of ${p.days_total}` : ""}</div>
       </div>
 
+      {b.marketplace_checked === false && <div className="rounded border border-orange-700 bg-orange-950/40 px-3 py-2 text-sm text-orange-200">Marketplace charges not cross-checked: {b.marketplace_note || "/v1/billing/charges could not be read"}. This bill may be missing the Neon (Marketplace) charge.</div>}
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <Stat label={<>This month, projected<HelpTip><div className="font-medium text-zinc-100">Projected = the invoices issued this month + each regular invoice not issued yet at its last amount</div><div className="mt-1">Vercel bills twice a month: the subscription (seats, plan, add-ons, infrastructure usage) on its cycle day, and the Marketplace (the stores) on the 1st. A month is every invoice issued in it.</div></HelpTip></>} value={tm?.projected_usd != null ? `≈ ${usd(tm.projected_usd)}` : "—"}
-          hint={tm ? tm.streams.map((x: any) => x.issued != null ? `${KIND[x.stream] ?? x.stream} ${usd(x.issued)} issued` : x.expected != null ? `${KIND[x.stream] ?? x.stream} ≈ ${usd(x.expected)} expected` : null).filter(Boolean).join(" · ") : ""} />
+        <Stat label={<>This month, projected<HelpTip><div className="font-medium text-zinc-100">Projected = what is billed for this month's usage + each regular stream not billed yet at its last amount</div><div className="mt-1">The subscription (seats, plan, add-ons, infrastructure usage) and the Marketplace (the stores, e.g. Neon, invoiced after the month) both count to the month of usage, not the day the invoice was issued.</div></HelpTip></>} value={tm?.projected_usd != null ? `≈ ${usd(tm.projected_usd)}` : "—"}
+          hint={tm ? tm.streams.map((x: any) => x.issued != null ? `${KIND[x.stream] ?? x.stream} ${usd(x.issued)} billed` : x.expected != null ? `${KIND[x.stream] ?? x.stream} ≈ ${usd(x.expected)} projected (not billed yet)` : null).filter(Boolean).join(" · ") : ""} />
         <Stat label={`Last month${b.last_month ? ` (${monthName(b.last_month)})` : ""}`} value={usd(b.last_month_usd)} hint={splitOf(b.months?.find((m: any) => m.month === b.last_month))} />
         <Stat label="Average, last 3 months" value={b.avg_last_3_usd != null ? `${usd(b.avg_last_3_usd)}/mo` : "—"} hint="every invoice of each month" />
         <Stat label="Subscription seats" value={b.seats_usd_month != null ? `${usd(b.seats_usd_month)}/mo` : b.plan || "—"} hint={b.seats != null ? `${b.seats} seats × ${usd(b.seat_usd)}; the plan, add-ons and usage come on top` : ""} />
@@ -60,7 +62,7 @@ export function VercelBill() {
         {p.by_project.length > 0 && <div className="mt-2 text-xs text-zinc-400">By project: {p.by_project.slice(0, 6).map((x: any) => `${x.name} ${x.requests.toLocaleString()} req · ${x.gb_hours} GB-h`).join(" · ")}</div>}
       </Card>
 
-      <Card title={<span>Invoices by month <span className="font-normal text-zinc-500">· as Vercel issued them: the subscription on its cycle day, the Marketplace (stores such as Neon, Redis) on the 1st</span></span>}>
+      <Card title={<span>Invoices by month <span className="font-normal text-zinc-500">· counted to the month of usage: the subscription and the Marketplace (stores such as Neon, Redis), which Vercel invoices after the month</span></span>}>
         {!d.invoices.length ? <div className="text-sm text-zinc-500">No invoice read yet.</div> : (
           <table className="w-full border-collapse text-sm">
             <thead><tr><Th>Issued</Th><Th>Kind</Th><Th>Number</Th><Th>Status</Th><Th>Period</Th><Th>Groups</Th><Th className="text-right">Subtotal</Th><Th className="text-right">Tax</Th><Th className="text-right">Total</Th><Th></Th></tr></thead>
@@ -71,7 +73,7 @@ export function VercelBill() {
                     <td colSpan={8} className="px-3 py-2 text-sm"><span className="font-medium text-zinc-100">{monthName(m.month)}</span>{m.partial && <span className="ml-1 text-xs text-zinc-500">so far</span>}<span className="ml-3 text-xs text-zinc-400">{splitOf(m)}</span></td>
                     <td className="px-3 py-2 text-right font-medium text-zinc-100">{usd(m.usd)}</td><td />
                   </tr>
-                  {d.invoices.filter((i: any) => String(i.created_at).slice(0, 7) === m.month).map((i: any) => (
+                  {d.invoices.filter((i: any) => i.month === m.month).map((i: any) => (
                     <Fragment key={i.id}>
                       <tr className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-900/60" onClick={() => setOpen(open === i.id ? null : i.id)}>
                         <Td className="whitespace-nowrap">{day(i.created_at)}</Td>
@@ -96,7 +98,7 @@ export function VercelBill() {
                   ))}
                   {m.partial && (tm?.streams || []).filter((x: any) => x.expected != null).map((x: any) => (
                     <tr key={`exp-${x.stream}`} className="border-t border-zinc-800 text-zinc-500">
-                      <Td className="italic">not issued yet</Td><Td><span className={x.stream === "subscription" ? "text-sky-300/70" : "text-violet-300/70"}>{KIND[x.stream] ?? x.stream}</span></Td>
+                      <Td className="italic">not billed yet</Td><Td><span className={x.stream === "subscription" ? "text-sky-300/70" : "text-violet-300/70"}>{KIND[x.stream] ?? x.stream}</span></Td>
                       <td colSpan={4} className="px-3 py-2 text-xs italic">expected as its last invoice ({day(x.from)}): {x.breakdown.map((g: any) => `${g.name} ${usd(g.usd)}`).join(" · ")}</td>
                       <Td /><Td /><Td className="text-right italic">≈ {usd(x.expected)}</Td><Td />
                     </tr>
