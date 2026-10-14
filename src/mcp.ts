@@ -33,13 +33,14 @@ import { containersOn } from "./container_inventory.js";
 import { instanceStatusOf, listInstanceStatus, statusEvents, statusSummary } from "./status_checks.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
 import { registerSwarmTools } from "./mcp_swarms.js";
+import { registerStrutTools } from "./mcp_strut.js";
 import { registerTagTools } from "./mcp_tags.js";
 import { complianceFindings, exposureOfResource, shortControl } from "./compliance.js";
 import { FunctionFactsError, functionFacts } from "./function_facts.js";
 
 /**
  * MCP fact server, mounted at /mcp (Streamable HTTP, stateless: one server+transport per request).
- * Every tool is read-only. repo2graph's agent loads them as `aws_<tool>` and uses them to verify facts
+ * Every tool is read-only towards AWS and Vercel, except advisor_simulate, which only writes claims into the Strut graph. repo2graph's agent loads them as `aws_<tool>` and uses them to verify facts
  * (existing resources, real prices, history) before recommending.
  */
 
@@ -737,6 +738,7 @@ export function createFactServer(): McpServer {
   });
 
   registerSwarmTools(server);
+  registerStrutTools(server);
   registerTagTools(server);
 
   server.registerTool("s3_usage", {

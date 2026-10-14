@@ -20,7 +20,8 @@
     "graph_query",
     "vercel_projects",
     "vercel_stores",
-    "vercel_bill"
+    "vercel_bill",
+    "advisor_simulate"
   ],
   "max_turns": 25,
   "rubric": [
