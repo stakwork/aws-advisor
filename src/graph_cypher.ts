@@ -1,8 +1,12 @@
 /** Cypher fragments shared by the mirror core and the adapters' edge writers (kept apart so the adapter modules need nothing from the core at load time). */
 
-/** A ref for a resource string the inventory has no node for: created on demand by the records that name it. */
-export const REF_MERGE = (alias: string, idExpr: string, typeExpr: string, namedBy: string) =>
-  `MERGE (${alias}:AdvisorResourceRef {id: ${idExpr}}) ON CREATE SET ${alias}.first_named_at = $now, ${alias}.named_by = '${namedBy}' SET ${alias}.account_id = $account, ${alias}.provider = $provider, ${alias}.native_type = 'ref', ${alias}.guessed_type = ${typeExpr}, ${alias}.updated_at = $now`;
+/**
+ * A ref for a resource string the inventory has no node for: created on demand by the records that name it.
+ * `accountExpr` is the Cypher expression for the ref's account (default `$account`); a caller whose rows carry
+ * their own account (a member account's function, say) passes `coalesce(row.account_id, $account)` instead.
+ */
+export const REF_MERGE = (alias: string, idExpr: string, typeExpr: string, namedBy: string, accountExpr = "$account") =>
+  `MERGE (${alias}:AdvisorResourceRef {id: ${idExpr}}) ON CREATE SET ${alias}.first_named_at = $now, ${alias}.named_by = '${namedBy}' SET ${alias}.account_id = ${accountExpr}, ${alias}.provider = $provider, ${alias}.native_type = 'ref', ${alias}.guessed_type = ${typeExpr}, ${alias}.updated_at = $now`;
 
 /**
  * Links `from` to the node each id in a list names: the resource, network gateway or account of ours with that id when
@@ -12,7 +16,7 @@ export const REF_MERGE = (alias: string, idExpr: string, typeExpr: string, named
  * so it follows any WITH that carries `from` and the `carry` variables; `id` reads the id off `li`, `key` is the
  * edge's merge key, `set` a SET clause on the edge `e`; `reverse` points the edge from the target to `from`.
  */
-export const LINK_BY_ID = (o: { from: string; carry?: string[]; list: string; id?: string; rel: string; reverse?: boolean; key?: string; set?: string; namedBy: string; guessed?: string }) => {
+export const LINK_BY_ID = (o: { from: string; carry?: string[]; list: string; id?: string; rel: string; reverse?: boolean; key?: string; set?: string; namedBy: string; guessed?: string; accountExpr?: string }) => {
   const id = o.id ?? "li";
   const vars = [o.from, ...(o.carry ?? [])].join(", ");
   const edge = (to: string) => o.reverse ? `MERGE (${to})-[e:${o.rel}${o.key ? ` ${o.key}` : ""}]->(${o.from})` : `MERGE (${o.from})-[e:${o.rel}${o.key ? ` ${o.key}` : ""}]->(${to})`;
@@ -28,7 +32,7 @@ CALL {
   OPTIONAL MATCH (l_acc:AdvisorAccount {id: ${id}})
   WITH ${vars}, li, coalesce(l_res, l_gw, l_acc) AS l_hit
   FOREACH (_ IN CASE WHEN l_hit IS NULL THEN [] ELSE [1] END | ${edge("l_hit")}${set})
-  FOREACH (_ IN CASE WHEN l_hit IS NULL THEN [1] ELSE [] END | ${REF_MERGE("l_ref", id, o.guessed ?? "null", o.namedBy)} ${edge("l_ref")}${set})
+  FOREACH (_ IN CASE WHEN l_hit IS NULL THEN [1] ELSE [] END | ${REF_MERGE("l_ref", id, o.guessed ?? "null", o.namedBy, o.accountExpr)} ${edge("l_ref")}${set})
 }`;
 };
 

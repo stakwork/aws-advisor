@@ -130,13 +130,33 @@ export function resourceFromElb(row: any, roles: RoleMap = new Map()): ResourceN
 
 export const lambdaArn = (row: any, account: string) => str(row.arn) || `arn:aws:lambda:${row.region}:${account}:function:${row.name}`;
 
-export function resourceFromLambda(row: any, account: string, roles: RoleMap = new Map()): ResourceNode {
+/** Generic trigger kinds a function's own node carries (distinct, from its stored polled + push triggers); pure. */
+export function lambdaTriggerKinds(row: any): string[] {
+  const polled = safeJson(row.polled_triggers) || [];
+  const push = safeJson(row.push_triggers) || [];
+  return [...new Set([...polled, ...push].map((t: any) => t?.kind).filter(Boolean))] as string[];
+}
+
+/** The configured repository tag keys only, as a JSON string (never individual properties: a key may contain spaces, `:` or `/`, or clash with a core property like `kind` or `url`); values capped at 256 chars with control characters stripped. `null` when the function has none of the configured keys. Pure given the tag map and the keys. */
+export function repoTagsProp(tags: unknown, keys: string[]): string | null {
+  const t = (safeJson(tags) || {}) as Record<string, unknown>;
+  const out: Record<string, string> = {};
+  for (const k of keys) { const v = t[k]; if (v == null || v === "") continue; out[k] = String(v).replace(/[\x00-\x1f\x7f]/g, "").slice(0, 256); }
+  return Object.keys(out).length ? JSON.stringify(out) : null;
+}
+
+export function resourceFromLambda(row: any, account: string, roles: RoleMap = new Map(), repoTagKeys: string[] = []): ResourceNode {
   const observed: ResourceNode["observed"] = [apiObserved(row)];
   if (Number(row.days) > 0) observed.push({ kind: "metrics", status: "ok", last_at: str(row.last_seen), detail: `invocations over ${num(row.days)} days` });
   const runtime = str(row.runtime);
   const version = runtime ? (/^(?:[a-z]+?)(\d+(?:\.\d+)*)/.exec(runtime)?.[1] ?? null) : null;
+  const packageKind = row.package_type === "Image" ? "image" : "archive";
+  const layers = (safeJson(row.layers) || []) as { arn?: string; code_size?: number }[];
   return base(lambdaArn(row, account), "AdvisorFunction", "lambda_function", row, str(row.name), "available", str(row.region), roles, {
-    runtime, runtime_version: version, memory_mb: num(row.memory_mb), timeout_s: num(row.timeout_s), arch: Number(row.arm) ? "arm64" : "x86_64", kind: "serverless",
+    runtime, runtime_version: version, memory_mb: num(row.memory_mb), timeout_s: num(row.timeout_s), arch: Number(row.arm) ? "arm64" : "x86_64",
+    kind: packageKind === "image" ? "container" : "serverless", package_kind: packageKind, native_package_type: str(row.package_type),
+    package_size_bytes: num(row.code_size_bytes), layer_count: layers.length, env_var_names: safeJson(row.env_var_names) || [], log_group: str(row.log_group),
+    triggers: lambdaTriggerKinds(row), repo_tags: repoTagsProp(row.tags, repoTagKeys),
     invocations_30d: num(row.invocations_30d), errors_30d: num(row.errors_30d), duration_avg_ms: num(row.avg_duration_ms), invocations_month: num(row.invocations_month), gb_seconds_month: num(row.gb_seconds_month),
   }, observed);
 }

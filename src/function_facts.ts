@@ -90,8 +90,8 @@ export function repositoriesFor(tags: Record<string, string> | null, stackRows: 
   return out;
 }
 
-/** The repository tags of every cloudformation stack that MANAGES this function's ARN, in the same account. */
-function stacksManaging(functionArn: string, accountId: string): { name: string | null; tags: Record<string, string> | null }[] {
+/** The repository tags of every cloudformation stack that MANAGES this function's ARN, in the same account. Exported: src/graph_functions.ts (BUILT_FROM) reads the same stacks as this tool, so the two always agree. */
+export function stacksManaging(functionArn: string, accountId: string): { name: string | null; tags: Record<string, string> | null }[] {
   let rows: any[] = [];
   try { rows = db.prepare("select name, tags, links from inventory_service where native_type = 'cloudformation_stack' and gone = 0 and account_id = ? and links like ?").all(accountId, `%${functionArn}%`); }
   catch { return []; }

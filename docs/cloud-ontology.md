@@ -291,17 +291,31 @@ Serverless code: a Lambda, a Vercel serverless or edge function, a Cloud Functio
 | `url` | its public URL when it has one (function URL, Vercel route) |
 | `triggers` | what invokes it: `http`, `queue`, `schedule`, `event`, `cron` (list) |
 
-Edges: `EXPOSES` → `AdvisorEndpoint` (its URL); `PART_OF` → `AdvisorDeployment` (a Vercel function belongs to a
-deployment); `USES_SECRET`; `RUNS_AS`.
+Edges: `EXPOSES` → `AdvisorEndpoint` (its URL; on AWS, a function URL `AdvisorEndpoint {kind: url, native_type:
+function_url}`, with `REACHABLE_FROM {requires_auth: false}` → `AdvisorSource {id: 'internet'}` when it needs no
+auth); `PART_OF` → `AdvisorDeployment` (a Vercel function belongs to a deployment); `USES_SECRET`; `RUNS_AS {via:
+'execution_identity'}` → its role, usually an `AdvisorResourceRef {guessed_type: 'identity'}` (a pure service role
+is not mirrored); `TRIGGERED_BY {kind, via: polled|invoke_permission, native_kind, state, batch_size, invoker,
+target_version, public, source_account, stale}` → a queue, stream, bucket or event source the inventory knows, else
+an `AdvisorResourceRef` with `guessed_type` queue|stream|event_rule|api (SNS keeps its own `DELIVERS_TO` edge and a
+load balancer target keeps its own `EXPOSES`/`FORWARDS_TO`: neither also gets a `TRIGGERED_BY`); `BUILT_FROM {via:
+function_tag|stack_tag, tag_key, stack, asserted_by: 'tag', verified: false, stale}` → `AdvisorRepository` (the
+repository a tag names; this is a different meaning of `BUILT_FROM` than a container's own edge to `AdvisorImage`:
+one points at source code, the other at a built artifact); `SHIPS_LOGS_TO {via: 'function_config'}` → `KnLogGroup`
+(only when the log group node's account and region match the function's).
 
 **Function facts** (`function_facts` MCP tool, `src/function_facts.ts`; collected on AWS into `inventory_lambda`,
-`src/lambda_inventory.ts` + `src/adapters/aws/functions.ts`): per-function network config, triggers (both polled
-sources such as queues and streams, and push invokers granted by the function's invoke permissions), execution
-identity, layers, package size, environment variable **names only** (values are never stored or returned anywhere
-in the advisor), log group with its stored bytes, and the repository its stack or a tag names (`repository`,
-`repo`, `git_repository`, `source_repo` by default; configurable in Settings as "Repository tag keys"). The graph
-edges this produces (`RUNS_AS`, `TRIGGERED_BY`, `BUILT_FROM` → `AdvisorRepository`, `SHIPS_LOGS_TO`) are a
-follow-up; today everything is served straight from SQLite, so it works without Neo4j.
+`src/lambda_inventory.ts` + `src/adapters/aws/functions.ts`; mirrored into the graph by `src/graph_functions.ts`):
+per-function network config, triggers (both polled sources such as queues and streams, and push invokers granted by
+the function's invoke permissions), execution identity, layers, package size, environment variable **names only**
+(values are never stored or returned anywhere in the advisor), log group with its stored bytes, and the repository
+its stack or a tag names (`repository`, `repo`, `git_repository`, `source_repo` by default; configurable in Settings
+as "Repository tag keys"). The tool serves everything straight from SQLite, so it works without Neo4j; the graph
+edges above are built from the same SQLite facts, so the tool and the graph always agree (a `github_repos` casing
+mismatch is the one exception: the graph's own case-insensitive fallback, used only when `github_repos` itself has
+no match, can land on a different casing than the tool reports until the next GitHub sync reconciles them). An edge
+built from a fact group the latest refresh could not collect carries `stale: true, stale_since` (the same meaning
+as `missing` in the tool's output): a value kept from an earlier run, not a confirmed one.
 
 > **Region limitation.** `inventory_lambda` is keyed on `(account_id, name)`, not `(account_id, name, region)`,
 > because a Lambda function name is unique per account only on AWS. A function deployed under the same name in two
@@ -1468,6 +1482,8 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `RUNS_ON_POOL` | AdvisorDeployment → AdvisorNodePool | the pool a deployment scales or is pinned to |
 | `BACKED_BY` | AdvisorDeployment → AdvisorLoadBalancer | the balancer in front of it |
 | `BUILT_FROM` | compute, deployment, function, container → AdvisorImage | the image it runs |
+| `BUILT_FROM {via: function_tag \| stack_tag, tag_key, stack, asserted_by: 'tag', verified: false, stale}` | AdvisorFunction → AdvisorRepository | the source repository a function's own tag or its stack's tag names (a different meaning than the row above: source code, not a built artifact) |
+| `TRIGGERED_BY {kind, via, native_kind, state, batch_size, invoker, target_version, public, source_account, stale}` | AdvisorFunction → resource \| AdvisorResourceRef {guessed_type: queue\|stream\|event_rule\|api} | what invokes it, beyond SNS (`DELIVERS_TO`) and a load balancer target (`EXPOSES`/`FORWARDS_TO`), which keep their own edges |
 | `USES {environments}` | AdvisorDeployment → AdvisorDatabase, AdvisorCache, AdvisorStorage | the data stores a deployment is connected to (Vercel stores today) |
 | `RUNS_IMAGE` | compute → AdvisorImage | the container images a plain box runs (from the software probe) |
 | `STORES_ON` | AdvisorBox → AdvisorStorage (block) | attached volume |

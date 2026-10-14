@@ -147,6 +147,22 @@ export function parseEventSourceMapping(row: { function_arn?: string | null; eve
   return { kind: "queue", via: "polled", native_kind: polledNativeKind(esArn), source, target_version, state: row.state ?? null, batch_size: row.batch_size != null ? Number(row.batch_size) : null };
 }
 
+/**
+ * A trigger's `source` (an ARN, a queue URL, or null) as the inventory id it probably matches, and what to call it
+ * when it does not: a DynamoDB stream ARN's table (`.../table/name/stream/...` -> `.../table/name`), an S3 bucket
+ * ARN's bucket name, else the source string itself with a generic `guessed_type` from its native kind. Pure.
+ */
+export function normalizeTriggerTarget(source: string | null, nativeKind: string): { id: string | null; guessed: string | null } {
+  if (!source) return { id: null, guessed: null };
+  if (nativeKind === "dynamodb_stream") { const m = /^(arn:aws[a-z0-9-]*:dynamodb:[^:]*:[^:]*:table\/[^/]+)/.exec(source); return { id: m ? m[1] : source, guessed: "database" }; }
+  if (nativeKind === "s3" || /^arn:aws[a-z0-9-]*:s3:::/.test(source)) { const m = /^arn:aws[a-z0-9-]*:s3:::([^/]+)/.exec(source); return { id: m ? m[1] : source, guessed: "bucket" }; }
+  if (nativeKind === "sqs") return { id: source, guessed: "queue" };
+  if (nativeKind === "kinesis" || nativeKind === "mq" || nativeKind === "kafka") return { id: source, guessed: "stream" };
+  if (nativeKind === "events") return { id: source, guessed: "event_rule" };
+  if (nativeKind === "apigateway" || nativeKind === "function_url") return { id: source, guessed: "api" };
+  return { id: source, guessed: null };
+}
+
 /** `logging_config.LogGroup`, else the AWS default `/aws/lambda/<name>`. Pure. */
 export function logGroupName(loggingConfig: unknown, functionName: string): string {
   const lc = safeJson(loggingConfig);
