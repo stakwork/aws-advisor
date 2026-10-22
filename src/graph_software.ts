@@ -4,6 +4,7 @@ import { resourceAccountIndex } from "./resource_index.js";
 import { ecosystemOf, packageScope, vulnerabilityMatches, type VulnMatch } from "./software_vulns.js";
 import { AWS } from "./adapters/types.js";
 import { COMPUTE_OF } from "./graph_cypher.js";
+import { ksmbdOn } from "./ksmbd_exposure.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
@@ -46,6 +47,36 @@ UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
 SET c += {os: row.os, os_id: row.os_id, os_version: row.os_version, kernel: row.kernel, arch: coalesce(row.arch, c.arch), package_manager: row.package_manager, os_collected_at: row.collected_at, updated_at: $now}`;
+
+/** What the ksmbd section of the software probe and its verdict (src/ksmbd_exposure.ts) say, on the compute the box hosts. */
+const KSMBD_CYPHER = `
+UNWIND $rows AS row
+MATCH (b:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("b", "c")}
+SET c += {ksmbd_state: row.state, ksmbd_active: row.active, ksmbd_loaded: row.loaded, ksmbd_shipped: row.shipped, ksmbd_listening: row.listening, ksmbd_smb_direct: row.smb_direct, ksmbd_writable_shares: row.writable_shares,
+  ksmbd_zdi_33774: row.pre_auth, ksmbd_zdi_33549: row.smb_direct_flag, ksmbd_reasons: row.reasons, ksmbd_kernel_note: row.kernel_note, ksmbd_collected_at: row.collected_at}`;
+
+/** ksmbd as a program the box runs (a kernel server: its RUNS edge carries the kernel thread count), serving the SMB endpoints it owns. */
+const KSMBD_APP_CYPHER = `
+UNWIND $rows AS row
+MERGE (app:AdvisorApp {id: 'ksmbd'})
+SET app.name = 'ksmbd', app.kind = 'infra', app.native_type = 'kernel_module', app.updated_at = $now
+WITH app, row
+MATCH (b:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("b", "c")}
+MERGE (c)-[e:RUNS {user: 'kernel'}]->(app)
+SET e += {count: row.kthreads, command: 'ksmbd (kernel)', last_seen: row.collected_at, gone: false, updated_at: $now}`;
+
+const KSMBD_SERVES_CYPHER = `
+UNWIND $rows AS row
+MATCH (a:AdvisorApp {id: 'ksmbd'}) MATCH (p:AdvisorEndpoint {id: row.endpoint})
+MERGE (a)-[s:SERVES]->(p) SET s.gone = false, s.updated_at = $now`;
+
+/** A box on which ksmbd is no longer active loses its RUNS edge. */
+const KSMBD_GONE_CYPHER = `
+UNWIND $rows AS row
+MATCH (c:AdvisorCompute {id: 'compute:' + row.instance_id})-[e:RUNS]->(:AdvisorApp {id: 'ksmbd'})
+SET e.gone = true, e.updated_at = $now`;
 
 /** A box's package and image edges the probe no longer reports (an older version, something removed): the node id is
  *  per version, so an upgrade adds an edge and only this takes the superseded one away. */
@@ -166,6 +197,24 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   if (instanceIds) await writeCypher(`UNWIND $ids AS id MATCH (c:AdvisorCompute {id: 'compute:' + id})-[r:VULNERABLE_TO]->() DELETE r`, { ids: instanceIds });
   else await writeCypher(`MATCH (c:AdvisorCompute {provider: $provider})-[r:VULNERABLE_TO]->() DELETE r`, { provider: AWS });
   for (const b of chunks(verdicts)) await w(VERDICT_CYPHER, b);
+  // the ksmbd verdict per box the probe has read it on (software/4); the same matches give the kernel note
+  const byBox = new Map<string, typeof matches>(); for (const m of matches) byBox.set(m.instance_id, [...(byBox.get(m.instance_id) ?? []), m]);
+  const km: any[] = []; const kmRun: any[] = []; const kmGone: any[] = []; const kmServes: any[] = [];
+  for (const o of os.values()) {
+    if (!o.ksmbd) continue;
+    const k = ksmbdOn(o.instance_id, byBox.get(o.instance_id) ?? []); const v = k.verdict;
+    if (v.state === "unknown") continue;
+    km.push({ instance_id: o.instance_id, state: v.state, active: v.active, loaded: Boolean(k.reading?.module_loaded), shipped: v.shipped, listening: v.listening.map((l) => `tcp/${l.port}:${l.exposure ?? l.scope}`), smb_direct: v.smb_direct.indicated, writable_shares: v.writable_shares,
+      pre_auth: v.flags.pre_auth.status, smb_direct_flag: v.flags.smb_direct.status, reasons: [...v.flags.pre_auth.reasons, ...v.flags.smb_direct.reasons], kernel_note: v.kernel_note, collected_at: o.collected_at ?? null });
+    if (v.active) {
+      kmRun.push({ instance_id: o.instance_id, kthreads: k.reading?.kthreads ?? 0, collected_at: o.collected_at ?? null });
+      for (const l of v.listening) if (l.kernel_owned && (l.port === 445 || l.port === 139)) kmServes.push({ endpoint: `${o.instance_id}:tcp:${l.port}` });
+    } else kmGone.push({ instance_id: o.instance_id });
+  }
+  for (const b of chunks(km)) await w(KSMBD_CYPHER, b);
+  for (const b of chunks(kmRun)) await w(KSMBD_APP_CYPHER, b);
+  for (const b of chunks(kmServes)) await w(KSMBD_SERVES_CYPHER, b);
+  for (const b of chunks(kmGone)) await w(KSMBD_GONE_CYPHER, b);
   // packages nobody has any more, advisories nothing is affected by
   await writeCypher("MATCH (p:AdvisorPackage) WHERE NOT (p)--() DELETE p");
   await writeCypher("MATCH (v:KnVulnerability) WHERE NOT (v)--() DELETE v");

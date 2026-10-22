@@ -36,6 +36,8 @@ create index if not exists package_changes_instance on package_changes(instance_
 if (!(db.prepare("pragma table_info(instance_packages)").all() as { name: string }[]).some((c) => c.name === "source")) db.exec("alter table instance_packages add column source text");
 // probe software/3 adds the guest's hibernation setup (JSON, ProbeHibernation); src/guest_hibernation.ts reads it
 if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "hibernation")) db.exec("alter table instance_os add column hibernation text");
+// probe software/4 adds the ksmbd / SMB server section (JSON, ProbeKsmbd); src/ksmbd_exposure.ts reads it
+if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "ksmbd")) db.exec("alter table instance_os add column ksmbd text");
 // rows marked gone before superseded software was deleted (2026-10-13): the column stays, nothing sets it any more
 db.exec("delete from instance_packages where gone = 1; delete from instance_binaries where gone = 1; delete from instance_images where gone = 1");
 
@@ -48,16 +50,28 @@ export interface ProbeHibernation {
   kernel_disk?: boolean; cmdline_resume?: boolean; sys_resume?: string | null; agent?: string | null; acpi_sleep_handler?: boolean;
   logind_suspend_key?: string | null; swap_active_bytes?: number; swap_file_bytes?: number; mem_bytes?: number;
 }
+/** What the guest has of the in-kernel SMB server, ksmbd (probe software/4): shipped, loaded, serving, listening, SMB Direct, share definitions. */
+export interface ProbeKsmbd {
+  module_loaded: boolean; module_sysfs: boolean; module_file: boolean; builtin: boolean;
+  /** CONFIG_SMB_SERVER and CONFIG_SMB_SERVER_SMBDIRECT of the running kernel: y, m, n, or null when the config was not readable. */
+  config: "y" | "m" | "n" | null; config_smbdirect: "y" | "m" | "n" | null;
+  autoload: boolean; modules: string[]; kthreads: number; daemons: string[]; units_installed: string[]; units_enabled: string[];
+  listeners: { proto: "tcp"; port: number; scope: "all" | "loopback" | "address"; process: string | null }[];
+  rdma_devices: string[]; conf_files: string[];
+  shares: { name: string; path: string | null; read_only: boolean; guest: boolean; hosts_allow: string | null }[];
+  settings: Record<string, string>; smb_direct_cfg: boolean | null;
+}
 export interface SoftwareData {
   hibernation?: ProbeHibernation | null;
+  ksmbd?: ProbeKsmbd | null;
   os?: { id?: string | null; version?: string | null; name?: string | null } | null; kernel?: string | null; arch?: string | null; package_manager?: string | null;
   packages?: ProbePackage[]; binaries?: ProbeBinary[]; images?: ProbeImage[];
 }
 
 export interface RecordSoftwareResult { packages: number; added: string[]; removed: string[]; changed: { name: string; from: string; to: string }[]; binaries: number; images: number }
 
-const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages`);
+const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation, ksmbd) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), ksmbd = coalesce(excluded.ksmbd, ksmbd), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages`);
 const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, ecosystem, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
@@ -101,7 +115,7 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
     for (const i of imgs) { imgSeen.add(i.image); upsertImg.run(instanceId, clean(i.image, 300), i.id == null ? null : clean(i.id, 100), i.digests ? clean(String(i.digests).split(",")[0], 300) : null, i.created == null ? null : clean(i.created, 40), i.platform == null ? null : clean(i.platform, 40), collectedAt, collectedAt); }
     if (Array.isArray(data.images)) db.prepare(`delete from instance_images where instance_id = ?${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
     res.images = imgs.length;
-    upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null);
+    upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null, data.ksmbd && typeof data.ksmbd === "object" ? JSON.stringify(data.ksmbd).slice(0, 8000) : null);
   })();
   return res;
 }
@@ -116,6 +130,13 @@ export function hibernationSetupOf(instanceId: string): { probe: ProbeHibernatio
   try { probe = os?.hibernation ? JSON.parse(os.hibernation) : null; } catch { probe = null; }
   const pkg = db.prepare(`select name from instance_packages where instance_id = ? and gone = 0 and name in (${HIBERNATION_AGENT_PACKAGES.map(() => "?").join(",")}) limit 1`).get(instanceId, ...HIBERNATION_AGENT_PACKAGES) as { name: string } | undefined;
   return { probe, agent_package: pkg?.name ?? null, packages_known: Boolean(os && os.packages > 0), collected_at: os?.collected_at ?? null };
+}
+
+/** The ksmbd section the software probe last read on one box (null: never read, or a probe older than software/4), with when. */
+export function ksmbdOf(instanceId: string): { probe: ProbeKsmbd; collected_at: string } | null {
+  const os = db.prepare("select collected_at, ksmbd from instance_os where instance_id = ?").get(instanceId) as { collected_at: string; ksmbd: string | null } | undefined;
+  if (!os?.ksmbd) return null;
+  try { return { probe: JSON.parse(os.ksmbd), collected_at: os.collected_at }; } catch { return null; }
 }
 
 export interface InstanceSoftware {

@@ -1,4 +1,4 @@
-import { recordSoftware, type ProbeHibernation } from "./software_inventory.js";
+import { recordSoftware, type ProbeHibernation, type ProbeKsmbd } from "./software_inventory.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
@@ -108,6 +108,8 @@ export interface ProbeResult {
   images?: { image: string; id: string | null; digests: string | null; created: string | null; platform: string | null }[];
   /** Software 3: the guest's hibernation setup (src/guest_hibernation.ts reads it). */
   hibernation?: ProbeHibernation | null;
+  /** Software 4: the in-kernel SMB server (src/ksmbd_exposure.ts reads it). */
+  ksmbd?: ProbeKsmbd | null;
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -156,6 +158,26 @@ function parseHibernation(h: any): ProbeHibernation {
     kernel_disk: h.kernel_disk === true, cmdline_resume: h.cmdline_resume === true, sys_resume: str(h.sys_resume, 20), agent: str(h.agent, 40),
     acpi_sleep_handler: h.acpi_sleep_handler === true, logind_suspend_key: str(h.logind_suspend_key, 30),
     swap_active_bytes: bytes(h.swap_active_bytes), swap_file_bytes: bytes(h.swap_file_bytes), mem_bytes: bytes(h.mem_bytes),
+  };
+}
+
+/** The ksmbd section of software 4, typed field by field: booleans, short ASCII names, ports; lists capped. Nothing outside these fields survives. */
+export function parseKsmbd(k: any): ProbeKsmbd {
+  const str = (v: unknown, n: number) => String(v ?? "").replace(/[^\x20-\x7e]/g, "").slice(0, n);
+  const list = (v: unknown, n: number, len: number) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x).slice(0, n).map((x) => str(x, len)) : []);
+  const tri = (v: unknown): "y" | "m" | "n" | null => (v === "y" || v === "m" || v === "n" ? v : null);
+  const scopes = ["all", "loopback", "address"] as const;
+  const settings: Record<string, string> = {};
+  if (k.settings && typeof k.settings === "object") for (const [key, val] of Object.entries(k.settings).slice(0, 12)) settings[str(key, 40)] = str(val, 100);
+  return {
+    module_loaded: k.module_loaded === true, module_sysfs: k.module_sysfs === true, module_file: k.module_file === true, builtin: k.builtin === true,
+    config: tri(k.config), config_smbdirect: tri(k.config_smbdirect), autoload: k.autoload === true,
+    modules: list(k.modules, 12, 20), kthreads: Math.max(0, Math.min(1000, Math.round(Number(k.kthreads)) || 0)), daemons: list(k.daemons, 8, 30),
+    units_installed: list(k.units_installed, 8, 30), units_enabled: list(k.units_enabled, 8, 30),
+    listeners: Array.isArray(k.listeners) ? k.listeners.filter((l: any) => l && [139, 445, 5445].includes(Number(l.port))).slice(0, 12).map((l: any) => ({ proto: "tcp" as const, port: Number(l.port), scope: (scopes as readonly string[]).includes(l.scope) ? l.scope : "all", process: l.process == null ? null : str(l.process, 40) })) : [],
+    rdma_devices: list(k.rdma_devices, 10, 30), conf_files: list(k.conf_files, 4, 80),
+    shares: Array.isArray(k.shares) ? k.shares.filter((s: any) => s && typeof s.name === "string").slice(0, 20).map((s: any) => ({ name: str(s.name, 60), path: s.path == null ? null : str(s.path, 100), read_only: s.read_only !== false, guest: s.guest === true, hosts_allow: s.hosts_allow == null ? null : str(s.hosts_allow, 100) })) : [],
+    settings, smb_direct_cfg: typeof k.smb_direct_cfg === "boolean" ? k.smb_direct_cfg : null,
   };
 }
 
@@ -222,6 +244,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,
     binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
     hibernation: raw.hibernation && typeof raw.hibernation === "object" ? parseHibernation(raw.hibernation) : undefined,
+    ksmbd: raw.ksmbd && typeof raw.ksmbd === "object" ? parseKsmbd(raw.ksmbd) : undefined,
     images: Array.isArray(raw.images) ? raw.images.filter((i: any) => i && typeof i.image === "string" && i.image).slice(0, 200).map((i: any) => ({ image: String(i.image).slice(0, 300), id: i.id == null || i.id === "" ? null : String(i.id).slice(0, 100), digests: i.digests == null || i.digests === "" ? null : String(i.digests).slice(0, 600), created: i.created == null || i.created === "" ? null : String(i.created).slice(0, 40), platform: i.platform == null || i.platform === "" ? null : String(i.platform).slice(0, 40) })) : undefined,
   };
 }

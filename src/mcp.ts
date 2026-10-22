@@ -29,6 +29,7 @@ import { topLogGroups } from "./logs.js";
 import { trailSummary } from "./trail.js";
 import { graphBill, listSystems, logAttributionReport, systemView } from "./graph_knowledge.js";
 import { appEvents, appsOn, appsSummary, fleetApps, fleetPorts, portsOn, portsSummary, whereListens, whereRuns } from "./instance_apps.js";
+import { fleetKsmbd, ksmbdOn } from "./ksmbd_exposure.js";
 import { containersOn } from "./container_inventory.js";
 import { instanceStatusOf, listInstanceStatus, statusEvents, statusSummary } from "./status_checks.js";
 import { QUERY_ROW_CAP as GRAPH_ROW_CAP, QUERY_TIMEOUT_MS as GRAPH_TIMEOUT_MS, SCHEMA_SUMMARY, enabled as graphEnabled, guardReadCypher, readQuery } from "./graph_mirror.js";
@@ -628,6 +629,13 @@ export function createFactServer(): McpServer {
     if (a.name) return text({ name: a.name, where: whereRuns(a.name), events: appEvents({ name: a.name, limit: 50 }) });
     return text({ summary: appsSummary(), apps: fleetApps(), ports: { summary: portsSummary(), open: fleetPorts().slice(0, 100) }, recent_events: appEvents({ limit: 50 }) });
   });
+
+  server.registerTool("ksmbd_exposure", {
+    title: "ksmbd exposure: ZDI-CAN-33774 and ZDI-CAN-33549",
+    description: "Which Linux boxes show the conditions for the two Linux ksmbd (in-kernel SMB server) advisories, from the software probe's read-only ksmbd section (software 4): ksmbd shipped in the kernel (config, module file), loaded, serving (kernel threads, ksmbd.mountd, a socket on 445/139 with no owning process), reachable (the advisor's own exposure verdict for port 445), RDMA devices and SMB Direct indicators, and the share definitions (names, paths, read-only, guest; no passwords). Each box gets a state (not_present, present_not_loaded, loaded_not_serving, serving_internal, serving_exposed, unknown = not read yet) and two FLAGS: ZDI-CAN-33774 (pre-auth race: ksmbd active and 445 reachable) and ZDI-CAN-33549 (SMB Direct underflow: ksmbd active with RDMA or SMB Direct and a writable share), each flagged | low | not_indicated | unknown. A flag says the conditions are present, never that the kernel is vulnerable: patch status is not judged from a version number; the kernel note says what a matched distribution advisory does and does not show. With instance_id: that box's full reading and verdict. Without: the fleet, flagged boxes first (only: flagged | active | all). Boxes whose software probe predates software 4, or whose SSM document is not redeployed, are unknown.",
+    inputSchema: { instance_id: z.string().regex(/^i-[0-9a-f]+$/).optional(), only: z.enum(["flagged", "active", "all"]).default("flagged") },
+    annotations: ro,
+  }, (a) => text(a.instance_id ? ksmbdOn(a.instance_id) : fleetKsmbd({ only: a.only })));
 
   server.registerTool("status_checks", {
     title: "EC2 status checks: system, instance and attached EBS",

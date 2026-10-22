@@ -47,7 +47,7 @@ export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   host: { kind: "host", title: "Host", what: "memory, swap, load, CPUs, uptime, disks and the top processes: the hourly statistics behind the disk, memory and load alerts and the utilisation charts", version: "2.0", sections: ["cpus", "uptime_seconds", "memory", "load", "disks", "top_cpu", "top_mem"], timeout_seconds: 60, cron_key: "probeCron", scope_key: "probeScope", takes_signals: false },
   docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
-  software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, and the images behind the running containers: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.1", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "hibernation"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
+  software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, and the images behind the running containers: the inventory a CVE is matched against; whether the guest can hibernate, and whether the in-kernel SMB server (ksmbd) is shipped, loaded, serving or using SMB Direct", version: "1.2", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "hibernation", "ksmbd"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
 };
 
 // ---- the scripts --------------------------------------------------------------------------------------------------------
@@ -231,6 +231,47 @@ const APPS_OUT = [
   "out=$(printf '{\"probe\":\"aws-advisor/apps/2\",\"kind\":\"apps\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"log_shipping\":[%s],\"processes\":[%s],\"listeners\":[%s]}' \"$hn\" \"$now\" \"$ship\" \"$procs\" \"$listeners\")",
 ];
 
+/** The ksmbd section of software 4 (src/ksmbd_exposure.ts reads it): shipped, loaded, serving, listening, SMB Direct, share definitions. */
+const KSMBD_BODY = [
+  "# ksmbd / SMB server exposure (probe software/4): is the in-kernel SMB server (ksmbd) shipped, loaded, serving, reachable and using SMB Direct (RDMA)?",
+  "# Strictly read-only: /proc, /sys, module and config files, ps, ss. No service manager call, no SMB packet is sent, no password or secret file is opened.",
+  "km_jarr() { awk 'NF { gsub(/[\\\\\"]/,\"\"); printf \"%s\\\"%s\\\"\", (n++?\",\":\"\"), $0 }'; }",
+  "km_tri() { case \"$1\" in y|m|n) printf '\"%s\"' \"$1\";; *) printf 'null';; esac; }",
+  "km_mods=$(awk '$1==\"ksmbd\"||$1==\"rdma_rxe\"||$1==\"siw\"||$1==\"irdma\"||$1==\"mlx5_ib\"||$1==\"mlx4_ib\"||$1==\"ib_core\"||$1==\"ib_uverbs\"||$1==\"rdma_cm\"||$1==\"rdma_ucm\" {print $1}' /proc/modules 2>/dev/null | tr -cd 'a-z0-9_\\12')",
+  "km_loaded=false; printf '%s\\n' \"$km_mods\" | grep -qx ksmbd && km_loaded=true",
+  "km_sysfs=false; [ -d /sys/module/ksmbd ] && km_sysfs=true",
+  "km_file=false; [ -n \"$(find /lib/modules/\"$kernel\" /usr/lib/modules/\"$kernel\" -maxdepth 6 -name 'ksmbd.ko*' 2>/dev/null | head -n 1)\" ] && km_file=true",
+  "km_builtin=false; grep -qs 'ksmbd' /lib/modules/\"$kernel\"/modules.builtin /usr/lib/modules/\"$kernel\"/modules.builtin && km_builtin=true",
+  "km_cfg=\"\"; if [ -r /boot/config-\"$kernel\" ]; then km_cfg=$(cat /boot/config-\"$kernel\" 2>/dev/null); elif [ -r /proc/config.gz ] && command -v zcat >/dev/null 2>&1; then km_cfg=$(zcat /proc/config.gz 2>/dev/null); fi",
+  "km_cfgv=\"\"; km_cfgd=\"\"",
+  "if [ -n \"$km_cfg\" ]; then km_cfgv=$(printf '%s\\n' \"$km_cfg\" | sed -n 's/^CONFIG_SMB_SERVER=\\([ymn]\\).*/\\1/p;s/^# CONFIG_SMB_SERVER is not set.*/n/p' | head -n 1); km_cfgd=$(printf '%s\\n' \"$km_cfg\" | sed -n 's/^CONFIG_SMB_SERVER_SMBDIRECT=\\([ymn]\\).*/\\1/p;s/^# CONFIG_SMB_SERVER_SMBDIRECT is not set.*/n/p' | head -n 1); fi",
+  "km_auto=false; grep -qsE '^[[:space:]]*ksmbd([[:space:]]|$)' /etc/modules /etc/modules-load.d/*.conf /usr/lib/modules-load.d/*.conf && km_auto=true",
+  "km_kthreads=$(ps -eo ppid=,comm= 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '$1==2 && $2 ~ /^ksmbd/ {n++} END{printf \"%d\", n+0}')",
+  "km_daemons=$(ps -eo comm= 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '$1==\"ksmbd.mountd\"||$1==\"smbd\"||$1==\"nmbd\"||$1==\"smbd-notifyd\"||$1==\"winbindd\" {print $1}' | sort -u)",
+  "km_inst=\"\"; km_en=\"\"",
+  "for s in ksmbd smbd nmbd smb samba-ad-dc; do",
+  "  for d in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do [ -e \"$d/$s.service\" ] && { km_inst=\"$km_inst$s \"; break; }; done",
+  "  for w in /etc/systemd/system/*.wants/\"$s\".service; do [ -e \"$w\" ] && { km_en=\"$km_en$s \"; break; }; done",
+  "done",
+  "km_lsn=\"\"",
+  "if command -v ss >/dev/null 2>&1; then",
+  "  km_lsn=$(ss -Hlntp 2>/dev/null | tr -cd '\\12\\40-\\176' | awk '{ l=$4; p=l; sub(/.*:/,\"\",p); if(p!=\"445\" && p!=\"139\" && p!=\"5445\") next; a=l; sub(/:[0-9]+$/,\"\",a); gsub(/[\\[\\]]/,\"\",a); sub(/%.*/,\"\",a); if(a==\"*\"||a==\"0.0.0.0\"||a==\"::\"||a==\"\") s=\"all\"; else if(a ~ /^127\\./||a==\"::1\") s=\"loopback\"; else s=\"address\"; nm=\"\"; if(match($0,/users:\\(\\(\"[^\"]*\"/)){ nm=substr($0,RSTART+9,RLENGTH-10); gsub(/[\\\\\"]/,\"\",nm) } k=p \":\" s \":\" nm; if(k in seen) next; seen[k]=1; printf \"%s{\\\"proto\\\":\\\"tcp\\\",\\\"port\\\":%d,\\\"scope\\\":\\\"%s\\\",\\\"process\\\":%s}\", (n++?\",\":\"\"), p, s, (nm==\"\"?\"null\":\"\\\"\" nm \"\\\"\") }')",
+  "else",
+  "  km_lsn=$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk '$4==\"0A\" { split($2,a,\":\"); p=a[2]; if(p!=\"01BD\" && p!=\"008B\" && p!=\"1555\") next; port=(p==\"01BD\"?445:(p==\"008B\"?139:5445)); s=(a[1] ~ /^(00000000|0+)$/ ? \"all\" : (a[1]==\"0100007F\"||a[1]==\"00000000000000000000000001000000\" ? \"loopback\" : \"address\")); k=port \":\" s; if(k in seen) next; seen[k]=1; printf \"%s{\\\"proto\\\":\\\"tcp\\\",\\\"port\\\":%d,\\\"scope\\\":\\\"%s\\\",\\\"process\\\":null}\", (n++?\",\":\"\"), port, s }')",
+  "fi",
+  "km_rdma=$(ls /sys/class/infiniband 2>/dev/null | head -n 10 | tr -cd 'A-Za-z0-9_.\\12')",
+  "# share definitions from the two config files, allowlisted keys only (never passwords, users, secrets or the password databases)",
+  "km_conf=\"\"; for f in /etc/ksmbd/ksmbd.conf /etc/samba/smb.conf; do [ -r \"$f\" ] && km_conf=\"$km_conf$f \"; done",
+  "km_rec=\"\"",
+  "if [ -n \"$km_conf\" ]; then km_rec=$(cat $km_conf 2>/dev/null | tr -cd '\\11\\12\\40-\\176' | head -n 2000 | awk ' function emit() { if (sec != \"\" && sec != \"global\") { if (nsh < 20) printf \"S\\t%s\\t%s\\t%s\\t%s\\t%s\\n\", sec, path, ro, guest, hosts; nsh++ } } { sub(/[;#].*$/, \"\"); sub(/^[ \\t]+/, \"\"); sub(/[ \\t]+$/, \"\"); if ($0 == \"\") next } /^\\[.*\\]$/ { emit(); sec = tolower(substr($0, 2, length($0) - 2)); gsub(/[^a-z0-9_$. -]/, \"\", sec); sec = substr(sec, 1, 60); path = \"\"; ro = \"\"; guest = \"\"; hosts = \"\"; next } { i = index($0, \"=\"); if (i == 0) next; k = tolower(substr($0, 1, i - 1)); v = substr($0, i + 1); gsub(/^[ \\t]+|[ \\t]+$/, \"\", k); gsub(/[ \\t]+/, \" \", k); gsub(/^[ \\t]+|[ \\t]+$/, \"\", v); gsub(/[\\\\\"]/, \"\", v); v = substr(v, 1, 100); lv = tolower(v); yes = (lv == \"yes\" || lv == \"true\" || lv == \"1\" || lv == \"on\"); if (sec == \"global\" || sec == \"\") { if (k == \"server min protocol\" || k == \"min protocol\" || k == \"smb direct\" || k == \"smb3 multichannel\" || k == \"interfaces\" || k == \"bind interfaces only\" || k == \"hosts allow\" || k == \"hosts deny\" || k == \"map to guest\") if (ng < 12) { printf \"G\\t%s\\t%s\\n\", k, v; ng++ } } else { if (k == \"path\") path = v; else if (k == \"read only\") ro = (yes ? \"yes\" : \"no\"); else if (k == \"writable\" || k == \"writeable\" || k == \"write ok\") ro = (yes ? \"no\" : \"yes\"); else if (k == \"guest ok\" || k == \"public\") guest = (yes ? \"yes\" : \"no\"); else if (k == \"hosts allow\") hosts = v } } END { emit() }'); fi",
+  "km_shares=$(printf '%s\\n' \"$km_rec\" | awk -F'\\t' '$1==\"S\" { gsub(/[\\\\\"]/,\"\"); printf \"%s{\\\"name\\\":\\\"%s\\\",\\\"path\\\":%s,\\\"read_only\\\":%s,\\\"guest\\\":%s,\\\"hosts_allow\\\":%s}\", (n++?\",\":\"\"), $2, ($3==\"\"?\"null\":\"\\\"\" $3 \"\\\"\"), ($4==\"\"?\"true\":($4==\"yes\"?\"true\":\"false\")), ($5==\"yes\"?\"true\":\"false\"), ($6==\"\"?\"null\":\"\\\"\" $6 \"\\\"\") }')",
+  "km_set=$(printf '%s\\n' \"$km_rec\" | awk -F'\\t' '$1==\"G\" { gsub(/[\\\\\"]/,\"\"); printf \"%s\\\"%s\\\":\\\"%s\\\"\", (n++?\",\":\"\"), $2, $3 }')",
+  "km_sdcfg=$(printf '%s\\n' \"$km_rec\" | awk -F'\\t' '$1==\"G\" && $2==\"smb direct\" { v=tolower($3); r=(v==\"yes\"||v==\"true\"||v==\"1\"||v==\"on\" ? \"true\" : \"false\") } END { printf \"%s\", (r==\"\"?\"null\":r) }')",
+  "km_files=$(printf '%s\\n' $km_conf | km_jarr)",
+  "ksmbd=$(printf '{\"module_loaded\":%s,\"module_sysfs\":%s,\"module_file\":%s,\"builtin\":%s,\"config\":%s,\"config_smbdirect\":%s,\"autoload\":%s,\"modules\":[%s],\"kthreads\":%s,\"daemons\":[%s],\"units_installed\":[%s],\"units_enabled\":[%s],\"listeners\":[%s],\"rdma_devices\":[%s],\"conf_files\":[%s],\"shares\":[%s],\"settings\":{%s},\"smb_direct_cfg\":%s}' \\",
+  "  \"$km_loaded\" \"$km_sysfs\" \"$km_file\" \"$km_builtin\" \"$(km_tri \"$km_cfgv\")\" \"$(km_tri \"$km_cfgd\")\" \"$km_auto\" \"$(printf '%s\\n' \"$km_mods\" | km_jarr)\" \"${km_kthreads:-0}\" \"$(printf '%s\\n' \"$km_daemons\" | km_jarr)\" \"$(printf '%s\\n' $km_inst | km_jarr)\" \"$(printf '%s\\n' $km_en | km_jarr)\" \"$km_lsn\" \"$(printf '%s\\n' \"$km_rdma\" | km_jarr)\" \"$km_files\" \"$km_shares\" \"$km_set\" \"${km_sdcfg:-null}\")",
+];
+
 const SOFTWARE_BODY = [
   "# ---- software (probe 2.0): what is installed and which version, for vulnerability matching. Read-only: package database, /etc/os-release,",
   "# ---- uname, the version flag of well-known programs, and the images of the running containers. Names and versions only; nothing is executed beyond --version.",
@@ -268,8 +309,9 @@ const SOFTWARE_BODY = [
   "hz_mem=$(awk '/^MemTotal:/{printf \"%.0f\", $2*1024}' /proc/meminfo 2>/dev/null)",
   "hib=$(printf '{\"kernel_disk\":%s,\"cmdline_resume\":%s,\"sys_resume\":%s,\"agent\":%s,\"acpi_sleep_handler\":%s,\"logind_suspend_key\":%s,\"swap_active_bytes\":%s,\"swap_file_bytes\":%s,\"mem_bytes\":%s}' \\",
   "  \"$hz_disk\" \"$hz_cmd\" \"$(jstr \"$hz_res\")\" \"$(jstr \"$hz_agent\")\" \"$hz_acpi\" \"$(jstr \"$hz_key\")\" \"${hz_swap:-0}\" \"$hz_file\" \"${hz_mem:-0}\")",
-  "out=$(printf '{\"probe\":\"aws-advisor/software/3\",\"kind\":\"software\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"os\":{\"id\":%s,\"version\":%s,\"name\":%s},\"kernel\":%s,\"arch\":%s,\"package_manager\":%s,\"packages\":[%s],\"binaries\":[%s],\"images\":[%s],\"hibernation\":%s}' \\",
-  "  \"$hn\" \"$now\" \"$(jstr \"$os_id\")\" \"$(jstr \"$os_ver\")\" \"$(jstr \"$os_name\")\" \"$(jstr \"$kernel\")\" \"$(jstr \"$arch\")\" \"$(jstr \"$pm\")\" \"$pkgs\" \"$bins\" \"$imgs\" \"$hib\")",
+  ...KSMBD_BODY,
+  "out=$(printf '{\"probe\":\"aws-advisor/software/4\",\"kind\":\"software\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"os\":{\"id\":%s,\"version\":%s,\"name\":%s},\"kernel\":%s,\"arch\":%s,\"package_manager\":%s,\"packages\":[%s],\"binaries\":[%s],\"images\":[%s],\"hibernation\":%s,\"ksmbd\":%s}' \\",
+  "  \"$hn\" \"$now\" \"$(jstr \"$os_id\")\" \"$(jstr \"$os_ver\")\" \"$(jstr \"$os_name\")\" \"$(jstr \"$kernel\")\" \"$(jstr \"$arch\")\" \"$(jstr \"$pm\")\" \"$pkgs\" \"$bins\" \"$imgs\" \"$hib\" \"$ksmbd\")",
 ];
 
 const EMIT = [
