@@ -115,7 +115,7 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/3");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/4");
     assert.deepEqual(j.packages, expected[name], name);
   }
 });

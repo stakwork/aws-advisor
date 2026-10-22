@@ -1097,6 +1097,18 @@ the status column says when that is due. `GET /api/probes`, `PUT/DELETE /api/pro
 probe on one box (without `kind`, every probe in turn); `GET /api/instances/:id/software`, `GET /api/software`,
 `GET /api/software/where?name=` read the software inventory.
 
+**ksmbd (ZDI-CAN-33774, ZDI-CAN-33549).** Software probe 4 (`software` document version 1.2: redeploy `AwsAdvisorProbe-software`) adds a
+read-only `ksmbd` section: whether the kernel ships ksmbd (`/boot/config-*` or `/proc/config.gz`, the module file, `modules.builtin`),
+whether it is loaded (`/proc/modules`, `/sys/module/ksmbd`), serving (ksmbd kernel threads, `ksmbd.mountd`/`smbd`/`nmbd` in `ps`, unit
+wants-symlinks; no `systemctl`), listening on 445/139/5445 with the owning process (none means a kernel socket), RDMA devices and modules,
+and the share definitions of `ksmbd.conf`/`smb.conf` from an allowlist of keys (names, paths, read-only, guest, `smb direct`; never
+passwords, users or the password databases). No SMB packet is sent. `src/ksmbd_exposure.ts` turns it into a state per box and two
+flags, `flagged | low | not_indicated | unknown`: ZDI-CAN-33774 (ksmbd active and 445 reachable) and ZDI-CAN-33549 (ksmbd active with
+RDMA/SMB Direct indicators and a writable share). A flag says the conditions are present, not that the kernel is vulnerable; the kernel
+note names a matched distribution advisory when there is one and never compares version numbers. `GET /api/security/ksmbd?only=flagged|active|all`,
+`GET /api/instances/:id/ksmbd`, the MCP tool `ksmbd_exposure` and the `ksmbd_*` properties on `AdvisorCompute` (plus an `AdvisorApp {id: ksmbd}`
+the box RUNS and that SERVES its 445 endpoint) expose it.
+
 A probe is sent
 to one instance that `aws_ssm_managed_instance` reports as online Linux, using the same
 identity Steampipe uses (the saved keys, the profile or the default chain, with the role when one is set; see

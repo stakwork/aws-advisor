@@ -5,6 +5,7 @@ import { db } from "../db.js";
 import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, defaultProbeScript, probeDocument, probeDocumentInfo, probeScriptOverride, probeScriptTemplate, resetProbeScript, setProbeScriptOverride } from "../probes.js";
 import { probeDocumentStatus } from "../probes_status.js";
 import { probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
+import { fleetKsmbd, ksmbdOn } from "../ksmbd_exposure.js";
 import { softwareOn, softwareSummary, wherePackage } from "../software_inventory.js";
 import { containersOn, whereImage } from "../container_inventory.js";
 import { appEvents } from "../instance_apps.js";
@@ -108,6 +109,16 @@ probes.get("/software/where", (req, res) => {
   const name = String(req.query.name || "").trim();
   if (!name || name.length > 120) return res.status(400).json({ error: "name is required" });
   res.json({ name, where: wherePackage(name) });
+});
+// ksmbd (ZDI-CAN-33774, ZDI-CAN-33549): which boxes show the conditions, from the software probe's ksmbd section (src/ksmbd_exposure.ts)
+probes.get("/security/ksmbd", (req, res) => {
+  const only = req.query.only === "all" || req.query.only === "active" ? req.query.only : "flagged";
+  res.json(fleetKsmbd({ only }));
+});
+probes.get("/instances/:id/ksmbd", (req, res) => {
+  const id = String(req.params.id);
+  if (!/^i-[0-9a-f]{8,17}$/.test(id)) return res.status(400).json({ error: "an EC2 instance id is expected" });
+  res.json(ksmbdOn(id));
 });
 probes.get("/instances/:id/software", (req, res) => {
   const id = String(req.params.id);
