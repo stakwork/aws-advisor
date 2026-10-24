@@ -8,7 +8,7 @@
 # the Steampipe config (the connection the app writes) and the AWS files (~/.aws), all on one volume.
 
 # ---- build the UI and check the server's types --------------------------------------------------------------
-FROM node:22-bookworm-slim AS build
+FROM node:22.23.4-bookworm-slim AS build
 WORKDIR /src
 COPY package.json package-lock.json ./
 COPY ui/package.json ui/package-lock.json ./ui/
@@ -19,7 +19,7 @@ COPY . .
 RUN npm run build
 
 # ---- runtime -------------------------------------------------------------------------------------------------
-FROM node:22-bookworm-slim
+FROM node:22.23.4-bookworm-slim
 ARG STEAMPIPE_VERSION=latest
 ARG POWERPIPE_VERSION=latest
 ENV DEBIAN_FRONTEND=noninteractive
