@@ -47,7 +47,7 @@ export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   host: { kind: "host", title: "Host", what: "memory, swap, load, CPUs, uptime, disks and the top processes: the hourly statistics behind the disk, memory and load alerts and the utilisation charts", version: "2.0", sections: ["cpus", "uptime_seconds", "memory", "load", "disks", "top_cpu", "top_mem"], timeout_seconds: 60, cron_key: "probeCron", scope_key: "probeScope", takes_signals: false },
   docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
-  software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, the images behind the running containers, the libraries the runtimes bundle (Node's process.versions) and the dependencies of the packages that own the probed programs: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.2", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "bundles", "depends", "hibernation"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
+  software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, the images behind the running containers, the libraries the runtimes bundle (Node's process.versions) and the dependencies of the packages that own the probed programs: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.3", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "bundles", "depends", "hibernation"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
 };
 
 // ---- the scripts --------------------------------------------------------------------------------------------------------
@@ -245,16 +245,19 @@ const SOFTWARE_BODY = [
   "fi",
   "# the version string of the programs a CVE usually names, from the binary itself (one line, printable ASCII, 100 chars)",
   "bins=\"\"; bn=\"\"",
+  "# where a program may live besides PATH (the agent runs as root with a short PATH): /usr/local, /opt, snap, and every user's nvm tree — a Node installed by a person is as real as one from a package (probe software/5). Symlinks resolved, duplicates dropped",
+  "pathsof() { ( command -v \"$1\" 2>/dev/null; for c in /usr/local/bin/\"$1\" /usr/local/sbin/\"$1\" /opt/*/bin/\"$1\" /snap/bin/\"$1\" /home/*/.nvm/versions/node/*/bin/\"$1\" /root/.nvm/versions/node/*/bin/\"$1\" /home/*/.local/bin/\"$1\" /usr/local/n/versions/node/*/bin/\"$1\"; do [ -x \"$c\" ] && printf '%s\\n' \"$c\"; done ) | while read -r c; do readlink -f \"$c\" 2>/dev/null || printf '%s\\n' \"$c\"; done | awk '!s[$0]++'; }",
   "vof() { \"$@\" 2>&1 </dev/null | head -n 1 | tr -cd '\\40-\\176' | cut -c1-100; }",
   "addbin() { [ -n \"$2\" ] || return 0; bins=\"$bins$bn{\\\"name\\\":\\\"$(esc \"$1\")\\\",\\\"version\\\":\\\"$(esc \"$2\")\\\",\\\"path\\\":\\\"$(esc \"$3\")\\\"}\"; bn=\",\"; }",
   "for b in sshd nginx apache2 httpd openssl node nodejs python3 python docker containerd postgres redis-server mysqld mariadbd mongod java ruby go caddy haproxy traefik bitcoind lnd php perl git curl; do",
-  "  p=$(command -v \"$b\" 2>/dev/null) || continue; v=\"\"",
-  "  case \"$b\" in sshd) v=$(vof ssh -V);; openssl) v=$(vof \"$p\" version);; go) v=$(vof \"$p\" version);; java) v=$(vof \"$p\" -version);; apache2|httpd) v=$(vof \"$p\" -v);; *) v=$(vof \"$p\" --version);; esac",
-  "  addbin \"$b\" \"$v\" \"$p\"",
+  "  for p in $(pathsof \"$b\"); do v=\"\"",
+  "    case \"$b\" in sshd) v=$(vof ssh -V);; openssl) v=$(vof \"$p\" version);; go) v=$(vof \"$p\" version);; java) v=$(vof \"$p\" -version);; apache2|httpd) v=$(vof \"$p\" -v);; *) v=$(vof \"$p\" --version);; esac",
+  "    addbin \"$b\" \"$v\" \"$p\"",
+  "  done",
   "done",
   "# what the runtimes bundle (probe software/4): the libraries compiled into Node, from the binary itself (process.versions) — what a CVE in brotli or OpenSSL reaches through a Node that ships its own copy",
   "bund=\"\"; bd=\"\"",
-  "for b in node nodejs; do p=$(command -v \"$b\" 2>/dev/null) || continue; pv=$(\"$p\" -p 'JSON.stringify(process.versions)' 2>/dev/null </dev/null | head -c 4000 | tr -cd '\\40-\\176'); case \"$pv\" in \\{*\\}) bund=\"$bund$bd{\\\"name\\\":\\\"$(esc \"$b\")\\\",\\\"versions\\\":$pv}\"; bd=\",\";; esac; done",
+  "for p in $( (pathsof node; pathsof nodejs) | awk '!s[$0]++'); do pv=$(\"$p\" -p 'JSON.stringify(process.versions)' 2>/dev/null </dev/null | head -c 4000 | tr -cd '\\40-\\176'); case \"$pv\" in \\{*\\}) bund=\"$bund$bd{\\\"name\\\":\\\"node\\\",\\\"path\\\":\\\"$(esc \"$p\")\\\",\\\"versions\\\":$pv}\"; bd=\",\";; esac; done",
   "# the dependencies of the packages that own the probed programs (dpkg only for now; probe software/4): the chain a CVE in a shared library reaches a service through. Bounded: a few dozen packages, never the whole database",
   "deps=\"\"; dd=\"\"",
   "if command -v dpkg-query >/dev/null 2>&1; then owners=$(for b in sshd nginx apache2 httpd openssl node nodejs python3 python docker containerd postgres redis-server mysqld mariadbd mongod java ruby go caddy haproxy traefik bitcoind lnd php perl git curl; do p=$(command -v \"$b\" 2>/dev/null) || continue; dpkg -S \"$(readlink -f \"$p\")\" 2>/dev/null | head -n 1 | cut -d: -f1; done | sort -u); for o in $owners; do d=$(dpkg-query -W -f='${Depends}' \"$o\" 2>/dev/null | tr -cd '\\40-\\176' | cut -c1-2000); [ -n \"$d\" ] || continue; deps=\"$deps$dd{\\\"n\\\":\\\"$(esc \"$o\")\\\",\\\"d\\\":\\\"$(esc \"$d\")\\\"}\"; dd=\",\"; done; fi",
@@ -274,7 +277,7 @@ const SOFTWARE_BODY = [
   "hz_mem=$(awk '/^MemTotal:/{printf \"%.0f\", $2*1024}' /proc/meminfo 2>/dev/null)",
   "hib=$(printf '{\"kernel_disk\":%s,\"cmdline_resume\":%s,\"sys_resume\":%s,\"agent\":%s,\"acpi_sleep_handler\":%s,\"logind_suspend_key\":%s,\"swap_active_bytes\":%s,\"swap_file_bytes\":%s,\"mem_bytes\":%s}' \\",
   "  \"$hz_disk\" \"$hz_cmd\" \"$(jstr \"$hz_res\")\" \"$(jstr \"$hz_agent\")\" \"$hz_acpi\" \"$(jstr \"$hz_key\")\" \"${hz_swap:-0}\" \"$hz_file\" \"${hz_mem:-0}\")",
-  "out=$(printf '{\"probe\":\"aws-advisor/software/4\",\"kind\":\"software\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"os\":{\"id\":%s,\"version\":%s,\"name\":%s},\"kernel\":%s,\"arch\":%s,\"package_manager\":%s,\"packages\":[%s],\"binaries\":[%s],\"images\":[%s],\"bundles\":[%s],\"depends\":[%s],\"hibernation\":%s}' \\",
+  "out=$(printf '{\"probe\":\"aws-advisor/software/5\",\"kind\":\"software\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"os\":{\"id\":%s,\"version\":%s,\"name\":%s},\"kernel\":%s,\"arch\":%s,\"package_manager\":%s,\"packages\":[%s],\"binaries\":[%s],\"images\":[%s],\"bundles\":[%s],\"depends\":[%s],\"hibernation\":%s}' \\",
   "  \"$hn\" \"$now\" \"$(jstr \"$os_id\")\" \"$(jstr \"$os_ver\")\" \"$(jstr \"$os_name\")\" \"$(jstr \"$kernel\")\" \"$(jstr \"$arch\")\" \"$(jstr \"$pm\")\" \"$pkgs\" \"$bins\" \"$imgs\" \"$bund\" \"$deps\" \"$hib\")",
 ];
 

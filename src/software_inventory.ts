@@ -19,9 +19,9 @@ create table if not exists instance_packages (
 );
 create index if not exists instance_packages_name on instance_packages(name, version);
 create table if not exists instance_binaries (
-  instance_id text not null, name text not null, version text not null, path text,
+  instance_id text not null, name text not null, version text not null, path text not null default '',
   first_seen text not null, last_seen text not null, gone integer not null default 0,
-  primary key (instance_id, name)
+  primary key (instance_id, name, path)
 );
 create table if not exists instance_images (
   instance_id text not null, image text not null, image_id text, digest text, created text, platform text,
@@ -31,7 +31,7 @@ create table if not exists instance_images (
 create table if not exists instance_bundles (
   instance_id text not null, parent text not null, parent_version text not null, name text not null, version text not null,
   first_seen text not null, last_seen text not null,
-  primary key (instance_id, parent, name)
+  primary key (instance_id, parent, parent_version, name)
 );
 create table if not exists instance_depends (
   instance_id text not null, name text not null, dep text not null, first_seen text not null, last_seen text not null,
@@ -46,6 +46,18 @@ if (!(db.prepare("pragma table_info(instance_packages)").all() as { name: string
 // probe software/3 adds the guest's hibernation setup (JSON, ProbeHibernation); src/guest_hibernation.ts reads it
 if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "hibernation")) db.exec("alter table instance_os add column hibernation text");
 // probe software/4 adds what the runtimes bundle (instance_bundles) and the dependencies of the packages owning the probed programs (instance_depends)
+// probe software/5 finds programs beyond PATH (nvm, /opt, /usr/local), so a box may hold several installs of one program: binaries are keyed by
+// (name, path) and bundles by the parent's version too. Older tables are rebuilt once with the wider key.
+for (const [table, want, create] of [
+  ["instance_binaries", ["instance_id", "name", "path"], "create table instance_binaries (instance_id text not null, name text not null, version text not null, path text not null default '', first_seen text not null, last_seen text not null, gone integer not null default 0, primary key (instance_id, name, path))"],
+  ["instance_bundles", ["instance_id", "parent", "parent_version", "name"], "create table instance_bundles (instance_id text not null, parent text not null, parent_version text not null, name text not null, version text not null, first_seen text not null, last_seen text not null, primary key (instance_id, parent, parent_version, name))"],
+] as const) {
+  const pk = (db.prepare(`pragma table_info(${table})`).all() as { name: string; pk: number }[]).filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+  if (pk.join(",") === want.join(",")) continue;
+  const cols = table === "instance_binaries" ? "instance_id, name, version, coalesce(path, ''), first_seen, last_seen, gone" : "instance_id, parent, parent_version, name, version, first_seen, last_seen";
+  const into = table === "instance_binaries" ? "instance_id, name, version, path, first_seen, last_seen, gone" : "instance_id, parent, parent_version, name, version, first_seen, last_seen";
+  db.exec(`alter table ${table} rename to ${table}_old; ${create}; insert or ignore into ${table}(${into}) select ${cols} from ${table}_old; drop table ${table}_old`);
+}
 // rows marked gone before superseded software was deleted (2026-10-13): the column stays, nothing sets it any more
 db.exec("delete from instance_packages where gone = 1; delete from instance_binaries where gone = 1; delete from instance_images where gone = 1");
 
@@ -54,7 +66,7 @@ export interface ProbePackage { n: string; v: string; a?: string | null; s?: str
 export interface ProbeBinary { name: string; version: string; path?: string | null }
 export interface ProbeImage { image: string; id?: string | null; digests?: string | null; created?: string | null; platform?: string | null }
 /** What a runtime bundles (probe software/4): the program and the library versions compiled into it, as Node's process.versions prints them. */
-export interface ProbeBundle { name: string; versions: Record<string, unknown> }
+export interface ProbeBundle { name: string; path?: string | null; versions: Record<string, unknown> }
 /** A package's dependency field as dpkg prints it (probe software/4): `libc6 (>= 2.34), libbrotli1 (>= 1.1.0) | libfoo`. */
 export interface ProbeDepend { n: string; d: string }
 /** What the guest has for hibernation (probe software/3): the kernel, the resume target, what answers the sleep button, the swap. */
@@ -76,11 +88,11 @@ const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, 
 const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, ecosystem, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
-  on conflict(instance_id, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, path = excluded.path, last_seen = excluded.last_seen, gone = 0`);
+  on conflict(instance_id, name, path) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, path = excluded.path, last_seen = excluded.last_seen, gone = 0`);
 const upsertImg = db.prepare(`insert into instance_images(instance_id, image, image_id, digest, created, platform, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, image) do update set image_id = excluded.image_id, digest = excluded.digest, created = excluded.created, platform = excluded.platform, last_seen = excluded.last_seen, gone = 0`);
 const upsertBundle = db.prepare(`insert into instance_bundles(instance_id, parent, parent_version, name, version, first_seen, last_seen) values (?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id, parent, name) do update set first_seen = case when version = excluded.version and parent_version = excluded.parent_version then first_seen else excluded.first_seen end, parent_version = excluded.parent_version, version = excluded.version, last_seen = excluded.last_seen`);
+  on conflict(instance_id, parent, parent_version, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, last_seen = excluded.last_seen`);
 const upsertDepend = db.prepare(`insert into instance_depends(instance_id, name, dep, first_seen, last_seen) values (?, ?, ?, ?, ?)
   on conflict(instance_id, name, dep) do update set last_seen = excluded.last_seen`);
 const insertChange = db.prepare("insert into package_changes(instance_id, ecosystem, name, from_version, to_version, at) values (?, ?, ?, ?, ?, ?)");
@@ -125,26 +137,29 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
       db.prepare("delete from instance_packages where instance_id = ? and ecosystem = ? and name = ?").run(instanceId, was.ecosystem, was.name);
       insertChange.run(instanceId, was.ecosystem, was.name, was.version, null, collectedAt); res.removed.push(was.name);
     }
-    const bins = (data.binaries ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.version);
+    // one row per install: a box may hold several Nodes (nvm), each at its own path
+    const bins = (data.binaries ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.version).map((b) => ({ name: clean(b.name, 64), version: clean(b.version, 120), path: b.path == null ? "" : clean(b.path, 200) }));
     const binSeen = new Set<string>();
-    for (const b of bins) { binSeen.add(b.name); upsertBin.run(instanceId, clean(b.name, 64), clean(b.version, 120), b.path == null ? null : clean(b.path, 200), collectedAt, collectedAt); }
-    if (Array.isArray(data.binaries)) db.prepare(`delete from instance_binaries where instance_id = ?${binSeen.size ? ` and name not in (${[...binSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...binSeen);
+    for (const b of bins) { binSeen.add(`${b.name}\t${b.path}`); upsertBin.run(instanceId, b.name, b.version, b.path, collectedAt, collectedAt); }
+    if (Array.isArray(data.binaries)) for (const r of db.prepare("select name, path from instance_binaries where instance_id = ?").all(instanceId) as { name: string; path: string }[]) if (!binSeen.has(`${r.name}\t${r.path}`)) db.prepare("delete from instance_binaries where instance_id = ? and name = ? and path = ?").run(instanceId, r.name, r.path);
     res.binaries = bins.length;
     // what a runtime bundles: one row per (runtime, library); the runtime's own entry (`node`) is the parent, not a child
     const bundles = (data.bundles ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.versions && typeof b.versions === "object");
     const bundleSeen = new Set<string>();
     for (const b of bundles) {
       const parent = clean(b.name, 64);
-      const own = bins.find((x) => x.name === b.name)?.version ?? bundledVersion(b.versions[parent]) ?? bundledVersion(b.versions["node"]);
+      const path = b.path == null ? "" : clean(b.path, 200);
+      // the runtime's own version: the binary row at the same path, else the entry's own key (`node`), so several installs stay apart
+      const own = (path ? bins.find((x) => x.name === parent && x.path === path)?.version : undefined) ?? bundledVersion(b.versions[parent]) ?? bundledVersion(b.versions["node"]) ?? bins.find((x) => x.name === parent)?.version;
       if (!own) continue;
       for (const [lib, raw] of Object.entries(b.versions)) {
         const v = bundledVersion(raw); const name = clean(lib, 64).toLowerCase();
         if (!v || !name || name === parent || NOT_LIBRARIES.has(name)) continue;
-        bundleSeen.add(`${parent}\t${name}`); res.bundles++;
+        bundleSeen.add(`${parent}\t${clean(own, 120)}\t${name}`); res.bundles++;
         upsertBundle.run(instanceId, parent, clean(own, 120), name, clean(v, 120), collectedAt, collectedAt);
       }
     }
-    if (Array.isArray(data.bundles)) for (const r of db.prepare("select parent, name from instance_bundles where instance_id = ?").all(instanceId) as { parent: string; name: string }[]) if (!bundleSeen.has(`${r.parent}\t${r.name}`)) db.prepare("delete from instance_bundles where instance_id = ? and parent = ? and name = ?").run(instanceId, r.parent, r.name);
+    if (Array.isArray(data.bundles)) for (const r of db.prepare("select parent, parent_version, name from instance_bundles where instance_id = ?").all(instanceId) as { parent: string; parent_version: string; name: string }[]) if (!bundleSeen.has(`${r.parent}\t${r.parent_version}\t${r.name}`)) db.prepare("delete from instance_bundles where instance_id = ? and parent = ? and parent_version = ? and name = ?").run(instanceId, r.parent, r.parent_version, r.name);
     // dependencies between installed packages, for the packages the probe read them of
     const installed = new Set(pkgs.map((p) => p.name));
     const depSeen = new Set<string>();

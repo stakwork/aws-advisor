@@ -123,12 +123,13 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/4");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/5");
     assert.deepEqual(j.packages, expected[name], name);
     assert.ok(Array.isArray(j.bundles) && Array.isArray(j.depends), `${name}: bundles and depends are arrays`);
     if (name === "dpkg-query") {
       // probe software/4: what the Node binary says it bundles, verbatim JSON; the Depends field of the package that owns each probed program
-      assert.deepEqual(j.bundles, [{ name: "node", versions: { node: "22.12.0", brotli: "1.1.0", openssl: "3.0.15+quic", modules: "127" } }]);
+      assert.equal(j.bundles.length, 1); assert.equal(j.bundles[0].name, "node"); assert.ok(String(j.bundles[0].path).endsWith("/node"), "the install's path, so several Nodes on one box stay apart");
+      assert.deepEqual(j.bundles[0].versions, { node: "22.12.0", brotli: "1.1.0", openssl: "3.0.15+quic", modules: "127" });
       assert.deepEqual(j.depends, [{ n: "nodejs", d: "libc6 (>= 2.34), nginx (>= 1), libnotinstalled (>= 1)" }]);
     } else assert.deepEqual(j.depends, [], `${name}: dependencies are read through dpkg only`);
   }

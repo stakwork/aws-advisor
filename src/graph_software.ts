@@ -170,7 +170,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const p of pkgRows) byInstanceName.set(`${p.instance_id}\t${p.ecosystem}\t${p.name}`, p.id);
   const bundles: any[] = [];
   for (const b of bundleRows) {
-    const parent_id = byInstanceName.get(`${b.instance_id}\tbinary\t${b.parent}`) ?? packageId("binary", b.parent, b.parent_version);
+    const parent_id = packageId("binary", b.parent, b.parent_version); // one box may hold several Nodes: the parent is the install of that version
     bundles.push({ parent_id, child_id: packageId("bundled", b.name, b.version) });
   }
   const depends: any[] = [];

@@ -883,7 +883,7 @@ An installed software component with a version. The vulnerability layer matches 
 |---|---|
 | `id` | `<ecosystem>:<name>:<version>` |
 | `ecosystem` | `deb` \| `rpm` \| `apk` \| `npm` \| `pypi` \| `go` \| `cargo` \| `gem` \| `docker` \| `runtime` \| `binary` (a version read from the program itself) \| `bundled` (a library compiled into a runtime, from Node's `process.versions`) \| `kernel` \| `os` \| `framework` |
-| `name` / `version` | the package name as its ecosystem spells it (`openssh-server`, `next`, `openssl`) and the exact installed version string |
+| `name` / `version` | the package name as its ecosystem spells it (`openssh-server`, `next`, `openssl`) and the exact installed version string. A probed program is found on PATH and in `/usr/local`, `/opt`, snap and every user's nvm tree, so one box may install several versions of `node`, each its own node with its own `INSTALLED_ON {path}` edge |
 | `source_kind` | how known: `dpkg` \| `rpm` \| `apk` \| `lockfile` \| `image_manifest` \| `deployment_metadata` \| `binary_version` \| `process_versions` \| `uname` \| `os_release` |
 | `source_name` | the source package the distribution advisories name (`openssh` for `openssh-server`); null when it is the name itself |
 | `advisory_ecosystem` | the feed's name for the distribution the package was installed from (`Ubuntu:24.04:LTS`, `Debian:12`, `Alpine:v3.19`, `Rocky Linux:9`, `AlmaLinux:9`, `Amazon Linux:2023`); null when no feed covers it |
