@@ -101,7 +101,8 @@ test("software inventory: a newer version replaces the row, what left is deleted
 test("the software script reads the source package from dpkg, rpm and apk (what the advisories name) and prints it as s when it differs", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-pm-"));
   const fake: Record<string, string> = {
-    "dpkg-query": "#!/bin/sh\nprintf 'ii\\topenssh-server\\t1:9.6p1-3ubuntu13.4\\tamd64\\topenssh\\n'; printf 'ii\\tnginx\\t1.24.0-2ubuntu7\\tamd64\\tnginx\\n'; printf 'rc\\tgone\\t1.0\\tall\\tgone\\n'\n",
+    // dpkg-query answers the package list, and (probe software/4) a Depends field when asked for one; dpkg -S names the package owning a program; node prints what it bundles
+    "dpkg-query": "#!/bin/sh\ncase \"$*\" in *Depends*) printf 'libc6 (>= 2.34), nginx (>= 1), libnotinstalled (>= 1)';; *) printf 'ii\\topenssh-server\\t1:9.6p1-3ubuntu13.4\\tamd64\\topenssh\\n'; printf 'ii\\tnginx\\t1.24.0-2ubuntu7\\tamd64\\tnginx\\n'; printf 'rc\\tgone\\t1.0\\tall\\tgone\\n';; esac\n",
     rpm: "#!/bin/sh\nprintf 'openssh-server\\t(none):8.7p1-38.el9\\tx86_64\\topenssh-8.7p1-38.el9.src.rpm\\n'; printf 'kernel\\t(none):5.14.0-427.el9\\tx86_64\\tkernel-5.14.0-427.el9.src.rpm\\n'\n",
     apk: "#!/bin/sh\ncase \"$1\" in list) printf 'openssh-server-9.6_p1-r0 x86_64 {openssh} (BSD) [installed]\\nmusl-1.2.4_git20230717-r4 x86_64 {musl} (MIT) [installed]\\n';; *) exit 1;; esac\n",
   };
@@ -110,12 +111,25 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     rpm: [{ n: "openssh-server", v: "8.7p1-38.el9", a: "x86_64", s: "openssh" }, { n: "kernel", v: "5.14.0-427.el9", a: "x86_64" }],
     apk: [{ n: "openssh-server", v: "9.6_p1-r0", a: "", s: "openssh" }, { n: "musl", v: "1.2.4_git20230717-r4", a: "" }],
   };
+  const extras: Record<string, Record<string, string>> = {
+    "dpkg-query": {
+      dpkg: "#!/bin/sh\nprintf 'nodejs: /usr/bin/node\\n'\n",
+      node: "#!/bin/sh\ncase \"$1\" in --version) printf 'v22.12.0\\n';; -p) printf '{\"node\":\"22.12.0\",\"brotli\":\"1.1.0\",\"openssl\":\"3.0.15+quic\",\"modules\":\"127\"}';; esac\n",
+    },
+  };
   for (const [name, body] of Object.entries(fake)) {
     const bin = path.join(dir, name); fs.mkdirSync(bin); fs.writeFileSync(path.join(bin, name), body, { mode: 0o755 });
+    for (const [extra, b] of Object.entries(extras[name] ?? {})) fs.writeFileSync(path.join(bin, extra), b, { mode: 0o755 });
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/3");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/4");
     assert.deepEqual(j.packages, expected[name], name);
+    assert.ok(Array.isArray(j.bundles) && Array.isArray(j.depends), `${name}: bundles and depends are arrays`);
+    if (name === "dpkg-query") {
+      // probe software/4: what the Node binary says it bundles, verbatim JSON; the Depends field of the package that owns each probed program
+      assert.deepEqual(j.bundles, [{ name: "node", versions: { node: "22.12.0", brotli: "1.1.0", openssl: "3.0.15+quic", modules: "127" } }]);
+      assert.deepEqual(j.depends, [{ n: "nodejs", d: "libc6 (>= 2.34), nginx (>= 1), libnotinstalled (>= 1)" }]);
+    } else assert.deepEqual(j.depends, [], `${name}: dependencies are read through dpkg only`);
   }
 });

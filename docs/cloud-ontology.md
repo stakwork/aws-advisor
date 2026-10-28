@@ -882,16 +882,24 @@ An installed software component with a version. The vulnerability layer matches 
 | property | meaning |
 |---|---|
 | `id` | `<ecosystem>:<name>:<version>` |
-| `ecosystem` | `deb` \| `rpm` \| `apk` \| `npm` \| `pypi` \| `go` \| `cargo` \| `gem` \| `docker` \| `runtime` \| `binary` (a version read from the program itself) \| `kernel` \| `os` \| `framework` |
+| `ecosystem` | `deb` \| `rpm` \| `apk` \| `npm` \| `pypi` \| `go` \| `cargo` \| `gem` \| `docker` \| `runtime` \| `binary` (a version read from the program itself) \| `bundled` (a library compiled into a runtime, from Node's `process.versions`) \| `kernel` \| `os` \| `framework` |
 | `name` / `version` | the package name as its ecosystem spells it (`openssh-server`, `next`, `openssl`) and the exact installed version string |
-| `source_kind` | how known: `dpkg` \| `rpm` \| `apk` \| `lockfile` \| `image_manifest` \| `deployment_metadata` \| `binary_version` \| `uname` \| `os_release` |
+| `source_kind` | how known: `dpkg` \| `rpm` \| `apk` \| `lockfile` \| `image_manifest` \| `deployment_metadata` \| `binary_version` \| `process_versions` \| `uname` \| `os_release` |
 | `source_name` | the source package the distribution advisories name (`openssh` for `openssh-server`); null when it is the name itself |
 | `advisory_ecosystem` | the feed's name for the distribution the package was installed from (`Ubuntu:24.04:LTS`, `Debian:12`, `Alpine:v3.19`, `Rocky Linux:9`, `AlmaLinux:9`, `Amazon Linux:2023`); null when no feed covers it |
 | `scope` | `service` (a program that may listen) \| `library` (linked by others) \| `kernel` \| `tool` (nothing listens as it): what the verdict can say about reachability |
 | `cpe` | the CPE string when it can be formed |
+| `purl` | the component without its version, by rules only (`src/sec/purl.ts`): `pkg:deb/ubuntu/libbrotli1`, `pkg:rpm/amzn/openssl`, `pkg:generic/node` (a probed binary), `pkg:generic/brotli` (a bundled library, as `process.versions` names it), `pkg:generic/linux`, `pkg:generic/ubuntu`. The key the public vulnerability graph's `SecComponent` nodes use; spellings are joined there by `SAME_AS`, never by a table here |
+| `source_purl` | the source package's purl, what a distribution's advisories name (`pkg:deb/ubuntu/brotli` for `libbrotli1`); equals `purl` when there is no separate source |
+| `sort_key` | the version rewritten so plain string order is version order (`src/sec/version.ts`, the same function the public graph's ranges use): a version is affected when `introduced_key <= sort_key < fixed_key`. For deb/rpm an index hint; their own ordering decides |
 
 Edges: `INSTALLED_ON {path, first_seen, last_seen, gone}` → compute, deployment, function or image; `PROVIDES` →
-`AdvisorApp`; `CONTAINED_IN` ← `AdvisorImage` (`CONTAINS`).
+`AdvisorApp`; `CONTAINED_IN` ← `AdvisorImage` (`CONTAINS`); `BUNDLES {source_kind: process_versions}` → the
+libraries compiled into a runtime (`node 22.12.0 BUNDLES brotli 1.1.0`, one fact however many boxes have it);
+`DEPENDS_ON {source_kind: dpkg}` → the installed packages a package's Depends names, read for the packages that own
+the probed programs. Containment is these two edges whatever the mechanism, so a vulnerability in a library reaches a
+box along `INSTALLED_ON` then `BUNDLES|DEPENDS_ON*0..4`; the match itself runs in a strut workflow against the public
+graph (`docs/vulnerability-graph-plan.md`).
 
 ### KnVulnerability
 

@@ -4,6 +4,7 @@ import { resourceAccountIndex } from "./resource_index.js";
 import { ecosystemOf, packageScope, vulnerabilityMatches, type VulnMatch } from "./software_vulns.js";
 import { AWS } from "./adapters/types.js";
 import { COMPUTE_OF } from "./graph_cypher.js";
+import { componentIdentity } from "./sec/identity.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
@@ -13,6 +14,14 @@ import { COMPUTE_OF } from "./graph_cypher.js";
  * own ecosystems; the versions read from well-known binaries as packages of the `binary` ecosystem; the container
  * images the box runs (RUNS_IMAGE → AdvisorImage, the same nodes cluster workloads are BUILT_FROM); PROVIDES edges
  * from a package to the program (AdvisorApp) it ships, so "which package is this listening process from" is one hop.
+ *
+ * Every package carries the identity the public vulnerability graph is walked with (src/sec/identity.ts): `purl` (the
+ * component, no version), `source_purl` (the source package a distribution's advisories name) and `sort_key` (the
+ * version as a sortable string). Containment is edges between package nodes, the same two whatever the mechanism:
+ * BUNDLES (a runtime to the libraries compiled into it, from Node's process.versions; the library is an AdvisorPackage
+ * of ecosystem `bundled`) and DEPENDS_ON (a package to the installed packages its dpkg Depends names). A CVE in brotli
+ * then reaches a box as (compute)<-[:INSTALLED_ON]-(node)-[:BUNDLES]->(brotli), with no lookup. The match itself is a
+ * strut workflow against the public graph; nothing here decides vulnerability from these.
  *
  * On top, the knowledge: KnVulnerability nodes (general area, no account_id: an advisory is true everywhere) for the
  * advisories matched (src/software_vulns.ts, from OSV and the Amazon Linux feed), AFFECTS edges to the package
@@ -27,7 +36,7 @@ UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
 MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, native_type: 'package', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, native_type: 'package', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
 SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}`;
 
@@ -61,6 +70,18 @@ MATCH (c:AdvisorCompute {id: 'compute:' + row.instance_id})-[r:RUNS_IMAGE]->(i:A
 WHERE NOT i.id IN row.keep
 DELETE r`;
 
+/** A runtime to a library compiled into it, and a package to an installed package it depends on: both between the
+ *  shared version nodes, so "node 22.12.0 bundles brotli 1.1.0" is one fact however many boxes have it. */
+const BUNDLES_CYPHER = `
+UNWIND $rows AS row
+MATCH (a:AdvisorPackage {id: row.parent_id}) MATCH (b:AdvisorPackage {id: row.child_id})
+MERGE (a)-[r:BUNDLES]->(b) SET r += {source_kind: 'process_versions', updated_at: $now}`;
+
+const DEPENDS_ON_CYPHER = `
+UNWIND $rows AS row
+MATCH (a:AdvisorPackage {id: row.from_id}) MATCH (b:AdvisorPackage {id: row.to_id})
+MERGE (a)-[r:DEPENDS_ON]->(b) SET r += {source_kind: row.source_kind, updated_at: $now}`;
+
 const PROVIDES_CYPHER = `
 UNWIND $rows AS row
 MATCH (p:AdvisorPackage {id: row.package_id}) MATCH (a:AdvisorApp {id: row.app})
@@ -85,7 +106,7 @@ SET r += {package: row.package, packages: row.packages, version: row.version, fi
 
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
 const rows = (sql: string, ...params: unknown[]): any[] => { try { return db.prepare(sql).all(...params) as any[]; } catch { return []; } };
-const SOURCE_KIND: Record<string, string> = { deb: "dpkg", rpm: "rpm", apk: "apk" };
+const SOURCE_KIND: Record<string, string> = { deb: "dpkg", rpm: "rpm", apk: "apk", bundled: "process_versions" };
 export const packageId = (ecosystem: string, name: string, version: string) => `pkg:${ecosystem}:${name}:${version}`;
 
 /** An image reference's node id, repository and tag (latest when none is named; none when pinned by digest). */
@@ -94,7 +115,7 @@ export function imageRef(image: string): { id: string; repository: string; tag: 
   return { id: `image:${image}`, repository: hasTag ? noDigest.slice(0, idx) : noDigest, tag: image.includes("@") ? null : hasTag ? noDigest.slice(idx + 1) : "latest" };
 }
 
-export interface SoftwareGraphCounts { packages: number; installed: number; images: number; provides: number; vulnerabilities: number; verdicts: number; took_ms: number }
+export interface SoftwareGraphCounts { packages: number; installed: number; images: number; provides: number; bundles: number; depends: number; vulnerabilities: number; verdicts: number; took_ms: number }
 
 /** Everything the software probe knows about the given boxes (or all), then the vulnerability knowledge and verdicts. */
 export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGraphCounts | null> {
@@ -112,14 +133,19 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   const pkgRows: any[] = [];
   for (const p of rows(`select instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone from instance_packages where 1=1${where}`, ...args)) {
     const o = os.get(p.instance_id); const eco = o ? ecosystemOf(o.package_manager, o.os_id, o.os_version) : null;
-    pkgRows.push({ instance_id: p.instance_id, id: packageId(p.ecosystem, p.name, p.version), name: p.name, version: p.version, ecosystem: p.ecosystem, source_name: p.source ?? null, source_kind: SOURCE_KIND[p.ecosystem] ?? p.ecosystem, advisory_ecosystem: eco?.ecosystem ?? null, scope: packageScope(p.source ?? p.name).scope, arch: p.arch ?? null, path: null, first_seen: p.first_seen, last_seen: p.last_seen, gone: Boolean(p.gone) });
+    pkgRows.push({ instance_id: p.instance_id, id: packageId(p.ecosystem, p.name, p.version), name: p.name, version: p.version, ecosystem: p.ecosystem, source_name: p.source ?? null, source_kind: SOURCE_KIND[p.ecosystem] ?? p.ecosystem, advisory_ecosystem: eco?.ecosystem ?? null, scope: packageScope(p.source ?? p.name).scope, arch: p.arch ?? null, path: null, first_seen: p.first_seen, last_seen: p.last_seen, gone: Boolean(p.gone), ...componentIdentity({ ecosystem: p.ecosystem, name: p.name, version: p.version, source: p.source ?? null, os_id: o?.os_id ?? null }) });
+  }
+  // what the runtimes bundle (probe software/4): the library is a package of its own, installed on the box through the runtime
+  const bundleRows = rows(`select instance_id, parent, parent_version, name, version, first_seen, last_seen from instance_bundles where 1=1${where}`, ...args);
+  for (const b of bundleRows) {
+    pkgRows.push({ instance_id: b.instance_id, id: packageId("bundled", b.name, b.version), name: b.name, version: b.version, ecosystem: "bundled", source_name: null, source_kind: "process_versions", advisory_ecosystem: null, scope: "library", arch: null, path: null, first_seen: b.first_seen, last_seen: b.last_seen, gone: false, ...componentIdentity({ ecosystem: "bundled", name: b.name, version: b.version }) });
   }
   for (const b of rows(`select instance_id, name, version, path, first_seen, last_seen, gone from instance_binaries where 1=1${where}`, ...args)) {
-    pkgRows.push({ instance_id: b.instance_id, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "binary_version", advisory_ecosystem: null, scope: packageScope(b.name).scope, arch: null, path: b.path ?? null, first_seen: b.first_seen, last_seen: b.last_seen, gone: Boolean(b.gone) });
+    pkgRows.push({ instance_id: b.instance_id, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "binary_version", advisory_ecosystem: null, scope: packageScope(b.name).scope, arch: null, path: b.path ?? null, first_seen: b.first_seen, last_seen: b.last_seen, gone: Boolean(b.gone), ...componentIdentity({ ecosystem: "binary", name: b.name, version: b.version }) });
   }
   for (const o of os.values()) {
-    if (o.kernel) pkgRows.push({ instance_id: o.instance_id, id: packageId("kernel", "linux", o.kernel), name: "linux", version: o.kernel, ecosystem: "kernel", source_name: null, source_kind: "uname", advisory_ecosystem: null, scope: "kernel", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, gone: false });
-    if (o.os_id) pkgRows.push({ instance_id: o.instance_id, id: packageId("os", o.os_id, o.os_version ?? "unknown"), name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", ecosystem: "os", source_name: o.os_id, source_kind: "os_release", advisory_ecosystem: ecosystemOf(o.package_manager, o.os_id, o.os_version)?.ecosystem ?? null, scope: "tool", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, gone: false });
+    if (o.kernel) pkgRows.push({ instance_id: o.instance_id, id: packageId("kernel", "linux", o.kernel), name: "linux", version: o.kernel, ecosystem: "kernel", source_name: null, source_kind: "uname", advisory_ecosystem: null, scope: "kernel", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, gone: false, ...componentIdentity({ ecosystem: "kernel", name: "linux", version: o.kernel }) });
+    if (o.os_id) pkgRows.push({ instance_id: o.instance_id, id: packageId("os", o.os_id, o.os_version ?? "unknown"), name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", ecosystem: "os", source_name: o.os_id, source_kind: "os_release", advisory_ecosystem: ecosystemOf(o.package_manager, o.os_id, o.os_version)?.ecosystem ?? null, scope: "tool", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, gone: false, ...componentIdentity({ ecosystem: "os", name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", source: o.os_id }) });
   }
   const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
   for (const b of chunks(osRows)) await w(OS_CYPHER, b);
@@ -138,6 +164,25 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     return [...by].map(([instance_id, keep]) => ({ instance_id, keep }));
   };
   for (const b of chunks(keepOf(pkgRows), 50)) await w(PRUNE_PACKAGES_CYPHER, b);
+
+  // containment: the runtime that bundles a library, the package that depends on another — edges between version nodes
+  const byInstanceName = new Map<string, string>(); // `${instance}\t${ecosystem}\t${name}` → node id
+  for (const p of pkgRows) byInstanceName.set(`${p.instance_id}\t${p.ecosystem}\t${p.name}`, p.id);
+  const bundles: any[] = [];
+  for (const b of bundleRows) {
+    const parent_id = byInstanceName.get(`${b.instance_id}\tbinary\t${b.parent}`) ?? packageId("binary", b.parent, b.parent_version);
+    bundles.push({ parent_id, child_id: packageId("bundled", b.name, b.version) });
+  }
+  const depends: any[] = [];
+  for (const d of rows(`select instance_id, name, dep from instance_depends where 1=1${where}`, ...args)) {
+    const eco = os.get(d.instance_id)?.package_manager; if (!eco) continue;
+    const from_id = byInstanceName.get(`${d.instance_id}\t${eco}\t${d.name}`); const to_id = byInstanceName.get(`${d.instance_id}\t${eco}\t${d.dep}`);
+    if (from_id && to_id && from_id !== to_id) depends.push({ from_id, to_id, source_kind: SOURCE_KIND[eco] ?? eco });
+  }
+  const uniq = (list: any[], key: (r: any) => string) => { const s = new Set<string>(); return list.filter((r) => { const k = key(r); if (s.has(k)) return false; s.add(k); return true; }); };
+  const bundleEdges = uniq(bundles, (r) => `${r.parent_id}\t${r.child_id}`); const dependEdges = uniq(depends, (r) => `${r.from_id}\t${r.to_id}`);
+  for (const b of chunks(bundleEdges)) await w(BUNDLES_CYPHER, b);
+  for (const b of chunks(dependEdges)) await w(DEPENDS_ON_CYPHER, b);
   for (const b of chunks(keepOf(imgRows), 50)) await w(PRUNE_IMAGES_CYPHER, b);
 
   // the program a package ships, where that program is seen running (AdvisorApp nodes are keyed by name)
@@ -169,7 +214,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // packages nobody has any more, advisories nothing is affected by
   await writeCypher("MATCH (p:AdvisorPackage) WHERE NOT (p)--() DELETE p");
   await writeCypher("MATCH (v:KnVulnerability) WHERE NOT (v)--() DELETE v");
-  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, provides: provRows.length, vulnerabilities: vulnRows.length, verdicts: verdicts.length, took_ms: Date.now() - t0 };
+  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, vulnerabilities: vulnRows.length, verdicts: verdicts.length, took_ms: Date.now() - t0 };
 }
 
 /** One VULNERABLE_TO edge: the match with the endpoint it is reached through, when one is. */
