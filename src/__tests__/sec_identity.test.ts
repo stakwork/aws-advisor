@@ -33,7 +33,7 @@ test("componentIdentity: what each kind of installed row becomes", () => {
   const deb = componentIdentity({ ecosystem: "deb", name: "libbrotli1", version: "1.1.0-2build3", source: "brotli", os_id: "ubuntu" });
   assert.equal(deb.purl, "pkg:deb/ubuntu/libbrotli1");
   assert.equal(deb.source_purl, "pkg:deb/ubuntu/brotli", "the source package the distribution advisories name");
-  assert.ok(deb.sort_key.startsWith("00000001.00000001.00000000"));
+  assert.ok(deb.sort_key?.startsWith("00000001.00000001.00000000"));
   const noSource = componentIdentity({ ecosystem: "deb", name: "nginx", version: "1.24.0-2", os_id: "debian" });
   assert.equal(noSource.source_purl, noSource.purl);
   assert.equal(componentIdentity({ ecosystem: "rpm", name: "openssl", version: "1:3.0.8-1.amzn2023", source: "openssl", os_id: "amzn" }).purl, "pkg:rpm/amzn/openssl");
@@ -43,6 +43,9 @@ test("componentIdentity: what each kind of installed row becomes", () => {
   assert.equal(componentIdentity({ ecosystem: "kernel", name: "linux", version: "6.8.0-45-generic" }).purl, "pkg:generic/linux");
   assert.equal(componentIdentity({ ecosystem: "os", name: "Ubuntu 24.04.1 LTS", version: "24.04", source: "ubuntu" }).purl, "pkg:generic/ubuntu");
   assert.equal(componentIdentity({ ecosystem: "npm", name: "next", version: "14.2.3" }).purl, "pkg:npm/next");
+  const line = componentIdentity({ ecosystem: "runtime", name: "node", version: "22.x" });
+  assert.deepEqual([line.purl, line.sort_key], ["pkg:generic/node", null], "a platform's runtime line (22.x) has an identity but nothing to compare");
+  assert.equal(componentIdentity({ ecosystem: "runtime", name: "node", version: "22" }).sort_key, null);
   assert.equal(distroOf("deb", null), "debian");
   assert.equal(distroOf("rpm", "Rocky"), "rocky");
 });

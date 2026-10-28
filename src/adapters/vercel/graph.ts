@@ -1,4 +1,5 @@
 import { enabled, neoParams, writeCypher } from "../../graph_mirror.js";
+import { componentIdentity } from "../../sec/identity.js";
 import { listProjects, listStores } from "./inventory.js";
 import { VERCEL, projectEndpoints, runtimeBoxId, storeEndpoints, vercelAdapter } from "./index.js";
 
@@ -41,7 +42,7 @@ const RUNTIME_CYPHER = `
 UNWIND $rows AS row
 MATCH (d:AdvisorResource {id: row.project_id})
 MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: 'runtime', source_name: row.name, source_kind: 'deployment_metadata', advisory_ecosystem: null, scope: 'service', native_type: 'package', provider: $provider, account_id: $account, updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: 'runtime', source_name: row.name, source_kind: 'deployment_metadata', advisory_ecosystem: null, scope: 'service', purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, native_type: 'package', provider: $provider, account_id: $account, updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(d) SET r += {first_seen: coalesce(r.first_seen, $now), last_seen: $now, gone: false, updated_at: $now}`;
 
 const USES_CYPHER = `
@@ -85,7 +86,8 @@ export async function mirrorVercel(): Promise<VercelGraphCounts> {
   const storeEps = listStores().flatMap(storeEndpoints);
   for (let i = 0; i < storeEps.length; i += 250) await writeCypher(STORE_ENDPOINT_CYPHER, neoParams({ rows: storeEps.slice(i, i + 250), now, provider: VERCEL, account }));
   await writeCypher(STALE_ENDPOINTS, { ids: [...endpoints.map((e) => e.id), ...storeEps.map((e) => e.id)], now, provider: VERCEL, account });
-  const runtimes = projects.filter((p) => p.node_version).map((p) => ({ project_id: p.id, id: `pkg:runtime:node:${p.node_version}`, name: "node", version: p.node_version }));
+  // the runtime carries the same identity as a probed binary (src/sec/identity.ts); Vercel names a line (22.x), so there is no sort_key to compare
+  const runtimes = projects.filter((p) => p.node_version).map((p) => ({ project_id: p.id, id: `pkg:runtime:node:${p.node_version}`, name: "node", version: p.node_version, ...componentIdentity({ ecosystem: "runtime", name: "node", version: String(p.node_version) }) }));
   for (let i = 0; i < runtimes.length; i += 250) await writeCypher(RUNTIME_CYPHER, { rows: runtimes.slice(i, i + 250), now, provider: VERCEL, account });
   // the stores a project is connected to (its data dependencies): deployment USES database / cache / storage
   const uses = listStores().flatMap((st) => st.projects.map((p) => ({ project_id: p.project_id, store_id: st.id, environments: p.environments })));

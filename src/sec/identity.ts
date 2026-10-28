@@ -31,8 +31,12 @@ export interface InstalledRow {
 export interface Identity {
   purl: string;
   source_purl: string;
-  sort_key: string;
+  /** Null when the version is not one version but a line (`22.x`, as a platform reports its runtime): nothing to compare. */
+  sort_key: string | null;
 }
+
+/** A version string that names a line rather than a release: `22.x`, `18.*`, `3`. */
+export const isVersionLine = (v: string): boolean => /[x*]/i.test(v) || /^\d+$/.test(v.trim());
 
 export const DISTRO_ECOSYSTEMS = new Set(["deb", "rpm", "apk"]);
 
@@ -42,7 +46,7 @@ export function distroOf(ecosystem: string, osId: string | null | undefined): st
 }
 
 export function componentIdentity(row: InstalledRow): Identity {
-  const sort_key = sortKey(row.version);
+  const sort_key = isVersionLine(row.version) ? null : sortKey(row.version);
   const eco = row.ecosystem.toLowerCase();
   if (DISTRO_ECOSYSTEMS.has(eco)) {
     const d = distroOf(eco, row.os_id);
