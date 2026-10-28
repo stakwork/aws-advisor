@@ -81,3 +81,19 @@ test("an older probe without the sections leaves the tables alone", () => {
   assert.equal(sw.softwareOn(BOX).bundles.length, 4, "no `bundles` array: nothing was said about them, nothing is removed");
   assert.equal((db.prepare("select count(*) as n from instance_depends where instance_id = ?").get(BOX) as any).n, 3);
 });
+
+test("parseProbeOutput keeps software 5's bundles and depends sections, bounded, so the inventory ever sees them", async () => {
+  const { parseProbeOutput } = await import("../ssm.js");
+  const out = parseProbeOutput(JSON.stringify({
+    probe: "aws-advisor/software/5", kind: "software", hostname: "h", collected_at: "2026-10-28T18:00:00Z", os: { id: "debian", version: "13", name: "Debian" }, kernel: "6.12", arch: "x86_64", package_manager: "deb",
+    packages: [{ n: "nodejs", v: "22.12.0-1", a: "amd64" }], binaries: [{ name: "node", version: "v20.18.0", path: "/home/example/.nvm/versions/node/v20.18.0/bin/node" }], images: [],
+    bundles: [{ name: "node", path: "/home/example/.nvm/versions/node/v20.18.0/bin/node", versions: { node: "20.18.0", brotli: "1.1.0", openssl: "3.0.13+quic", "bad key!": "x", modules: 115 } }, { name: "", versions: {} }, "junk"],
+    depends: [{ n: "nodejs", d: "libc6 (>= 2.34), libbrotli1 (>= 1.1.0)" }, { n: "x" }],
+    hibernation: null,
+  }));
+  assert.deepEqual(out.bundles, [{ name: "node", path: "/home/example/.nvm/versions/node/v20.18.0/bin/node", versions: { node: "20.18.0", brotli: "1.1.0", openssl: "3.0.13+quic" } }], "string values under plain keys only; a nameless or non-object entry is dropped");
+  assert.deepEqual(out.depends, [{ n: "nodejs", d: "libc6 (>= 2.34), libbrotli1 (>= 1.1.0)" }]);
+  const older = parseProbeOutput(JSON.stringify({ probe: "aws-advisor/software/3", kind: "software", hostname: "h", collected_at: "2026-10-28T18:00:00Z", os: { id: "debian", version: "13", name: "Debian" }, packages: [], binaries: [], images: [] }));
+  assert.equal(older.bundles, undefined, "an older probe says nothing about bundles, and the inventory leaves its rows alone");
+  assert.equal(older.depends, undefined);
+});

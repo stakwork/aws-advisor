@@ -108,6 +108,9 @@ export interface ProbeResult {
   images?: { image: string; id: string | null; digests: string | null; created: string | null; platform: string | null }[];
   /** Software 3: the guest's hibernation setup (src/guest_hibernation.ts reads it). */
   hibernation?: ProbeHibernation | null;
+  /** Software 4/5: what each runtime install bundles (Node's process.versions, with the install's path) and the dpkg Depends of the packages owning the probed programs. */
+  bundles?: { name: string; path: string | null; versions: Record<string, string> }[];
+  depends?: { n: string; d: string }[];
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -222,6 +225,10 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,
     binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
     hibernation: raw.hibernation && typeof raw.hibernation === "object" ? parseHibernation(raw.hibernation) : undefined,
+    bundles: Array.isArray(raw.bundles) ? raw.bundles.filter((b: any) => b && typeof b.name === "string" && b.name && b.versions && typeof b.versions === "object").slice(0, 20).map((b: any) => ({
+      name: String(b.name).slice(0, 64), path: b.path == null || b.path === "" ? null : String(b.path).slice(0, 200),
+      versions: Object.fromEntries(Object.entries(b.versions as Record<string, unknown>).filter(([k, v]) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(k)).slice(0, 80).map(([k, v]) => [k, String(v).slice(0, 80)])) })) : undefined,
+    depends: Array.isArray(raw.depends) ? raw.depends.filter((d: any) => d && typeof d.n === "string" && d.n && typeof d.d === "string").slice(0, 200).map((d: any) => ({ n: String(d.n).slice(0, 120), d: String(d.d).slice(0, 2000) })) : undefined,
     images: Array.isArray(raw.images) ? raw.images.filter((i: any) => i && typeof i.image === "string" && i.image).slice(0, 200).map((i: any) => ({ image: String(i.image).slice(0, 300), id: i.id == null || i.id === "" ? null : String(i.id).slice(0, 100), digests: i.digests == null || i.digests === "" ? null : String(i.digests).slice(0, 600), created: i.created == null || i.created === "" ? null : String(i.created).slice(0, 40), platform: i.platform == null || i.platform === "" ? null : String(i.platform).slice(0, 40) })) : undefined,
   };
 }
