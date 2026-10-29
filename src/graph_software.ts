@@ -117,6 +117,24 @@ export function imageRef(image: string): { id: string; repository: string; tag: 
   return { id: `image:${image}`, repository: hasTag ? noDigest.slice(0, idx) : noDigest, tag: image.includes("@") ? null : hasTag ? noDigest.slice(idx + 1) : "latest" };
 }
 
+/** One instance_sbom row as the graph takes it: a filesystem purl is INSTALLED_ON the box like any package (PACKAGE_CYPHER), a purl inside
+ *  an image is CONTAINS from the image node (CONTAINS_CYPHER). The purl\'s own type is the ecosystem; a distro purl carries the image\'s
+ *  distribution (distro qualifier, else the namespace) and source package (upstream), so its identity and advisory ecosystem are that
+ *  distribution\'s, not the host\'s. The package id is the package\'s; the image id travels as image_id. Pure; null for a purl that does not parse. */
+export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string }): { edge: "installed_on" | "contains"; row: Record<string, unknown> } | null {
+  const p = parsePurl(String(r.purl)); if (!p) return null;
+  const version = String(r.version || p.version || "unknown");
+  const upstream = p.qualifiers.upstream ? p.qualifiers.upstream.split("@")[0] || null : null;
+  const distro = /^(.+?)-([0-9][^-]*)$/.exec(p.qualifiers.distro ?? "");
+  const distroId = DISTRO_ECOSYSTEMS.has(p.type) ? (distro?.[1] ?? p.namespace ?? null) : null;
+  const advisory = distroId ? ecosystemOf(p.type, distroId, distro?.[2] ?? null)?.ecosystem ?? null : null;
+  const node = { id: packageId(p.type, String(r.name), version), name: String(r.name), version, ecosystem: p.type, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: "library", version_purl: String(r.purl),
+    ...componentIdentity({ ecosystem: p.type, name: String(r.name), version, source: upstream, os_id: distroId }) };
+  if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen, gone: false } };
+  const im = imageRef(String(r.ref));
+  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: im.id, image: String(r.ref), repository: im.repository, tag: im.tag, first_seen: r.first_seen, last_seen: r.last_seen } };
+}
+
 export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; provides: number; bundles: number; depends: number; took_ms: number }
 
 /** Everything the software and sbom probes know about the given boxes (or all). */
@@ -154,16 +172,8 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // and its source package (upstream), so its identity and advisory ecosystem are those of that distribution, not the host's
   const containsRows: any[] = [];
   for (const r of rows(`select instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen from instance_sbom where 1=1${where}`, ...args)) {
-    const p = parsePurl(String(r.purl)); if (!p) continue;
-    const version = String(r.version || p.version || "unknown");
-    const upstream = p.qualifiers.upstream ? p.qualifiers.upstream.split("@")[0] || null : null;
-    const distro = /^(.+?)-([0-9][^-]*)$/.exec(p.qualifiers.distro ?? "");
-    const distroId = DISTRO_ECOSYSTEMS.has(p.type) ? (distro?.[1] ?? p.namespace ?? null) : null;
-    const advisory = distroId ? ecosystemOf(p.type, distroId, distro?.[2] ?? null)?.ecosystem ?? null : null;
-    const node = { id: packageId(p.type, String(r.name), version), name: String(r.name), version, ecosystem: p.type, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: "library", version_purl: String(r.purl),
-      ...componentIdentity({ ecosystem: p.type, name: String(r.name), version, source: upstream, os_id: distroId }) };
-    if (r.source === "dir") pkgRows.push({ instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen, gone: false });
-    else containsRows.push({ instance_id: r.instance_id, ...node, ...imageRef(String(r.ref)), image_id: imageRef(String(r.ref)).id, image: String(r.ref), first_seen: r.first_seen, last_seen: r.last_seen });
+    const g = sbomGraphRow(r); if (!g) continue;
+    (g.edge === "installed_on" ? pkgRows : containsRows).push(g.row);
   }
   const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
   for (const b of chunks(osRows)) await w(OS_CYPHER, b);
