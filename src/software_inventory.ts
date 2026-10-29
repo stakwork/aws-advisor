@@ -5,7 +5,8 @@ import { db } from "./db.js";
  * every package with its version, the versions of well-known programs read from the binaries, and the images behind
  * the running containers. One row per (instance, package) holding what is installed now: a newer version replaces
  * the row and a package, program or image the probe no longer reports is deleted. The history is package_changes:
- * every version move (from → to) and every removal (to null). This is the inventory a vulnerability is matched
+ * every version move (from → to) and every removal (to null). This is the inventory the vulnerability match (a strut
+ * workflow over the graph, docs/vulnerability-graph-plan.md) is run
  * against (the graph's AdvisorPackage / AdvisorImage nodes come from these tables).
  */
 
@@ -60,6 +61,26 @@ for (const [table, want, create] of [
 }
 // rows marked gone before superseded software was deleted (2026-10-13): the column stays, nothing sets it any more
 db.exec("delete from instance_packages where gone = 1; delete from instance_binaries where gone = 1; delete from instance_images where gone = 1");
+// the advisor's own OSV/ALAS matcher (src/software_vulns.ts, src/alas_feed.ts) was removed on 2026-10-29: the strut workflows match against the graph now; its tables go
+for (const t of ["vuln_queries", "vulnerabilities", "package_vulns", "vuln_scans", "alas_advisories", "alas_packages"]) db.exec(`drop table if exists ${t}`);
+
+// ---- the sbom probe (src/probes.ts, kind "sbom"): what syft read inside the running images and on the host filesystem --
+// One row per (instance, scan, purl): the scan is a running image (ref as `docker ps` names it, the same string as
+// instance_images.image) or the filesystem (ref "/"). A scan that timed out or failed keeps the rows of the last good
+// one, with its status on the sources row; a scan the probe no longer reports (the container stopped) loses its rows.
+db.exec(`create table if not exists instance_sbom_scans (
+  instance_id text primary key, collected_at text not null, available integer not null default 0, tool text, cap integer not null default 0, sources integer not null default 0, packages integer not null default 0
+);
+create table if not exists instance_sbom_sources (
+  instance_id text not null, source text not null, ref text not null, status text not null, total integer not null default 0, listed integer not null default 0, collected_at text not null,
+  primary key (instance_id, source, ref)
+);
+create table if not exists instance_sbom (
+  instance_id text not null, source text not null, ref text not null, purl text not null, type text not null, namespace text, name text not null, version text, first_seen text not null, last_seen text not null,
+  primary key (instance_id, source, ref, purl)
+);
+create index if not exists instance_sbom_name on instance_sbom(name, version);
+create index if not exists instance_sbom_ref on instance_sbom(source, ref)`);
 
 /** One package as the probe prints it: name, version, architecture and the source package when it differs from the name. */
 export interface ProbePackage { n: string; v: string; a?: string | null; s?: string | null }
@@ -178,6 +199,85 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
   return res;
 }
 
+/** A package URL taken apart (https://github.com/package-url/purl-spec): `pkg:type/namespace/name@version?qualifiers#subpath`. */
+export interface Purl {
+  type: string; namespace: string | null; name: string; version: string | null; qualifiers: Record<string, string>;
+  /** The name as its ecosystem spells it: `@scope/name` for npm, `group:artifact` for maven, the module path for golang, the bare package name for distro packages. */
+  full_name: string;
+}
+const decode = (s: string): string => { try { return decodeURIComponent(s); } catch { return s; } };
+const DISTRO_TYPES = new Set(["deb", "rpm", "apk"]);
+/** Pure; null for anything that is not a purl. */
+export function parsePurl(purl: string): Purl | null {
+  const m = /^pkg:([A-Za-z0-9.+-]+)\/([^?#]+)(?:\?([^#]*))?(?:#.*)?$/.exec(String(purl ?? "").trim());
+  if (!m) return null;
+  const type = m[1]!.toLowerCase();
+  let path = m[2]!; let version: string | null = null;
+  const at = path.lastIndexOf("@"); if (at > 0) { version = decode(path.slice(at + 1)) || null; path = path.slice(0, at); }
+  const segs = path.split("/").filter(Boolean).map(decode);
+  const name = segs.pop(); if (!name) return null;
+  const namespace = segs.length ? segs.join("/") : null;
+  const qualifiers: Record<string, string> = {};
+  for (const q of (m[3] ?? "").split("&")) { const i = q.indexOf("="); if (i > 0) qualifiers[decode(q.slice(0, i)).toLowerCase()] = decode(q.slice(i + 1)); }
+  const full_name = !namespace || DISTRO_TYPES.has(type) ? name : type === "maven" ? `${namespace}:${name}` : `${namespace}/${name}`;
+  return { type, namespace, name, version, qualifiers, full_name };
+}
+
+/** One syft scan as the probe prints it (src/ssm.ts ProbeSbomSource). */
+export interface SbomSource { source: "image" | "dir"; ref: string; status: string; total?: number; purls?: string[] }
+export interface SbomData { available?: boolean; tool?: string | null; cap?: number; sources?: SbomSource[] }
+export interface RecordSbomResult { available: boolean; tool: string | null; sources: number; packages: number; /** purls syft found that did not fit the probe's output budget */ trimmed: number; failed: { ref: string; status: string }[]; added: number; removed: number }
+
+const upsertSbomScan = db.prepare(`insert into instance_sbom_scans(instance_id, collected_at, available, tool, cap, sources, packages) values (?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id) do update set collected_at = excluded.collected_at, available = excluded.available, tool = excluded.tool, cap = excluded.cap, sources = excluded.sources, packages = excluded.packages`);
+const upsertSbomSource = db.prepare(`insert into instance_sbom_sources(instance_id, source, ref, status, total, listed, collected_at) values (?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id, source, ref) do update set status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, collected_at = excluded.collected_at`);
+const upsertSbomRow = db.prepare(`insert into instance_sbom(instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id, source, ref, purl) do update set last_seen = excluded.last_seen`);
+const int = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0; };
+
+/** Records one sbom probe: every scan's status, the purls of the scans that succeeded (replacing the last good list), nothing when syft is not on the box. */
+export function recordSbom(instanceId: string, collectedAt: string, sbom: SbomData): RecordSbomResult | null {
+  if (!sbom || typeof sbom !== "object") return null;
+  const res: RecordSbomResult = { available: sbom.available === true, tool: sbom.tool ? clean(sbom.tool, 40) || null : null, sources: 0, packages: 0, trimmed: 0, failed: [], added: 0, removed: 0 };
+  db.transaction(() => {
+    if (!res.available) {
+      // syft gone from the box: what it read is no longer known to be there
+      for (const t of ["instance_sbom", "instance_sbom_sources"]) db.prepare(`delete from ${t} where instance_id = ?`).run(instanceId);
+      upsertSbomScan.run(instanceId, collectedAt, 0, null, 0, 0, 0);
+      return;
+    }
+    const seen = new Set<string>();
+    for (const s of sbom.sources ?? []) {
+      if (!s || (s.source !== "image" && s.source !== "dir")) continue;
+      const ref = clean(s.ref, 300); if (!ref) continue;
+      const key = `${s.source}\t${ref}`; if (seen.has(key)) continue; seen.add(key);
+      const status = ["ok", "timeout", "error", "skipped"].includes(String(s.status)) ? String(s.status) : "error";
+      const purls = status === "ok" ? [...new Set((s.purls ?? []).map((p) => clean(p, 300)).filter(Boolean))] : [];
+      res.sources++;
+      upsertSbomSource.run(instanceId, s.source, ref, status, int(s.total), purls.length, collectedAt);
+      if (status !== "ok") { res.failed.push({ ref, status }); continue; } // the rows of the last good scan stay
+      res.trimmed += Math.max(0, int(s.total) - purls.length);
+      const before = new Set((db.prepare("select purl from instance_sbom where instance_id = ? and source = ? and ref = ?").all(instanceId, s.source, ref) as { purl: string }[]).map((r) => r.purl));
+      const now = new Set<string>();
+      for (const purl of purls) {
+        const p = parsePurl(purl); if (!p) continue;
+        now.add(purl); res.packages++;
+        if (before.size && !before.has(purl)) res.added++;
+        upsertSbomRow.run(instanceId, s.source, ref, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt);
+      }
+      for (const purl of before) if (!now.has(purl)) { db.prepare("delete from instance_sbom where instance_id = ? and source = ? and ref = ? and purl = ?").run(instanceId, s.source, ref, purl); res.removed++; }
+    }
+    // a scan the probe no longer reports (the container stopped, the image changed): its rows go with it
+    for (const r of db.prepare("select source, ref from instance_sbom_sources where instance_id = ?").all(instanceId) as { source: string; ref: string }[]) if (!seen.has(`${r.source}\t${r.ref}`)) {
+      res.removed += (db.prepare("delete from instance_sbom where instance_id = ? and source = ? and ref = ?").run(instanceId, r.source, r.ref) as { changes: number }).changes;
+      db.prepare("delete from instance_sbom_sources where instance_id = ? and source = ? and ref = ?").run(instanceId, r.source, r.ref);
+    }
+    upsertSbomScan.run(instanceId, collectedAt, 1, res.tool, int(sbom.cap), res.sources, (db.prepare("select count(*) as n from instance_sbom where instance_id = ?").get(instanceId) as { n: number }).n);
+  })();
+  return res;
+}
+
 /** The hibernation agent packages (Amazon Linux, Ubuntu): the fallback signal while a box has no probe software/3 reading. */
 export const HIBERNATION_AGENT_PACKAGES = ["ec2-hibinit-agent", "hibagent", "ec2-hibernate-linux-agent"];
 
@@ -198,6 +298,10 @@ export interface InstanceSoftware {
   changes: { ecosystem: string; name: string; from_version: string | null; to_version: string | null; at: string }[];
   bundles: { parent: string; parent_version: string; name: string; version: string; first_seen: string; last_seen: string }[];
   depends: { name: string; dep: string; first_seen: string; last_seen: string }[];
+  /** The sbom probe: whether syft is on the box, each scan (image or filesystem) with its status and counts, and the packages (`q` filters by name). */
+  sbom: { scan: { collected_at: string; available: boolean; tool: string | null; cap: number; sources: number; packages: number } | null;
+    sources: { source: string; ref: string; status: string; total: number; listed: number; collected_at: string }[];
+    packages: { source: string; ref: string; purl: string; type: string; namespace: string | null; name: string; version: string | null; first_seen: string; last_seen: string }[] };
 }
 
 /** Everything the software probe knows about one instance; `q` filters packages by name. */
@@ -212,18 +316,25 @@ export function softwareOn(instanceId: string, opts: { q?: string; limit?: numbe
     changes: db.prepare("select ecosystem, name, from_version, to_version, at from package_changes where instance_id = ? order by id desc limit 50").all(instanceId) as any[],
     bundles: db.prepare("select parent, parent_version, name, version, first_seen, last_seen from instance_bundles where instance_id = ? order by parent, name").all(instanceId) as any[],
     depends: db.prepare("select name, dep, first_seen, last_seen from instance_depends where instance_id = ? order by name, dep").all(instanceId) as any[],
+    sbom: {
+      scan: ((r) => (r ? { ...r, available: Boolean(r.available) } : null))(db.prepare("select collected_at, available, tool, cap, sources, packages from instance_sbom_scans where instance_id = ?").get(instanceId) as any),
+      sources: db.prepare("select source, ref, status, total, listed, collected_at from instance_sbom_sources where instance_id = ? order by source desc, ref").all(instanceId) as any[],
+      packages: db.prepare(`select source, ref, purl, type, namespace, name, version, first_seen, last_seen from instance_sbom where instance_id = ?${q ? " and lower(name) like ?" : ""} order by source desc, ref, type, name limit ?`).all(...(q ? [instanceId, q, limit] : [instanceId, limit])) as any[],
+    },
   };
 }
 
 /** Where a package (or binary) is installed across the fleet, with its version per box: the question a CVE asks. */
-export function wherePackage(name: string): { instance_id: string; instance_name: string | null; kind: "package" | "binary"; ecosystem: string | null; name: string; version: string; source?: string | null; last_seen: string }[] {
+export function wherePackage(name: string): { instance_id: string; instance_name: string | null; kind: "package" | "binary" | "sbom"; ecosystem: string | null; name: string; version: string; source?: string | null; /** sbom rows: the image the package is inside, or "/" for the filesystem */ ref?: string | null; last_seen: string }[] {
   const like = `%${name.toLowerCase()}%`;
   const pk = db.prepare(`select p.instance_id, i.name as instance_name, 'package' as kind, p.ecosystem, p.name, p.version, p.source, p.last_seen from instance_packages p left join inventory_ec2 i on i.instance_id = p.instance_id where p.gone = 0 and (lower(p.name) like ? or lower(p.source) like ?) order by p.name, p.version, i.name limit 2000`).all(like, like) as any[];
   const bn = db.prepare(`select b.instance_id, i.name as instance_name, 'binary' as kind, null as ecosystem, b.name, b.version, b.last_seen from instance_binaries b left join inventory_ec2 i on i.instance_id = b.instance_id where b.gone = 0 and lower(b.name) like ? order by b.name, i.name limit 500`).all(like) as any[];
-  return [...pk, ...bn];
+  // what syft read inside the images and on the filesystems: the image (or "/") says where
+  const sb = db.prepare(`select s.instance_id, i.name as instance_name, 'sbom' as kind, s.type as ecosystem, s.name, coalesce(s.version, '') as version, s.ref, s.last_seen from instance_sbom s left join inventory_ec2 i on i.instance_id = s.instance_id where lower(s.name) like ? order by s.name, s.version, i.name limit 1000`).all(like) as any[];
+  return [...pk, ...bn, ...sb];
 }
 
-export interface SoftwareSummary { instances: number; packages: number; distinct_packages: number; images: number; os: { os: string; n: number }[]; kernels: { kernel: string; n: number }[]; last_collected_at: string | null; changes_7d: number }
+export interface SoftwareSummary { instances: number; packages: number; distinct_packages: number; images: number; os: { os: string; n: number }[]; kernels: { kernel: string; n: number }[]; last_collected_at: string | null; changes_7d: number; /** the sbom probe: boxes with syft, boxes probed without it, packages read */ sbom: { boxes: number; without_syft: number; packages: number } }
 
 /** The fleet's software at a glance. */
 export function softwareSummary(): SoftwareSummary {
@@ -233,5 +344,6 @@ export function softwareSummary(): SoftwareSummary {
   const os = db.prepare("select coalesce(os_name, os_id, 'unknown') as os, count(*) as n from instance_os group by 1 order by n desc limit 12").all() as any[];
   const kernels = db.prepare("select coalesce(kernel, 'unknown') as kernel, count(*) as n from instance_os group by 1 order by n desc limit 12").all() as any[];
   const ch = db.prepare("select count(*) as n from package_changes where datetime(at) > datetime('now', '-7 days')").get() as any;
-  return { instances: Number(a?.instances || 0), packages: Number(a?.packages || 0), distinct_packages: Number(d?.n || 0), images: Number(im?.n || 0), os, kernels, last_collected_at: a?.last ?? null, changes_7d: Number(ch?.n || 0) };
+  const sb = db.prepare("select sum(available) as boxes, sum(1 - available) as without_syft, sum(packages) as packages from instance_sbom_scans").get() as any;
+  return { instances: Number(a?.instances || 0), packages: Number(a?.packages || 0), distinct_packages: Number(d?.n || 0), images: Number(im?.n || 0), os, kernels, last_collected_at: a?.last ?? null, changes_7d: Number(ch?.n || 0), sbom: { boxes: Number(sb?.boxes || 0), without_syft: Number(sb?.without_syft || 0), packages: Number(sb?.packages || 0) } };
 }

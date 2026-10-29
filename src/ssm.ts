@@ -1,4 +1,4 @@
-import { recordSoftware, type ProbeHibernation } from "./software_inventory.js";
+import { recordSbom, recordSoftware, type ProbeHibernation } from "./software_inventory.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
@@ -20,7 +20,7 @@ import { effectiveSignals } from "./signal_rules.js";
  * as one merged view (each section from its kind's latest row; a pre-2.0 combined probe counts for every section).
  * Tested on Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyProbeDocumentName, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyKindOf, legacyProbeDocumentName, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
 export { PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
 /** The host kind's document and info, for the places that still ask for "the" probe document. */
 export const probeDocument = (kind: ProbeKind = "host") => probeDocumentFor(kind);
@@ -72,6 +72,10 @@ export interface ProbeProcessGroup { name: string; user: string; count: number; 
 /** Probe 1.8: one port the box answers on. `scope` says which interfaces (all, loopback, one address); a host socket names its process and pid, a port a container publishes names the container and the port inside it. */
 export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: string; scope: "all" | "loopback" | "address"; process: string | null; pid: number | null; container: string | null; container_port: number | null }
 
+/** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
+export interface ProbeSbomSource { source: "image" | "dir"; ref: string; status: "ok" | "timeout" | "error" | "skipped"; total: number; purls: string[] }
+export interface ProbeSbom { available: boolean; tool: string | null; cap: number; sources: ProbeSbomSource[] }
+
 export interface ProbeResult {
   probe: string;
   hostname: string;
@@ -111,6 +115,8 @@ export interface ProbeResult {
   /** Software 4/5: what each runtime install bundles (Node's process.versions, with the install's path) and the dpkg Depends of the packages owning the probed programs. */
   bundles?: { name: string; path: string | null; versions: Record<string, string> }[];
   depends?: { n: string; d: string }[];
+  /** The sbom probe: the package URLs syft read from each running image and from the host filesystem, with every scan's status and true count. */
+  sbom?: ProbeSbom;
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -160,6 +166,15 @@ function parseHibernation(h: any): ProbeHibernation {
     acpi_sleep_handler: h.acpi_sleep_handler === true, logind_suspend_key: str(h.logind_suspend_key, 30),
     swap_active_bytes: bytes(h.swap_active_bytes), swap_file_bytes: bytes(h.swap_file_bytes), mem_bytes: bytes(h.mem_bytes),
   };
+}
+
+/** The sbom section, typed: at most 60 scans of 5,000 purls each, a purl being a printable `pkg:<type>/...` string of up to 300 characters. */
+export function parseSbom(s: any): ProbeSbom {
+  const status = (v: unknown): ProbeSbomSource["status"] => (v === "timeout" || v === "error" || v === "skipped" ? v : "ok");
+  const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
+    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), status: status(x.status), total: Math.max(0, int(x.total)),
+    purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 5000) as string[] }));
+  return { available: s.available === true, tool: s.tool == null || s.tool === "" ? null : String(s.tool).replace(/[^\x20-\x7e]/g, "").slice(0, 40), cap: Math.max(0, int(s.cap)), sources };
 }
 
 /** Parses the command's stdout: tolerates noise before the JSON line and validates the shape. */
@@ -225,6 +240,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,
     binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
     hibernation: raw.hibernation && typeof raw.hibernation === "object" ? parseHibernation(raw.hibernation) : undefined,
+    sbom: raw.sbom && typeof raw.sbom === "object" ? parseSbom(raw.sbom) : undefined,
     bundles: Array.isArray(raw.bundles) ? raw.bundles.filter((b: any) => b && typeof b.name === "string" && b.name && b.versions && typeof b.versions === "object").slice(0, 20).map((b: any) => ({
       name: String(b.name).slice(0, 64), path: b.path == null || b.path === "" ? null : String(b.path).slice(0, 200),
       versions: Object.fromEntries(Object.entries(b.versions as Record<string, unknown>).filter(([k, v]) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(k)).slice(0, 80).map(([k, v]) => [k, String(v).slice(0, 80)])) })) : undefined,
@@ -491,7 +507,7 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
       catch (e: any) {
         const name = String(e?.name || e?.Code || "");
         // the per-kind document is not deployed yet: the combined pre-2.0 document covers host, docker and apps
-        if (/InvalidDocument\b/i.test(name) && kind !== "software" && legacyProbeDocumentName() !== documentUsed) {
+        if (/InvalidDocument\b/i.test(name) && legacyKindOf(kind) === "all" && legacyProbeDocumentName() !== documentUsed) {
           if (!warnedLegacyDocument.has(kind)) { warnedLegacyDocument.add(kind); console.warn(`[probe] SSM document ${documentUsed} does not exist; probing ${kind} through the pre-2.0 combined document ${legacyProbeDocumentName()} until it is created (Settings > Probes)`); }
           documentUsed = legacyProbeDocumentName();
           try { sent = await send(documentUsed, true); }
@@ -597,6 +613,15 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
     if (r) {
       console.log(`[probe] ${instanceId} software: ${r.packages} packages${r.changed.length ? `, ${r.changed.length} changed (${r.changed.slice(0, 3).map((c) => `${c.name} ${c.from} -> ${c.to}`).join("; ")}${r.changed.length > 3 ? ", ..." : ""})` : ""}${r.added.length ? `, ${r.added.length} added` : ""}${r.removed.length ? `, ${r.removed.length} removed` : ""}, ${r.binaries} program versions, ${r.images} images`);
       import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
+    }
+  }
+  if (kinds.includes("sbom") && data.sbom) {
+    // what syft read inside the images and on the filesystem: the rows, then the graph's CONTAINS edges (image → package) with the rest of the software layer
+    let r: ReturnType<typeof recordSbom> = null;
+    try { r = recordSbom(instanceId, collectedAt, data.sbom); } catch (e: any) { console.error(`[probe] sbom not recorded for ${instanceId}: ${e?.message || e}`); }
+    if (r) {
+      console.log(`[probe] ${instanceId} sbom: ${r.available ? `${r.tool ?? "syft"}: ${r.packages} packages in ${r.sources} scans${r.trimmed ? ` (${r.trimmed} more did not fit the output cap)` : ""}${r.failed.length ? `, ${r.failed.length} scan(s) ${r.failed.map((f) => `${f.ref} ${f.status}`).join(", ")}` : ""}${r.added ? `, ${r.added} added` : ""}${r.removed ? `, ${r.removed} removed` : ""}` : "syft is not installed on the box, nothing scanned"}`);
+      if (r.available) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
     }
   }
 }

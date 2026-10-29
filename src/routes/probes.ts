@@ -2,7 +2,7 @@ import { Router } from "express";
 import { authMiddleware } from "../auth.js";
 import { config } from "../config.js";
 import { db } from "../db.js";
-import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, defaultProbeScript, probeDocument, probeDocumentInfo, probeScriptOverride, probeScriptTemplate, resetProbeScript, setProbeScriptOverride } from "../probes.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, defaultProbeScript, legacyKindOf, probeDocument, probeDocumentInfo, probeScriptOverride, probeScriptTemplate, resetProbeScript, setProbeScriptOverride } from "../probes.js";
 import { probeDocumentStatus } from "../probes_status.js";
 import { probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
 import { softwareOn, softwareSummary, wherePackage } from "../software_inventory.js";
@@ -26,8 +26,8 @@ const cronOff = (c: string) => /^(off|none|disabled|0|false)$/i.test(String(c ||
 /** One kind as the page shows it. */
 function describe(kind: ProbeKind) {
   const def = PROBE_DEFS[kind];
-  const last = db.prepare("select max(collected_at) as at, count(distinct instance_id) as boxes from instance_metrics where coalesce(kind, 'all') in (?, ?) and datetime(collected_at) > datetime('now', '-1 day')").get(kind, kind === "software" ? "software" : "all") as { at: string | null; boxes: number };
-  const ever = db.prepare("select count(distinct instance_id) as boxes, count(*) as rows_ from instance_metrics where coalesce(kind, 'all') in (?, ?)").get(kind, kind === "software" ? "software" : "all") as { boxes: number; rows_: number };
+  const last = db.prepare("select max(collected_at) as at, count(distinct instance_id) as boxes from instance_metrics where coalesce(kind, 'all') in (?, ?) and datetime(collected_at) > datetime('now', '-1 day')").get(kind, legacyKindOf(kind)) as { at: string | null; boxes: number };
+  const ever = db.prepare("select count(distinct instance_id) as boxes, count(*) as rows_ from instance_metrics where coalesce(kind, 'all') in (?, ?)").get(kind, legacyKindOf(kind)) as { boxes: number; rows_: number };
   const cron = (config as any)[def.cron_key] as string;
   const { scope, intervalHours } = probeKindSettings(kind);
   const info = probeDocumentInfo(kind);

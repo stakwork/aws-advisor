@@ -58,7 +58,7 @@ export const awsAdapter: ProviderAdapter = {
   flow: { boundary: "account", credentials: "a role to assume from the advisor's identity (read role, optional actuator role), or keys / a profile for the first one; the one-command setup creates them", children: "member accounts reached through a role from the parent; the Organizations management account can list them" },
   capabilities: { probes: true, metrics: true, executor: true, compliance: true, cost: true, bill: true, findings: true, changes: true, alerts: true, clusters: true, software: true, network: true },
   storage: ["inventory_ec2", "inventory_rds", "inventory_elasticache", "inventory_elb", "inventory_lambda", "inventory_dynamodb", "inventory_s3", "inventory_ebs", "inventory_route53_zone", "inventory_route53_record", "inventory_route53_link", "inventory_service", "threat_findings", "inventory_subnet", "inventory_route_table", "inventory_gateway", "inventory_eip", "inventory_eni", "inventory_cluster",
-    "sg_ingress", "sg_egress", "instance_metrics", "instance_apps", "instance_ports", "instance_containers", "instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes", "cluster_workloads", "cluster_services", "cluster_ingresses", "cluster_network_policies", "alas_advisories", "alas_packages", "status_checks", "capacity_patterns"],
+    "sg_ingress", "sg_egress", "instance_metrics", "instance_apps", "instance_ports", "instance_containers", "instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes", "cluster_workloads", "cluster_services", "cluster_ingresses", "cluster_network_policies", "instance_sbom_scans", "instance_sbom_sources", "instance_sbom", "status_checks", "capacity_patterns"],
   telemetry: TELEMETRY,
   configured: () => hasConnectionFile(),
   primaryAccountId: () => {
@@ -115,9 +115,9 @@ export const awsAdapter: ProviderAdapter = {
   jobs: AWS_JOBS,
   onboarding: awsOnboarding,
   agentNote: () => { const id = credentialsMeta()?.accountId; return id ? `AWS account ${id} (the default for every aws_* table and tool)` : null; },
-  // the AWS-only pages' APIs: security scans, probes, clusters, vulnerabilities, Identity Center, AWS notifications, swarms, tags
+  // the AWS-only pages' APIs: security scans, probes, clusters, Identity Center, AWS notifications, swarms, tags
   routes: async () => [(await import("../../routes/swarms.js")).swarms, (await import("../../routes/tags.js")).tags, (await import("../../routes/security.js")).security, (await import("../../routes/probes.js")).probes,
-    (await import("../../routes/clusters.js")).clusters, (await import("../../routes/vulnerabilities.js")).vulnerabilities, (await import("../../routes/identity_center.js")).identityCenter, (await import("../../routes/cloud_notifications.js")).cloudNotifications],
+    (await import("../../routes/clusters.js")).clusters, (await import("../../routes/identity_center.js")).identityCenter, (await import("../../routes/cloud_notifications.js")).cloudNotifications],
   cost: awsCost(() => awsAdapter.primaryAccountId()),
   attention: () => awsAttention(awsAdapter.primaryAccountId()),
   // the collection run (src/collector.ts): Powerpipe's Thrifty benchmarks, the fact queries and the rules (src/rules.ts); the security scan (src/compliance.ts) has its own scans table

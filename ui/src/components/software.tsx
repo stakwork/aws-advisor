@@ -1,30 +1,26 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { api, when } from "../api";
 import { Button, Td, Th } from "./ui";
 
 /**
  * Inventory › EC2 › Software: what the software probe found on one box (src/software_inventory.ts): the OS and
  * kernel, every installed package with its version and source package, the versions read from well-known binaries,
- * the images behind its containers, the recent version changes and removals, and the advisories matched against it with the
- * advisor's verdict (src/software_vulns.ts). The package list is searchable; a search also matches the source.
+ * the images behind its containers, what syft read inside those images and on the filesystem (the sbom probe, when syft is
+ * installed on the box), and the recent version changes and removals. The package list is searchable; a search also
+ * matches the source. Vulnerability verdicts are the strut workflows' (the graph), not shown here.
  */
 
-const tone = (c: string) => (c === "critical" ? "text-red-300" : c === "exposed" ? "text-orange-300" : c === "mitigated" ? "text-sky-300" : "text-zinc-300");
-const sevTone = (s: string | null) => (s === "critical" ? "text-red-300" : s === "high" ? "text-orange-300" : s === "medium" ? "text-yellow-200" : "text-zinc-400");
 const Section = ({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) => (
   <div className="mt-4"><div className="mb-1 flex items-center justify-between text-xs uppercase tracking-wide text-zinc-500"><span>{title}</span>{action}</div>{children}</div>
 );
 
 export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanceId: string; canProbe: boolean; onProbe: () => void; busy: boolean }) {
   const [d, setD] = useState<any>(null);
-  const [vulns, setVulns] = useState<any[] | null>(null);
   const [q, setQ] = useState(""); const [qApplied, setQApplied] = useState("");
   const [err, setErr] = useState("");
   const load = () => {
     const qs = new URLSearchParams(); if (qApplied) qs.set("q", qApplied); qs.set("limit", "500");
     api(`/instances/${encodeURIComponent(instanceId)}/software?${qs}`).then((r) => { setD(r); setErr(""); }).catch((e) => setErr(e.message));
-    api(`/instances/${encodeURIComponent(instanceId)}/vulnerabilities`).then((r) => setVulns(r.matches)).catch(() => setVulns([]));
   };
   useEffect(() => { load(); }, [instanceId, qApplied, busy]);
   if (err) return <div className="mt-3 text-sm text-red-300">{err}</div>;
@@ -40,27 +36,6 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
           <dt className="text-zinc-500">Kernel</dt><dd className="font-mono text-xs">{os.kernel || "—"} <span className="font-sans text-zinc-500">{os.arch || ""}</span></dd>
           <dt className="text-zinc-500">Packages</dt><dd>{os.packages} installed via {os.package_manager || "?"}{d.changes?.length ? <span className="text-zinc-500"> · {d.changes.length} recent changes</span> : null}</dd>
         </dl>
-      </Section>
-
-      <Section title={`Vulnerabilities · ${(vulns ?? []).length}`}>
-        {vulns == null ? <div className="text-xs text-zinc-500">Loading…</div> : !vulns.length ? <div className="text-xs text-zinc-500">No known advisory matches this box's packages (or no vulnerability match has run yet: Security › Vulnerabilities › Match now).</div> : (
-          <table className="w-full border-collapse text-xs">
-            <thead><tr><Th>Verdict</Th><Th>Advisory</Th><Th>Severity</Th><Th>Package</Th><Th>Fixed in</Th><Th>Listening</Th></tr></thead>
-            <tbody>
-              {vulns.slice(0, 60).map((m: any) => (
-                <tr key={`${m.vuln_id}-${m.package}`} className="border-t border-zinc-800">
-                  <Td><span className={tone(m.criticality)}>{m.criticality.replace("_", " ")}</span></Td>
-                  <Td className="max-w-xs"><Link className="font-mono hover:underline" to={`/security?vuln=${encodeURIComponent(m.vuln_id)}`}>{m.vuln_id}</Link><div className="truncate text-zinc-500" title={m.summary || ""}>{m.summary || ""}</div></Td>
-                  <Td><span className={sevTone(m.severity)}>{m.severity || "unrated"}{m.score != null ? ` ${m.score}` : ""}</span></Td>
-                  <Td className="font-mono">{m.packages.join(", ")} {m.version}</Td>
-                  <Td className="font-mono text-zinc-400">{m.fixed_version || <span className="text-zinc-600" title="the advisory names no fixed version for this release yet">no fix yet</span>}</Td>
-                  <Td>{m.port != null ? <span className="font-mono">{m.process} {m.proto}/{m.port} <span className="text-zinc-500">{m.exposure}</span></span> : <span className="text-zinc-600">{m.scope}</span>}</Td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        {(vulns ?? []).length > 60 && <div className="mt-1 text-xs text-zinc-500">{vulns!.length - 60} more on the Security page.</div>}
       </Section>
 
       <Section title={`Packages · ${d.packages.length}${d.packages.length >= 500 ? "+" : ""}`} action={
@@ -96,6 +71,34 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
           <ul className="space-y-0.5 text-xs">
             {d.images.map((i: any) => <li key={i.image} className="text-zinc-300"><span className="font-mono">{i.image}</span>{i.created ? <span className="text-zinc-500"> · built {when(i.created)}</span> : null}{i.platform ? <span className="text-zinc-500"> · {i.platform}</span> : null}{i.digest ? <span className="text-zinc-600"> · {String(i.digest).replace(/^.*@/, "").slice(0, 19)}…</span> : null}</li>)}
           </ul>
+        </Section>
+      )}
+
+      {d.sbom?.scan && (
+        <Section title={`Software bill of materials (syft) · ${d.sbom.packages.length}${d.sbom.packages.length >= 500 ? "+" : ""}`}>
+          {!d.sbom.scan.available ? (
+            <div className="text-xs text-zinc-500">syft is not installed on this box (probed {when(d.sbom.scan.collected_at)}), so what its images and filesystem contain beyond the OS packages is not read. Install it there with <code className="text-zinc-400">curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin</code> and probe again.</div>
+          ) : (
+            <>
+              <ul className="mb-1 space-y-0.5 text-xs text-zinc-500">
+                {d.sbom.sources.map((s: any) => <li key={`${s.source}-${s.ref}`}><span className="font-mono text-zinc-400">{s.source === "dir" ? "filesystem /" : s.ref}</span> · {s.status === "ok" ? <>{s.listed}{s.total > s.listed ? ` of ${s.total} (trimmed to the probe's output cap)` : ""} packages</> : <span className="text-orange-300">{s.status === "skipped" ? "skipped: the time budget ran out" : s.status === "timeout" ? "timed out" : "failed"}{s.listed ? `, ${s.listed} from the last good scan` : ""}</span>} · {when(s.collected_at)}</li>)}
+              </ul>
+              {!d.sbom.packages.length ? <div className="text-xs text-zinc-500">Nothing matches.</div> : (
+                <div className="max-h-96 overflow-auto rounded border border-zinc-800">
+                  <table className="w-full border-collapse text-xs">
+                    <thead className="sticky top-0 bg-zinc-900"><tr><Th>Package</Th><Th>Version</Th><Th>Type</Th><Th>In</Th></tr></thead>
+                    <tbody>
+                      {d.sbom.packages.map((p: any) => (
+                        <tr key={`${p.source}-${p.ref}-${p.purl}`} className="border-t border-zinc-800/60" title={p.purl}>
+                          <Td className="font-mono">{p.name}</Td><Td className="font-mono text-zinc-300">{p.version || ""}</Td><Td className="text-zinc-500">{p.type}</Td><Td className="font-mono text-zinc-500">{p.source === "dir" ? "/" : p.ref}</Td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
         </Section>
       )}
 

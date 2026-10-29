@@ -11,6 +11,8 @@ import { DEFAULT_SIGNALS_STRING } from "./signals.js";
  *  - docker:   the containers and the activity around them (logs, use signals, connections, the front door, logins, traffic)
  *  - apps:     what runs (process groups), what listens (ports), where the log agents ship
  *  - software: what is installed and at which version (packages, kernel, OS, well-known binaries, container images) for vulnerability matching
+ *  - sbom:     what the running container images and the host filesystem contain beyond the OS packages (npm, pypi, golang, java, ...), as package URLs
+ *              read by syft (https://github.com/anchore/syft) where a person installed it; the probe reports "not available" elsewhere
  *
  * Every script prints exactly one JSON object on its last line (gzip+base64 behind a marker when big), carrying
  * `probe` ("aws-advisor/<kind>/<version>") and `kind`. The text here is the default; Settings > Probes may override a
@@ -22,8 +24,12 @@ import { DEFAULT_SIGNALS_STRING } from "./signals.js";
  * on every line and never sit alone in a comment.
  */
 
-export const PROBE_KINDS = ["host", "docker", "apps", "software"] as const;
+export const PROBE_KINDS = ["host", "docker", "apps", "software", "sbom"] as const;
 export type ProbeKind = (typeof PROBE_KINDS)[number];
+/** The kinds the pre-2.0 combined document (one row of kind "all") covered; the other kinds only ever had a document and rows of their own. */
+const COMBINED_KINDS: ReadonlySet<string> = new Set(["host", "docker", "apps"]);
+/** The row kind a pre-2.0 combined probe stored for this kind: "all" for the kinds it covered, the kind itself for the rest (nothing older exists). */
+export const legacyKindOf = (kind: ProbeKind): string => (COMBINED_KINDS.has(kind) ? "all" : kind);
 /** The probe family version: the documents and the parser moved to per-kind scripts here. */
 export const PROBE_VERSION = "aws-advisor/2.0";
 /** GetCommandInvocation returns at most this many characters of stdout; the agent appends "---Output truncated---" past it. */
@@ -48,6 +54,7 @@ export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
   software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, the images behind the running containers, the libraries the runtimes bundle (Node's process.versions) and the dependencies of the packages that own the probed programs: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.3", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "bundles", "depends", "hibernation"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
+  sbom: { kind: "sbom", title: "Software bill of materials (syft)", what: "the packages inside each running container image and the language packages on the host filesystem (npm, pypi, golang, java, ruby, rust, ...; the OS packages are the software probe's), as package URLs read by syft (https://github.com/anchore/syft) when it is installed on the box; without it the probe reports that it is not available and scans nothing. Install it on a box with: curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin. Images first, then the filesystem, within a 480 s budget; the lists are trimmed to fit SSM's output cap and every scan reports its true count", version: "1.0", sections: ["sbom"], timeout_seconds: 600, cron_key: "probeSbomCron", scope_key: "probeSbomScope", takes_signals: false },
 };
 
 // ---- the scripts --------------------------------------------------------------------------------------------------------
@@ -281,6 +288,50 @@ const SOFTWARE_BODY = [
   "  \"$hn\" \"$now\" \"$(jstr \"$os_id\")\" \"$(jstr \"$os_ver\")\" \"$(jstr \"$os_name\")\" \"$(jstr \"$kernel\")\" \"$(jstr \"$arch\")\" \"$(jstr \"$pm\")\" \"$pkgs\" \"$bins\" \"$imgs\" \"$bund\" \"$deps\" \"$hib\")",
 ];
 
+const SBOM_BODY = [
+  "# ---- sbom (probe 2.0): the packages inside each running container image and the language packages on the host filesystem, as package URLs",
+  "# ---- (purl) read by syft (https://github.com/anchore/syft) when it is installed on the box; nothing is scanned otherwise. Read-only: syft only",
+  "# ---- reads the image layers through the Docker daemon and walks the filesystem, and is told not to check for its own updates (no network).",
+  "SYFT_CHECK_FOR_APP_UPDATE=false; export SYFT_CHECK_FOR_APP_UPDATE",
+  "SYFT_QUIET=true; export SYFT_QUIET",
+  "syft=\"\"; for c in $(command -v syft 2>/dev/null) /usr/local/bin/syft /usr/bin/syft /opt/syft/syft /snap/bin/syft /root/.local/bin/syft; do if [ -z \"$syft\" ] && [ -x \"$c\" ]; then syft=$c; fi; done",
+  "tool=\"\"; [ -n \"$syft\" ] && tool=$(\"$syft\" version 2>/dev/null </dev/null | awk '/^Version:/{print \"syft \" $2; exit}' | tr -cd '\\40-\\176' | cut -c1-40)",
+  "avail=false; [ -n \"$syft\" ] && avail=true",
+  "pm=\"\"; for c in dpkg-query rpm apk; do command -v \"$c\" >/dev/null 2>&1 && pm=$c; done",
+  "# a time budget in seconds: the images get two thirds of it, the filesystem what is left; the document timeout sits above the whole",
+  "start=$(date +%s); budget=480",
+  "left() { l=$(( start + $1 - $(date +%s) )); if [ \"$l\" -gt 5 ]; then printf '%s' \"$l\"; else printf '5'; fi; }",
+  "tmo() { if command -v timeout >/dev/null 2>&1; then timeout \"$@\"; else shift; \"$@\"; fi; }",
+  "# what the scans gather, one record per line: S<tab>source<tab>ref<tab>status<tab>total for each scan, P<tab>source<tab>ref<tab>purl for each package",
+  "lines=\"\"",
+  "scan() { k=$1; r=$2; secs=$3; shift 3",
+  "  raw=$(tmo \"$secs\" \"$syft\" scan \"$@\" -o purls -q 2>/dev/null </dev/null); rc=$?",
+  "  st=ok; [ \"$rc\" -eq 124 ] && st=timeout; [ \"$rc\" -ne 0 ] && [ \"$rc\" -ne 124 ] && st=error",
+  "  pl=$(printf '%s\\n' \"$raw\" | tr -cd '\\12\\40-\\176' | grep '^pkg:' | awk '!s[$0]++')",
+  "  # the OS packages of the host are the software probe reading (dpkg, rpm, apk); the filesystem scan keeps the rest",
+  "  [ \"$k\" = dir ] && [ -n \"$pm\" ] && pl=$(printf '%s\\n' \"$pl\" | grep -v -E '^pkg:(deb|rpm|apk)/')",
+  "  n=$(printf '%s\\n' \"$pl\" | grep -c '^pkg:')",
+  "  lines=$(printf '%s\\nS\\t%s\\t%s\\t%s\\t%s\\n%s' \"$lines\" \"$k\" \"$r\" \"$st\" \"$n\" \"$(printf '%s\\n' \"$pl\" | awk -v k=\"$k\" -v r=\"$r\" '/^pkg:/{print \"P\\t\" k \"\\t\" r \"\\t\" $0}')\")",
+  "}",
+  "if [ -n \"$syft\" ]; then",
+  "  # the images behind the running containers (the list the software probe reports), through the Docker daemon; at most 30, while two thirds of the budget last",
+  "  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then for im in $(docker ps --format '{{.Image}}' 2>/dev/null | sort -u | head -30); do",
+  "    if [ \"$(left $((budget * 2 / 3)))\" -gt 5 ]; then scan image \"$im\" \"$(left $((budget * 2 / 3)))\" \"docker:$im\"; else lines=$(printf '%s\\nS\\timage\\t%s\\tskipped\\t0' \"$lines\" \"$im\"); fi",
+  "  done; fi",
+  "  # the host filesystem, without the kernel and device trees, runtime state, caches, logs, the container stores (read above as images), and every",
+  "  # mount that is not a local disk (network and FUSE filesystems, squashfs snaps, bind mounts) as /proc/mounts lists them; globbing is off while the list is passed",
+  "  ex=\"\"; for d in proc sys dev run tmp var/tmp var/cache var/log var/lib/docker var/lib/containerd var/lib/snapd snap boot mnt media lost+found root/.cache 'home/*/.cache'; do ex=\"$ex --exclude ./$d/**\"; done",
+  "  for mp in $(awk '$2 != \"/\" && $3 !~ /^(ext[234]|xfs|btrfs|zfs|f2fs|jfs)$/ && $2 !~ /\\\\/ {print $2}' /proc/mounts 2>/dev/null | sort -u); do ex=\"$ex --exclude .$mp/**\"; done",
+  "  if [ \"$(left $budget)\" -gt 5 ]; then set -f; scan dir / \"$(left $budget)\" dir:/ $ex; set +f; else lines=$(printf '%s\\nS\\tdir\\t/\\tskipped\\t0' \"$lines\"); fi",
+  "fi",
+  "# the JSON under the SSM output cap: every scan with its status and true count, the package lists trimmed to one shared budget (cap) that shrinks until the compressed line fits",
+  "build() { printf '%s\\n' \"$lines\" | awk -F'\\t' -v cap=\"$1\" '$1==\"S\" { ns++; key[ns]=$2 \"\\t\" $3; src[ns]=$2; ref[ns]=$3; st[ns]=$4; tot[ns]=$5+0; next } $1==\"P\" { k=$2 \"\\t\" $3; if (used < cap) { used++; p=$4; gsub(/[\\\\\"]/, \"\", p); pl[k]=pl[k] (n[k]?\",\":\"\") \"\\\"\" p \"\\\"\"; n[k]++ } } END { for (i=1;i<=ns;i++) { r=ref[i]; gsub(/[\\\\\"]/, \"\", r); printf \"%s{\\\"source\\\":\\\"%s\\\",\\\"ref\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"total\\\":%d,\\\"purls\\\":[%s]}\", (i>1?\",\":\"\"), src[i], r, st[i], tot[i], pl[key[i]] } }'; }",
+  "mk() { printf '{\"probe\":\"aws-advisor/sbom/1\",\"kind\":\"sbom\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"sbom\":{\"available\":%s,\"tool\":%s,\"cap\":%s,\"sources\":[%s]}}' \"$hn\" \"$now\" \"$avail\" \"$(jstr \"$tool\")\" \"$1\" \"$2\"; }",
+  "toobig() { if command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then [ ${#out} -gt 16000 ] && [ \"$(printf '%s' \"$out\" | gzip -c -9 | base64 | tr -d '\\n' | wc -c | tr -d ' ')\" -gt 22000 ]; else [ ${#out} -gt 23000 ]; fi; }",
+  "cap=3000; out=$(mk $cap \"$(build $cap)\")",
+  "while [ $cap -gt 100 ] && toobig; do cap=$((cap * 2 / 3)); out=$(mk $cap \"$(build $cap)\"); done",
+];
+
 const EMIT = [
   "# ---- exactly one JSON object on the last line. GetCommandInvocation returns only the first 24,000 characters of stdout, so a big result",
   "# ---- prints the object gzip-compressed and base64-encoded on one marked line instead (probe 1.7); the advisor decodes it (parseProbeOutput).",
@@ -293,6 +344,7 @@ const DEFAULT_LINES: Record<ProbeKind, string[]> = {
   docker: [header("docker"), ...PREAMBLE, ...DOCKER_BODY, ...DOCKER_OUT, ...EMIT],
   apps: [header("apps"), ...PREAMBLE, ...APPS_BODY, ...APPS_OUT, ...EMIT],
   software: [header("software"), ...PREAMBLE, ...SOFTWARE_BODY, ...EMIT],
+  sbom: [header("sbom"), ...PREAMBLE, ...SBOM_BODY, ...EMIT],
 };
 
 /** The default script of a kind, with `__SIGNALS__` still in place for the docker kind. */

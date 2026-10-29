@@ -327,3 +327,10 @@ test("parseProbeOutput keeps a package's source (s) from probe software/2 and le
   const p = parseProbeOutput('{"probe":"aws-advisor/software/2","kind":"software","hostname":"h","collected_at":"2026-10-03T09:00:00Z","os":{"id":"amzn","version":"2023","name":"Amazon Linux 2023"},"kernel":"6.1","arch":"x86_64","package_manager":"rpm","packages":[{"n":"vim-filesystem","v":"2:9.1.785-1.amzn2023.0.1","a":"noarch","s":"vim"},{"n":"pam","v":"1.5.1-8.amzn2023.0.4","a":"x86_64"}],"binaries":[],"images":[]}')!;
   assert.deepEqual(p.packages?.map((x) => [x.n, x.s ?? null]), [["vim-filesystem", "vim"], ["pam", null]]);
 });
+
+test("parseProbeOutput types the sbom section: the scans with their status and counts, purls that look like purls, anything else dropped", () => {
+  const p = parseProbeOutput('{"probe":"aws-advisor/sbom/1","kind":"sbom","hostname":"h","collected_at":"2026-10-29T10:00:00Z","sbom":{"available":true,"tool":"syft 1.55.0","cap":3000,"sources":[{"source":"image","ref":"nginx:1.27","status":"ok","total":2,"purls":["pkg:deb/debian/nginx@1.27.0-1","not a purl",7]},{"source":"dir","ref":"/","status":"timeout","total":0,"purls":[]},{"source":"other","ref":"x"}]}}');
+  assert.equal(p.kind, "sbom");
+  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", status: "ok", total: 2, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", status: "timeout", total: 0, purls: [] }] });
+  assert.equal(parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","packages":[]}').sbom, undefined, "another kind carries no sbom section");
+});

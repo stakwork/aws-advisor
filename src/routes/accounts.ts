@@ -30,7 +30,7 @@ export function principalArnOf(arn: string): string {
 /** Every provider the advisor knows: the adapters (with whether one is configured, their sections and capabilities) and the stubs with what they will need. */
 accounts.get("/providers", (_req, res) => res.json({ providers: providers() }));
 
-/** The general view: every account with its resources, cost, findings, security, vulnerabilities, recommendations, alerts and probe coverage. */
+/** The general view: every account with its resources, cost, findings, security, recommendations, alerts and probe coverage. */
 accounts.get("/accounts/overview", async (_req, res) => { try { res.json({ accounts: await accountsOverview() }); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 /** The organisation's accounts as the parent sees them (organizations:ListAccounts, management account only), with whether each is the parent, a registered member, or neither. */
 accounts.get("/accounts/organization", async (_req, res) => {

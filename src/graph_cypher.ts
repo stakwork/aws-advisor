@@ -44,7 +44,7 @@ export const computeId = (boxId: string) => `compute:${boxId}`;
 
 /**
  * The AdvisorCompute the box `box` hosts, made on demand with its HOSTS edge, as `alias`: the node the software layers
- * (programs, containers, packages, images, vulnerabilities) and the deployments that run on the box attach to. The
+ * (programs, containers, packages, images) and the deployments that run on the box attach to. The
  * resource mirror writes it with the box (src/graph_mirror.ts); this keeps a layer that runs first from losing a row.
  */
 export const COMPUTE_OF = (box: string, alias: string) =>

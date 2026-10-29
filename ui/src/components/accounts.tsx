@@ -8,7 +8,7 @@ import { AccountsBilling } from "./billing";
  * Overview › Accounts: the general view across every account the advisor is pointed at, one row each, with the
  * numbers a person wants before choosing one to look at (the sidebar's "Looking at" sets the scope every page
  * then uses): resources, last month's bill, what the last run and scan flagged, open
- * recommendations and alerts, the vulnerability verdicts that matter, probe coverage.
+ * recommendations and alerts, probe coverage.
  */
 export function AccountsOverview() {
   const [loaded, setRows] = useState<any[] | null>(null);
@@ -26,7 +26,7 @@ export function AccountsOverview() {
   return (
     <Card title={<span>Accounts <span className="font-normal text-zinc-500">· {rows.length}{all.length > rows.length ? ` of ${all.length}` : ""} across {new Set(rows.map((r) => r.provider)).size} provider{new Set(rows.map((r) => r.provider)).size === 1 ? "" : "s"}; {scope === "all" ? "every page shows all of them" : `the pages are scoped to ${scope}${all.length > rows.length ? "; pick \"all accounts\" for every provider" : ""}`} · <Link className="underline" to="/settings?tab=accounts">manage</Link></span></span>}>
       <table className="w-full border-collapse text-sm">
-        <thead><tr><Th>Account</Th><Th>Resources</Th><Th className="text-right">Last full month</Th><Th className="text-right">Findings</Th><Th className="text-right">Security</Th><Th className="text-right">Vulnerable</Th><Th className="text-right">Open recs</Th><Th className="text-right">Alerts</Th><Th>Probes</Th><Th></Th></tr></thead>
+        <thead><tr><Th>Account</Th><Th>Resources</Th><Th className="text-right">Last full month</Th><Th className="text-right">Findings</Th><Th className="text-right">Security</Th><Th className="text-right">Open recs</Th><Th className="text-right">Alerts</Th><Th>Probes</Th><Th></Th></tr></thead>
         <tbody>
           {rows.map((a) => (
             <tr key={a.id} className={`border-t border-zinc-800 ${scope === a.id ? "bg-zinc-900/50" : ""}`}>
@@ -41,7 +41,6 @@ export function AccountsOverview() {
               <Td className="text-right">{a.spend.usd != null ? <span title={a.spend.month}>{usd(a.spend.usd)}</span> : <span className="text-zinc-600">—</span>}</Td>
               <Td className="text-right">{a.findings_alarms}</Td>
               <Td className="text-right"><span className={tone(a.security.critical, 1, 1)}>{a.security.critical} crit</span> <span className="text-zinc-500">· {a.security.high} high</span></Td>
-              <Td className="text-right"><span className={tone(a.vulnerabilities.critical, 1, 1)}>{a.vulnerabilities.critical} crit</span> <span className="text-zinc-500">· {a.vulnerabilities.exposed} exposed · {a.vulnerabilities.boxes} boxes</span></Td>
               <Td className="text-right">{a.recommendations.open}{a.recommendations.saving_usd_month ? <span className="text-zinc-500"> · {usd(a.recommendations.saving_usd_month)}/mo</span> : null}</Td>
               <Td className="text-right"><span className={tone(a.alerts_open, 1, 5)}>{a.alerts_open}</span></Td>
               <Td className="text-xs text-zinc-400">{a.probes.ssm_online} online · {a.probes.probed_24h} probed today</Td>

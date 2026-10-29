@@ -20,7 +20,7 @@ test("the registry: the adapters (aws, vercel, github, local) with their section
   const aws = reg.adapterFor("aws")!;
   assert.equal(aws.label, "AWS"); assert.equal(aws.flow.boundary, "account");
   assert.deepEqual(aws.ui.settings.map((s) => s.id), ["access", "permissions", "probes", "benchmarks", "members"]);
-  assert.ok(aws.storage.includes("inventory_ec2") && aws.storage.includes("instance_packages") && aws.storage.includes("alas_advisories"));
+  assert.ok(aws.storage.includes("inventory_ec2") && aws.storage.includes("instance_packages") && aws.storage.includes("instance_sbom"));
   assert.equal(aws.capabilities.probes, true); assert.equal(typeof aws.configured(), "boolean", "configured() reads the machine's connection file, not the data dir");
   assert.equal(reg.adapterFor("gcp"), null);
   const vercel = reg.adapterFor("vercel")!; assert.equal(vercel.flow.boundary, "team"); assert.equal(vercel.capabilities.probes, false); assert.equal(vercel.configured(), false, "no token in this test's environment");

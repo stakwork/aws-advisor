@@ -287,7 +287,7 @@ passed, then offers **Check permissions**.
   `~/.aws/credentials` under `[aws-advisor-user]` with `aws configure set` (the secret is never printed; AWS
   allows two keys per user); write `[profile aws-advisor]` with `role_arn` / `source_profile` / `region`; verify
   `aws sts get-caller-identity --profile aws-advisor` answers as `assumed-role/aws-advisor-read`; create (or
-  update) the four SSM probe documents `AwsAdvisorProbe-<kind>`; `PUT /api/settings/aws` with the profile and print the test
+  update) the five SSM probe documents `AwsAdvisorProbe-<kind>`; `PUT /api/settings/aws` with the profile and print the test
   result; `POST /api/permissions/check` and print the summary. The EC2 path instead creates the instance role
   with its instance profile when missing, attaches `AmazonSSMManagedInstanceCore` to it (the host is
   SSM-managed too), makes the read-only role trust it and gives it `aws-advisor-assume`; with an instance id it
@@ -664,18 +664,27 @@ preference enabled on the payer account), `pricing:GetProducts` the price list, 
 `AWS-RunShellScript` runs whatever shell it is handed, so a policy that allows `ssm:SendCommand` on it lets the
 credentials run *any* command on every instance, and IAM alone cannot make the probe read-only. The advisor
 therefore runs its probes through its own SSM Command documents, one per probe (`src/probes.ts`):
-`AwsAdvisorProbe-host`, `AwsAdvisorProbe-docker`, `AwsAdvisorProbe-apps` and `AwsAdvisorProbe-software` (the base
-name is `PROBE_DOCUMENT`, default `AwsAdvisorProbe`), each embedding its fixed script, and the policy above grants
+`AwsAdvisorProbe-host`, `AwsAdvisorProbe-docker`, `AwsAdvisorProbe-apps`, `AwsAdvisorProbe-software` and
+`AwsAdvisorProbe-sbom` (the base name is `PROBE_DOCUMENT`, default `AwsAdvisorProbe`), each embedding its fixed script, and the policy above grants
 `ssm:SendCommand` on `arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe*` and `arn:aws:ec2:*:*:instance/*` only.
 **Never grant the advisor `ssm:SendCommand` on `AWS-RunShellScript`** (or on `document/*`): with it a leaked key runs
-arbitrary commands on the fleet. The setup script creates the four documents and updates them when a probe changes;
+arbitrary commands on the fleet. The setup script creates the five documents and updates them when a probe changes;
 Settings › Probes shows each one's status (deployed and current, stale, missing) and the commands; by hand:
 
 ```
 curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/host/document > probe-host.json   # schemaVersion 2.2, one aws:runShellScript step, the script lines, the timeout
 aws ssm create-document --name AwsAdvisorProbe-host --document-type Command --document-format JSON --content file://probe-host.json
-# the same for docker, apps and software
+# the same for docker, apps, software and sbom
 ```
+
+The `sbom` probe reads what the running container images and the host filesystem contain beyond the OS packages
+(npm, pypi, golang, java, ruby, rust, ... as package URLs) with [syft](https://github.com/anchore/syft), and only on
+the boxes where a person installed it (`curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin`);
+elsewhere it reports that syft is not available and scans nothing. It scans each image through the Docker daemon,
+then the filesystem with the kernel and device trees, runtime state, caches, logs, the container stores and every
+non-local mount excluded, within a 480 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 600 s),
+and trims the lists to fit SSM's 24,000-character output cap, each scan reporting its true count. What it finds is on
+the instance's Software tab and in the graph as `CONTAINS` edges from the image to its packages (`src/graph_software.ts`).
 
 The advisor sends a document by name with no `commands` parameter (the script is inside the document; the docker
 one takes the use-signal patterns as its `signals` parameter); the policy also grants `ssm:GetCommandInvocation`,
@@ -1308,38 +1317,15 @@ The **Network** page shows the layer as the graph holds it (`GET /api/graph/netw
 that lets it in, what a rule admits but something else blocks, every network with its segments, routes, gateways and
 peers, and every filter with its rules and what wears it.
 
-### Vulnerabilities: the installed software against the advisories
+### Vulnerabilities: matched by the strut workflows, not here
 
-The software probe's inventory is matched against published advisories (`src/software_vulns.ts`), never against a
-hand-written list, and the result is judged by reachability, the way the rest of the graph is:
-
-- **Sources.** [OSV](https://osv.dev) for Ubuntu, Debian, Alpine, Rocky Linux and AlmaLinux: the batch API is asked
-  about each distinct (distribution release, source package, exact version) the fleet has, under OSV's
-  release-qualified ecosystems (`Ubuntu:24.04:LTS`, `Debian:12`, `Alpine:v3.19`). Amazon Linux is not in OSV, so
-  AL2 and AL2023 use the core repository's `updateinfo.xml.gz` on `cdn.amazonlinux.com` (the feed `dnf updateinfo`
-  reads; public, about 1.5 MB per release and architecture, re-read when its timestamp changes), matched by binary
-  package with rpm's own version order (`src/alas_feed.ts`). RHEL, CentOS, Fedora and SUSE are reported as not
-  matchable, with the reason, on the Security page.
-- **Scores.** Ubuntu's and Debian's advisories carry no CVSS; the CVE they fix is read from OSV and lends its score
-  and attack vector (`severity_from`). Amazon's `Important`/`Critical` words are kept and the CVEs add the score.
-  Ubuntu and Debian publish both per-CVE records and the USN/DSA bundles that fixed several; when the per-CVE records
-  exist the bundles are left out, so one hole is one row.
-- **The verdict.** Each match is judged by what the affected program listens on (the apps probe's ports and their
-  exposure through security groups and network ACLs): `critical` when the internet can reach it, `exposed` when the
-  network or another group can, `mitigated` when it listens but is blocked, `local_only` when only loopback can or
-  the attack needs local access, `affected` when it is installed with no listening program of its own (a library,
-  the kernel, a tool). A package is tied to its program by name (`openssh` → `sshd`, `postgresql` → `postgres`, …).
-- **Where it shows.** Security page › Vulnerabilities (grouped by advisory, worst verdict first, each box underneath
-  with its version, the fixed version, the port and its exposure; "Match now" runs a scan); Inventory › EC2 › a box ›
-  Software tab (its OS and kernel, the advisories matched against it with the verdict, every package with its source,
-  searchable, the programs by version flag, the container images it runs, recent version changes, "Probe software now"). `GET
-  /api/security/vulnerabilities`, `/api/security/vulnerabilities/:id`, `/api/instances/:id/vulnerabilities`,
-  `POST /api/security/vulnerabilities/scan`. In the graph: `AdvisorPackage` nodes `INSTALLED_ON` the box,
-  `KnVulnerability` nodes with `AFFECTS` edges and the `VULNERABLE_TO` verdict from the box (`docs/ontology.md` §1b),
-  so "which boxes run a vulnerable sshd the internet can reach" is one query.
-- **Cadence and cost.** `VULN_CRON` (default `40 4 * * *`, after the software probe) asks only about versions not
-  asked about in the last 6 hours and reads only advisories not stored or changed since; the first scan of a fleet
-  reads a few hundred advisories (about half a minute). Everything is cached in SQLite.
+The advisor publishes the inventory and matches nothing against advisories itself (its own OSV/Amazon Linux matcher,
+the Security page's vulnerability card and `VULN_CRON` were removed on 2026-10-29). Every `AdvisorPackage` node
+carries the identity the public vulnerability graph is walked with (`purl`, `source_purl`, `sort_key`,
+`advisory_ecosystem` such as `Ubuntu:24.04:LTS`; `src/sec/identity.ts`, `src/package_scope.ts`), and the strut
+workflows (`docs/vulnerability-graph-plan.md`) write the vulnerability nodes, the affected ranges and the verdicts
+into the graph. What reaches a package is already there: `PROVIDES` from the package to the listening program, the
+endpoint's reachability verdict, `CONTAINS` from an image to what syft read inside it.
 
 ### Testing the probe
 
@@ -3186,7 +3172,7 @@ organisation), Recommendations and Alerts by an `account_id` each row gets once,
 through the inventories, from the details a platform pass wrote, or from the run that proposed it (what cannot be
 attributed reads as the primary account's), Network and Knowledge by the graph's account, Changes by a CloudTrail
 read per account (the parent with its own credentials, each member through its read role, every event stamped),
-Logs by the groups' account, the vulnerability card by the instances' account. This month stays the payer's whole bill, since Cost Explorer and the forecast are
+Logs by the groups' account. This month stays the payer's whole bill, since Cost Explorer and the forecast are
 organisation-wide; under one account's scope it shows that account's own months from Cost Explorer's per-account
 view. A collection run reads every account in one pass, so the Runs list does not scope.
 

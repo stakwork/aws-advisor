@@ -2,7 +2,6 @@ import { Fragment, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Badge, Button, Card, Empty, Pager, Stat, Td, Th } from "../components/ui";
-import { VulnerabilitiesCard } from "../components/vulnerabilities";
 
 const PAGE_SIZE = 50;
 const SEVERITIES = ["critical", "high", "medium", "low"] as const;
@@ -114,8 +113,6 @@ export default function Security() {
         resource is reachable: a security group on a running instance with a public address, an instance a domain resolves to. Security recommendations carry no saving and the executor never acts on them.
         A control the role may not read shows up as an error in the scan log and in Settings › Permissions, not as a finding.
       </p>
-
-      <VulnerabilitiesCard />
 
       {!summary ? <Empty>Loading…</Empty> : !latest ? (
         <Empty>{summary.busy ? "The first scan is running; it takes about a minute." : "No security scan yet. Press Scan now, or wait for the daily one (COMPLIANCE_CRON)."}</Empty>

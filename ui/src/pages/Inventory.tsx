@@ -1120,10 +1120,10 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
   const probesAt: Record<string, string> = latest?.data?.probes_at || {};
   const probeButton = canProbe ? (
     <span className="inline-flex items-center gap-1">
-      <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={() => onProbe()} disabled={probe.busy} title="Run every probe: host, containers, programs and ports, installed software">{probe.busy ? "Probing…" : latest ? "Probe again" : "Probe now"}</Button>
+      <Button variant="ghost" className="!px-2 !py-1 !text-xs normal-case tracking-normal" onClick={() => onProbe()} disabled={probe.busy} title="Run every probe: host, containers, programs and ports, installed software (the syft scan runs on its own schedule, or pick it below)">{probe.busy ? "Probing…" : latest ? "Probe again" : "Probe now"}</Button>
       <select className="rounded border border-zinc-700 bg-zinc-900 px-1 py-1 text-xs text-zinc-300" value="" disabled={probe.busy} onChange={(e) => { if (e.target.value) onProbe(e.target.value); }} title="Run one probe only">
         <option value="">one probe…</option>
-        {[["host", "host: memory, load, disks"], ["docker", "containers and activity"], ["apps", "programs, ports, log shipping"], ["software", "installed software"]].map(([k, l]) => <option key={k} value={k}>{l}{probesAt[k] ? ` (last ${when(probesAt[k])})` : " (never)"}</option>)}
+        {[["host", "host: memory, load, disks"], ["docker", "containers and activity"], ["apps", "programs, ports, log shipping"], ["software", "installed software"], ["sbom", "software bill of materials (syft)"]].map(([k, l]) => <option key={k} value={k}>{l}{probesAt[k] ? ` (last ${when(probesAt[k])})` : " (never)"}</option>)}
       </select>
     </span>) : null;
   return (

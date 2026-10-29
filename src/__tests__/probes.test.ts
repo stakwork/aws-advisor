@@ -134,3 +134,71 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     } else assert.deepEqual(j.depends, [], `${name}: dependencies are read through dpkg only`);
   }
 });
+
+test("the sbom script: with syft it scans each running image and the filesystem, keeps each scan's status, trims to the budget and fits the SSM cap; without syft it says so and scans nothing", async () => {
+  const { parseProbeOutput, SSM_OUTPUT_CAP } = await import("../ssm.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-syft-"));
+  const bin = path.join(dir, "bin"); fs.mkdirSync(bin); const bare = path.join(dir, "bare"); fs.mkdirSync(bare);
+  const log = path.join(dir, "args.log");
+  const w = (where: string, name: string, body: string) => fs.writeFileSync(path.join(where, name), body, { mode: 0o755 });
+  for (const where of [bin, bare]) {
+    w(where, "docker", "#!/bin/sh\ncase \"$1\" in info) exit 0;; ps) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\n';; *) exit 1;; esac\n");
+    w(where, "dpkg-query", "#!/bin/sh\nexit 0\n");
+    w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n"); // macOS has none; the script falls back to no bound either way
+  }
+  // one image times out, one lists a duplicate and a distro package, the filesystem lists an OS package (dropped: dpkg owns it) and far more than the budget
+  w(bin, "syft", `#!/bin/sh\necho "$*" >> ${log}\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\npkg:npm/express@4.19.2\\npkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\n' "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
+  const run = (PATH: string) => { const r = spawnSync("sh", [], { input: pr.defaultProbeScript("sbom"), encoding: "utf8", env: { ...process.env, PATH } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
+  const line = run(`${bin}:/usr/bin:/bin`);
+  assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
+  const j = parseProbeOutput(line);
+  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/1");
+  assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0");
+  const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
+  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", status: "ok", total: 3, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept");
+  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", status: "timeout", total: 0, purls: [] });
+  assert.equal(by["dir /"]!.status, "ok"); assert.equal(by["dir /"]!.total, 6000, "the OS package is left to the software probe; the true count is reported");
+  assert.ok(by["dir /"]!.purls.length < 6000 && by["dir /"]!.purls.length >= 100 && by["dir /"]!.purls.every((p) => p.startsWith("pkg:pypi/")), `trimmed to the budget (${by["dir /"]!.purls.length}, cap ${j.sbom!.cap})`);
+  const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
+  for (const ex of ["./proc/**", "./sys/**", "./var/lib/docker/**", "./home/*/.cache/**"]) assert.ok(args.includes(`--exclude ${ex}`), `the filesystem scan excludes ${ex} (globbing off)`);
+  assert.ok(args.includes("-o purls") && args.includes("-q"), "purls only, quiet");
+  const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`));
+  assert.deepEqual(none.sbom, { available: false, tool: null, cap: 3000, sources: [] });
+});
+
+test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, replaces a good scan's list, keeps the last good one through a timeout, drops a scan no longer reported and forgets everything when syft is gone", () => {
+  assert.deepEqual(sw.parsePurl("pkg:npm/%40aws-sdk/core@3.1.0"), { type: "npm", namespace: "@aws-sdk", name: "core", version: "3.1.0", qualifiers: {}, full_name: "@aws-sdk/core" });
+  const deb = sw.parsePurl("pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12")!;
+  assert.equal(deb.full_name, "libc6"); assert.equal(deb.namespace, "debian"); assert.deepEqual(deb.qualifiers, { arch: "amd64", upstream: "glibc", distro: "debian-12" });
+  assert.equal(sw.parsePurl("pkg:maven/org.apache/commons@1.0")!.full_name, "org.apache:commons");
+  assert.equal(sw.parsePurl("pkg:golang/github.com/foo/bar@v1.2.3")!.full_name, "github.com/foo/bar");
+  assert.equal(sw.parsePurl("pkg:generic/node")!.version, null);
+  assert.equal(sw.parsePurl("nonsense"), null);
+  const iid = "i-0sbom00000000001";
+  const r1 = sw.recordSbom(iid, "2026-10-29T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, sources: [
+    { source: "image", ref: "app:latest", status: "ok", total: 2, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?upstream=glibc&distro=debian-12"] },
+    { source: "dir", ref: "/", status: "ok", total: 1, purls: ["pkg:pypi/requests@2.32.3"] } ] })!;
+  assert.equal(r1.packages, 3); assert.equal(r1.sources, 2); assert.equal(r1.added, 0, "a first scan adds nothing");
+  let on = sw.softwareOn(iid).sbom;
+  assert.equal(on.scan?.available, true); assert.equal(on.scan?.packages, 3); assert.equal(on.scan?.tool, "syft 1.55.0");
+  assert.deepEqual(on.packages.map((p) => [p.ref, p.type, p.name, p.version]), [["app:latest", "deb", "libc6", "2.36-9"], ["app:latest", "npm", "express", "4.19.2"], ["/", "pypi", "requests", "2.32.3"]]);
+  // the image timed out this time (its rows stay), the filesystem moved on: one version replaced, one package new
+  const r2 = sw.recordSbom(iid, "2026-10-30T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, sources: [
+    { source: "image", ref: "app:latest", status: "timeout", total: 0, purls: [] },
+    { source: "dir", ref: "/", status: "ok", total: 2, purls: ["pkg:pypi/requests@2.32.4", "pkg:pypi/urllib3@2.2.0"] } ] })!;
+  assert.deepEqual(r2.failed, [{ ref: "app:latest", status: "timeout" }]); assert.equal(r2.added, 2); assert.equal(r2.removed, 1);
+  on = sw.softwareOn(iid).sbom;
+  assert.equal(on.sources.find((s) => s.ref === "app:latest")?.status, "timeout");
+  assert.equal(on.packages.filter((p) => p.ref === "app:latest").length, 2, "a timed-out scan keeps the last good list");
+  assert.deepEqual(on.packages.filter((p) => p.ref === "/").map((p) => p.version), ["2.32.4", "2.2.0"]);
+  assert.deepEqual(sw.softwareOn(iid, { q: "url" }).sbom.packages.map((p) => p.name), ["urllib3"], "the search filters the sbom too");
+  // the container stopped: its scan is no longer reported, so its rows go; the fleet search still finds the rest
+  const r3 = sw.recordSbom(iid, "2026-10-31T10:00:00Z", { available: true, sources: [{ source: "dir", ref: "/", status: "ok", total: 2, purls: ["pkg:pypi/requests@2.32.4", "pkg:pypi/urllib3@2.2.0"] }] })!;
+  assert.equal(r3.removed, 2); assert.equal(sw.softwareOn(iid).sbom.sources.length, 1);
+  assert.ok(sw.wherePackage("urllib3").some((w) => w.kind === "sbom" && w.instance_id === iid && w.ref === "/" && w.ecosystem === "pypi"));
+  assert.ok(sw.softwareSummary().sbom.boxes >= 1);
+  // syft uninstalled: what it read is no longer known to be there
+  sw.recordSbom(iid, "2026-11-01T10:00:00Z", { available: false, sources: [] });
+  on = sw.softwareOn(iid).sbom; assert.equal(on.scan?.available, false); assert.equal(on.packages.length, 0); assert.equal(on.sources.length, 0);
+  assert.ok(sw.softwareSummary().sbom.without_syft >= 1);
+});

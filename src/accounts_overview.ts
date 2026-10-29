@@ -6,7 +6,7 @@ import type { AccountRecord } from "./adapters/types.js";
  * The general view across accounts (Overview › Accounts, GET /api/accounts/overview): one row per account with what
  * a person wants before choosing one to look at: how much is there, what it costs, what is open and what is urgent.
  * Everything comes from the tables that carry an account id (the inventories, findings, scans, recommendations,
- * alerts); vulnerability verdicts name an instance and are attributed through the inventory's ids; each provider
+ * alerts); each provider
  * says what an account's bill was (src/adapters/types.ts ProviderCost). Rows stored before account ids were kept
  * belong to the primary account of the provider that has such rows.
  */
@@ -18,7 +18,6 @@ export interface AccountOverview extends AccountRecord {
   security: { critical: number; high: number; scan_at: string | null };
   recommendations: { open: number; saving_usd_month: number };
   alerts_open: number;
-  vulnerabilities: { critical: number; exposed: number; boxes: number };
   probes: { ssm_online: number; probed_24h: number };
   last_collected_at: string | null;
 }
@@ -64,11 +63,6 @@ export async function accountsOverview(): Promise<AccountOverview[]> {
   const alerts = byAcct(() => ({ n: 0 }));
   for (const r of rows("select account_id from alerts where acknowledged = 0")) alerts.get(r.account_id).n++;
 
-  const vulns = byAcct(() => ({ critical: 0, exposed: 0, boxes: new Set<string>() }));
-  try {
-    const { vulnerabilityMatches } = await import("./software_vulns.js");
-    for (const m of vulnerabilityMatches()) { const a = idx.of(m.instance_id); if (!a) continue; const x = vulns.get(a); if (m.criticality === "critical") x.critical++; if (m.criticality === "exposed") x.exposed++; x.boxes.add(m.instance_id); }
-  } catch { /* the software layer is optional */ }
 
   const probes = byAcct(() => ({ ssm_online: 0, probed_24h: 0 }));
   for (const r of rows("select account_id, coalesce(sum(ssm_status = 'Online'), 0) as online, coalesce(sum(probe_at > datetime('now', '-1 day')), 0) as probed from inventory_ec2 where gone = 0 and state = 'running' group by account_id")) { const x = probes.get(r.account_id); x.ssm_online += n(r.online); x.probed_24h += n(r.probed); }
@@ -78,10 +72,10 @@ export async function accountsOverview(): Promise<AccountOverview[]> {
   const collectedAt = (rows("select max(last_seen) as at from inventory_ec2")[0]?.at as string | null) ?? null;
 
   return accounts.map((a) => {
-    const r = res.get(a.id); const s = sec.get(a.id); const v = vulns.get(a.id); const p = probes.get(a.id); const rc = recs.get(a.id);
+    const r = res.get(a.id); const s = sec.get(a.id); const p = probes.get(a.id); const rc = recs.get(a.id);
     return { ...a, resources: { ec2_running: r.ec2_running, ec2_total: r.ec2_total, rds: r.rds, lambda: r.lambda, dynamodb: r.dynamodb, elb: r.elb, s3: r.s3, ebs_gb: Math.round(r.ebs_gb), clusters: r.clusters }, spend: spendOf(a.id, a.provider),
       findings_alarms: alarms.get(a.id).n, security: { critical: s.critical, high: s.high, scan_at: scan?.finished_at ?? null }, recommendations: { open: rc.open, saving_usd_month: Math.round(rc.saving) }, alerts_open: alerts.get(a.id).n,
-      vulnerabilities: { critical: v.critical, exposed: v.exposed, boxes: v.boxes.size }, probes: { ssm_online: p.ssm_online, probed_24h: p.probed_24h }, last_collected_at: a.parent_id ? collectedAt : (lastRun.get(a.provider) ?? collectedAt) };
+      probes: { ssm_online: p.ssm_online, probed_24h: p.probed_24h }, last_collected_at: a.parent_id ? collectedAt : (lastRun.get(a.provider) ?? collectedAt) };
   });
 }
 
@@ -98,7 +92,7 @@ export interface GeneralOverview {
   month: { total_usd: number | null; parts: { provider: string; key: string; label: string; usd: number | null; to_total: boolean; month_to_date_usd?: number | null }[] };
   recommendations: { open: number; saving_usd_month: number; by_provider: Record<string, { open: number; saving_usd_month: number }> };
   attention: { provider: string; account: string; account_name: string | null; level: "alarm" | "warning" | "info"; what: string; link: string | null }[];
-  counts: { alarms: number; warnings: number; alerts_open: number; security_critical: number; security_high: number; vulnerabilities_critical: number };
+  counts: { alarms: number; warnings: number; alerts_open: number; security_critical: number; security_high: number };
 }
 
 export async function generalOverview(): Promise<GeneralOverview> {
@@ -121,7 +115,7 @@ export async function generalOverview(): Promise<GeneralOverview> {
     month: { total_usd: summed.length ? Math.round(summed.reduce((x, y) => x + y, 0)) : null, parts },
     recommendations: { open: Object.values(recsBy).reduce((x, b) => x + b.open, 0), saving_usd_month: Math.round(Object.values(recsBy).reduce((x, b) => x + b.saving_usd_month, 0)), by_provider: recsBy },
     attention: attention.sort((a, b) => order[a.level] - order[b.level]).slice(0, 30),
-    counts: { alarms: accounts.reduce((x, a) => x + a.findings_alarms, 0), warnings: attention.filter((a) => a.level === "warning").length, alerts_open: accounts.reduce((x, a) => x + a.alerts_open, 0), security_critical: sec.critical, security_high: sec.high, vulnerabilities_critical: accounts.reduce((x, a) => x + a.vulnerabilities.critical, 0) },
+    counts: { alarms: accounts.reduce((x, a) => x + a.findings_alarms, 0), warnings: attention.filter((a) => a.level === "warning").length, alerts_open: accounts.reduce((x, a) => x + a.alerts_open, 0), security_critical: sec.critical, security_high: sec.high },
   };
 }
 

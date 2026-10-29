@@ -28,7 +28,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorAccount: "A cloud account, team or project the advisor collects from, or the site of the local machines; resources, runs and scans hang off it with IN_ACCOUNT",
   AdvisorResource: "Base label of every inventoried cloud resource; provider, account_id and native_type say what it is at the provider (native_id where its id there differs)",
   AdvisorBox: "A machine: a cloud instance (EC2), a platform's hidden runtime (Vercel, opaque) or a local laptop, desktop or server; it HOSTS one AdvisorCompute",
-  AdvisorCompute: "The operating system a box runs: programs, containers, packages and vulnerabilities hang off it, and deployments RUNS_ON it",
+  AdvisorCompute: "The operating system a box runs: programs, containers and packages hang off it, and deployments RUNS_ON it",
   AdvisorDatabase: "A managed database instance or store (RDS, Aurora, DynamoDB, a Vercel Neon store)",
   AdvisorCache: "A managed cache node or group (ElastiCache, a Vercel Redis store)",
   AdvisorLoadBalancer: "A load balancer (application, network, gateway or classic)",
@@ -91,7 +91,6 @@ const DESCRIPTIONS: Record<string, string> = {
   KnDestination: "Knowledge layer: where traffic or data goes",
   KnSource: "Knowledge layer: where traffic or data comes from",
   KnPlaybook: "Knowledge layer: the playbook for a control, generated from its official sources",
-  KnVulnerability: "A published vulnerability advisory (OSV, ALAS) and the packages it affects; shared across accounts",
 };
 
 export type AttrType = "string" | "int" | "float" | "boolean" | "list" | "complex";

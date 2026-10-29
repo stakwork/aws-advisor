@@ -436,7 +436,8 @@ api.post("/instances/:id/probe", async (req, res) => {
   probeInFlight.add(id);
   try {
     if (kind) { const p = await probeInstance(id, { kind: kind as ProbeKind }); const merged = latestProbe(id); return res.json({ ...p, merged: merged?.data ?? null, summary: merged ? summarizeProbe(merged.data) : summarizeProbe(p.data) }); }
-    const r = await probeInstanceAll(id);
+    // every kind but sbom: a syft scan may take minutes, so it runs from its own schedule or when asked for by name (?kind=sbom)
+    const r = await probeInstanceAll(id, PROBE_KINDS.filter((k) => k !== "sbom"));
     if (!r.probe) { const f = r.failed[0]; return res.status(f && ["no_credentials", "not_managed", "permission"].includes(f.code) ? 400 : 502).json({ error: f?.message || "no probe succeeded", code: f?.code || "failed", failed: r.failed }); }
     res.json({ ...r.probe, summary: summarizeProbe(r.probe.data), ran: r.ran, failed: r.failed });
   } catch (e: any) {

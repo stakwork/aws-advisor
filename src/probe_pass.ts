@@ -8,7 +8,7 @@
 import { config } from "./config.js";
 import { db } from "./db.js";
 import { ProbeError, probeInstance } from "./ssm.js";
-import { PROBE_DEFS, PROBE_KINDS, type ProbeKind } from "./probes.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, legacyKindOf } from "./probes.js";
 import { credentialGate } from "./gate.js";
 import { pruneHistory, rollupDaily } from "./history.js";
 import { checkAllDiskLevels } from "./disk_alerts.js";
@@ -29,9 +29,11 @@ export interface ProbePassResult {
 
 const inFlight = new Map<ProbeKind, Promise<ProbePassResult>>();
 
-/** The scope and the minimum interval of a kind (Settings > Probe pass): the software probe has its own, the rest share. */
+/** The scope and the minimum interval of a kind (Settings > Probe pass): the software and sbom probes have their own, the rest share. */
 export const probeKindSettings = (kind: ProbeKind): { scope: "idle" | "all"; intervalHours: number } =>
-  kind === "software" ? { scope: config.probeSoftwareScope, intervalHours: config.probeSoftwareIntervalHours } : { scope: config.probeScope, intervalHours: config.probeMinIntervalHours };
+  kind === "software" ? { scope: config.probeSoftwareScope, intervalHours: config.probeSoftwareIntervalHours }
+  : kind === "sbom" ? { scope: config.probeSbomScope, intervalHours: config.probeSbomIntervalHours }
+  : { scope: config.probeScope, intervalHours: config.probeMinIntervalHours };
 
 /** The skip window in minutes: the configured hours minus a five-minute margin, so "1" means every hourly pass
  *  (the previous probe finished seconds after its cron minute and would otherwise still be inside a full hour). */
@@ -49,7 +51,7 @@ export function probeExclusions(kind: ProbeKind = "host", window = probeWindowMi
     outside_scope: probeKindSettings(kind).scope === "all" ? 0 : n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
       and not ((i.cpu_30d is not null and i.cpu_30d < ?) or exists (select 1 from recommendations r where r.resource = i.instance_id and r.rule = 'idle_instance' and r.status in ('open', 'snoozed')))`, config.probeIdleCpu),
     probed_recently: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
-      and exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))`, kind, kind === "software" ? "software" : "all", `-${window} minutes`),
+      and exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))`, kind, legacyKindOf(kind), `-${window} minutes`),
   };
 }
 
@@ -74,7 +76,7 @@ export function probeTargets(kind: ProbeKind = "host", limit?: number): { instan
       -- a pre-2.0 combined probe (kind 'all') counts for host, docker and apps, never for software
       and not exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
     order by coalesce(i.cpu_30d, 100) asc, i.instance_id
-    limit ?`).all(scope, config.probeIdleCpu, kind, kind === "software" ? "software" : "all", `-${probeWindowMinutes(intervalHours)} minutes`, cap) as any[];
+    limit ?`).all(scope, config.probeIdleCpu, kind, legacyKindOf(kind), `-${probeWindowMinutes(intervalHours)} minutes`, cap) as any[];
 }
 
 /** One pass of one kind (host by default); a pass of a kind already running is joined, not doubled. */

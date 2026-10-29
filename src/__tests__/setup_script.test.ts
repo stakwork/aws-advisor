@@ -236,7 +236,7 @@ test("the plan has the expected steps per path and names the probe document", ()
     "Create an access key for aws-advisor and store it under [aws-advisor-user]",
     "Write the [profile aws-advisor] that assumes the role",
     "Verify that the profile answers as aws-advisor-read",
-    "Create the read-only SSM probe documents (AwsAdvisorProbe-host, AwsAdvisorProbe-docker, AwsAdvisorProbe-apps, AwsAdvisorProbe-software) in us-east-1",
+    "Create the read-only SSM probe documents (AwsAdvisorProbe-host, AwsAdvisorProbe-docker, AwsAdvisorProbe-apps, AwsAdvisorProbe-software, AwsAdvisorProbe-sbom) in us-east-1",
     "Point the advisor (http://localhost:9034) at profile aws-advisor and test it",
     "Run the advisor's permission check",
   ]);
