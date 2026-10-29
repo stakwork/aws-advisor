@@ -44,7 +44,11 @@ probes.get("/probes", async (req, res) => {
   const withStatus = req.query.status !== "0";
   let status: Awaited<ReturnType<typeof probeDocumentStatus>> | null = null;
   if (withStatus) { try { status = await probeDocumentStatus(); } catch { status = null; } }
+  // whole results to S3 (src/probe_uploads.ts): the bucket checked with the signing identity, at most every ten minutes
+  const { checkProbeUploads } = await import("../probe_uploads.js");
+  let uploads: Awaited<ReturnType<typeof checkProbeUploads>>; try { uploads = await checkProbeUploads(); } catch (e: any) { uploads = { configured: true, bucket: config.probeUploadBucket || null, prefix: null, ok: false, error: String(e?.message || e), checked_at: new Date().toISOString(), identity: null }; }
   res.json({
+    uploads,
     base_document: config.probeDocument, kinds: PROBE_KINDS.map((k) => ({ ...describe(k), deployed: status?.find((s) => s.kind === k) ?? null })), legacy_rows: Number((db.prepare("select count(*) as n from instance_metrics where coalesce(kind, 'all') = 'all'").get() as any)?.n || 0),
     // the ledger rows that create or update the documents (src/actions/probe_document.ts): open ones wait for "Run as me"
     document_rows: listActions({ kind: "probe_document", page_size: 50 }).actions.filter((r) => r.status !== "stale"),

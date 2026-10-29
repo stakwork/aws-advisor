@@ -9,7 +9,7 @@ process.env.TYPESAFE_API_KEY = "";
 const u = await import("../probe_uploads.js");
 const g = await import("../graph_software.js");
 
-test("upload keys say what an object is and parse back; receipts carry bytes and sha256", () => {
+test("upload keys say what an object is and parse back; receipts carry bytes and sha256; no bucket means no check and no signing", async () => {
   const key = u.uploadKey("123456789012", "i-0abc123456789def0", "sbom", new Date("2026-10-29T12:45:19.123Z"));
   assert.equal(key, "aws-advisor/probes/123456789012/i-0abc123456789def0/sbom/2026-10-29T12-45-19-123Z.json.gz");
   assert.deepEqual(u.parseUploadKey(key), { account_id: "123456789012", instance_id: "i-0abc123456789def0", kind: "sbom", at: "2026-10-29T12:45:19.123Z" });
@@ -18,6 +18,8 @@ test("upload keys say what an object is and parse back; receipts carry bytes and
   assert.deepEqual(u.parseReceipt("uploaded 1741"), { bytes: 1741, sha256: null }, "a box without sha256sum");
   assert.deepEqual(u.parseReceipt("upload failed (curl and egress to S3 are needed)"), { bytes: null, sha256: null });
   assert.equal(u.probeUploadsConfigured(), false, "no bucket in the test settings");
+  assert.deepEqual(await u.checkProbeUploads(true), { configured: false, bucket: null, prefix: null, ok: null, error: null, checked_at: null, identity: null }, "nothing to check without a bucket");
+  assert.equal(await u.probeUploadsReady(), false);
 });
 
 test("imageNodeId: the repository at its registry digest, else the local image id, else the bare reference", () => {

@@ -29,7 +29,7 @@ test("every probe kind has a document of its own that passes sh -n, embeds its h
   assert.deepEqual((pr.probeDocument("host") as any).parameters, {});
   assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "upload"]);
   assert.deepEqual(Object.keys((pr.probeDocument("software") as any).parameters), ["upload"]);
-  for (const k of ["software", "sbom"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload={{ upload }}")), `${k}: the upload URL is a document parameter`);
+  for (const k of ["software", "sbom"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload='{{ upload }}'")), `${k}: the upload URL is a document parameter, quoted (a presigned URL is full of & and =)`);
   assert.ok((pr.probeDocument("sbom") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("install={{ install }}")), "the install switch is a document parameter");
   // SSM compiles allowedPattern with RE2, which rejects a repeat count above 1000 (CreateDocument: "invalid repeat count")
   for (const kind of pr.PROBE_KINDS) for (const p of Object.values((pr.probeDocument(kind) as any).parameters) as any[]) {

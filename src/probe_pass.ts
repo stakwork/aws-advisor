@@ -119,7 +119,10 @@ async function run(kind: ProbeKind): Promise<ProbePassResult> {
         result.probed.push(t.instance_id);
       } catch (e: any) {
         const code = e instanceof ProbeError ? e.code : "failed";
-        result.failed.push({ instance_id: t.instance_id, code, message: String(e?.message || e).slice(0, 200) });
+        const message = String(e?.message || e);
+        result.failed.push({ instance_id: t.instance_id, code, message: message.slice(0, 200) });
+        // every failure on its own line, with the box: a script that died prints its stderr here (the probe's message carries it), which the counts below hide
+        console.error(`[${tag}] ${t.instance_id}${t.name ? ` (${t.name})` : ""} ${code}: ${message.slice(0, 600).replace(/\s+/g, " ")}`);
         // a permission problem is the same for every instance: stop early
         if (code === "permission" || code === "no_credentials" || e?.name === "QuotaError") { queue.length = 0; }
       }

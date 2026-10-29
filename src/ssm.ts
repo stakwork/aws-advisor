@@ -1,5 +1,5 @@
 import { recordSbom, recordSoftware, type ProbeHibernation } from "./software_inventory.js";
-import { fetchProbeUpload, presignProbeUpload, probeUploadsConfigured, recordProbeUpload } from "./probe_uploads.js";
+import { fetchProbeUpload, presignProbeUpload, probeUploadsReady, recordProbeUpload } from "./probe_uploads.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
@@ -501,7 +501,7 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
   const timeoutMs = opts.timeoutMs ?? Math.max(90_000, def.timeout_seconds * 1000 + 30_000);
   // the whole result to S3 when a bucket is configured (src/probe_uploads.ts): a presigned PUT URL the script posts to, so the inline cap trims nothing
   let upload: { key: string; url: string } | null = null;
-  if (UPLOAD_KINDS.includes(kind) && probeUploadsConfigured()) {
+  if (UPLOAD_KINDS.includes(kind) && (await probeUploadsReady())) {
     try { upload = await presignProbeUpload({ accountId: creds.account_id, instanceId, kind, expiresInSeconds: def.timeout_seconds + 900 }); }
     catch (e: any) { console.warn(`[probe] ${instanceId} ${kind}: no upload URL (${String(e?.message || e).slice(0, 160)}); the inline answer alone`); }
   }
@@ -600,6 +600,8 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
         console.error(`[probe] ${instanceId} ${kind}: the S3 object could not be read (${msg}); the inline answer is used${kind === "sbom" ? " (trimmed to the output cap)" : ""}`);
       }
     } else if (data.inline === false) throw new ProbeError("failed", `the box answered with a stub (${data.upload ?? "no receipt"}) and no upload was arranged for this run`);
+    else if (upload && data.upload) console.warn(`[probe] ${instanceId} ${kind}: the box could not post its result to S3 (${data.upload}); the inline answer is used${kind === "sbom" ? " (trimmed to the output cap)" : ""}`);
+    else if (upload) console.warn(`[probe] ${instanceId} ${kind}: the box printed no upload receipt (an older document, or the script stopped before the upload); the inline answer is used`);
     // an sbom row in instance_metrics keeps the scans without their package lists (the tables hold those): one row per box per day must stay small
     return applyProbeResult(instanceId, data, kind === "sbom" ? { ...data, sbom: data.sbom ? { ...data.sbom, sources: data.sbom.sources.map((x) => ({ ...x, purls: [] })) } : data.sbom } : data);
   } finally {

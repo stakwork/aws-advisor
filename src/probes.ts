@@ -357,8 +357,11 @@ const UPLOAD = [
   "# ---- upload (probe 2.1): when the advisor passed a presigned S3 URL (the upload parameter), the whole object goes there gzip-compressed, so nothing is",
   "# ---- lost to the 24,000-character cap of the inline answer; the inline line then carries the receipt (bytes, sha256) and stays the fallback. The object",
   "# ---- is spooled through a temp file (curl needs its size) that is emptied afterwards. An inline object the cap would cut becomes a stub once the whole is in S3.",
-  "upload=__UPLOAD__; up=\"\"; case \"$upload\" in https://*) ;; *) upload=\"\";; esac",
-  "if [ -n \"$upload\" ] && [ -n \"${full:-}\" ] && command -v curl >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then",
+  "# quoted: a presigned URL is full of & and = (the parameter pattern admits no quote character)",
+  "upload='__UPLOAD__'; up=\"\"; case \"$upload\" in https://*) ;; *) upload=\"\";; esac",
+  "if [ -n \"$upload\" ] && [ -n \"${full:-}\" ] && ! command -v curl >/dev/null 2>&1; then up=\"upload failed (curl is needed on the box)\"",
+  "elif [ -n \"$upload\" ] && [ -n \"${full:-}\" ] && ! command -v gzip >/dev/null 2>&1; then up=\"upload failed (gzip is needed on the box)\"",
+  "elif [ -n \"$upload\" ] && [ -n \"${full:-}\" ]; then",
   "  tmp=$(mktemp 2>/dev/null || printf '/tmp/aws-advisor-probe.%s' \"$$\")",
   "  if printf '%s' \"$full\" | gzip -c -9 > \"$tmp\" && curl -sSf -X PUT --max-time 180 --data-binary @\"$tmp\" \"$upload\" >/dev/null 2>&1; then",
   "    h=$( (sha256sum \"$tmp\" 2>/dev/null || shasum -a 256 \"$tmp\" 2>/dev/null || openssl dgst -r -sha256 \"$tmp\" 2>/dev/null) | head -n 1 | cut -c1-64 | tr -cd '0-9a-f')",
@@ -441,7 +444,7 @@ export function probeDocument(kind: ProbeKind) {
       signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: "^[^\\n]*$" }, // SSM validates with RE2, which caps a repeat count at 1000: no count here (the SendCommand parameter limit bounds the length)
     } : {
       ...(kind === "sbom" ? { install: { type: "String", description: "yes installs the pinned syft release into /usr/local/bin where it is missing (the one write a probe makes); no leaves such a box alone. The advisor passes PROBE_SBOM_INSTALL.", default: "yes", allowedValues: ["yes", "no"] } } : {}),
-      ...(UPLOAD_KINDS.includes(kind) ? { upload: { type: "String", description: "A presigned S3 PUT URL the whole result is posted to, gzip-compressed (the advisor signs one per run when an upload bucket is configured); empty keeps the result inline, under SSM's output cap.", default: "", allowedPattern: "^(https://[^\\s]*)?$" } } : {}),
+      ...(UPLOAD_KINDS.includes(kind) ? { upload: { type: "String", description: "A presigned S3 PUT URL the whole result is posted to, gzip-compressed (the advisor signs one per run when an upload bucket is configured); empty keeps the result inline, under SSM's output cap.", default: "", allowedPattern: "^(https://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*)?$" } } : {}),
     },
     mainSteps: [{ action: "aws:runShellScript", name: `probe_${kind}`, inputs: { timeoutSeconds: String(def.timeout_seconds), runCommand: script.split("\n") } }],
   };

@@ -92,6 +92,16 @@ export const CAPABILITIES: Capability[] = [
       if (!r.ok) throw new CredentialsError(`${meta ? `mode ${meta.mode} (${meta.label}): ` : ""}${r.error}`);
       return `mode ${meta?.mode ?? "keys"} (${r.describe}): ${r.arn}`;
     } },
+  // Whole probe results to S3 (src/probe_uploads.ts): only with a bucket configured, and only from the parent, the identity that signs the URLs and reads the objects back
+  { id: "probe_uploads", label: "Probe uploads bucket (S3)", group: "ssm", actions: ["s3:ListBucket", "s3:PutObject", "s3:GetObject"],
+    sdk: async (ctx) => {
+      const { probeUploadsConfigured, checkProbeUploads } = await import("./probe_uploads.js");
+      if (!probeUploadsConfigured()) return { skipped: "no upload bucket configured (Settings > Probe pass): the software and sbom probes answer inline" };
+      if (!ctx.is_parent) return { skipped: "uploads are signed and read back with the parent's identity" };
+      const st = await checkProbeUploads(true);
+      if (st.ok) return `bucket ${st.bucket} takes uploads under ${st.prefix}/ as ${st.identity ?? "the advisor"}`;
+      throw Object.assign(new Error(st.error ?? "the bucket check failed"), { name: /^([A-Za-z]+):/.exec(st.error ?? "")?.[1] ?? "AccessDenied" });
+    } },
   { id: "account", label: "Account identity (aws_account)", group: "core", actions: ["sts:GetCallerIdentity", "iam:ListAccountAliases"], sql: global("aws_account") },
   { id: "ec2_instances", label: "EC2 instances", group: "compute", actions: ["ec2:DescribeInstances"], sql: table("aws_ec2_instance") },
   { id: "ebs_volumes", label: "EBS volumes", group: "compute", actions: ["ec2:DescribeVolumes"], sql: table("aws_ebs_volume") },

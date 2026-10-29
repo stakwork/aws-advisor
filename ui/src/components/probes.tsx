@@ -21,7 +21,7 @@ const statusWord: Record<string, string> = { current: "deployed, current", stale
  * update commands, and the script itself with an editor (saved edits take effect when the document is redeployed).
  */
 export function ProbesCard() {
-  const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number; document_rows?: any[] } | null>(null);
+  const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number; uploads?: { configured: boolean; bucket: string | null; prefix: string | null; ok: boolean | null; error: string | null; checked_at: string | null; identity: string | null }; document_rows?: any[] } | null>(null);
   const [proposing, setProposing] = useState(false);
   const [proposeMsg, setProposeMsg] = useState<{ text: string; err: boolean } | null>(null);
   const [err, setErr] = useState("");
@@ -56,6 +56,14 @@ export function ProbesCard() {
         Each probe is a fixed shell script embedded in its own SSM document (<code className="text-zinc-200">{d.base_document}-&lt;kind&gt;</code>), so <code className="text-zinc-200">ssm:SendCommand</code> is granted on these documents only and nothing else can run on the fleet. Schedules, scopes and intervals are below; a script edited here takes effect when its document is redeployed, and the status column says whether the deployed document matches.
         {d.legacy_rows > 0 && <> {d.legacy_rows} stored rows still come from the pre-2.0 combined probe; a box without the per-kind documents keeps probing through the old <code className="text-zinc-200">{d.base_document}</code> document for host, containers and programs until they are created.</>}
       </p>
+      {d.uploads && (
+        <p className="mb-3 text-sm text-zinc-400">
+          Whole results to S3 (software and sbom probes):{" "}
+          {!d.uploads.configured ? <>not configured. Set an upload bucket under Probe pass and the two probes post their whole result there instead of trimming to SSM's 24,000-character cap.</>
+            : d.uploads.ok ? <><span className="text-emerald-300">bucket {d.uploads.bucket} works</span> under <code className="text-zinc-200">{d.uploads.prefix}/</code>{d.uploads.identity ? <> as <code className="text-zinc-200">{d.uploads.identity}</code></> : null}{d.uploads.checked_at ? <> · checked {when(d.uploads.checked_at)}</> : null}.</>
+            : <><span className="text-red-300">bucket {d.uploads.bucket} is not usable</span>{d.uploads.identity ? <> as <code className="text-zinc-200">{d.uploads.identity}</code></> : null}: {d.uploads.error}. The probes answer inline until it is. A bucket in another account needs a bucket policy for this role; the role needs s3:PutObject and s3:GetObject under the prefix and s3:ListBucket on the bucket.</>}
+        </p>
+      )}
       <table className="w-full border-collapse text-sm">
         <thead className="text-xs text-zinc-500"><tr><th className="py-1 text-left font-normal">Probe</th><th className="text-left font-normal">Document</th><th className="text-left font-normal">Schedule</th><th className="text-left font-normal">Scope</th><th className="text-right font-normal">Last 24 h</th><th className="text-right font-normal">Due now</th><th className="font-normal"></th></tr></thead>
         <tbody>

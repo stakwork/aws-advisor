@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadBucketCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "./config.js";
 import { db } from "./db.js";
@@ -92,3 +92,50 @@ export async function listProbeUploads(): Promise<{ key: string; bytes: number; 
   } finally { c.destroy(); }
   return out;
 }
+
+// ---- is the bucket usable with the identity that signs? -------------------------------------------------------------------
+
+export interface ProbeUploadStatus { configured: boolean; bucket: string | null; prefix: string | null; ok: boolean | null; error: string | null; checked_at: string | null; identity: string | null }
+let status: ProbeUploadStatus = { configured: false, bucket: null, prefix: null, ok: null, error: null, checked_at: null, identity: null };
+let checking: Promise<ProbeUploadStatus> | null = null;
+const RECHECK_MS = 10 * 60_000;
+
+/** The last check's result, without running one. */
+export const probeUploadStatus = (): ProbeUploadStatus => ({ ...status, configured: probeUploadsConfigured(), bucket: config.probeUploadBucket || null, prefix: probeUploadsConfigured() ? prefix() : null });
+
+/**
+ * Whether uploads can work right now: the bucket answers HeadBucket (s3:ListBucket) and takes a small marker object under the
+ * prefix (s3:PutObject) that is read back (s3:GetObject), all with the identity that signs the URLs. Run at most every ten
+ * minutes, or now when `force`; the outcome is logged when it changes, so a bucket in another account, a missing statement or
+ * a KMS key the role may not use shows up in the log and on Settings > Probes, not as a failed upload on every box.
+ */
+export async function checkProbeUploads(force = false): Promise<ProbeUploadStatus> {
+  if (!probeUploadsConfigured()) { status = { ...status, ok: null, error: null, identity: null }; return probeUploadStatus(); }
+  if (!force && status.checked_at && Date.now() - Date.parse(status.checked_at) < RECHECK_MS && status.bucket === config.probeUploadBucket) return probeUploadStatus();
+  if (checking) return checking;
+  checking = (async () => {
+    const before = status.ok; const bucket = config.probeUploadBucket; const c = client();
+    let identity: string | null = null;
+    try {
+      try { const { STSClient, GetCallerIdentityCommand } = await import("@aws-sdk/client-sts"); const base = accountCredentials(null); const sts = new STSClient({ region: base.region, credentials: base.provider }); try { identity = (await sts.send(new GetCallerIdentityCommand({}))).Arn ?? null; } finally { sts.destroy(); } } catch { /* the error below says enough */ }
+      let step = "HeadBucket (s3:ListBucket)";
+      await c.send(new HeadBucketCommand({ Bucket: bucket }));
+      const key = `${prefix()}/_check/${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+      step = "PutObject (s3:PutObject)";
+      await c.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: `aws-advisor probe uploads check ${identity ?? ""}\n`, ContentType: "text/plain" }));
+      step = "GetObject (s3:GetObject)";
+      await (await c.send(new GetObjectCommand({ Bucket: bucket, Key: key }))).Body!.transformToByteArray();
+      status = { ...status, bucket, prefix: prefix(), ok: true, error: null, checked_at: new Date().toISOString(), identity };
+      if (before !== true) console.log(`[probe-uploads] bucket ${bucket} takes uploads under ${prefix()}/ as ${identity ?? "the advisor's identity"}`);
+      void step;
+    } catch (e: any) {
+      const msg = `${e?.name || "error"}: ${String(e?.message || e).slice(0, 300)}`;
+      status = { ...status, bucket, prefix: prefix(), ok: false, error: msg, checked_at: new Date().toISOString(), identity };
+      if (before !== false) console.error(`[probe-uploads] bucket ${bucket} is not usable as ${identity ?? "the advisor's identity"} (${msg}); the software and sbom probes answer inline until it is (a bucket in another account needs a bucket policy for this role; the role needs s3:PutObject, s3:GetObject under ${prefix()}/ and s3:ListBucket)`);
+    } finally { c.destroy(); checking = null; }
+    return probeUploadStatus();
+  })();
+  return checking;
+}
+/** True when a URL may be signed now: configured and the last check (at most ten minutes old) passed. */
+export async function probeUploadsReady(): Promise<boolean> { return probeUploadsConfigured() && (await checkProbeUploads()).ok === true; }
