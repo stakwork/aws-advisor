@@ -20,13 +20,15 @@ test("every probe kind has a document of its own that passes sh -n, embeds its h
     assert.equal(doc.mainSteps[0].name, `probe_${kind}`);
     assert.equal(doc.mainSteps[0].inputs.timeoutSeconds, String(pr.PROBE_DEFS[kind].timeout_seconds));
     const script = doc.mainSteps[0].inputs.runCommand.join("\n");
-    const r = spawnSync("sh", ["-n"], { input: script.replace("{{ signals }}", "x=y"), encoding: "utf8" });
+    const r = spawnSync("sh", ["-n"], { input: script.replace("{{ signals }}", "x=y").replace("{{ install }}", "yes"), encoding: "utf8" });
     assert.equal(r.status, 0, `${kind}: ${r.stderr}`);
     assert.equal(pr.probeDocumentName(kind), `AwsAdvisorProbe-${kind}`);
     assert.ok(pr.probeDocumentInfo(kind).create_command.includes(`/api/probes/${kind}/document`));
   }
   assert.ok(Object.keys((pr.probeDocument("docker") as any).parameters).includes("signals"));
   assert.deepEqual((pr.probeDocument("software") as any).parameters, {});
+  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install"]);
+  assert.ok((pr.probeDocument("sbom") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("install={{ install }}")), "the install switch is a document parameter");
   // SSM compiles allowedPattern with RE2, which rejects a repeat count above 1000 (CreateDocument: "invalid repeat count")
   for (const kind of pr.PROBE_KINDS) for (const p of Object.values((pr.probeDocument(kind) as any).parameters) as any[]) {
     const counts = [...String(p.allowedPattern || "").matchAll(/\{(\d+)(?:,(\d+))?\}/g)].flatMap((m) => [m[1], m[2]].filter(Boolean).map(Number));
@@ -148,11 +150,11 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   }
   // one image times out, one lists a duplicate and a distro package, the filesystem lists an OS package (dropped: dpkg owns it) and far more than the budget
   w(bin, "syft", `#!/bin/sh\necho "$*" >> ${log}\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\npkg:npm/express@4.19.2\\npkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\n' "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
-  const run = (PATH: string) => { const r = spawnSync("sh", [], { input: pr.defaultProbeScript("sbom"), encoding: "utf8", env: { ...process.env, PATH } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
+  const run = (PATH: string, script = pr.defaultProbeScript("sbom"), extra: Record<string, string> = {}) => { const r = spawnSync("sh", [], { input: script, encoding: "utf8", env: { ...process.env, PATH, ...extra } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
   const line = run(`${bin}:/usr/bin:/bin`);
   assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
   const j = parseProbeOutput(line);
-  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/1");
+  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/2"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
   assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
   assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", status: "ok", total: 3, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept");
@@ -162,8 +164,19 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
   for (const ex of ["./proc/**", "./sys/**", "./var/lib/docker/**", "./home/*/.cache/**"]) assert.ok(args.includes(`--exclude ${ex}`), `the filesystem scan excludes ${ex} (globbing off)`);
   assert.ok(args.includes("-o purls") && args.includes("-q"), "purls only, quiet");
-  const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`));
-  assert.deepEqual(none.sbom, { available: false, tool: null, cap: 3000, sources: [] });
+  // no syft and the install switch off: reported, left alone
+  const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__INSTALL__", "no")));
+  assert.deepEqual(none.sbom, { available: false, tool: null, install: "not installed; the install parameter is no", cap: 3000, sources: [] });
+  // the switch on (the default): the installer is fetched with curl and run; the fake one copies the fake syft into the target directory, then the scan runs with it
+  const target = path.join(dir, "installed");
+  w(bare, "curl", `#!/bin/sh\ncase "$*" in *get.anchore.io/syft*) printf 'mkdir -p "$2"; cp "%s" "$2/syft"\n' "${path.join(bin, "syft")}";; *) exit 22;; esac\n`);
+  const got = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.probeScript("sbom"), { AWS_ADVISOR_SYFT_DIR: target }));
+  assert.equal(got.sbom?.install, "installed v1.55.0"); assert.equal(got.sbom?.available, true); assert.equal(got.sbom?.sources.length, 3, "scanned right after installing");
+  assert.ok(fs.existsSync(path.join(target, "syft")));
+  // the switch on but no egress: the failure and what it needs are reported, nothing scanned
+  w(bare, "curl", "#!/bin/sh\nexit 6\n");
+  const failed = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.probeScript("sbom"), { AWS_ADVISOR_SYFT_DIR: path.join(dir, "nowhere") }));
+  assert.equal(failed.sbom?.available, false); assert.match(failed.sbom?.install ?? "", /^install failed: curl, egress/);
 });
 
 test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, replaces a good scan's list, keeps the last good one through a timeout, drops a scan no longer reported and forgets everything when syft is gone", () => {

@@ -678,9 +678,11 @@ aws ssm create-document --name AwsAdvisorProbe-host --document-type Command --do
 ```
 
 The `sbom` probe reads what the running container images and the host filesystem contain beyond the OS packages
-(npm, pypi, golang, java, ruby, rust, ... as package URLs) with [syft](https://github.com/anchore/syft), and only on
-the boxes where a person installed it (`curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin`);
-elsewhere it reports that syft is not available and scans nothing. It scans each image through the Docker daemon,
+(npm, pypi, golang, java, ruby, rust, ... as package URLs) with [syft](https://github.com/anchore/syft). A box without
+syft gets the pinned release installed (`PROBE_SBOM_INSTALL`, on by default: the document's `install` parameter; the
+official installer fetches it from GitHub, verifies its checksum and puts it in `/usr/local/bin`), which is the one
+write any probe makes and needs curl and egress from the box; with the setting off, or when the install fails, the box
+is reported as not available with the reason and nothing is scanned. It scans each image through the Docker daemon,
 then the filesystem with the kernel and device trees, runtime state, caches, logs, the container stores and every
 non-local mount excluded, within a 480 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 600 s),
 and trims the lists to fit SSM's 24,000-character output cap, each scan reporting its true count. What it finds is on

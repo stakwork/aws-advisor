@@ -77,7 +77,7 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
       {d.sbom?.scan && (
         <Section title={`Software bill of materials (syft) · ${d.sbom.packages.length}${d.sbom.packages.length >= 500 ? "+" : ""}`}>
           {!d.sbom.scan.available ? (
-            <div className="text-xs text-zinc-500">syft is not installed on this box (probed {when(d.sbom.scan.collected_at)}), so what its images and filesystem contain beyond the OS packages is not read. Install it there with <code className="text-zinc-400">curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin</code> and probe again.</div>
+            <div className="text-xs text-zinc-500">syft is not on this box (probed {when(d.sbom.scan.collected_at)}{d.sbom.scan.note ? `: ${d.sbom.scan.note}` : ""}), so what its images and filesystem contain beyond the OS packages is not read. The probe installs it when Settings › Probe pass › Install syft where missing is on and the box can reach GitHub; by hand: <code className="text-zinc-400">curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin</code>.</div>
           ) : (
             <>
               <ul className="mb-1 space-y-0.5 text-xs text-zinc-500">

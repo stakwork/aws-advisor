@@ -18,7 +18,9 @@ import { DEFAULT_SIGNALS_STRING } from "./signals.js";
  * `probe` ("aws-advisor/<kind>/<version>") and `kind`. The text here is the default; Settings > Probes may override a
  * script (saved as a setting), and the SSM document embeds the effective text, so an edit means redeploying that
  * kind's document (the hash in the document description says whether it is current). Scripts only read /proc, /sys,
- * df, ps, ss, the package database and the version flags of known programs; nothing is written or changed on the box.
+ * df, ps, ss, the package database and the version flags of known programs; nothing is written or changed on the box,
+ * with one exception a person switches off: the sbom probe installs the pinned syft release where it is missing
+ * (PROBE_SBOM_INSTALL, the document's `install` parameter).
  *
  * Quoting note: the setup script embeds the documents in a bash heredoc inside $( ), so single quotes must pair up
  * on every line and never sit alone in a comment.
@@ -54,7 +56,7 @@ export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
   software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, the images behind the running containers, the libraries the runtimes bundle (Node's process.versions) and the dependencies of the packages that own the probed programs: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.3", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "bundles", "depends", "hibernation"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
-  sbom: { kind: "sbom", title: "Software bill of materials (syft)", what: "the packages inside each running container image and the language packages on the host filesystem (npm, pypi, golang, java, ruby, rust, ...; the OS packages are the software probe's), as package URLs read by syft (https://github.com/anchore/syft) when it is installed on the box; without it the probe reports that it is not available and scans nothing. Install it on a box with: curl -sSfL https://get.anchore.io/syft | sudo sh -s -- -b /usr/local/bin. Images first, then the filesystem, within a 480 s budget; the lists are trimmed to fit SSM's output cap and every scan reports its true count", version: "1.0", sections: ["sbom"], timeout_seconds: 600, cron_key: "probeSbomCron", scope_key: "probeSbomScope", takes_signals: false },
+  sbom: { kind: "sbom", title: "Software bill of materials (syft)", what: "the packages inside each running container image and the language packages on the host filesystem (npm, pypi, golang, java, ruby, rust, ...; the OS packages are the software probe's), as package URLs read by syft (https://github.com/anchore/syft). A box without syft gets the pinned release installed into /usr/local/bin by the official installer (checksum verified) when the install parameter is yes (Settings > Probe pass > Install syft where missing, on by default; the one write a probe makes), and is reported as not available otherwise. Images first, then the filesystem, within a 480 s budget; the lists are trimmed to fit SSM's output cap and every scan reports its true count", version: "1.1", sections: ["sbom"], timeout_seconds: 600, cron_key: "probeSbomCron", scope_key: "probeSbomScope", takes_signals: false },
 };
 
 // ---- the scripts --------------------------------------------------------------------------------------------------------
@@ -294,14 +296,22 @@ const SBOM_BODY = [
   "# ---- reads the image layers through the Docker daemon and walks the filesystem, and is told not to check for its own updates (no network).",
   "SYFT_CHECK_FOR_APP_UPDATE=false; export SYFT_CHECK_FOR_APP_UPDATE",
   "SYFT_QUIET=true; export SYFT_QUIET",
+  "tmo() { if command -v timeout >/dev/null 2>&1; then timeout \"$@\"; else shift; \"$@\"; fi; }",
+  "start=$(date +%s); budget=480",
   "syft=\"\"; for c in $(command -v syft 2>/dev/null) /usr/local/bin/syft /usr/bin/syft /opt/syft/syft /snap/bin/syft /root/.local/bin/syft; do if [ -z \"$syft\" ] && [ -x \"$c\" ]; then syft=$c; fi; done",
+  "# syft install (sbom 1.1): a box without syft gets the pinned release when the install parameter says yes (PROBE_SBOM_INSTALL): the official",
+  "# installer fetches it from GitHub, verifies its checksum and puts it in /usr/local/bin. The one write a probe makes; it counts against the",
+  "# time budget, and a box without curl, egress to get.anchore.io and github.com, or a writable /usr/local/bin stays as it is and says so",
+  "install=__INSTALL__; SYFT_VERSION=v1.55.0; bindir=${AWS_ADVISOR_SYFT_DIR:-/usr/local/bin}; inst=\"\"",
+  "if [ -z \"$syft\" ] && [ \"$install\" = yes ]; then",
+  "  if command -v curl >/dev/null 2>&1 && curl -sSfL --max-time 60 https://get.anchore.io/syft 2>/dev/null | tmo 180 sh -s -- -b \"$bindir\" \"$SYFT_VERSION\" >/dev/null 2>&1 && [ -x \"$bindir/syft\" ]; then syft=$bindir/syft; inst=\"installed $SYFT_VERSION\"; else inst=\"install failed: curl, egress to get.anchore.io and github.com, and a writable $bindir are needed\"; fi",
+  "elif [ -z \"$syft\" ]; then inst=\"not installed; the install parameter is no\"",
+  "fi",
   "tool=\"\"; [ -n \"$syft\" ] && tool=$(\"$syft\" version 2>/dev/null </dev/null | awk '/^Version:/{print \"syft \" $2; exit}' | tr -cd '\\40-\\176' | cut -c1-40)",
   "avail=false; [ -n \"$syft\" ] && avail=true",
   "pm=\"\"; for c in dpkg-query rpm apk; do command -v \"$c\" >/dev/null 2>&1 && pm=$c; done",
-  "# a time budget in seconds: the images get two thirds of it, the filesystem what is left; the document timeout sits above the whole",
-  "start=$(date +%s); budget=480",
+  "# the time budget in seconds (start above, before the install): the images get two thirds of it, the filesystem what is left; the document timeout sits above the whole",
   "left() { l=$(( start + $1 - $(date +%s) )); if [ \"$l\" -gt 5 ]; then printf '%s' \"$l\"; else printf '5'; fi; }",
-  "tmo() { if command -v timeout >/dev/null 2>&1; then timeout \"$@\"; else shift; \"$@\"; fi; }",
   "# what the scans gather, one record per line: S<tab>source<tab>ref<tab>status<tab>total for each scan, P<tab>source<tab>ref<tab>purl for each package",
   "lines=\"\"",
   "scan() { k=$1; r=$2; secs=$3; shift 3",
@@ -326,7 +336,7 @@ const SBOM_BODY = [
   "fi",
   "# the JSON under the SSM output cap: every scan with its status and true count, the package lists trimmed to one shared budget (cap) that shrinks until the compressed line fits",
   "build() { printf '%s\\n' \"$lines\" | awk -F'\\t' -v cap=\"$1\" '$1==\"S\" { ns++; key[ns]=$2 \"\\t\" $3; src[ns]=$2; ref[ns]=$3; st[ns]=$4; tot[ns]=$5+0; next } $1==\"P\" { k=$2 \"\\t\" $3; if (used < cap) { used++; p=$4; gsub(/[\\\\\"]/, \"\", p); pl[k]=pl[k] (n[k]?\",\":\"\") \"\\\"\" p \"\\\"\"; n[k]++ } } END { for (i=1;i<=ns;i++) { r=ref[i]; gsub(/[\\\\\"]/, \"\", r); printf \"%s{\\\"source\\\":\\\"%s\\\",\\\"ref\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"total\\\":%d,\\\"purls\\\":[%s]}\", (i>1?\",\":\"\"), src[i], r, st[i], tot[i], pl[key[i]] } }'; }",
-  "mk() { printf '{\"probe\":\"aws-advisor/sbom/1\",\"kind\":\"sbom\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"sbom\":{\"available\":%s,\"tool\":%s,\"cap\":%s,\"sources\":[%s]}}' \"$hn\" \"$now\" \"$avail\" \"$(jstr \"$tool\")\" \"$1\" \"$2\"; }",
+  "mk() { printf '{\"probe\":\"aws-advisor/sbom/2\",\"kind\":\"sbom\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"sbom\":{\"available\":%s,\"tool\":%s,\"install\":%s,\"cap\":%s,\"sources\":[%s]}}' \"$hn\" \"$now\" \"$avail\" \"$(jstr \"$tool\")\" \"$(jstr \"$inst\")\" \"$1\" \"$2\"; }",
   "toobig() { if command -v gzip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then [ ${#out} -gt 16000 ] && [ \"$(printf '%s' \"$out\" | gzip -c -9 | base64 | tr -d '\\n' | wc -c | tr -d ' ')\" -gt 22000 ]; else [ ${#out} -gt 23000 ]; fi; }",
   "cap=3000; out=$(mk $cap \"$(build $cap)\")",
   "while [ $cap -gt 100 ] && toobig; do cap=$((cap * 2 / 3)); out=$(mk $cap \"$(build $cap)\"); done",
@@ -354,8 +364,10 @@ const overrideKey = (kind: ProbeKind) => `probe_script:${kind}`;
 export const probeScriptOverride = (kind: ProbeKind): string | null => getSetting(overrideKey(kind));
 /** The script in force: the override when one is saved, else the default; `__SIGNALS__` still unresolved. */
 export const probeScriptTemplate = (kind: ProbeKind): string => probeScriptOverride(kind) ?? defaultProbeScript(kind);
-/** The script as sent inline (tests, the stock-document fallback): the use-signal patterns inlined. */
-export const probeScript = (kind: ProbeKind, signals: string = config.probeSignals): string => probeScriptTemplate(kind).replace("__SIGNALS__", signals);
+/** The value the sbom document's `install` parameter gets from the setting. */
+export const probeInstallValue = (): "yes" | "no" => (config.probeSbomInstall === "off" ? "no" : "yes");
+/** The script as sent inline (tests, the stock-document fallback): the use-signal patterns and the install switch inlined. */
+export const probeScript = (kind: ProbeKind, signals: string = config.probeSignals): string => probeScriptTemplate(kind).replace("__SIGNALS__", signals).replace("__INSTALL__", probeInstallValue());
 
 /** Saves a script override after the checks a read-only probe must pass; throws with the reason otherwise. */
 export function setProbeScriptOverride(kind: ProbeKind, text: string): void {
@@ -367,6 +379,7 @@ export function setProbeScriptOverride(kind: ProbeKind, text: string): void {
   if (!t.includes('"probe":"aws-advisor/')) throw new Error('the script must print a JSON object with "probe":"aws-advisor/<kind>/<version>" on its last line');
   if (!t.includes(`"kind":"${kind}"`)) throw new Error(`the script must print "kind":"${kind}" in its JSON`);
   if (kind === "docker" && !t.includes("__SIGNALS__")) throw new Error("the docker script must keep the __SIGNALS__ placeholder for the use-signal patterns");
+  if (kind === "sbom" && !t.includes("__INSTALL__")) throw new Error("the sbom script must keep the __INSTALL__ placeholder for the install switch");
   if (t === defaultProbeScript(kind)) { resetProbeScript(kind); return; }
   setSetting(overrideKey(kind), t);
 }
@@ -389,12 +402,14 @@ export const probeDocumentDescription = (kind: ProbeKind): string => `aws-adviso
  */
 export function probeDocument(kind: ProbeKind) {
   const def = PROBE_DEFS[kind];
-  const script = probeScriptTemplate(kind).replace("__SIGNALS__", "{{ signals }}");
+  const script = probeScriptTemplate(kind).replace("__SIGNALS__", "{{ signals }}").replace("__INSTALL__", "{{ install }}");
   return {
     schemaVersion: "2.2",
     description: probeDocumentDescription(kind),
     parameters: def.takes_signals ? {
       signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: "^[^\\n]*$" }, // SSM validates with RE2, which caps a repeat count at 1000: no count here (the SendCommand parameter limit bounds the length)
+    } : kind === "sbom" ? {
+      install: { type: "String", description: "yes installs the pinned syft release into /usr/local/bin where it is missing (the one write a probe makes); no leaves such a box alone. The advisor passes PROBE_SBOM_INSTALL.", default: "yes", allowedValues: ["yes", "no"] },
     } : {},
     mainSteps: [{ action: "aws:runShellScript", name: `probe_${kind}`, inputs: { timeoutSeconds: String(def.timeout_seconds), runCommand: script.split("\n") } }],
   };

@@ -20,7 +20,7 @@ import { effectiveSignals } from "./signal_rules.js";
  * as one merged view (each section from its kind's latest row; a pre-2.0 combined probe counts for every section).
  * Tested on Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyKindOf, legacyProbeDocumentName, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyKindOf, legacyProbeDocumentName, probeInstallValue, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
 export { PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
 /** The host kind's document and info, for the places that still ask for "the" probe document. */
 export const probeDocument = (kind: ProbeKind = "host") => probeDocumentFor(kind);
@@ -74,7 +74,7 @@ export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: strin
 
 /** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
 export interface ProbeSbomSource { source: "image" | "dir"; ref: string; status: "ok" | "timeout" | "error" | "skipped"; total: number; purls: string[] }
-export interface ProbeSbom { available: boolean; tool: string | null; cap: number; sources: ProbeSbomSource[] }
+export interface ProbeSbom { available: boolean; tool: string | null; /** sbom 1.1: what the probe did about a missing syft (installed, failed and why, or left alone), null when it was there */ install: string | null; cap: number; sources: ProbeSbomSource[] }
 
 export interface ProbeResult {
   probe: string;
@@ -174,7 +174,8 @@ export function parseSbom(s: any): ProbeSbom {
   const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
     source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), status: status(x.status), total: Math.max(0, int(x.total)),
     purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 5000) as string[] }));
-  return { available: s.available === true, tool: s.tool == null || s.tool === "" ? null : String(s.tool).replace(/[^\x20-\x7e]/g, "").slice(0, 40), cap: Math.max(0, int(s.cap)), sources };
+  const note = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
+  return { available: s.available === true, tool: note(s.tool, 40), install: note(s.install, 200), cap: Math.max(0, int(s.cap)), sources };
 }
 
 /** Parses the command's stdout: tolerates noise before the JSON line and validates the shape. */
@@ -495,10 +496,12 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
     let commandId = "";
     let documentUsed = probeDocumentName(kind);
     try {
+      // what a document takes: the docker one the use-signal patterns, the sbom one the install switch; withSignals is the legacy combined document's case
+      const parametersOf = (k: ProbeKind, withSignals: boolean): Record<string, string[]> | null => (k === "sbom" ? { install: [probeInstallValue()] } : withSignals ? { signals: [config.probeSignals] } : null);
       const send = (document: string, withSignals: boolean) => client.send(new SendCommandCommand({
         DocumentName: document,
         InstanceIds: [instanceId],
-        ...(withSignals ? { Parameters: { signals: [config.probeSignals] } } : {}),
+        ...((p) => (p ? { Parameters: p } : {}))(parametersOf(kind, withSignals)),
         TimeoutSeconds: def.timeout_seconds,
         Comment: `aws-advisor probe ${kind} ${def.version}`,
       }));
@@ -620,7 +623,7 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
     let r: ReturnType<typeof recordSbom> = null;
     try { r = recordSbom(instanceId, collectedAt, data.sbom); } catch (e: any) { console.error(`[probe] sbom not recorded for ${instanceId}: ${e?.message || e}`); }
     if (r) {
-      console.log(`[probe] ${instanceId} sbom: ${r.available ? `${r.tool ?? "syft"}: ${r.packages} packages in ${r.sources} scans${r.trimmed ? ` (${r.trimmed} more did not fit the output cap)` : ""}${r.failed.length ? `, ${r.failed.length} scan(s) ${r.failed.map((f) => `${f.ref} ${f.status}`).join(", ")}` : ""}${r.added ? `, ${r.added} added` : ""}${r.removed ? `, ${r.removed} removed` : ""}` : "syft is not installed on the box, nothing scanned"}`);
+      console.log(`[probe] ${instanceId} sbom: ${r.available ? `${r.tool ?? "syft"}: ${r.packages} packages in ${r.sources} scans${r.trimmed ? ` (${r.trimmed} more did not fit the output cap)` : ""}${r.failed.length ? `, ${r.failed.length} scan(s) ${r.failed.map((f) => `${f.ref} ${f.status}`).join(", ")}` : ""}${r.added ? `, ${r.added} added` : ""}${r.removed ? `, ${r.removed} removed` : ""}` : `syft is not installed on the box, nothing scanned${r.note ? ` (${r.note})` : ""}`}${r.available && r.note ? ` (${r.note})` : ""}`);
       if (r.available) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
     }
   }
