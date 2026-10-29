@@ -9,6 +9,7 @@ import { config } from "./config.js";
 import { db } from "./db.js";
 import { ProbeError, probeInstance } from "./ssm.js";
 import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, legacyKindOf } from "./probes.js";
+import "./software_inventory.js"; // the instance_sbom_scans table the sbom retry rule reads
 import { credentialGate } from "./gate.js";
 import { pruneHistory, rollupDaily } from "./history.js";
 import { checkAllDiskLevels } from "./disk_alerts.js";
@@ -35,6 +36,9 @@ export const probeKindSettings = (kind: ProbeKind): { scope: "idle" | "all"; int
   : kind === "sbom" ? { scope: config.probeSbomScope, intervalHours: config.probeSbomIntervalHours }
   : { scope: config.probeScope, intervalHours: config.probeMinIntervalHours };
 
+/** The sbom probe retries a box where syft was not available on every pass while the install switch is on: the next run installs it (or says again why it cannot). */
+const retryUnavailableSbom = (kind: ProbeKind): 0 | 1 => (kind === "sbom" && config.probeSbomInstall !== "off" ? 1 : 0);
+
 /** The skip window in minutes: the configured hours minus a five-minute margin, so "1" means every hourly pass
  *  (the previous probe finished seconds after its cron minute and would otherwise still be inside a full hour). */
 export function probeWindowMinutes(hours: number): number { return Math.max(1, Math.round(hours * 60) - 5); }
@@ -51,7 +55,8 @@ export function probeExclusions(kind: ProbeKind = "host", window = probeWindowMi
     outside_scope: probeKindSettings(kind).scope === "all" ? 0 : n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
       and not ((i.cpu_30d is not null and i.cpu_30d < ?) or exists (select 1 from recommendations r where r.resource = i.instance_id and r.rule = 'idle_instance' and r.status in ('open', 'snoozed')))`, config.probeIdleCpu),
     probed_recently: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
-      and exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))`, kind, legacyKindOf(kind), `-${window} minutes`),
+      and exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
+      and not (? = 1 and exists (select 1 from instance_sbom_scans s where s.instance_id = i.instance_id and s.available = 0))`, kind, legacyKindOf(kind), `-${window} minutes`, retryUnavailableSbom(kind)),
   };
 }
 
@@ -74,9 +79,11 @@ export function probeTargets(kind: ProbeKind = "host", limit?: number): { instan
       -- collected_at is the probe's ISO time (2026-09-19T15:09:45Z): datetime() normalises it; a raw string compare
       -- against datetime('now') sorts every same-day probe as newer and would skip the instance for the rest of the day
       -- a pre-2.0 combined probe (kind 'all') counts for host, docker and apps, never for software
-      and not exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
+      -- a box where syft was not available is due again on every sbom pass while the install switch is on
+      and (not exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
+        or (? = 1 and exists (select 1 from instance_sbom_scans s where s.instance_id = i.instance_id and s.available = 0)))
     order by coalesce(i.cpu_30d, 100) asc, i.instance_id
-    limit ?`).all(scope, config.probeIdleCpu, kind, legacyKindOf(kind), `-${probeWindowMinutes(intervalHours)} minutes`, cap) as any[];
+    limit ?`).all(scope, config.probeIdleCpu, kind, legacyKindOf(kind), `-${probeWindowMinutes(intervalHours)} minutes`, retryUnavailableSbom(kind), cap) as any[];
 }
 
 /** One pass of one kind (host by default); a pass of a kind already running is joined, not doubled. */

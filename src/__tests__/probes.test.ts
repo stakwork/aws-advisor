@@ -164,6 +164,7 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
   for (const ex of ["./proc/**", "./sys/**", "./var/lib/docker/**", "./home/*/.cache/**"]) assert.ok(args.includes(`--exclude ${ex}`), `the filesystem scan excludes ${ex} (globbing off)`);
   assert.ok(args.includes("-o purls") && args.includes("-q"), "purls only, quiet");
+  assert.ok(args.includes(`--exclude .${path.join(bin, "syft")}`), "syft does not catalog its own Go modules");
   // no syft and the install switch off: reported, left alone
   const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__INSTALL__", "no")));
   assert.deepEqual(none.sbom, { available: false, tool: null, install: "not installed; the install parameter is no", cap: 3000, sources: [] });

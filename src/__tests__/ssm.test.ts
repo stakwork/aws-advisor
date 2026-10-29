@@ -179,6 +179,13 @@ test("probe pass: an ISO-timestamped probe from earlier today does not hide the 
   assert.ok(probeTargets("software", 1000).some((t) => t.instance_id === iid), "a combined row never counts as a software probe: the software pass is still due");
   db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, '{}', 'software')").run(iid, iso(10));
   assert.ok(!probeTargets("software", 1000).some((t) => t.instance_id === iid), "probed for software ten minutes ago: skipped");
+  // the sbom probe: a box probed ten minutes ago is skipped like the others, unless syft was not available there and the install switch is on, then it is due again
+  db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, '{}', 'sbom')").run(iid, iso(10));
+  assert.ok(!probeTargets("sbom", 1000).some((t) => t.instance_id === iid), "probed for sbom ten minutes ago: skipped");
+  db.prepare("insert or replace into instance_sbom_scans(instance_id, collected_at, available, cap, sources, packages) values (?, ?, 0, 0, 0, 0)").run(iid, iso(10));
+  assert.ok(probeTargets("sbom", 1000).some((t) => t.instance_id === iid), "syft was not available: due again so the installer runs");
+  db.prepare("update instance_sbom_scans set available = 1 where instance_id = ?").run(iid);
+  assert.ok(!probeTargets("sbom", 1000).some((t) => t.instance_id === iid), "syft there: the window applies");
   for (const t of ["inventory_ec2", "instance_metrics"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
 });
 
