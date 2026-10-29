@@ -1,4 +1,5 @@
 import { recordSbom, recordSoftware, type ProbeHibernation } from "./software_inventory.js";
+import { fetchProbeUpload, presignProbeUpload, probeUploadsConfigured, recordProbeUpload } from "./probe_uploads.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
 import { config } from "./config.js";
@@ -20,7 +21,7 @@ import { effectiveSignals } from "./signal_rules.js";
  * as one merged view (each section from its kind's latest row; a pre-2.0 combined probe counts for every section).
  * Tested on Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyKindOf, legacyProbeDocumentName, probeInstallValue, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, UPLOAD_KINDS, legacyKindOf, legacyProbeDocumentName, probeInstallValue, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
 export { PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
 /** The host kind's document and info, for the places that still ask for "the" probe document. */
 export const probeDocument = (kind: ProbeKind = "host") => probeDocumentFor(kind);
@@ -73,7 +74,7 @@ export interface ProbeProcessGroup { name: string; user: string; count: number; 
 export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: string; scope: "all" | "loopback" | "address"; process: string | null; pid: number | null; container: string | null; container_port: number | null }
 
 /** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
-export interface ProbeSbomSource { source: "image" | "dir"; ref: string; status: "ok" | "timeout" | "error" | "skipped"; total: number; purls: string[] }
+export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem) */ image_id: string | null; digest: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; purls: string[] }
 export interface ProbeSbom { available: boolean; tool: string | null; /** sbom 1.1: what the probe did about a missing syft (installed, failed and why, or left alone), null when it was there */ install: string | null; cap: number; sources: ProbeSbomSource[] }
 
 export interface ProbeResult {
@@ -117,6 +118,10 @@ export interface ProbeResult {
   depends?: { n: string; d: string }[];
   /** The sbom probe: the package URLs syft read from each running image and from the host filesystem, with every scan's status and true count. */
   sbom?: ProbeSbom;
+  /** Probe 2.1 (software, sbom): the receipt of the whole result posted to S3 (`uploaded <bytes> <sha256>`, or why not), when the advisor passed an upload URL. */
+  upload?: string | null;
+  /** False when the inline object is only a stub because the whole result would not fit SSM's output cap and went to S3. */
+  inline?: false;
 }
 
 /** Compact view of a probe used by the idle-instance rule and the UI. */
@@ -168,13 +173,13 @@ function parseHibernation(h: any): ProbeHibernation {
   };
 }
 
-/** The sbom section, typed: at most 60 scans of 5,000 purls each, a purl being a printable `pkg:<type>/...` string of up to 300 characters. */
+/** The sbom section, typed: at most 60 scans of 50,000 purls each (an S3 object carries whole lists; an inline one is trimmed by the script), a purl being a printable `pkg:<type>/...` string of up to 300 characters. */
 export function parseSbom(s: any): ProbeSbom {
   const status = (v: unknown): ProbeSbomSource["status"] => (v === "timeout" || v === "error" || v === "skipped" ? v : "ok");
-  const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
-    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), status: status(x.status), total: Math.max(0, int(x.total)),
-    purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 5000) as string[] }));
   const note = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
+  const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
+    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, status: status(x.status), total: Math.max(0, int(x.total)),
+    purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 50000) as string[] }));
   return { available: s.available === true, tool: note(s.tool, 40), install: note(s.install, 200), cap: Math.max(0, int(s.cap)), sources };
 }
 
@@ -242,6 +247,8 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
     hibernation: raw.hibernation && typeof raw.hibernation === "object" ? parseHibernation(raw.hibernation) : undefined,
     sbom: raw.sbom && typeof raw.sbom === "object" ? parseSbom(raw.sbom) : undefined,
+    upload: raw.upload == null ? undefined : String(raw.upload).replace(/[^\x20-\x7e]/g, "").slice(0, 200),
+    inline: raw.inline === false ? false : undefined,
     bundles: Array.isArray(raw.bundles) ? raw.bundles.filter((b: any) => b && typeof b.name === "string" && b.name && b.versions && typeof b.versions === "object").slice(0, 20).map((b: any) => ({
       name: String(b.name).slice(0, 64), path: b.path == null || b.path === "" ? null : String(b.path).slice(0, 200),
       versions: Object.fromEntries(Object.entries(b.versions as Record<string, unknown>).filter(([k, v]) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(k)).slice(0, 80).map(([k, v]) => [k, String(v).slice(0, 80)])) })) : undefined,
@@ -492,16 +499,29 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
   const client = new SSMClient({ region: m.region || creds.region, credentials: creds.provider });
   const def = PROBE_DEFS[kind];
   const timeoutMs = opts.timeoutMs ?? Math.max(90_000, def.timeout_seconds * 1000 + 30_000);
+  // the whole result to S3 when a bucket is configured (src/probe_uploads.ts): a presigned PUT URL the script posts to, so the inline cap trims nothing
+  let upload: { key: string; url: string } | null = null;
+  if (UPLOAD_KINDS.includes(kind) && probeUploadsConfigured()) {
+    try { upload = await presignProbeUpload({ accountId: creds.account_id, instanceId, kind, expiresInSeconds: def.timeout_seconds + 900 }); }
+    catch (e: any) { console.warn(`[probe] ${instanceId} ${kind}: no upload URL (${String(e?.message || e).slice(0, 160)}); the inline answer alone`); }
+  }
   try {
     let commandId = "";
     let documentUsed = probeDocumentName(kind);
     try {
-      // what a document takes: the docker one the use-signal patterns, the sbom one the install switch; withSignals is the legacy combined document's case
-      const parametersOf = (k: ProbeKind, withSignals: boolean): Record<string, string[]> | null => (k === "sbom" ? { install: [probeInstallValue()] } : withSignals ? { signals: [config.probeSignals] } : null);
-      const send = (document: string, withSignals: boolean) => client.send(new SendCommandCommand({
+      // what a document takes: the docker one the use-signal patterns, the sbom one the install switch, the software and sbom ones the upload URL;
+      // withSignals is the legacy combined document's case
+      const parametersOf = (k: ProbeKind, withSignals: boolean, withUpload: boolean): Record<string, string[]> | null => {
+        const p: Record<string, string[]> = {};
+        if (k === "sbom") p.install = [probeInstallValue()];
+        if (withUpload && upload) p.upload = [upload.url];
+        if (withSignals && k !== "sbom") p.signals = [config.probeSignals];
+        return Object.keys(p).length ? p : null;
+      };
+      const send = (document: string, withSignals: boolean, withUpload = true) => client.send(new SendCommandCommand({
         DocumentName: document,
         InstanceIds: [instanceId],
-        ...((p) => (p ? { Parameters: p } : {}))(parametersOf(kind, withSignals)),
+        ...((p) => (p ? { Parameters: p } : {}))(parametersOf(kind, withSignals, withUpload)),
         TimeoutSeconds: def.timeout_seconds,
         Comment: `aws-advisor probe ${kind} ${def.version}`,
       }));
@@ -509,8 +529,11 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
       try { sent = await send(documentUsed, def.takes_signals); }
       catch (e: any) {
         const name = String(e?.name || e?.Code || "");
-        // the per-kind document is not deployed yet: the combined pre-2.0 document covers host, docker and apps
-        if (/InvalidDocument\b/i.test(name) && legacyKindOf(kind) === "all" && legacyProbeDocumentName() !== documentUsed) {
+        // the deployed document predates the upload parameter: the result stays inline until it is redeployed
+        if (/InvalidParameters/i.test(`${name} ${e?.message}`) && upload) {
+          if (!warnedNoUploadParameter.has(kind)) { warnedNoUploadParameter.add(kind); console.warn(`[probe] SSM document ${documentUsed} takes no upload parameter: the ${kind} result stays inline (under SSM's output cap) until the document is redeployed from Settings > Probes`); }
+          upload = null; sent = await send(documentUsed, def.takes_signals, false);
+        } else if (/InvalidDocument\b/i.test(name) && legacyKindOf(kind) === "all" && legacyProbeDocumentName() !== documentUsed) {
           if (!warnedLegacyDocument.has(kind)) { warnedLegacyDocument.add(kind); console.warn(`[probe] SSM document ${documentUsed} does not exist; probing ${kind} through the pre-2.0 combined document ${legacyProbeDocumentName()} until it is created (Settings > Probes)`); }
           documentUsed = legacyProbeDocumentName();
           try { sent = await send(documentUsed, true); }
@@ -563,16 +586,37 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
       const detail = [`${stdout.length} chars of stdout${truncated ? ` (SSM caps the command output at ${SSM_OUTPUT_CAP} characters, the probe's JSON line was cut off)` : ""}`, tail ? `tail: ${tail}` : "", stderr.trim() ? `stderr: ${stderr.trim().slice(0, 300)}` : ""].filter(Boolean).join("; ");
       throw new ProbeError("bad_output", `${e.message}: ${detail}`);
     }
-    const stored = (data.kind ?? "all") as ProbeKind | "all";
-    const collectedAt = data.collected_at;
-    const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(data), stored).lastInsertRowid);
-    runProbeHooks(instanceId, id, collectedAt, data, kindsOfRow(stored));
-    return { id, instance_id: instanceId, collected_at: collectedAt, data, kind: stored };
+    // the whole result from S3 when the script posted it there; the inline object (trimmed, or a stub) is what fit in 24,000 characters
+    const inline = data;
+    if (upload && typeof data.upload === "string" && data.upload.startsWith("uploaded ")) {
+      try {
+        const full = parseProbeOutput(await fetchProbeUpload(upload.key, data.upload));
+        if (full.kind !== data.kind) throw new Error(`the object is a ${full.kind} probe, not ${data.kind}`);
+        full.upload = data.upload; data = full;
+        recordProbeUpload({ key: upload.key, instanceId, accountId: creds.account_id, kind, receipt: inline.upload, collectedAt: data.collected_at });
+      } catch (e: any) {
+        const msg = String(e?.message || e).slice(0, 200);
+        if (inline.inline === false) throw new ProbeError("failed", `the result went to S3 (${inline.upload}) but could not be read back: ${msg}; the inline answer is only a stub`);
+        console.error(`[probe] ${instanceId} ${kind}: the S3 object could not be read (${msg}); the inline answer is used${kind === "sbom" ? " (trimmed to the output cap)" : ""}`);
+      }
+    } else if (data.inline === false) throw new ProbeError("failed", `the box answered with a stub (${data.upload ?? "no receipt"}) and no upload was arranged for this run`);
+    // an sbom row in instance_metrics keeps the scans without their package lists (the tables hold those): one row per box per day must stay small
+    return applyProbeResult(instanceId, data, kind === "sbom" ? { ...data, sbom: data.sbom ? { ...data.sbom, sources: data.sbom.sources.map((x) => ({ ...x, purls: [] })) } : data.sbom } : data);
   } finally {
     client.destroy();
   }
 }
 const warnedLegacyDocument = new Set<ProbeKind>();
+const warnedNoUploadParameter = new Set<ProbeKind>();
+
+/** A parsed probe result stored (as `storeAs`, which is `data` unless a lighter form is wanted) and fed to the hooks of its kind: the probe flow and the S3 replay both end here. */
+export function applyProbeResult(instanceId: string, data: ProbeResult, storeAs: ProbeResult = data): StoredProbe {
+  const stored = (data.kind ?? "all") as ProbeKind | "all";
+  const collectedAt = data.collected_at;
+  const id = Number(db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, ?, ?)").run(instanceId, collectedAt, JSON.stringify(storeAs), stored).lastInsertRowid);
+  runProbeHooks(instanceId, id, collectedAt, data, kindsOfRow(stored));
+  return { id, instance_id: instanceId, collected_at: collectedAt, data, kind: stored };
+}
 
 /** What each kind feeds once its row is stored; a combined row runs every hook. Failures are logged, never thrown. */
 function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, data: ProbeResult, kinds: readonly ProbeKind[]): void {

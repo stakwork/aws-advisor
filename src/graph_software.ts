@@ -9,19 +9,21 @@ import { parsePurl } from "./software_inventory.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
- * installed on each box (src/software_inventory.ts) as AdvisorPackage nodes shared across the fleet, one per
+ * installed on each box (src/software_inventory.ts) as SoftwareComponent nodes shared across the fleet, one per
  * (ecosystem, name, version), INSTALLED_ON the operating system (AdvisorCompute) the box HOSTS, which also takes the
  * distribution, version and kernel; the OS and the kernel as packages of their
  * own ecosystems; the versions read from well-known binaries as packages of the `binary` ecosystem; the container
  * images the box runs (RUNS_IMAGE → AdvisorImage, the same nodes cluster workloads are BUILT_FROM), what syft read
- * inside each image (the sbom probe: CONTAINS from the image to AdvisorPackage nodes of the purl's own ecosystem, npm,
+ * inside each image (the sbom probe: CONTAINS from the image to SoftwareComponent nodes of the purl's own ecosystem, npm,
  * pypi, deb of the image's distribution, ...) and on the filesystem (INSTALLED_ON like any package); PROVIDES edges
  * from a package to the program (AdvisorApp) it ships, so "which package is this listening process from" is one hop.
  *
- * Every package carries the identity the public vulnerability graph is walked with (src/sec/identity.ts): `purl` (the
- * component, no version), `source_purl` (the source package a distribution's advisories name) and `sort_key` (the
- * version as a sortable string). Containment is edges between package nodes, the same two whatever the mechanism:
- * BUNDLES (a runtime to the libraries compiled into it, from Node's process.versions; the library is an AdvisorPackage
+ * The label is the public vulnerability graph's: a SoftwareComponent there is keyed by `product_key` (scheme-specific;
+ * for the purl scheme the purl without version), and every node here carries that key (`product_key` = `purl`, `scheme`
+ * = purl, `package` = the name) next to its own identity (src/sec/identity.ts): `purl`, `source_purl` (the source
+ * package a distribution's advisories name), `sort_key` (the version as a sortable string) and `version_purl`. One node
+ * here is one installed version, so several share a product_key; the match reads (product_key, sort_key). Containment is edges between package nodes, the same two whatever the mechanism:
+ * BUNDLES (a runtime to the libraries compiled into it, from Node's process.versions; the library is an SoftwareComponent
  * of ecosystem `bundled`) and DEPENDS_ON (a package to the installed packages its dpkg Depends names). A CVE in brotli
  * then reaches a box as (compute)<-[:INSTALLED_ON]-(node)-[:BUNDLES]->(brotli), with no lookup. The match itself is a
  * strut workflow against the public graph; nothing here decides vulnerability from these.
@@ -31,14 +33,14 @@ import { parsePurl } from "./software_inventory.js";
  * and its KnVulnerability, AFFECTS and VULNERABLE_TO writes were removed on 2026-10-29. Rebuilt per box after its probes.
  */
 
-export const SOFTWARE_LABELS = ["AdvisorPackage", "AdvisorImage"] as const;
+export const SOFTWARE_LABELS = ["SoftwareComponent", "AdvisorImage"] as const;
 
 const PACKAGE_CYPHER = `
 UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
-MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, native_type: 'package', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
 SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen: row.last_seen, gone: row.gone, updated_at: $now}`;
 
@@ -56,15 +58,15 @@ SET r += {image_id: row.image_id, first_seen: row.first_seen, last_seen: row.las
 const CONTAINS_CYPHER = `
 UNWIND $rows AS row
 MERGE (i:AdvisorResource {id: row.image_id}) ON CREATE SET i.first_seen = $now, i.name = row.image, i.kind = 'container', i.repository = row.repository, i.tag = row.tag, i.native_type = 'container_image', i.native_id = row.image, i.provider = $provider, i.account_id = coalesce(row.account_id, $account)
-SET i:AdvisorImage
-MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, native_type: 'package', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+SET i:AdvisorImage, i.digest = coalesce(row.digest, i.digest), i.image_id = coalesce(row.docker_image_id, i.image_id)
+MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (i)-[r:CONTAINS]->(p)
 SET r += {first_seen: row.first_seen, last_seen: row.last_seen, updated_at: $now}`;
 
 const PRUNE_CONTAINS_CYPHER = `
 UNWIND $rows AS row
-MATCH (i:AdvisorImage {id: row.image_id})-[r:CONTAINS]->(p:AdvisorPackage)
+MATCH (i:AdvisorImage {id: row.image_id})-[r:CONTAINS]->(p:SoftwareComponent)
 WHERE NOT p.id IN row.keep
 DELETE r`;
 
@@ -79,7 +81,7 @@ SET c += {os: row.os, os_id: row.os_id, os_version: row.os_version, kernel: row.
  *  per version, so an upgrade adds an edge and only this takes the superseded one away. */
 const PRUNE_PACKAGES_CYPHER = `
 UNWIND $rows AS row
-MATCH (p:AdvisorPackage)-[r:INSTALLED_ON]->(c:AdvisorCompute {id: 'compute:' + row.instance_id})
+MATCH (p:SoftwareComponent)-[r:INSTALLED_ON]->(c:AdvisorCompute {id: 'compute:' + row.instance_id})
 WHERE NOT p.id IN row.keep
 DELETE r`;
 
@@ -93,17 +95,17 @@ DELETE r`;
  *  shared version nodes, so "node 22.12.0 bundles brotli 1.1.0" is one fact however many boxes have it. */
 const BUNDLES_CYPHER = `
 UNWIND $rows AS row
-MATCH (a:AdvisorPackage {id: row.parent_id}) MATCH (b:AdvisorPackage {id: row.child_id})
+MATCH (a:SoftwareComponent {id: row.parent_id}) MATCH (b:SoftwareComponent {id: row.child_id})
 MERGE (a)-[r:BUNDLES]->(b) SET r += {source_kind: 'process_versions', updated_at: $now}`;
 
 const DEPENDS_ON_CYPHER = `
 UNWIND $rows AS row
-MATCH (a:AdvisorPackage {id: row.from_id}) MATCH (b:AdvisorPackage {id: row.to_id})
+MATCH (a:SoftwareComponent {id: row.from_id}) MATCH (b:SoftwareComponent {id: row.to_id})
 MERGE (a)-[r:DEPENDS_ON]->(b) SET r += {source_kind: row.source_kind, updated_at: $now}`;
 
 const PROVIDES_CYPHER = `
 UNWIND $rows AS row
-MATCH (p:AdvisorPackage {id: row.package_id}) MATCH (a:AdvisorApp {id: row.app})
+MATCH (p:SoftwareComponent {id: row.package_id}) MATCH (a:AdvisorApp {id: row.app})
 MERGE (p)-[r:PROVIDES]->(a) SET r.updated_at = $now`;
 
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
@@ -111,7 +113,17 @@ const rows = (sql: string, ...params: unknown[]): any[] => { try { return db.pre
 const SOURCE_KIND: Record<string, string> = { deb: "dpkg", rpm: "rpm", apk: "apk", bundled: "process_versions" };
 export const packageId = (ecosystem: string, name: string, version: string) => `pkg:${ecosystem}:${name}:${version}`;
 
-/** An image reference's node id, repository and tag (latest when none is named; none when pinned by digest). */
+/** The node id of an image: its content when known (the repository at its registry digest, else the local image id for a build that never
+ *  left the box), the bare reference otherwise. A tag such as latest moves; two boxes on different builds of it are two nodes, and a box that
+ *  pulls the new build moves to a new node while the old one is pruned once nobody runs it. Pure. */
+export function imageNodeId(ref: string, digest?: string | null, imageId?: string | null): string {
+  const d = digest ? String(digest).split("@").pop()! : "";
+  if (/^sha256:[0-9a-f]{64}$/.test(d)) return `image:${imageRef(ref).repository}@${d}`;
+  if (imageId && /^sha256:[0-9a-f]{12,64}$/.test(imageId)) return `image:${imageId}`;
+  return `image:${ref}`;
+}
+
+/** An image reference's node id (by name alone; imageNodeId prefers the content), repository and tag (latest when none is named; none when pinned by digest). */
 export function imageRef(image: string): { id: string; repository: string; tag: string | null } {
   const noDigest = image.split("@")[0]; const idx = noDigest.lastIndexOf(":"); const hasTag = idx > noDigest.lastIndexOf("/");
   return { id: `image:${image}`, repository: hasTag ? noDigest.slice(0, idx) : noDigest, tag: image.includes("@") ? null : hasTag ? noDigest.slice(idx + 1) : "latest" };
@@ -121,7 +133,7 @@ export function imageRef(image: string): { id: string; repository: string; tag: 
  *  an image is CONTAINS from the image node (CONTAINS_CYPHER). The purl\'s own type is the ecosystem; a distro purl carries the image\'s
  *  distribution (distro qualifier, else the namespace) and source package (upstream), so its identity and advisory ecosystem are that
  *  distribution\'s, not the host\'s. The package id is the package\'s; the image id travels as image_id. Pure; null for a purl that does not parse. */
-export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string }): { edge: "installed_on" | "contains"; row: Record<string, unknown> } | null {
+export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string; digest?: string | null; image_id?: string | null }): { edge: "installed_on" | "contains"; row: Record<string, unknown> } | null {
   const p = parsePurl(String(r.purl)); if (!p) return null;
   const version = String(r.version || p.version || "unknown");
   const upstream = p.qualifiers.upstream ? p.qualifiers.upstream.split("@")[0] || null : null;
@@ -132,7 +144,7 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
     ...componentIdentity({ ecosystem: p.type, name: String(r.name), version, source: upstream, os_id: distroId }) };
   if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen, gone: false } };
   const im = imageRef(String(r.ref));
-  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: im.id, image: String(r.ref), repository: im.repository, tag: im.tag, first_seen: r.first_seen, last_seen: r.last_seen } };
+  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };
 }
 
 export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; provides: number; bundles: number; depends: number; took_ms: number }
@@ -171,7 +183,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // The purl's own type is the ecosystem (npm, pypi, golang, deb, ...); a distro purl carries the image's distribution (namespace, distro qualifier)
   // and its source package (upstream), so its identity and advisory ecosystem are those of that distribution, not the host's
   const containsRows: any[] = [];
-  for (const r of rows(`select instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen from instance_sbom where 1=1${where}`, ...args)) {
+  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.first_seen, p.last_seen, s.digest, s.image_id from instance_sbom p left join instance_sbom_sources s on s.instance_id = p.instance_id and s.source = p.source and s.ref = p.ref where 1=1${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
     const g = sbomGraphRow(r); if (!g) continue;
     (g.edge === "installed_on" ? pkgRows : containsRows).push(g.row);
   }
@@ -182,7 +194,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // the container images the box runs
   const imgRows = rows(`select instance_id, image, image_id, digest, created, platform, first_seen, last_seen, gone from instance_images where 1=1${where}`, ...args).map((i) => {
     const image = String(i.image);
-    return { instance_id: i.instance_id, ...imageRef(image), image, digest: i.digest ?? null, created: i.created ?? null, platform: i.platform ?? null, image_id: i.image_id ?? null, first_seen: i.first_seen, last_seen: i.last_seen, gone: Boolean(i.gone) };
+    return { instance_id: i.instance_id, ...imageRef(image), id: imageNodeId(image, i.digest, i.image_id), image, digest: i.digest ?? null, created: i.created ?? null, platform: i.platform ?? null, image_id: i.image_id ?? null, first_seen: i.first_seen, last_seen: i.last_seen, gone: Boolean(i.gone) };
   });
   for (const b of chunks(imgRows)) await w(IMAGE_CYPHER, b);
   // only the boxes the software probe has read (an instance_os row): what they no longer have loses its edge
@@ -214,8 +226,15 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of chunks(keepOf(imgRows), 50)) await w(PRUNE_IMAGES_CYPHER, b);
   // what each image contains; an edge the scans no longer support goes (the keep list is every box's reading of that image, so one trimmed list does not drop what another box still lists)
   for (const b of chunks(containsRows)) await w(CONTAINS_CYPHER, b);
-  const imagesScanned = [...new Set(rows(`select ref from instance_sbom_sources where source = 'image' and status = 'ok' and instance_id in (select instance_id from instance_sbom_scans where 1=1${where})`, ...args).map((r) => String(r.ref)))];
-  const keepContains = imagesScanned.map((ref) => ({ image_id: imageRef(ref).id, keep: rows("select purl, name, version from instance_sbom where source = 'image' and ref = ?", ref).map((r) => { const p = parsePurl(String(r.purl)); return p ? packageId(p.type, String(r.name), String(r.version || p.version || "unknown")) : null; }).filter(Boolean) }));
+  const keepBy = new Map<string, Set<string>>();
+  for (const r of rows("select p.ref, p.purl, p.name, p.version, s.digest, s.image_id from instance_sbom p join instance_sbom_sources s on s.instance_id = p.instance_id and s.source = p.source and s.ref = p.ref where p.source = 'image' and s.status = 'ok'")) {
+    const p = parsePurl(String(r.purl)); if (!p) continue;
+    const nid = imageNodeId(String(r.ref), r.digest, r.image_id);
+    if (!keepBy.has(nid)) keepBy.set(nid, new Set());
+    keepBy.get(nid)!.add(packageId(p.type, String(r.name), String(r.version || p.version || "unknown")));
+  }
+  const inScope = new Set(containsRows.map((r) => String(r.image_id)));
+  const keepContains = [...keepBy].filter(([nid]) => inScope.has(nid)).map(([image_id, keep]) => ({ image_id, keep: [...keep] }));
   for (const b of chunks(keepContains, 50)) await w(PRUNE_CONTAINS_CYPHER, b);
 
   // the program a package ships, where that program is seen running (AdvisorApp nodes are keyed by name)
@@ -226,7 +245,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of chunks(provRows)) await w(PROVIDES_CYPHER, b);
 
   // packages nobody has any more
-  await writeCypher("MATCH (p:AdvisorPackage) WHERE NOT (p)--() DELETE p");
+  await writeCypher("MATCH (p:SoftwareComponent) WHERE NOT (p)--() DELETE p");
   return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, took_ms: Date.now() - t0 };
 }
 

@@ -336,8 +336,11 @@ test("parseProbeOutput keeps a package's source (s) from probe software/2 and le
 });
 
 test("parseProbeOutput types the sbom section: the scans with their status and counts, purls that look like purls, anything else dropped", () => {
-  const p = parseProbeOutput('{"probe":"aws-advisor/sbom/1","kind":"sbom","hostname":"h","collected_at":"2026-10-29T10:00:00Z","sbom":{"available":true,"tool":"syft 1.55.0","install":"installed v1.55.0","cap":3000,"sources":[{"source":"image","ref":"nginx:1.27","status":"ok","total":2,"purls":["pkg:deb/debian/nginx@1.27.0-1","not a purl",7]},{"source":"dir","ref":"/","status":"timeout","total":0,"purls":[]},{"source":"other","ref":"x"}]}}');
+  const p = parseProbeOutput('{"probe":"aws-advisor/sbom/1","kind":"sbom","hostname":"h","collected_at":"2026-10-29T10:00:00Z","sbom":{"available":true,"tool":"syft 1.55.0","install":"installed v1.55.0","cap":3000,"sources":[{"source":"image","ref":"nginx:1.27","image_id":"sha256:ab","digest":"sha256:cd","status":"ok","total":2,"purls":["pkg:deb/debian/nginx@1.27.0-1","not a purl",7]},{"source":"dir","ref":"/","image_id":"x","status":"timeout","total":0,"purls":[]},{"source":"other","ref":"x"}]},"upload":"uploaded 1234 ab"}');
   assert.equal(p.kind, "sbom");
-  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", install: "installed v1.55.0", cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", status: "ok", total: 2, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", status: "timeout", total: 0, purls: [] }] });
+  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", install: "installed v1.55.0", cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", image_id: "sha256:ab", digest: "sha256:cd", status: "ok", total: 2, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", image_id: null, digest: null, status: "timeout", total: 0, purls: [] }] });
+  assert.equal(p.upload, "uploaded 1234 ab"); assert.equal(p.inline, undefined);
+  const stub = parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","inline":false,"upload":"uploaded 99 ff"}');
+  assert.equal(stub.inline, false); assert.equal(stub.upload, "uploaded 99 ff"); assert.equal(stub.packages, undefined);
   assert.equal(parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","packages":[]}').sbom, undefined, "another kind carries no sbom section");
 });

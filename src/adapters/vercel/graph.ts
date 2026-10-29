@@ -7,7 +7,7 @@ import { VERCEL, projectEndpoints, runtimeBoxId, storeEndpoints, vercelAdapter }
  * The Vercel adapter's graph layer, on top of the AdvisorDeployment nodes the mirror core writes from
  * `vercelAdapter.resources()`: one AdvisorEndpoint per URL the project serves (production URL, domains, latest
  * deployment URL), EXPOSED by the project and REACHABLE_FROM the internet, the verdict carrying `requires_auth` and
- * the protection that enforces it; the Node runtime as an AdvisorPackage INSTALLED_ON the project; every project
+ * the protection that enforces it; the Node runtime as an SoftwareComponent INSTALLED_ON the project; every project
  * RUNS_ON the team's opaque runtime (an AdvisorBox and its AdvisorCompute: Vercel never shows the machines). The same shapes
  * as the AWS layers, so "which deployments can the internet open without logging in" is one query across providers.
  */
@@ -41,8 +41,8 @@ SET e.gone = true, e.updated_at = $now`;
 const RUNTIME_CYPHER = `
 UNWIND $rows AS row
 MATCH (d:AdvisorResource {id: row.project_id})
-MERGE (p:AdvisorPackage {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: 'runtime', source_name: row.name, source_kind: 'deployment_metadata', advisory_ecosystem: null, scope: 'service', purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, native_type: 'package', provider: $provider, account_id: $account, updated_at: $now}
+MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
+SET p += {name: row.name, version: row.version, ecosystem: 'runtime', source_name: row.name, source_kind: 'deployment_metadata', advisory_ecosystem: null, scope: 'service', purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', provider: $provider, account_id: $account, updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(d) SET r += {first_seen: coalesce(r.first_seen, $now), last_seen: $now, gone: false, updated_at: $now}`;
 
 const USES_CYPHER = `

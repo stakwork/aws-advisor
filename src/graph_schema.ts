@@ -63,7 +63,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorEndpoint: "Something listening: a port on a box, a balancer listener, a database endpoint, a function URL, a cluster API",
   AdvisorPressureEvent: "A capacity pressure event on a pool and the action that answered it",
   AdvisorSecurityScan: "A security scan run (compliance benchmark)",
-  AdvisorPackage: "An installed software package seen on a box",
+  SoftwareComponent: "A versioned piece of software seen installed: on a box, inside a container image, bundled in a runtime. The public vulnerability graph's label and key (product_key: the purl without version), one node per version here",
   AdvisorImage: "A container image and the repository and revision it is built from",
   AdvisorContainer: "A Docker container on a box, kept by name",
   AdvisorNotification: "A notification the provider sent the account (AWS User Notifications)",

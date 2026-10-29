@@ -20,14 +20,16 @@ test("every probe kind has a document of its own that passes sh -n, embeds its h
     assert.equal(doc.mainSteps[0].name, `probe_${kind}`);
     assert.equal(doc.mainSteps[0].inputs.timeoutSeconds, String(pr.PROBE_DEFS[kind].timeout_seconds));
     const script = doc.mainSteps[0].inputs.runCommand.join("\n");
-    const r = spawnSync("sh", ["-n"], { input: script.replace("{{ signals }}", "x=y").replace("{{ install }}", "yes"), encoding: "utf8" });
+    const r = spawnSync("sh", ["-n"], { input: script.replace("{{ signals }}", "x=y").replace("{{ install }}", "yes").replace("{{ upload }}", ""), encoding: "utf8" });
     assert.equal(r.status, 0, `${kind}: ${r.stderr}`);
     assert.equal(pr.probeDocumentName(kind), `AwsAdvisorProbe-${kind}`);
     assert.ok(pr.probeDocumentInfo(kind).create_command.includes(`/api/probes/${kind}/document`));
   }
   assert.ok(Object.keys((pr.probeDocument("docker") as any).parameters).includes("signals"));
-  assert.deepEqual((pr.probeDocument("software") as any).parameters, {});
-  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install"]);
+  assert.deepEqual((pr.probeDocument("host") as any).parameters, {});
+  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "upload"]);
+  assert.deepEqual(Object.keys((pr.probeDocument("software") as any).parameters), ["upload"]);
+  for (const k of ["software", "sbom"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload={{ upload }}")), `${k}: the upload URL is a document parameter`);
   assert.ok((pr.probeDocument("sbom") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("install={{ install }}")), "the install switch is a document parameter");
   // SSM compiles allowedPattern with RE2, which rejects a repeat count above 1000 (CreateDocument: "invalid repeat count")
   for (const kind of pr.PROBE_KINDS) for (const p of Object.values((pr.probeDocument(kind) as any).parameters) as any[]) {
@@ -144,7 +146,7 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const log = path.join(dir, "args.log");
   const w = (where: string, name: string, body: string) => fs.writeFileSync(path.join(where, name), body, { mode: 0o755 });
   for (const where of [bin, bare]) {
-    w(where, "docker", "#!/bin/sh\ncase \"$1\" in info) exit 0;; ps) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\n';; *) exit 1;; esac\n");
+    w(where, "docker", "#!/bin/sh\ncase \"$1 $2 $5\" in info*) exit 0;; ps*) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\n';; 'image inspect nginx:1.27') printf 'sha256:bbbb|nginx@sha256:cccc\\n';; 'image inspect app:latest') printf 'sha256:aaaa|\\n';; *) exit 1;; esac\n");
     w(where, "dpkg-query", "#!/bin/sh\nexit 0\n");
     w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n"); // macOS has none; the script falls back to no bound either way
   }
@@ -154,11 +156,12 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const line = run(`${bin}:/usr/bin:/bin`);
   assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
   const j = parseProbeOutput(line);
-  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/2"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
+  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/3"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
   assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
-  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", status: "ok", total: 3, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept");
-  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", status: "timeout", total: 0, purls: [] });
+  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, status: "ok", total: 3, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept; a local build has an id and no digest");
+  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", status: "timeout", total: 0, purls: [] }, "a pulled image carries its registry digest");
+  assert.equal(by["dir /"]!.image_id, null); assert.equal(j.upload, undefined, "no upload URL: no receipt");
   assert.equal(by["dir /"]!.status, "ok"); assert.equal(by["dir /"]!.total, 6000, "the OS package is left to the software probe; the true count is reported");
   assert.ok(by["dir /"]!.purls.length < 6000 && by["dir /"]!.purls.length >= 100 && by["dir /"]!.purls.every((p) => p.startsWith("pkg:pypi/")), `trimmed to the budget (${by["dir /"]!.purls.length}, cap ${j.sbom!.cap})`);
   const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
@@ -178,6 +181,39 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   w(bare, "curl", "#!/bin/sh\nexit 6\n");
   const failed = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.probeScript("sbom"), { AWS_ADVISOR_SYFT_DIR: path.join(dir, "nowhere") }));
   assert.equal(failed.sbom?.available, false); assert.match(failed.sbom?.install ?? "", /^install failed: curl, egress/);
+  // an upload URL (probe 2.1): the whole, untrimmed result is posted gzip-compressed with curl; the inline line carries the receipt and stays trimmed
+  const capture = path.join(dir, "uploaded.json.gz");
+  w(bin, "curl", `#!/bin/sh\ncase "$*" in *" -X PUT "*) for a in "$@"; do case "$a" in @*) cp "\${a#@}" "$UPLOAD_CAPTURE";; esac; done; exit 0;; *) exit 22;; esac\n`);
+  const withUrl = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__UPLOAD__", "https://bucket.s3.amazonaws.com/k?X-Amz-Signature=1"), { UPLOAD_CAPTURE: capture }));
+  assert.match(withUrl.upload ?? "", /^uploaded \d+ [0-9a-f]{64}$/, "the receipt: bytes and sha256");
+  assert.ok(withUrl.sbom!.sources.find((s) => s.ref === "/")!.purls.length < 6000, "the inline list is still trimmed");
+  const { gunzipSync } = await import("node:zlib"); const { createHash } = await import("node:crypto");
+  const blob = fs.readFileSync(capture);
+  assert.equal(`uploaded ${blob.length} ${createHash("sha256").update(blob).digest("hex")}`, withUrl.upload, "the receipt describes the object");
+  const whole = parseProbeOutput(gunzipSync(blob).toString("utf8"));
+  assert.equal(whole.sbom!.cap, 0); assert.equal(whole.sbom!.sources.find((s) => s.ref === "/")!.purls.length, 6000, "the object holds everything");
+  assert.equal(whole.sbom!.sources.find((s) => s.ref === "nginx:1.27")!.digest, "sha256:cccc");
+  assert.equal(whole.upload, undefined, "the object was written before the receipt existed");
+});
+
+test("the software script with an upload URL: a result that fits goes inline with the receipt; one the cap would cut becomes a stub, the whole in S3", async () => {
+  const { parseProbeOutput } = await import("../ssm.js");
+  const { gunzipSync } = await import("node:zlib");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-upload-")); const bin = path.join(dir, "bin"); fs.mkdirSync(bin);
+  const capture = path.join(dir, "uploaded.json.gz");
+  const w = (name: string, body: string) => fs.writeFileSync(path.join(bin, name), body, { mode: 0o755 });
+  w("curl", `#!/bin/sh\ncase "$*" in *" -X PUT "*) for a in "$@"; do case "$a" in @*) cp "\${a#@}" "$UPLOAD_CAPTURE";; esac; done; exit 0;; *) exit 22;; esac\n`);
+  // dpkg-query lists N packages: 3 fits inline; 2000 does not
+  const dpkg = (n: number) => `#!/bin/sh\ncase "$*" in *Depends*) exit 1;; *) i=0; while [ $i -lt ${n} ]; do printf 'ii\\tpackage-%s\\t1.0.%s-1ubuntu1\\tamd64\\tsource-%s\\n' $i $i $i; i=$((i+1)); done;; esac\n`;
+  const run = () => { const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software").replace("__UPLOAD__", "https://bucket.s3.amazonaws.com/k?sig=1"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, UPLOAD_CAPTURE: capture } }); assert.equal(r.status, 0, r.stderr); return parseProbeOutput(r.stdout.trim().split("\n").pop() || ""); };
+  w("dpkg-query", dpkg(3));
+  const small = run();
+  assert.equal(small.kind, "software"); assert.equal(small.packages?.length, 3, "inline, whole"); assert.match(small.upload ?? "", /^uploaded \d+ /); assert.equal(small.inline, undefined);
+  w("dpkg-query", dpkg(2000));
+  const big = run();
+  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/5");
+  const whole = parseProbeOutput(gunzipSync(fs.readFileSync(capture)).toString("utf8"));
+  assert.equal(whole.packages?.length, 2000, "the object holds every package"); assert.equal(whole.os?.id ?? null, whole.os?.id ?? null);
 });
 
 test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, replaces a good scan's list, keeps the last good one through a timeout, drops a scan no longer reported and forgets everything when syft is gone", () => {

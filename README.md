@@ -649,10 +649,25 @@ the MCP tools and the AWS Thrifty benchmarks:
       "Effect": "Allow",
       "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
       "Resource": "*"
+    },
+    {
+      "Sid": "AdvisorProbeUploads",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::<upload-bucket>/aws-advisor/probes/*"
+    },
+    {
+      "Sid": "AdvisorProbeUploadsList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::<upload-bucket>"
     }
   ]
 }
 ```
+
+The two `AdvisorProbeUploads` statements are only needed with `PROBE_UPLOAD_BUCKET` set (below): the software and sbom
+probes then post their whole result to that bucket through a URL the advisor presigns, and the advisor reads it back.
 
 `ce:*` is what Cost Explorer needs (`aws_cost_*` tables; resource-level history additionally needs the
 preference enabled on the payer account), `pricing:GetProducts` the price list, `sts:GetCallerIdentity` and
@@ -687,6 +702,23 @@ then the filesystem with the kernel and device trees, runtime state, caches, log
 non-local mount excluded, within a 480 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 600 s),
 and trims the lists to fit SSM's 24,000-character output cap, each scan reporting its true count. What it finds is on
 the instance's Software tab and in the graph as `CONTAINS` edges from the image to its packages (`src/graph_software.ts`).
+An image is identified by its content there: the repository at its registry digest (`image:redis@sha256:…`), or the local
+image id for a build that never left the box, so two boxes on different builds of `redis:latest` are two nodes and a box
+that pulls the new build moves to a new node. (Cluster workloads' `BUILT_FROM` edges still point at `image:<ref>` nodes
+by name, since a workload spec names a tag.)
+
+**Whole results through S3.** GetCommandInvocation returns 24,000 characters of stdout, and a box with a few thousand
+packages (a swarm host's images, a big Node application) outgrows it: the software probe's answer is then cut off and
+the sbom probe trims its lists to fit, reporting the true counts. Set `PROBE_UPLOAD_BUCKET` (and `PROBE_UPLOAD_REGION`,
+`PROBE_UPLOAD_PREFIX`, default `aws-advisor/probes`; Settings › Probe pass) to a bucket in the advisor's account and
+those two probes post their whole result there instead: the advisor presigns a PutObject URL per run and passes it as
+the document's `upload` parameter, the script posts the gzip-compressed JSON with curl and prints a receipt (`uploaded
+<bytes> <sha256>`) on its inline line, and the advisor reads the object back, checks it against the receipt and ingests
+it. The boxes need no IAM change (the URL carries the advisor's signature), only egress to S3; the advisor's identity
+needs the `AdvisorProbeUploads` statements above. The inline line stays the fallback (trimmed, or a stub once the whole
+is in S3), and a document deployed before the parameter existed keeps answering inline until it is redeployed. Objects
+are kept under `<prefix>/<account>/<instance>/<kind>/<time>.json.gz`, so "Probes: re-ingest the uploads in S3"
+(Schedules, by hand) can replay the newest per box and kind after a recorder change.
 
 The advisor sends a document by name with no `commands` parameter (the script is inside the document; the docker
 one takes the use-signal patterns as its `signals` parameter); the policy also grants `ssm:GetCommandInvocation`,
@@ -1322,8 +1354,9 @@ peers, and every filter with its rules and what wears it.
 ### Vulnerabilities: matched by the strut workflows, not here
 
 The advisor publishes the inventory and matches nothing against advisories itself (its own OSV/Amazon Linux matcher,
-the Security page's vulnerability card and `VULN_CRON` were removed on 2026-10-29). Every `AdvisorPackage` node
-carries the identity the public vulnerability graph is walked with (`purl`, `source_purl`, `sort_key`,
+the Security page's vulnerability card and `VULN_CRON` were removed on 2026-10-29). Every `SoftwareComponent` node
+(the public graph's label; `AdvisorPackage` until 2026-10-29, relabelled on the next start)
+carries the public graph's key, `product_key` (the purl without version, `scheme: purl`), and the identity it is walked with (`purl`, `source_purl`, `sort_key`,
 `advisory_ecosystem` such as `Ubuntu:24.04:LTS`; `src/sec/identity.ts`, `src/package_scope.ts`), and the strut
 workflows (`docs/vulnerability-graph-plan.md`) write the vulnerability nodes, the affected ranges and the verdicts
 into the graph. What reaches a package is already there: `PROVIDES` from the package to the listening program, the
@@ -1826,7 +1859,7 @@ for a team, the team id; the token is tested against the API, saved as a runtime
 framework and Node version, the latest deployments, the domains, the names of environment variables (never values)
 and the firewall state, and mirrors them: a project is an `AdvisorDeployment`, each URL it serves an `AdvisorEndpoint`
 reachable from the internet with `requires_auth` taken from the project's deployment protection (Vercel login,
-password or trusted IPs, per target), the runtime an `AdvisorPackage`. The account's Projects section shows all of it;
+password or trusted IPs, per target), the runtime a `SoftwareComponent`. The account's Projects section shows all of it;
 `GET /api/vercel/projects`, `GET /api/vercel/stores?kind=`, `POST /api/vercel/refresh`, `POST`/`DELETE /api/accounts/vercel`.
 Usage is read from `/v2/usage` per type and day (requests with cache hits, bandwidth, function invocations by
 outcome and GB-hours, builds, blob, cron, data cache, log volume) with Vercel's per-project breakdown: the team's

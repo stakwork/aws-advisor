@@ -7,7 +7,7 @@ import { db } from "./db.js";
  * the row and a package, program or image the probe no longer reports is deleted. The history is package_changes:
  * every version move (from → to) and every removal (to null). This is the inventory the vulnerability match (a strut
  * workflow over the graph, docs/vulnerability-graph-plan.md) is run
- * against (the graph's AdvisorPackage / AdvisorImage nodes come from these tables).
+ * against (the graph's SoftwareComponent / AdvisorImage nodes come from these tables).
  */
 
 db.exec(`create table if not exists instance_os (
@@ -81,7 +81,8 @@ create table if not exists instance_sbom (
 );
 create index if not exists instance_sbom_name on instance_sbom(name, version);
 create index if not exists instance_sbom_ref on instance_sbom(source, ref)`);
-// sbom 1.1 adds what the probe did about a missing syft (installed it, failed and why, left it alone)
+// sbom 1.1 adds what the probe did about a missing syft (installed it, failed and why, left it alone); 1.4 the image behind each scan (docker id, registry digest)
+for (const c of ["image_id", "digest"]) if (!(db.prepare("pragma table_info(instance_sbom_sources)").all() as { name: string }[]).some((x) => x.name === c)) db.exec(`alter table instance_sbom_sources add column ${c} text`);
 if (!(db.prepare("pragma table_info(instance_sbom_scans)").all() as { name: string }[]).some((c) => c.name === "note")) db.exec("alter table instance_sbom_scans add column note text");
 
 /** One package as the probe prints it: name, version, architecture and the source package when it differs from the name. */
@@ -226,14 +227,14 @@ export function parsePurl(purl: string): Purl | null {
 }
 
 /** One syft scan as the probe prints it (src/ssm.ts ProbeSbomSource). */
-export interface SbomSource { source: "image" | "dir"; ref: string; status: string; total?: number; purls?: string[] }
+export interface SbomSource { source: "image" | "dir"; ref: string; image_id?: string | null; digest?: string | null; status: string; total?: number; purls?: string[] }
 export interface SbomData { available?: boolean; tool?: string | null; install?: string | null; cap?: number; sources?: SbomSource[] }
 export interface RecordSbomResult { available: boolean; tool: string | null; /** what the probe did about a missing syft */ note: string | null; sources: number; packages: number; /** purls syft found that did not fit the probe's output budget */ trimmed: number; failed: { ref: string; status: string }[]; added: number; removed: number }
 
 const upsertSbomScan = db.prepare(`insert into instance_sbom_scans(instance_id, collected_at, available, tool, cap, sources, packages, note) values (?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(instance_id) do update set collected_at = excluded.collected_at, available = excluded.available, tool = excluded.tool, cap = excluded.cap, sources = excluded.sources, packages = excluded.packages, note = excluded.note`);
-const upsertSbomSource = db.prepare(`insert into instance_sbom_sources(instance_id, source, ref, status, total, listed, collected_at) values (?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id, source, ref) do update set status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, collected_at = excluded.collected_at`);
+const upsertSbomSource = db.prepare(`insert into instance_sbom_sources(instance_id, source, ref, status, total, listed, collected_at, image_id, digest) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id, source, ref) do update set status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, collected_at = excluded.collected_at, image_id = coalesce(excluded.image_id, image_id), digest = coalesce(excluded.digest, digest)`);
 const upsertSbomRow = db.prepare(`insert into instance_sbom(instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(instance_id, source, ref, purl) do update set last_seen = excluded.last_seen`);
 const int = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0; };
@@ -257,7 +258,7 @@ export function recordSbom(instanceId: string, collectedAt: string, sbom: SbomDa
       const status = ["ok", "timeout", "error", "skipped"].includes(String(s.status)) ? String(s.status) : "error";
       const purls = status === "ok" ? [...new Set((s.purls ?? []).map((p) => clean(p, 300)).filter(Boolean))] : [];
       res.sources++;
-      upsertSbomSource.run(instanceId, s.source, ref, status, int(s.total), purls.length, collectedAt);
+      upsertSbomSource.run(instanceId, s.source, ref, status, int(s.total), purls.length, collectedAt, s.image_id ? clean(s.image_id, 100) || null : null, s.digest ? clean(s.digest, 100) || null : null);
       if (status !== "ok") { res.failed.push({ ref, status }); continue; } // the rows of the last good scan stay
       res.trimmed += Math.max(0, int(s.total) - purls.length);
       const before = new Set((db.prepare("select purl from instance_sbom where instance_id = ? and source = ? and ref = ?").all(instanceId, s.source, ref) as { purl: string }[]).map((r) => r.purl));
@@ -302,7 +303,7 @@ export interface InstanceSoftware {
   depends: { name: string; dep: string; first_seen: string; last_seen: string }[];
   /** The sbom probe: whether syft is on the box, each scan (image or filesystem) with its status and counts, and the packages (`q` filters by name). */
   sbom: { scan: { collected_at: string; available: boolean; tool: string | null; note: string | null; cap: number; sources: number; packages: number } | null;
-    sources: { source: string; ref: string; status: string; total: number; listed: number; collected_at: string }[];
+    sources: { source: string; ref: string; image_id: string | null; digest: string | null; status: string; total: number; listed: number; collected_at: string }[];
     packages: { source: string; ref: string; purl: string; type: string; namespace: string | null; name: string; version: string | null; first_seen: string; last_seen: string }[] };
 }
 
@@ -320,7 +321,7 @@ export function softwareOn(instanceId: string, opts: { q?: string; limit?: numbe
     depends: db.prepare("select name, dep, first_seen, last_seen from instance_depends where instance_id = ? order by name, dep").all(instanceId) as any[],
     sbom: {
       scan: ((r) => (r ? { ...r, available: Boolean(r.available) } : null))(db.prepare("select collected_at, available, tool, note, cap, sources, packages from instance_sbom_scans where instance_id = ?").get(instanceId) as any),
-      sources: db.prepare("select source, ref, status, total, listed, collected_at from instance_sbom_sources where instance_id = ? order by source desc, ref").all(instanceId) as any[],
+      sources: db.prepare("select source, ref, image_id, digest, status, total, listed, collected_at from instance_sbom_sources where instance_id = ? order by source desc, ref").all(instanceId) as any[],
       packages: db.prepare(`select source, ref, purl, type, namespace, name, version, first_seen, last_seen from instance_sbom where instance_id = ?${q ? " and lower(name) like ?" : ""} order by source desc, ref, type, name limit ?`).all(...(q ? [instanceId, q, limit] : [instanceId, limit])) as any[],
     },
   };

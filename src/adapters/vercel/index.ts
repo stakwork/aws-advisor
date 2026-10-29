@@ -24,7 +24,7 @@ export const partnersConfigured = () => ({ neon: Boolean(config.neonApiKey), red
  * (`native_type: team`, a personal account is a team of one); a project is an `AdvisorDeployment`
  * (`native_type: vercel_project`) whose state is its latest production deployment; its production URL, deployment
  * URL and domains are `AdvisorEndpoint`s the project EXPOSES, each `REACHABLE_FROM internet` with `requires_auth`
- * from the project's deployment protection; the Node runtime is an `AdvisorPackage` INSTALLED_ON the project and the
+ * from the project's deployment protection; the Node runtime is an `SoftwareComponent` INSTALLED_ON the project and the
  * framework a property. No probes, metrics, executor or benchmarks: the capabilities say so, and the pages that
  * need them stay empty for this provider. Credentials: a token (and optional team id) saved as runtime settings.
  */
