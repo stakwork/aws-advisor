@@ -1,3 +1,4 @@
+import "./log_time.js"; // first: every console line from here on starts with the time
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";

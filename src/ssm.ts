@@ -499,6 +499,8 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
   const client = new SSMClient({ region: m.region || creds.region, credentials: creds.provider });
   const def = PROBE_DEFS[kind];
   const timeoutMs = opts.timeoutMs ?? Math.max(90_000, def.timeout_seconds * 1000 + 30_000);
+  // how often the invocation is asked for: a document that runs for minutes (sbom) every 10 s, so a pass of many boxes at a time stays well under SSM's request rate
+  const pollMs = def.timeout_seconds >= 600 ? 10_000 : 2_000;
   // the whole result to S3 when a bucket is configured (src/probe_uploads.ts): a presigned PUT URL the script posts to, so the inline cap trims nothing
   let upload: { key: string; url: string } | null = null;
   if (UPLOAD_KINDS.includes(kind) && (await probeUploadsReady())) {
@@ -553,7 +555,7 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
     const deadline = Date.now() + timeoutMs;
     let stdout = "", stderr = "";
     for (;;) {
-      await sleep(2000);
+      await sleep(pollMs);
       if (Date.now() > deadline) throw new ProbeError("timeout", `SSM command ${commandId} did not finish within ${Math.round(timeoutMs / 1000)}s`);
       let status = "";
       try {

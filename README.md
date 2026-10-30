@@ -976,7 +976,7 @@ outcome under the row.
 - `PROBE_CRON` (default `30 5 * * *`, `off` to disable) runs the SSM probe automatically, but only where it can
   change a decision: running, SSM-online instances whose 30-day CPU is under `PROBE_IDLE_CPU` (default 20 %) or
   that carry an open idle-instance recommendation, skipping any probed more recently than `PROBE_MIN_INTERVAL_HOURS` (default 20; 1 with an hourly cron, 24 with a daily one; a five-minute margin is built in so the next pass is never skipped), at most `PROBE_MAX`
-  (default 25) per pass, three at a time. `PROBE_SCOPE=all` widens the pass to every SSM-online running instance
+  (default 25) per pass, three at a time (the sbom pass twenty: its boxes work for minutes each while the advisor only waits). `PROBE_SCOPE=all` widens the pass to every SSM-online running instance
   (cap raised to 100), so the Inventory carries memory, disk and process data for the whole fleet. It runs half an hour before the daily collection so the idle-instance
   rule sees fresh memory and process data. Samples older than 30 days are pruned. `POST /api/probe-pass` runs it
   by hand and `GET /api/probe-pass/targets` previews the candidates.

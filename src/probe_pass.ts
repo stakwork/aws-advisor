@@ -98,6 +98,8 @@ export function probePass(kind: ProbeKind = "host"): Promise<ProbePassResult> {
 async function run(kind: ProbeKind): Promise<ProbePassResult> {
   const t0 = Date.now();
   const tag = `probe-pass:${kind}`;
+  const workers = Math.max(1, PROBE_DEFS[kind].concurrency);
+  const longRunning = PROBE_DEFS[kind].timeout_seconds >= 600; // minutes per box: say when each finishes, so a slow pass is readable while it runs
   const gate = await credentialGate(tag);
   if (!gate.ok) console.log(`[${tag}] skipped: ${gate.error || "credentials not working"}`);
   if (!gate.ok) return { kind, started_at: new Date().toISOString(), candidates: 0, probed: [], failed: [{ instance_id: "*", code: "no_credentials", message: gate.error || "credentials not working" }], pruned: 0, databases: null, took_ms: Date.now() - t0 };
@@ -108,15 +110,17 @@ async function run(kind: ProbeKind): Promise<ProbePassResult> {
     const x = probeExclusions(kind); const limit = scope === "all" ? Math.max(config.probeMax, 100) : config.probeMax;
     const why = [x.not_ssm_online && `${x.not_ssm_online} not SSM online`, x.batch && `${x.batch} Batch worker(s)`, x.just_launched && `${x.just_launched} launched under 15 min ago`,
       x.outside_scope && `${x.outside_scope} outside scope "idle" (CPU over ${config.probeIdleCpu} % and no idle recommendation)`, x.probed_recently && `${x.probed_recently} probed within ${probeWindowMinutes(intervalHours)} min`].filter(Boolean);
-    console.log(`[${tag}] ${PROBE_DEFS[kind].title}: ${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${scope}, limit ${limit}, interval ${intervalHours} h`);
+    console.log(`[${tag}] ${PROBE_DEFS[kind].title}: ${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${scope}, limit ${limit}, interval ${intervalHours} h, ${workers} at a time`);
   } catch (e: any) { console.error(`[${tag}] could not explain the selection: ${e?.message || e}`); }
-  // a few at a time: SSM is happy with it and it keeps the pass short
+  // as many at a time as the kind says (PROBE_DEFS concurrency): the boxes do the work and SSM runs them side by side, the advisor sends and waits
   const queue = [...targets];
   const worker = async () => {
     for (let t = queue.shift(); t; t = queue.shift()) {
+      const t1 = Date.now();
       try {
         await probeInstance(t.instance_id, { kind });
         result.probed.push(t.instance_id);
+        if (longRunning) console.log(`[${tag}] ${t.instance_id}${t.name ? ` (${t.name})` : ""} done in ${Math.round((Date.now() - t1) / 1000)} s; ${result.probed.length + result.failed.length} of ${targets.length} finished, ${queue.length} waiting`);
       } catch (e: any) {
         const code = e instanceof ProbeError ? e.code : "failed";
         const message = String(e?.message || e);
@@ -128,7 +132,7 @@ async function run(kind: ProbeKind): Promise<ProbePassResult> {
       }
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
   if (kind === "host" || kind === "docker") {
     // roll yesterday (and any day not yet rolled) into the daily tables before the raw detail expires
     try { const r = rollupDaily(); console.log(`[${tag}] rolled up ${r.instance_days} instance-days, ${r.container_days} container-days`); } catch (e: any) { console.error(`[${tag}] rollup failed: ${e?.message || e}`); }
