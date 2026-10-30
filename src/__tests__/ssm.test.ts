@@ -69,7 +69,11 @@ test("every probe script is a read-only shell script that prints its kind", () =
     const script = probeScript(kind, "x=y");
     assert.match(script, new RegExp(`^# aws-advisor probe ${kind} `));
     assert.ok(script.includes(`"probe":"aws-advisor/${kind}/`) && script.includes(`"kind":"${kind}"`), `${kind} prints its probe id and kind`);
-    for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(script, forbidden);
+    // the sbom script's one exception: it removes the scratch directory it gives syft and the stereoscope-* leftovers of earlier runs, on lines that guard themselves
+    const scratch = script.split("\n").filter((l) => /\brm\b/.test(l));
+    for (const l of scratch) assert.ok(kind === "sbom" && (/case "\$sbtmp" in \*\/aws-advisor-sbom\) rm -rf "\$sbtmp"/.test(l) || /-name 'stereoscope-\*' -mmin \+60 -exec rm -rf \{\}/.test(l)), `${kind}: an unguarded removal: ${l}`);
+    const rest = script.split("\n").filter((l) => !scratch.includes(l)).join("\n");
+    for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(rest, forbidden);
   }
 });
 
@@ -338,7 +342,7 @@ test("parseProbeOutput keeps a package's source (s) from probe software/2 and le
 test("parseProbeOutput types the sbom section: the scans with their status and counts, purls that look like purls, anything else dropped", () => {
   const p = parseProbeOutput('{"probe":"aws-advisor/sbom/1","kind":"sbom","hostname":"h","collected_at":"2026-10-29T10:00:00Z","sbom":{"available":true,"tool":"syft 1.55.0","install":"installed v1.55.0","cap":3000,"sources":[{"source":"image","ref":"nginx:1.27","image_id":"sha256:ab","digest":"sha256:cd","status":"ok","total":2,"purls":["pkg:deb/debian/nginx@1.27.0-1","not a purl",7]},{"source":"dir","ref":"/","image_id":"x","status":"timeout","total":0,"purls":[]},{"source":"other","ref":"x"}]},"upload":"uploaded 1234 ab"}');
   assert.equal(p.kind, "sbom");
-  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", install: "installed v1.55.0", cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", image_id: "sha256:ab", digest: "sha256:cd", status: "ok", total: 2, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", image_id: null, digest: null, status: "timeout", total: 0, purls: [] }] });
+  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", install: "installed v1.55.0", cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", image_id: "sha256:ab", digest: "sha256:cd", status: "ok", total: 2, note: null, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", image_id: null, digest: null, status: "timeout", total: 0, note: null, purls: [] }] });
   assert.equal(p.upload, "uploaded 1234 ab"); assert.equal(p.inline, undefined);
   const stub = parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","inline":false,"upload":"uploaded 99 ff"}');
   assert.equal(stub.inline, false); assert.equal(stub.upload, "uploaded 99 ff"); assert.equal(stub.packages, undefined);

@@ -4,7 +4,7 @@ import { db, getSetting, setSetting } from "./db.js";
 import { DEFAULT_SIGNALS_STRING } from "./signals.js";
 
 /**
- * The probes: read-only shell scripts the advisor runs on a box through AWS Systems Manager Run Command, one per
+ * The probes: read-only shell scripts (the sbom one also keeps, and removes, a scratch directory for syft: SBOM_BODY) the advisor runs on a box through AWS Systems Manager Run Command, one per
  * concern so each can run on its own cadence and each SSM document stays small and scoped:
  *
  *  - host:     memory, swap, load, CPUs, uptime, disks and the top processes (the hourly statistics behind the alerts and charts)
@@ -56,7 +56,7 @@ export const PROBE_DEFS: Record<ProbeKind, ProbeDef> = {
   docker: { kind: "docker", title: "Containers and activity", what: "the containers (state, CPU, memory, network; image, health, restarts, ports, mounts, source repository and revision) and whether anyone uses the box: container logs and use signals, established connections, the front door, logins, traffic; the usage profiles and the swarm costs read it", version: "2.1", sections: ["docker", "containers", "container_details", "activity"], timeout_seconds: 90, cron_key: "probeDockerCron", scope_key: "probeScope", takes_signals: true },
   apps: { kind: "apps", title: "Programs, ports and log shipping", what: "every user-space program with its user, count, CPU and memory; every port the box answers on and who owns it (exposure comes from the security groups); the log groups its agents ship to", version: "2.0", sections: ["processes", "listeners", "log_shipping"], timeout_seconds: 60, cron_key: "probeAppsCron", scope_key: "probeScope", takes_signals: false },
   software: { kind: "software", title: "Installed software", what: "the OS and kernel, every installed package with its version (dpkg, rpm or apk), the version of well-known programs read from the binary, the images behind the running containers, the libraries the runtimes bundle (Node's process.versions) and the dependencies of the packages that own the probed programs: the inventory a CVE is matched against; and whether the guest can hibernate", version: "1.4", sections: ["os", "kernel", "arch", "package_manager", "packages", "binaries", "images", "bundles", "depends", "hibernation"], timeout_seconds: 120, cron_key: "probeSoftwareCron", scope_key: "probeSoftwareScope", takes_signals: false },
-  sbom: { kind: "sbom", title: "Software bill of materials (syft)", what: "the packages inside each running container image and the language packages on the host filesystem (npm, pypi, golang, java, ruby, rust, ...; the OS packages are the software probe's), as package URLs read by syft (https://github.com/anchore/syft). A box without syft gets the pinned release installed into /usr/local/bin by the official installer (checksum verified) when the install parameter is yes (Settings > Probe pass > Install syft where missing, on by default; the one write a probe makes), and is reported as not available otherwise. Images first, then the filesystem, within a 20-minute budget. With an upload bucket configured (Settings > Probe pass) the whole result goes to S3 and nothing is trimmed; otherwise the lists are trimmed to fit SSM's output cap and every scan reports its true count", version: "1.4", sections: ["sbom"], timeout_seconds: 1500, cron_key: "probeSbomCron", scope_key: "probeSbomScope", takes_signals: false },
+  sbom: { kind: "sbom", title: "Software bill of materials (syft)", what: "the packages inside each running container image and the language packages on the host filesystem (npm, pypi, golang, java, ruby, rust, ...; the OS packages are the software probe's), as package URLs read by syft (https://github.com/anchore/syft). A box without syft gets the pinned release installed into /usr/local/bin by the official installer (checksum verified) when the install parameter is yes (Settings > Probe pass > Install syft where missing, on by default; the one lasting write a probe makes), and is reported as not available otherwise. Images first, then the filesystem, within a 20-minute budget. With an upload bucket configured (Settings > Probe pass) the whole result goes to S3 and nothing is trimmed; otherwise the lists are trimmed to fit SSM's output cap and every scan reports its true count. An image is unpacked in a scratch directory of the probe's own (/var/tmp) that is emptied after every scan; one the free disk cannot hold is skipped and says so", version: "1.5", sections: ["sbom"], timeout_seconds: 1500, cron_key: "probeSbomCron", scope_key: "probeSbomScope", takes_signals: false },
 };
 
 // ---- the scripts --------------------------------------------------------------------------------------------------------
@@ -302,10 +302,22 @@ const SBOM_BODY = [
   "SYFT_QUIET=true; export SYFT_QUIET",
   "SYFT_LINUX_KERNEL_CATALOG_MODULES=false; export SYFT_LINUX_KERNEL_CATALOG_MODULES",
   "tmo() { if command -v timeout >/dev/null 2>&1; then timeout \"$@\"; else shift; \"$@\"; fi; }",
+  "# scratch space (sbom 1.5): syft reads an image through the daemon by saving it and unpacking its layers under $TMPDIR/stereoscope-*, about twice the",
+  "# image's size on disk, and a scan the time budget kills leaves that behind: enough runs filled /tmp. The probe gives syft a directory of its own on",
+  "# disk (/var/tmp first: /tmp may be memory), empties it after every scan and when it exits, skips an image the free space cannot hold (status",
+  "# skipped, with the sizes), and removes what earlier runs left: stereoscope-* directories in /tmp and /var/tmp untouched for an hour (a scan of this",
+  "# probe's own never lasts that long). AWS_ADVISOR_SBOM_TMP names the directory (tests). The only removals a probe makes, and each guards itself:",
+  "# the scratch functions touch nothing but a path that ends in /aws-advisor-sbom, the sweep nothing but a stereoscope-* directory",
+  "sbtmp=${AWS_ADVISOR_SBOM_TMP:-}; if [ -z \"$sbtmp\" ]; then for d in /var/tmp /tmp; do if [ -z \"$sbtmp\" ] && [ -d \"$d\" ] && [ -w \"$d\" ]; then sbtmp=$d/aws-advisor-sbom; fi; done; fi",
+  "scratch_reset() { case \"$sbtmp\" in */aws-advisor-sbom) rm -rf \"$sbtmp\" 2>/dev/null; mkdir -p \"$sbtmp\" 2>/dev/null || sbtmp=\"\";; *) sbtmp=\"\";; esac; return 0; }",
+  "scratch_drop() { case \"$sbtmp\" in */aws-advisor-sbom) rm -rf \"$sbtmp\" 2>/dev/null;; esac; return 0; }",
+  "scratch_reset; if [ -n \"$sbtmp\" ]; then TMPDIR=$sbtmp; export TMPDIR; fi",
+  "trap scratch_drop EXIT",
+  "find /tmp /var/tmp -maxdepth 1 -name 'stereoscope-*' -mmin +60 -exec rm -rf {} \\; 2>/dev/null",
   "start=$(date +%s); budget=1200",
   "syft=\"\"; for c in $(command -v syft 2>/dev/null) /usr/local/bin/syft /usr/bin/syft /opt/syft/syft /snap/bin/syft /root/.local/bin/syft; do if [ -z \"$syft\" ] && [ -x \"$c\" ]; then syft=$c; fi; done",
   "# syft install (sbom 1.1): a box without syft gets the pinned release when the install parameter says yes (PROBE_SBOM_INSTALL): the official",
-  "# installer fetches it from GitHub, verifies its checksum and puts it in /usr/local/bin. The one write a probe makes; it counts against the",
+  "# installer fetches it from GitHub, verifies its checksum and puts it in /usr/local/bin. The one lasting write a probe makes (the scratch directory it unpacks images in is emptied after every scan); it counts against the",
   "# time budget, and a box without curl, egress to get.anchore.io and github.com, or a writable /usr/local/bin stays as it is and says so",
   "install=__INSTALL__; SYFT_VERSION=v1.55.0; bindir=${AWS_ADVISOR_SYFT_DIR:-/usr/local/bin}; inst=\"\"",
   "if [ -z \"$syft\" ] && [ \"$install\" = yes ]; then",
@@ -317,7 +329,7 @@ const SBOM_BODY = [
   "pm=\"\"; for c in dpkg-query rpm apk; do command -v \"$c\" >/dev/null 2>&1 && pm=$c; done",
   "# the time budget in seconds (start above, before the install): the images get two thirds of it, the filesystem what is left; the document timeout sits above the whole",
   "left() { l=$(( start + $1 - $(date +%s) )); if [ \"$l\" -gt 5 ]; then printf '%s' \"$l\"; else printf '5'; fi; }",
-  "# what the scans gather, one record per line: S<tab>source<tab>ref<tab>status<tab>total<tab>image id<tab>digest for each scan, P<tab>source<tab>ref<tab>purl for each package",
+  "# what the scans gather, one record per line: S<tab>source<tab>ref<tab>status<tab>total<tab>image id<tab>digest<tab>note for each scan, P<tab>source<tab>ref<tab>purl for each package",
   "lines=\"\"; cur_id=\"\"; cur_dg=\"\"",
   "scan() { k=$1; r=$2; secs=$3; shift 3",
   "  raw=$(tmo \"$secs\" \"$syft\" scan \"$@\" -o purls -q 2>/dev/null </dev/null); rc=$?",
@@ -326,14 +338,19 @@ const SBOM_BODY = [
   "  # the OS packages of the host are the software probe reading (dpkg, rpm, apk); the filesystem scan keeps the rest",
   "  [ \"$k\" = dir ] && [ -n \"$pm\" ] && pl=$(printf '%s\\n' \"$pl\" | grep -v -E '^pkg:(deb|rpm|apk)/')",
   "  n=$(printf '%s\\n' \"$pl\" | grep -c '^pkg:')",
-  "  lines=$(printf '%s\\nS\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n%s' \"$lines\" \"$k\" \"$r\" \"$st\" \"$n\" \"$cur_id\" \"$cur_dg\" \"$(printf '%s\\n' \"$pl\" | awk -v k=\"$k\" -v r=\"$r\" '/^pkg:/{print \"P\\t\" k \"\\t\" r \"\\t\" $0}')\")",
+  "  lines=$(printf '%s\\nS\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t\\n%s' \"$lines\" \"$k\" \"$r\" \"$st\" \"$n\" \"$cur_id\" \"$cur_dg\" \"$(printf '%s\\n' \"$pl\" | awk -v k=\"$k\" -v r=\"$r\" '/^pkg:/{print \"P\\t\" k \"\\t\" r \"\\t\" $0}')\")",
+  "  scratch_reset",
   "}",
   "if [ -n \"$syft\" ]; then",
   "  # the images behind the running containers (the list the software probe reports), through the Docker daemon; at most 30, while two thirds of the budget last",
   "  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then for im in $(docker ps --format '{{.Image}}' 2>/dev/null | sort -u | head -30); do",
   "    # the image behind the name: its id and its registry digest (none for a build that never left the box) identify it when a tag such as latest moves",
-  "    ins=$(docker image inspect --format '{{.Id}}|{{join .RepoDigests \",\"}}' \"$im\" 2>/dev/null | head -n 1 | tr -cd '\\40-\\176'); cur_id=${ins%%|*}; cur_dg=${ins#*|}; cur_dg=${cur_dg%%,*}; cur_dg=${cur_dg#*@}; [ \"$cur_dg\" = \"$ins\" ] && cur_dg=\"\"",
-  "    if [ \"$(left $((budget * 2 / 3)))\" -gt 5 ]; then scan image \"$im\" \"$(left $((budget * 2 / 3)))\" \"docker:$im\"; else lines=$(printf '%s\\nS\\timage\\t%s\\tskipped\\t0\\t%s\\t%s' \"$lines\" \"$im\" \"$cur_id\" \"$cur_dg\"); fi",
+  "    ins=$(docker image inspect --format '{{.Id}}|{{join .RepoDigests \",\"}}|{{.Size}}' \"$im\" 2>/dev/null | head -n 1 | tr -cd '\\40-\\176'); cur_id=\"\"; cur_dg=\"\"; cur_sz=0",
+  "    case \"$ins\" in *\\|*\\|*) cur_id=${ins%%|*}; rest=${ins#*|}; cur_dg=${rest%%|*}; cur_dg=${cur_dg%%,*}; cur_dg=${cur_dg#*@}; cur_sz=${rest##*|};; esac; case \"$cur_sz\" in ''|*[!0-9]*) cur_sz=0;; esac",
+  "    # the room the scan takes under $TMPDIR: the saved image and its unpacked layers, about twice its size, plus 256 MB; an image that would not fit is skipped, not half-read",
+  "    need_kb=$((cur_sz / 512 + 262144)); free_kb=$(df -Pk \"${sbtmp:-/tmp}\" 2>/dev/null | awk 'NR==2{print $4}'); case \"$free_kb\" in ''|*[!0-9]*) free_kb=\"\";; esac",
+  "    if [ -n \"$free_kb\" ] && [ \"$need_kb\" -gt \"$free_kb\" ]; then lines=$(printf '%s\\nS\\timage\\t%s\\tskipped\\t0\\t%s\\t%s\\tneeds about %s MB of scratch space under %s, %s MB free' \"$lines\" \"$im\" \"$cur_id\" \"$cur_dg\" \"$((need_kb / 1024))\" \"${sbtmp:-/tmp}\" \"$((free_kb / 1024))\")",
+  "    elif [ \"$(left $((budget * 2 / 3)))\" -gt 5 ]; then scan image \"$im\" \"$(left $((budget * 2 / 3)))\" \"docker:$im\"; else lines=$(printf '%s\\nS\\timage\\t%s\\tskipped\\t0\\t%s\\t%s\\tthe time budget ran out' \"$lines\" \"$im\" \"$cur_id\" \"$cur_dg\"); fi",
   "  done; fi",
   "  # the host filesystem, without the kernel and device trees, runtime state, caches, logs, the container stores (read above as images), and every",
   "  # mount that is not a local disk (network and FUSE filesystems, squashfs snaps, bind mounts) as /proc/mounts lists them; globbing is off while the list is passed",
@@ -342,10 +359,10 @@ const SBOM_BODY = [
   "  [ -n \"$syft\" ] && ex=\"$ex --exclude .$syft\"",
   "  for mp in $(awk '$2 != \"/\" && $3 !~ /^(ext[234]|xfs|btrfs|zfs|f2fs|jfs)$/ && $2 !~ /\\\\/ {print $2}' /proc/mounts 2>/dev/null | sort -u); do ex=\"$ex --exclude .$mp/**\"; done",
   "  cur_id=\"\"; cur_dg=\"\"",
-  "  if [ \"$(left $budget)\" -gt 5 ]; then set -f; scan dir / \"$(left $budget)\" dir:/ $ex; set +f; else lines=$(printf '%s\\nS\\tdir\\t/\\tskipped\\t0\\t\\t' \"$lines\"); fi",
+  "  if [ \"$(left $budget)\" -gt 5 ]; then set -f; scan dir / \"$(left $budget)\" dir:/ $ex; set +f; else lines=$(printf '%s\\nS\\tdir\\t/\\tskipped\\t0\\t\\t\\tthe time budget ran out' \"$lines\"); fi",
   "fi",
   "# the JSON under the SSM output cap: every scan with its status and true count, the package lists trimmed to one shared budget (cap) that shrinks until the compressed line fits",
-  "build() { printf '%s\\n' \"$lines\" | awk -F'\\t' -v cap=\"$1\" '$1==\"S\" { ns++; key[ns]=$2 \"\\t\" $3; src[ns]=$2; ref[ns]=$3; st[ns]=$4; tot[ns]=$5+0; iid[ns]=$6; dg[ns]=$7; next } $1==\"P\" { k=$2 \"\\t\" $3; if (used < cap) { used++; p=$4; gsub(/[\\\\\"]/, \"\", p); pl[k]=pl[k] (n[k]?\",\":\"\") \"\\\"\" p \"\\\"\"; n[k]++ } } END { for (i=1;i<=ns;i++) { r=ref[i]; gsub(/[\\\\\"]/, \"\", r); x=iid[i]; gsub(/[\\\\\"]/, \"\", x); y=dg[i]; gsub(/[\\\\\"]/, \"\", y); printf \"%s{\\\"source\\\":\\\"%s\\\",\\\"ref\\\":\\\"%s\\\",\\\"image_id\\\":\\\"%s\\\",\\\"digest\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"total\\\":%d,\\\"purls\\\":[%s]}\", (i>1?\",\":\"\"), src[i], r, x, y, st[i], tot[i], pl[key[i]] } }'; }",
+  "build() { printf '%s\\n' \"$lines\" | awk -F'\\t' -v cap=\"$1\" '$1==\"S\" { ns++; key[ns]=$2 \"\\t\" $3; src[ns]=$2; ref[ns]=$3; st[ns]=$4; tot[ns]=$5+0; iid[ns]=$6; dg[ns]=$7; nt[ns]=$8; next } $1==\"P\" { k=$2 \"\\t\" $3; if (used < cap) { used++; p=$4; gsub(/[\\\\\"]/, \"\", p); pl[k]=pl[k] (n[k]?\",\":\"\") \"\\\"\" p \"\\\"\"; n[k]++ } } END { for (i=1;i<=ns;i++) { r=ref[i]; gsub(/[\\\\\"]/, \"\", r); x=iid[i]; gsub(/[\\\\\"]/, \"\", x); y=dg[i]; gsub(/[\\\\\"]/, \"\", y); z=nt[i]; gsub(/[\\\\\"]/, \"\", z); printf \"%s{\\\"source\\\":\\\"%s\\\",\\\"ref\\\":\\\"%s\\\",\\\"image_id\\\":\\\"%s\\\",\\\"digest\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"total\\\":%d,\\\"note\\\":\\\"%s\\\",\\\"purls\\\":[%s]}\", (i>1?\",\":\"\"), src[i], r, x, y, st[i], tot[i], z, pl[key[i]] } }'; }",
   "mk() { printf '{\"probe\":\"aws-advisor/sbom/3\",\"kind\":\"sbom\",\"hostname\":\"%s\",\"collected_at\":\"%s\",\"sbom\":{\"available\":%s,\"tool\":%s,\"install\":%s,\"cap\":%s,\"sources\":[%s]}}' \"$hn\" \"$now\" \"$avail\" \"$(jstr \"$tool\")\" \"$(jstr \"$inst\")\" \"$1\" \"$2\"; }",
   "# the whole, untrimmed (cap 0) for the upload; then the inline object under the cap",
   "full=$(mk 0 \"$(build 100000000)\")",
@@ -408,7 +425,10 @@ export function setProbeScriptOverride(kind: ProbeKind, text: string): void {
   if (!t.trim()) throw new Error("the script is empty; reset it to go back to the default");
   if (t.length > 60_000) throw new Error("the script is too long for an SSM document (60,000 characters at most)");
   // the words a read-only probe never needs (reboot and shutdown appear as log words in the docker script, so they are not on the list)
-  for (const re of [/\brm\b/, /\bkill(all)?\b/, /\bsystemctl\b/, /\bsudo\b/, /\bmkfs\b/, /\bdd\s+if=/, /\bchmod\b/, /\bchown\b/, /\bapt(-get)?\s+(install|remove|purge)\b/, /\byum\s+(install|remove)\b/, /\bdnf\s+(install|remove)\b/, /\bdocker\s+(rm|rmi|stop|kill|exec|run|prune)\b/, />\s*\/(etc|var|usr|boot|bin|sbin|lib)/]) if (re.test(t)) throw new Error(`the script contains "${t.match(re)![0]}": probes are read-only, that word is refused`);
+  // the stock script's own lines are trusted (the sbom one removes the scratch directory it gives syft and what earlier runs left in /tmp, on lines that guard themselves); what an edit adds must pass the word list
+  const stock = new Set(defaultProbeScript(kind).split("\n"));
+  const body = t.split("\n").filter((l) => !stock.has(l)).join("\n");
+  for (const re of [/\brm\b/, /\bkill(all)?\b/, /\bsystemctl\b/, /\bsudo\b/, /\bmkfs\b/, /\bdd\s+if=/, /\bchmod\b/, /\bchown\b/, /\bapt(-get)?\s+(install|remove|purge)\b/, /\byum\s+(install|remove)\b/, /\bdnf\s+(install|remove)\b/, /\bdocker\s+(rm|rmi|stop|kill|exec|run|prune)\b/, />\s*\/(etc|var|usr|boot|bin|sbin|lib)/]) if (re.test(body)) throw new Error(`the script contains "${t.match(re)![0]}": probes are read-only, that word is refused`);
   if (!t.includes('"probe":"aws-advisor/')) throw new Error('the script must print a JSON object with "probe":"aws-advisor/<kind>/<version>" on its last line');
   if (!t.includes(`"kind":"${kind}"`)) throw new Error(`the script must print "kind":"${kind}" in its JSON`);
   if (kind === "docker" && !t.includes("__SIGNALS__")) throw new Error("the docker script must keep the __SIGNALS__ placeholder for the use-signal patterns");
@@ -443,7 +463,7 @@ export function probeDocument(kind: ProbeKind) {
     parameters: def.takes_signals ? {
       signals: { type: "String", description: "Use-signal patterns: name=regex entries joined by ;; (the advisor passes its current list; this default applies when a caller sends none).", default: DEFAULT_SIGNALS_STRING, allowedPattern: "^[^\\n]*$" }, // SSM validates with RE2, which caps a repeat count at 1000: no count here (the SendCommand parameter limit bounds the length)
     } : {
-      ...(kind === "sbom" ? { install: { type: "String", description: "yes installs the pinned syft release into /usr/local/bin where it is missing (the one write a probe makes); no leaves such a box alone. The advisor passes PROBE_SBOM_INSTALL.", default: "yes", allowedValues: ["yes", "no"] } } : {}),
+      ...(kind === "sbom" ? { install: { type: "String", description: "yes installs the pinned syft release into /usr/local/bin where it is missing (the one lasting write a probe makes); no leaves such a box alone. The advisor passes PROBE_SBOM_INSTALL.", default: "yes", allowedValues: ["yes", "no"] } } : {}),
       ...(UPLOAD_KINDS.includes(kind) ? { upload: { type: "String", description: "A presigned S3 PUT URL the whole result is posted to, gzip-compressed (the advisor signs one per run when an upload bucket is configured); empty keeps the result inline, under SSM's output cap.", default: "", allowedPattern: "^(https://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*)?$" } } : {}),
     },
     mainSteps: [{ action: "aws:runShellScript", name: `probe_${kind}`, inputs: { timeoutSeconds: String(def.timeout_seconds), runCommand: script.split("\n") } }],

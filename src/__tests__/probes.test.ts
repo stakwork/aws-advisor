@@ -162,25 +162,34 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const log = path.join(dir, "args.log");
   const w = (where: string, name: string, body: string) => fs.writeFileSync(path.join(where, name), body, { mode: 0o755 });
   for (const where of [bin, bare]) {
-    w(where, "docker", "#!/bin/sh\ncase \"$1 $2 $5\" in info*) exit 0;; ps*) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\n';; 'image inspect nginx:1.27') printf 'sha256:bbbb|nginx@sha256:cccc\\n';; 'image inspect app:latest') printf 'sha256:aaaa|\\n';; *) exit 1;; esac\n");
+    w(where, "docker", "#!/bin/sh\ncase \"$1 $2 $5\" in info*) exit 0;; ps*) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\nhuge:1\\n';; 'image inspect nginx:1.27') printf 'sha256:bbbb|nginx@sha256:cccc|52428800\\n';; 'image inspect app:latest') printf 'sha256:aaaa||104857600\\n';; 'image inspect huge:1') printf 'sha256:dddd|huge@sha256:eeee|9000000000000000000\\n';; *) exit 1;; esac\n");
     w(where, "dpkg-query", "#!/bin/sh\nexit 0\n");
     w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n"); // macOS has none; the script falls back to no bound either way
   }
   // one image times out, one lists a duplicate and a distro package, the filesystem lists an OS package (dropped: dpkg owns it) and far more than the budget
-  w(bin, "syft", `#!/bin/sh\necho "$*" >> ${log}\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\npkg:npm/express@4.19.2\\npkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\n' "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
+  w(bin, "syft", `#!/bin/sh\necho "$* tmpdir=\${TMPDIR:-}" >> ${log}\nif [ -n "\${TMPDIR:-}" ]; then mkdir -p "$TMPDIR/stereoscope-fake" && : > "$TMPDIR/stereoscope-fake/layer.tar"; fi\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\npkg:npm/express@4.19.2\\npkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\n' "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
   const run = (PATH: string, script = pr.defaultProbeScript("sbom"), extra: Record<string, string> = {}) => { const r = spawnSync("sh", [], { input: script, encoding: "utf8", env: { ...process.env, PATH, ...extra } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
-  const line = run(`${bin}:/usr/bin:/bin`);
+  const scratch = path.join(dir, "aws-advisor-sbom"); // the name the guarded removals require
+  const line = run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: scratch });
+  assert.ok(!fs.existsSync(scratch), "the scratch directory syft unpacked images in is gone when the probe exits");
+  // a directory of another name is never touched: the probe then leaves syft its default TMPDIR
+  const other = path.join(dir, "elsewhere"); fs.mkdirSync(other); fs.writeFileSync(path.join(other, "keep"), "");
+  run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: other });
+  assert.ok(fs.existsSync(path.join(other, "keep")), "a scratch path that does not end in /aws-advisor-sbom is refused, not emptied");
   assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
   const j = parseProbeOutput(line);
   assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/3"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
   assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
-  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, status: "ok", total: 3, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept; a local build has an id and no digest");
-  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", status: "timeout", total: 0, purls: [] }, "a pulled image carries its registry digest");
+  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept; a local build has an id and no digest");
+  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", status: "timeout", total: 0, note: null, purls: [] }, "a pulled image carries its registry digest");
+  assert.equal(by["image huge:1"]!.status, "skipped"); assert.match(by["image huge:1"]!.note ?? "", /^needs about \d+ MB of scratch space under .*, \d+ MB free$/, "an image the free disk cannot hold is skipped, not half-read");
+  assert.ok(!fs.readFileSync(log, "utf8").includes("docker:huge:1"), "syft was never asked for it");
   assert.equal(by["dir /"]!.image_id, null); assert.equal(j.upload, undefined, "no upload URL: no receipt");
   assert.equal(by["dir /"]!.status, "ok"); assert.equal(by["dir /"]!.total, 6000, "the OS package is left to the software probe; the true count is reported");
   assert.ok(by["dir /"]!.purls.length < 6000 && by["dir /"]!.purls.length >= 100 && by["dir /"]!.purls.every((p) => p.startsWith("pkg:pypi/")), `trimmed to the budget (${by["dir /"]!.purls.length}, cap ${j.sbom!.cap})`);
   const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
+  assert.ok(args.includes(`tmpdir=${scratch}`), "syft is given the probe's scratch directory as TMPDIR");
   for (const ex of ["./proc/**", "./sys/**", "./var/lib/docker/**", "./home/*/.cache/**"]) assert.ok(args.includes(`--exclude ${ex}`), `the filesystem scan excludes ${ex} (globbing off)`);
   assert.ok(args.includes("-o purls") && args.includes("-q"), "purls only, quiet");
   assert.ok(args.includes(`--exclude .${path.join(bin, "syft")}`), "syft does not catalog its own Go modules");
@@ -191,7 +200,7 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const target = path.join(dir, "installed");
   w(bare, "curl", `#!/bin/sh\ncase "$*" in *get.anchore.io/syft*) printf 'mkdir -p "$2"; cp "%s" "$2/syft"\n' "${path.join(bin, "syft")}";; *) exit 22;; esac\n`);
   const got = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.probeScript("sbom"), { AWS_ADVISOR_SYFT_DIR: target }));
-  assert.equal(got.sbom?.install, "installed v1.55.0"); assert.equal(got.sbom?.available, true); assert.equal(got.sbom?.sources.length, 3, "scanned right after installing");
+  assert.equal(got.sbom?.install, "installed v1.55.0"); assert.equal(got.sbom?.available, true); assert.equal(got.sbom?.sources.length, 4, "scanned right after installing");
   assert.ok(fs.existsSync(path.join(target, "syft")));
   // the switch on but no egress: the failure and what it needs are reported, nothing scanned
   w(bare, "curl", "#!/bin/sh\nexit 6\n");

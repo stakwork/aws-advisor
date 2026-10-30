@@ -74,7 +74,7 @@ export interface ProbeProcessGroup { name: string; user: string; count: number; 
 export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: string; scope: "all" | "loopback" | "address"; process: string | null; pid: number | null; container: string | null; container_port: number | null }
 
 /** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
-export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem) */ image_id: string | null; digest: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; purls: string[] }
+export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem) */ image_id: string | null; digest: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; /** sbom 1.5: why a scan was skipped (scratch space, the time budget), null otherwise */ note: string | null; purls: string[] }
 export interface ProbeSbom { available: boolean; tool: string | null; /** sbom 1.1: what the probe did about a missing syft (installed, failed and why, or left alone), null when it was there */ install: string | null; cap: number; sources: ProbeSbomSource[] }
 
 export interface ProbeResult {
@@ -178,7 +178,7 @@ export function parseSbom(s: any): ProbeSbom {
   const status = (v: unknown): ProbeSbomSource["status"] => (v === "timeout" || v === "error" || v === "skipped" ? v : "ok");
   const note = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
   const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
-    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, status: status(x.status), total: Math.max(0, int(x.total)),
+    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, status: status(x.status), total: Math.max(0, int(x.total)), note: note(x.note, 200),
     purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 50000) as string[] }));
   return { available: s.available === true, tool: note(s.tool, 40), install: note(s.install, 200), cap: Math.max(0, int(s.cap)), sources };
 }
