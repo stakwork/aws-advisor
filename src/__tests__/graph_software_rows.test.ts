@@ -27,5 +27,9 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   assert.equal(mvn.row.purl, "pkg:maven/org.apache.commons/commons-lang3", "group and artifact, no qualifiers");
   const py = g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "pkg:pypi/requests@2.31.0", name: "requests", version: "2.31.0" })!;
   assert.equal(py.row.purl, "pkg:pypi/requests");
+  // syft's binary cataloger and the software probe's version flag read the same program: one node, the probe's binary ecosystem
+  const node = g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0" })!;
+  assert.equal(node.row.id, "pkg:binary:node:20.18.0", "the id the probe's reading of the same node gets"); assert.equal(node.row.ecosystem, "binary"); assert.equal(node.row.purl, "pkg:generic/node");
+  assert.equal(node.row.id, g.packageId("binary", "node", "20.18.0")); assert.equal(g.sbomEcosystem("npm"), "npm");
   assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "nonsense", name: "x", version: null }), null);
 });

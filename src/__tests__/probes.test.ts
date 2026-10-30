@@ -140,6 +140,7 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
   for (const [name, body] of Object.entries(fake)) {
     const bin = path.join(dir, name); fs.mkdirSync(bin); fs.writeFileSync(path.join(bin, name), body, { mode: 0o755 });
     for (const [extra, b] of Object.entries(extras[name] ?? {})) fs.writeFileSync(path.join(bin, extra), b, { mode: 0o755 });
+    if (name === "dpkg-query") fs.symlinkSync(path.join(bin, "node"), path.join(bin, "nodejs")); // Debian's nodejs is a link to node
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
@@ -150,6 +151,7 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
       // probe software/4: what the Node binary says it bundles, verbatim JSON; the Depends field of the package that owns each probed program
       assert.equal(j.bundles.length, 1); assert.equal(j.bundles[0].name, "node"); assert.ok(String(j.bundles[0].path).endsWith("/node"), "the install's path, so several Nodes on one box stay apart");
       assert.deepEqual(j.bundles[0].versions, { node: "22.12.0", brotli: "1.1.0", openssl: "3.0.15+quic", modules: "127" });
+      assert.deepEqual(j.binaries.filter((b: any) => /^node(js)?$/.test(b.name)).map((b: any) => b.name), ["node"], "nodejs resolves to the node file already listed: one row, not two programs");
       assert.deepEqual(j.depends, [{ n: "nodejs", d: "libc6 (>= 2.34), nginx (>= 1), libnotinstalled (>= 1)" }]);
     } else assert.deepEqual(j.depends, [], `${name}: dependencies are read through dpkg only`);
   }

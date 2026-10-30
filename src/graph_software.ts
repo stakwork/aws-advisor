@@ -127,6 +127,10 @@ const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; f
 const rows = (sql: string, ...params: unknown[]): any[] => { try { return db.prepare(sql).all(...params) as any[]; } catch { return []; } };
 const SOURCE_KIND: Record<string, string> = { deb: "dpkg", rpm: "rpm", apk: "apk", bundled: "process_versions" };
 export const packageId = (ecosystem: string, name: string, version: string) => `pkg:${ecosystem}:${name}:${version}`;
+/** The ecosystem a syft purl's type lands in: its own (npm, pypi, golang, deb, ...), except that `generic`, what syft's binary cataloger gives a program
+ *  it recognised by its contents (pkg:generic/node@20.18.0), is the `binary` ecosystem of the software probe's version-flag readings, so the node
+ *  syft found and the node the probe asked are one SoftwareComponent (pkg:binary:node:20.18.0) rather than two with the same purl and version. */
+export const sbomEcosystem = (type: string): string => (type === "generic" ? "binary" : type);
 
 /** The node id of an image: its content when known (the repository at its registry digest, else the local image id for a build that never
  *  left the box), the bare reference otherwise. A tag such as latest moves; two boxes on different builds of it are two nodes, and a box that
@@ -159,7 +163,8 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
   // all (componentIdentity slugs the name, which would fold github.com/andybalholm/brotli into github.comandybalholmbrotli)
   const identity = componentIdentity({ ecosystem: p.type, name: String(r.name), version, source: upstream, os_id: distroId });
   if (!DISTRO_ECOSYSTEMS.has(p.type)) { const purl = componentPurl(p); identity.purl = purl; identity.source_purl = purl; }
-  const node = { id: packageId(p.type, String(r.name), version), name: String(r.name), version, ecosystem: p.type, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: "library", version_purl: String(r.purl), ...identity };
+  const eco = sbomEcosystem(p.type);
+  const node = { id: packageId(eco, String(r.name), version), name: String(r.name), version, ecosystem: eco, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: eco === "binary" ? packageScope(String(r.name)).scope : "library", version_purl: String(r.purl), ...identity };
   if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen } };
   const im = imageRef(String(r.ref));
   return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };
@@ -200,9 +205,13 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // the sbom probe: a purl inside an image is CONTAINS from the image node; one on the filesystem is INSTALLED_ON the box like any package.
   // The purl's own type is the ecosystem (npm, pypi, golang, deb, ...); a distro purl carries the image's distribution (namespace, distro qualifier)
   // and its source package (upstream), so its identity and advisory ecosystem are those of that distribution, not the host's
+  // A program both collectors saw on a box (syft's pkg:generic/node and the probe's node, the same id through sbomEcosystem) is one row: the probe's,
+  // which knows the path; the syft row would only rewrite the same node and edge with less
+  const probed = new Set(pkgRows.filter((p) => p.ecosystem === "binary").map((p) => `${p.instance_id}\t${p.id}`));
   const containsRows: any[] = [];
   for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.first_seen, p.last_seen, s.digest, s.image_id from instance_sbom p left join instance_sbom_sources s on s.instance_id = p.instance_id and s.source = p.source and s.ref = p.ref where 1=1${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
     const g = sbomGraphRow(r); if (!g) continue;
+    if (g.edge === "installed_on" && g.row.ecosystem === "binary" && probed.has(`${g.row.instance_id}\t${g.row.id}`)) continue;
     (g.edge === "installed_on" ? pkgRows : containsRows).push(g.row);
   }
   const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
@@ -249,7 +258,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     const p = parsePurl(String(r.purl)); if (!p) continue;
     const nid = imageNodeId(String(r.ref), r.digest, r.image_id);
     if (!keepBy.has(nid)) keepBy.set(nid, new Set());
-    keepBy.get(nid)!.add(packageId(p.type, String(r.name), String(r.version || p.version || "unknown")));
+    keepBy.get(nid)!.add(packageId(sbomEcosystem(p.type), String(r.name), String(r.version || p.version || "unknown")));
   }
   const inScope = new Set(containsRows.map((r) => String(r.image_id)));
   const keepContains = [...keepBy].filter(([nid]) => inScope.has(nid)).map(([image_id, keep]) => ({ image_id, keep: [...keep] }));
