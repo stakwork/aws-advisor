@@ -226,6 +226,15 @@ export function parsePurl(purl: string): Purl | null {
   return { type, namespace, name, version, qualifiers, full_name };
 }
 
+/** A purl segment percent-encoded as the spec prints it: `@` becomes %40, `:` and `+` stay (syft's own spelling, so the key matches). */
+const purlSegment = (s: string): string => encodeURIComponent(s).replace(/%3A/gi, ":").replace(/%2B/gi, "+");
+/** The component a purl names, without version, qualifiers or subpath: `pkg:golang/github.com/andybalholm/brotli`, `pkg:npm/%40aws-sdk/core`.
+ *  The namespace keeps its slashes (a Go module path, an npm scope, a maven group); nothing is slugged. Pure. */
+export function componentPurl(p: Purl): string {
+  const ns = p.namespace ? p.namespace.split("/").filter(Boolean).map(purlSegment).join("/") + "/" : "";
+  return `pkg:${p.type}/${ns}${purlSegment(p.name)}`;
+}
+
 /** One syft scan as the probe prints it (src/ssm.ts ProbeSbomSource). */
 export interface SbomSource { source: "image" | "dir"; ref: string; image_id?: string | null; digest?: string | null; status: string; total?: number; purls?: string[] }
 export interface SbomData { available?: boolean; tool?: string | null; install?: string | null; cap?: number; sources?: SbomSource[] }

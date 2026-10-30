@@ -20,5 +20,12 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   const npm = g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "pkg:npm/%40aws-sdk/core@3.1.0", name: "@aws-sdk/core", version: "3.1.0" })!;
   assert.equal(npm.edge, "installed_on");
   assert.equal(npm.row.id, "pkg:npm:@aws-sdk/core:3.1.0"); assert.equal(npm.row.ecosystem, "npm"); assert.equal(npm.row.advisory_ecosystem, null);
+  assert.equal(npm.row.purl, "pkg:npm/%40aws-sdk/core", "the scope survives, encoded as the purl spec prints it"); assert.equal(npm.row.source_purl, "pkg:npm/%40aws-sdk/core");
+  const go = g.sbomGraphRow({ ...base, source: "image", ref: "app:1", purl: "pkg:golang/github.com/andybalholm/brotli@v1.0.5", name: "github.com/andybalholm/brotli", version: "v1.0.5" })!;
+  assert.equal(go.row.purl, "pkg:golang/github.com/andybalholm/brotli", "a module path keeps its slashes"); assert.equal(go.row.id, "pkg:golang:github.com/andybalholm/brotli:v1.0.5");
+  const mvn = g.sbomGraphRow({ ...base, source: "image", ref: "app:1", purl: "pkg:maven/org.apache.commons/commons-lang3@3.12.0?type=jar", name: "org.apache.commons:commons-lang3", version: "3.12.0" })!;
+  assert.equal(mvn.row.purl, "pkg:maven/org.apache.commons/commons-lang3", "group and artifact, no qualifiers");
+  const py = g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "pkg:pypi/requests@2.31.0", name: "requests", version: "2.31.0" })!;
+  assert.equal(py.row.purl, "pkg:pypi/requests");
   assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "nonsense", name: "x", version: null }), null);
 });

@@ -5,7 +5,7 @@ import { ecosystemOf, packageScope } from "./package_scope.js";
 import { AWS } from "./adapters/types.js";
 import { COMPUTE_OF } from "./graph_cypher.js";
 import { DISTRO_ECOSYSTEMS, componentIdentity } from "./sec/identity.js";
-import { parsePurl } from "./software_inventory.js";
+import { componentPurl, parsePurl } from "./software_inventory.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
@@ -155,8 +155,11 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
   const distro = /^(.+?)-([0-9][^-]*)$/.exec(p.qualifiers.distro ?? "");
   const distroId = DISTRO_ECOSYSTEMS.has(p.type) ? (distro?.[1] ?? p.namespace ?? null) : null;
   const advisory = distroId ? ecosystemOf(p.type, distroId, distro?.[2] ?? null)?.ecosystem ?? null : null;
-  const node = { id: packageId(p.type, String(r.name), version), name: String(r.name), version, ecosystem: p.type, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: "library", version_purl: String(r.purl),
-    ...componentIdentity({ ecosystem: p.type, name: String(r.name), version, source: upstream, os_id: distroId }) };
+  // a distro purl takes the identity rules (distribution segment, source package); any other keeps the purl's own path, namespace and
+  // all (componentIdentity slugs the name, which would fold github.com/andybalholm/brotli into github.comandybalholmbrotli)
+  const identity = componentIdentity({ ecosystem: p.type, name: String(r.name), version, source: upstream, os_id: distroId });
+  if (!DISTRO_ECOSYSTEMS.has(p.type)) { const purl = componentPurl(p); identity.purl = purl; identity.source_purl = purl; }
+  const node = { id: packageId(p.type, String(r.name), version), name: String(r.name), version, ecosystem: p.type, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: "library", version_purl: String(r.purl), ...identity };
   if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen } };
   const im = imageRef(String(r.ref));
   return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };

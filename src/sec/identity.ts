@@ -16,6 +16,9 @@ import { sortKey } from "./version.js";
  *   kernel               → pkg:generic/linux
  *   operating system     → pkg:generic/<os_id>             pkg:generic/ubuntu
  *   anything else        → pkg:<eco>/<name>                pkg:npm/next, pkg:runtime/node
+ *
+ * A purl syft printed (the sbom probe) already is the identity: src/graph_software.ts keeps its path, namespace included
+ * (pkg:golang/github.com/andybalholm/brotli, pkg:npm/%40aws-sdk/core), and takes only the distro rules from here.
  */
 
 export interface InstalledRow {
