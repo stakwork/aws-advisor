@@ -399,7 +399,7 @@ export default function Inventory() {
   const [detail, setDetail] = useState<any>(null);
   const [err, setErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-  const [probe, setProbe] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
+  const [probe, setProbe] = useState<{ busy: boolean; error: string; note?: string }>({ busy: false, error: "" });
 
   const set = (patch: Record<string, string | null>) => {
     const p = new URLSearchParams(params);
@@ -479,7 +479,20 @@ export default function Inventory() {
 
   const runProbe = async (id: string, kind?: string) => {
     setProbe({ busy: true, error: "" });
-    try { const r = await api(`/instances/${id}/probe${kind ? `?kind=${kind}` : ""}`, { method: "POST" }); await refresh(); if (r?.failed?.length) setProbe({ busy: false, error: `${r.failed.map((f: any) => `${f.kind}: ${f.message}`).join("; ")}` }); else setProbe({ busy: false, error: "" }); return; }
+    try {
+      const r = await api(`/instances/${id}/probe${kind ? `?kind=${kind}` : ""}`, { method: "POST" });
+      if (r?.started) {
+        // a long probe (sbom: syft may take minutes) runs in the background; the page follows it until it ends
+        const minutes = Math.round((r.timeout_seconds || 1500) / 60);
+        setProbe({ busy: true, error: "", note: `${r.kind} probe started ${when(r.started_at)}: a syft scan can take up to ${minutes} minutes; the Software tab fills in when it lands.` });
+        for (;;) {
+          await new Promise((ok) => setTimeout(ok, 15000));
+          let st: any = null; try { st = await api(`/instances/${id}/probe/status`); } catch { continue; }
+          if (!st?.in_flight && st?.last?.finished_at) { await refresh(); setProbe(st.last.ok ? { busy: false, error: "", note: `${st.last.kind} probe finished ${when(st.last.finished_at)}.` } : { busy: false, error: `${st.last.kind}: ${st.last.error}` }); return; }
+        }
+      }
+      await refresh(); if (r?.failed?.length) setProbe({ busy: false, error: `${r.failed.map((f: any) => `${f.kind}: ${f.message}`).join("; ")}` }); else setProbe({ busy: false, error: "" }); return;
+    }
     catch (e: any) { setProbe({ busy: false, error: e.message }); return; }
   };
 
@@ -1099,7 +1112,7 @@ const EC2_TABS: [Ec2Tab, string][] = [["overview", "Overview"], ["usage", "Usage
  * What runs (apps, activity, containers, the process and disk lines) and Links & history (DNS, balancers,
  * recommendations, findings, the graph, the timeline).
  */
-function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; error: string }; onProbe: (kind?: string) => void }) {
+function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; error: string; note?: string }; onProbe: (kind?: string) => void }) {
   const [rules, setRules] = useState<any[]>([]);
   const [tab, setTab] = useState<Ec2Tab>("overview");
   const [usage, setUsage] = useState<any>(null);
@@ -1217,6 +1230,7 @@ function Ec2Detail({ d, probe, onProbe }: { d: any; probe: { busy: boolean; erro
             <Group title="Trends"><TypicalLine instanceId={d.instance_id} /><div className="mt-2"><InstanceCharts instanceId={d.instance_id} /></div></Group>
             <Group title={`Probes${d.probes?.length ? ` · ${d.probes.length}` : ""}`} action={probeButton}>
               {probe.error && <div className="mb-1 text-xs text-red-300">{probe.error}</div>}
+              {probe.note && !probe.error && <div className="mb-1 text-xs text-zinc-400">{probe.note}</div>}
               {latest ? <ul className="space-y-0.5 text-xs text-zinc-400">{d.probes.slice(0, 24).map((p: any) => <li key={p.id}>{when(p.collected_at)} · memory {p.summary.memory_used_pct}% · load {p.summary.load_1m}{p.summary.top_process ? ` · busiest ${p.summary.top_process}` : ""}{p.summary.last_use_at ? ` · last use ${when(p.summary.last_use_at)}` : ""}</li>)}</ul>
                 : <div className="text-sm text-zinc-500">{canProbe ? "Not probed yet: Probe now reads memory, load, disks, processes, containers and activity over SSM." : d.state !== "running" ? "Not running: nothing to probe." : "The SSM agent is not online, so the probe cannot run."}</div>}
             </Group>

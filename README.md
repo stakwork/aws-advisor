@@ -715,7 +715,10 @@ those two probes post their whole result there instead: the advisor presigns a P
 the document's `upload` parameter, the script posts the gzip-compressed JSON with curl and prints a receipt (`uploaded
 <bytes> <sha256>`) on its inline line, and the advisor reads the object back, checks it against the receipt and ingests
 it. The boxes need no IAM change (the URL carries the advisor's signature), only egress to S3; the advisor's identity
-needs the `AdvisorProbeUploads` statements above. The inline line stays the fallback (trimmed, or a stub once the whole
+needs the `AdvisorProbeUploads` statements above (a bucket in another account additionally needs a bucket policy naming
+the advisor's role). The advisor checks the bucket with that identity before it signs anything, at most every ten minutes:
+Settings › Probes says whether uploads work, Settings › Permissions has the same check ("Probe uploads bucket"), the log
+says when the state changes, and a box whose own upload failed is logged with the reason from its receipt. The inline line stays the fallback (trimmed, or a stub once the whole
 is in S3), and a document deployed before the parameter existed keeps answering inline until it is redeployed. Objects
 are kept under `<prefix>/<account>/<instance>/<kind>/<time>.json.gz`, so "Probes: re-ingest the uploads in S3"
 (Schedules, by hand) can replay the newest per box and kind after a recorder change.

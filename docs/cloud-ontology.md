@@ -893,7 +893,7 @@ An installed software component with a version. The vulnerability layer matches 
 | `source_purl` | the source package's purl, what a distribution's advisories name (`pkg:deb/ubuntu/brotli` for `libbrotli1`); equals `purl` when there is no separate source |
 | `sort_key` | the version rewritten so plain string order is version order (`src/sec/version.ts`, the same function the public graph's ranges use): a version is affected when `introduced_key <= sort_key < fixed_key`. For deb/rpm an index hint; their own ordering decides |
 
-Edges: `INSTALLED_ON {path, first_seen, last_seen, gone}` → compute, deployment, function or image; `PROVIDES` →
+Edges: `INSTALLED_ON {path, first_seen, last_seen, is_deleted, deleted_at}` → compute, deployment, function or image; `PROVIDES` →
 `AdvisorApp`; `CONTAINED_IN` ← `AdvisorImage` (`CONTAINS`); `BUNDLES {source_kind: process_versions}` → the
 libraries compiled into a runtime (`node 22.12.0 BUNDLES brotli 1.1.0`, one fact however many boxes have it);
 `DEPENDS_ON {source_kind: dpkg}` → the installed packages a package's Depends names, read for the packages that own

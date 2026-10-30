@@ -22,7 +22,7 @@ import { effectiveSignals } from "./signal_rules.js";
  * Tested on Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
 import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, UPLOAD_KINDS, legacyKindOf, legacyProbeDocumentName, probeInstallValue, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
-export { PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
+export { PROBE_DEFS, PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
 /** The host kind's document and info, for the places that still ask for "the" probe document. */
 export const probeDocument = (kind: ProbeKind = "host") => probeDocumentFor(kind);
 export const probeDocumentInfo = (kind: ProbeKind = "host") => probeDocumentInfoFor(kind);

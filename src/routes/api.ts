@@ -19,7 +19,7 @@ import { ssoSummary } from "../sso_inventory.js";
 import { proposeReadPolicyUpdates } from "../actions/read_policy.js";
 import { isAccountTarget, dismissAccountChange, noteAccountChange, pendingAccountChange, purgeAccountData, purgePreview, wipeAllData, wipePreview } from "../purge.js";
 import { postRejectionLearning } from "../learnings.js";
-import { PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, ProbeError, instanceMetrics, latestProbe, probeDocument, probeDocumentInfo, probeDocumentsInfo, probeErrorStatus, probeInstance, probeInstanceAll, summarizeProbe } from "../ssm.js";
 import { clearPermissionIssues, listPermissionIssues, policyForIssues, recommendedPolicy, VIEW_ONLY_POLICY_ARN } from "../permissions.js";
 import { checkPermissions, lastPermissionCheck, permissionCheckSummary } from "../permission_check.js";
 import { defaultSetupDocuments, renderSetupPlan, renderSetupScript, setupCommands, validateSetupOptions } from "../setup_script.js";
@@ -427,12 +427,26 @@ api.get("/learnings", (_req, res) => {
 // ---- instances (SSM probe) -------------------------------------------------
 const probeInFlight = new Set<string>();
 
-// ?kind=host|docker|apps|software runs one probe; without it every kind runs in turn and the merged view comes back.
+/** The last background probe of each instance (the sbom kind: a syft scan can take minutes, longer than a browser or a proxy waits), for the page to poll. */
+const probeRuns = new Map<string, { kind: string; started_at: string; finished_at: string | null; ok: boolean | null; error: string | null; code: string | null }>();
+const BACKGROUND_KINDS: readonly string[] = ["sbom"];
+
+// ?kind=host|docker|apps|software runs one probe and waits for it; ?kind=sbom starts it in the background (202) and GET .../probe/status follows it;
+// without a kind every kind but sbom runs in turn and the merged view comes back.
 api.post("/instances/:id/probe", async (req, res) => {
   const id = String(req.params.id);
   const kind = typeof req.query.kind === "string" ? req.query.kind : typeof req.body?.kind === "string" ? req.body.kind : "";
   if (kind && !(PROBE_KINDS as readonly string[]).includes(kind)) return res.status(400).json({ error: `kind must be one of ${PROBE_KINDS.join(", ")}` });
-  if (probeInFlight.has(id)) return res.status(409).json({ error: `a probe of ${id} is already running` });
+  if (probeInFlight.has(id)) return res.status(409).json({ error: `a probe of ${id} is already running${probeRuns.get(id)?.finished_at === null ? ` (${probeRuns.get(id)!.kind}, since ${probeRuns.get(id)!.started_at})` : ""}` });
+  if (kind && BACKGROUND_KINDS.includes(kind) && req.query.wait !== "1") {
+    const run = { kind, started_at: new Date().toISOString(), finished_at: null as string | null, ok: null as boolean | null, error: null as string | null, code: null as string | null };
+    probeRuns.set(id, run); probeInFlight.add(id);
+    void probeInstance(id, { kind: kind as ProbeKind })
+      .then(() => { run.ok = true; })
+      .catch((e: any) => { run.ok = false; run.error = String(e?.message || e).slice(0, 400); run.code = e instanceof ProbeError ? e.code : "failed"; console.error(`[probe] ${id} ${kind} (started from the page): ${run.error}`); })
+      .finally(() => { run.finished_at = new Date().toISOString(); probeInFlight.delete(id); });
+    return res.status(202).json({ started: true, kind, instance_id: id, started_at: run.started_at, timeout_seconds: PROBE_DEFS[kind as ProbeKind].timeout_seconds });
+  }
   probeInFlight.add(id);
   try {
     if (kind) { const p = await probeInstance(id, { kind: kind as ProbeKind }); const merged = latestProbe(id); return res.json({ ...p, merged: merged?.data ?? null, summary: merged ? summarizeProbe(merged.data) : summarizeProbe(p.data) }); }
@@ -446,6 +460,12 @@ api.post("/instances/:id/probe", async (req, res) => {
   } finally {
     probeInFlight.delete(id);
   }
+});
+
+/** The last background probe of an instance and whether one runs now. */
+api.get("/instances/:id/probe/status", (req, res) => {
+  const id = String(req.params.id);
+  res.json({ instance_id: id, in_flight: probeInFlight.has(id), last: probeRuns.get(id) ?? null });
 });
 
 // ---- use signals: which log patterns count as a person using the service, per image (src/signal_rules.ts) ----
