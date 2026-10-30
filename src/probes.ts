@@ -262,7 +262,7 @@ const SOFTWARE_BODY = [
   "addbin() { [ -n \"$2\" ] || return 0; bins=\"$bins$bn{\\\"name\\\":\\\"$(esc \"$1\")\\\",\\\"version\\\":\\\"$(esc \"$2\")\\\",\\\"path\\\":\\\"$(esc \"$3\")\\\"}\"; bn=\",\"; }",
   "for b in sshd nginx apache2 httpd openssl node nodejs python3 python docker containerd postgres redis-server mysqld mariadbd mongod java ruby go caddy haproxy traefik bitcoind lnd php perl git curl; do",
   "  for p in $(pathsof \"$b\"); do v=\"\"",
-  "    case \"$b\" in sshd) v=$(vof ssh -V);; openssl) v=$(vof \"$p\" version);; go) v=$(vof \"$p\" version);; java) v=$(vof \"$p\" -version);; apache2|httpd) v=$(vof \"$p\" -v);; *) v=$(vof \"$p\" --version);; esac",
+  "    case \"$b\" in sshd) v=$(vof ssh -V);; nginx) v=$(vof \"$p\" -v);; openssl) v=$(vof \"$p\" version);; go) v=$(vof \"$p\" version);; java) v=$(vof \"$p\" -version);; apache2|httpd) v=$(vof \"$p\" -v);; *) v=$(vof \"$p\" --version);; esac",
   "    addbin \"$b\" \"$v\" \"$p\"",
   "  done",
   "done",

@@ -135,6 +135,22 @@ export function parseDepends(field: string): string[] {
 
 /** A version as process.versions prints it, or null for anything that is not a plain version string. */
 const bundledVersion = (v: unknown): string | null => (typeof v === "string" && /^[0-9][0-9A-Za-z.+:~-]{0,60}$/.test(v) ? v : null);
+/** The version in the first line a program prints for its version flag: `Python 3.11.2` → `3.11.2`, `v18.20.4` → `18.20.4`,
+ *  `OpenSSH_9.2p1 Debian-2+deb12u10, OpenSSL 3.0.22 ...` → `9.2p1`, `Docker version 25.0.14, build 0bab007` → `25.0.14`,
+ *  `go version go1.23.8 linux/amd64` → `1.23.8`, `nginx version: nginx/1.26.3` → `1.26.3`, `Redis server v=7.0.15 ...` → `7.0.15`,
+ *  `openjdk version "17.0.2" 2022-01-18` → `17.0.2`, `This is perl 5, version 38, subversion 2 (v5.38.2) ...` → `5.38.2`.
+ *  The first word that is a dotted version once its wrapping (quotes, parentheses, a trailing comma) and a product prefix
+ *  (`OpenSSH_`, `nginx/`, `v=`, `go`, `v`) are taken off; the line itself when no word is one, so an unforeseen format is kept
+ *  rather than lost. The stored version is the key of the SoftwareComponent node and what a CVE range is compared against. Pure. */
+export function binaryVersion(line: string): string {
+  const raw = String(line ?? "").trim();
+  for (const word of raw.split(/\s+/)) {
+    const w = word.replace(/^[("'\[]+|[)"',;\]]+$/g, "");
+    const m = /^(?:[A-Za-z][A-Za-z0-9_.-]*[=\/_:]|[a-z]{1,4})?[vV]?(\d+(?:\.\d+)+[0-9A-Za-z.+~_-]*)$/.exec(w);
+    if (m) return m[1]!;
+  }
+  return raw;
+}
 /** process.versions keys that are not libraries: the runtime itself and its ABI numbers. */
 const NOT_LIBRARIES = new Set(["node", "modules", "napi", "unicode", "tz", "cldr"]);
 
@@ -162,7 +178,7 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
       insertChange.run(instanceId, was.ecosystem, was.name, was.version, null, collectedAt); res.removed.push(was.name);
     }
     // one row per install: a box may hold several Nodes (nvm), each at its own path
-    const bins = (data.binaries ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.version).map((b) => ({ name: clean(b.name, 64), version: clean(b.version, 120), path: b.path == null ? "" : clean(b.path, 200) }));
+    const bins = (data.binaries ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.version).map((b) => ({ name: clean(b.name, 64), version: clean(binaryVersion(b.version), 120), path: b.path == null ? "" : clean(b.path, 200) }));
     const binSeen = new Set<string>();
     for (const b of bins) { binSeen.add(`${b.name}\t${b.path}`); upsertBin.run(instanceId, b.name, b.version, b.path, collectedAt, collectedAt); }
     if (Array.isArray(data.binaries)) for (const r of db.prepare("select name, path from instance_binaries where instance_id = ?").all(instanceId) as { name: string; path: string }[]) if (!binSeen.has(`${r.name}\t${r.path}`)) db.prepare("delete from instance_binaries where instance_id = ? and name = ? and path = ?").run(instanceId, r.name, r.path);

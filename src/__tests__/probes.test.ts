@@ -67,6 +67,22 @@ test("script overrides: a read-only edit is kept and changes the hash, a dangero
   assert.equal(pr.probeScriptHash("apps"), before);
 });
 
+test("binaryVersion: the number alone out of whatever a program prints for its version flag", () => {
+  const cases: [string, string][] = [
+    ["Python 3.11.2", "3.11.2"], ["v18.20.4", "18.20.4"], ["OpenSSH_9.2p1 Debian-2+deb12u10, OpenSSL 3.0.22 25 Aug 2026", "9.2p1"], ["OpenSSH_7.4p1, OpenSSL 1.0.2k-fips  26 Jan 2017", "7.4p1"],
+    ["OpenSSL 1.0.2k-fips  26 Jan 2017", "1.0.2k-fips"], ["OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)", "3.0.13"], ["Docker version 25.0.14, build 0bab007", "25.0.14"],
+    ["containerd containerd.io 1.7.19 2bf793ef6dc9a18e00cb12efb64355c2c9d5eb41", "1.7.19"], ["containerd containerd v2.3.5 1294c24a7da8e5a793ed378161673abe94118892", "2.3.5"], ["containerd github.com/containerd/containerd/v2 2.2.7+unknown ", "2.2.7+unknown"],
+    ["curl 7.88.1 (x86_64-pc-linux-gnu) libcurl/7.88.1 OpenSSL/3.0.22 zlib/1.2.13", "7.88.1"], ["git version 2.39.5", "2.39.5"], ["go version go1.23.8 linux/amd64", "1.23.8"], ["Server version: Apache/2.4.62 ()", "2.4.62"],
+    ["nginx version: nginx/1.26.3", "1.26.3"], ["lnd version 0.18.0-beta commit=v0.18.0-beta", "0.18.0-beta"], ["Bitcoin Core version v23.0.0", "23.0.0"], ["Bitcoin Knots version v23.0.knots20220529", "23.0.knots20220529"],
+    ["db version v7.0.14", "7.0.14"], ["ruby 2.3.1p112 (2016-04-26) [x86_64-linux-gnu]", "2.3.1p112"], ["openjdk version \"17.0.2\" 2022-01-18", "17.0.2"], ["java version \"1.8.0_292\"", "1.8.0_292"],
+    ["PHP 8.3.6 (cli) (built: Apr 15 2024 19:21:47) (NTS)", "8.3.6"], ["This is perl 5, version 38, subversion 2 (v5.38.2) built for x86_64-linux-gnu-thread-multi", "5.38.2"], ["postgres (PostgreSQL) 16.3 (Debian 16.3-1.pgdg120+1)", "16.3"],
+    ["Redis server v=7.0.15 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=abc", "7.0.15"], ["mysqld  Ver 8.0.37-0ubuntu0.24.04.1 for Linux on x86_64 ((Ubuntu))", "8.0.37-0ubuntu0.24.04.1"], ["v2.8.4 h1:q/Q4u4qX5Ox3ZrQ=", "2.8.4"],
+    ["HAProxy version 2.8.5-1ubuntu3 2024/04/01", "2.8.5-1ubuntu3"], ["3.11.2", "3.11.2"],
+    ["nginx: invalid option: \"-\"", "nginx: invalid option: \"-\""],
+  ];
+  for (const [line, want] of cases) assert.equal(sw.binaryVersion(line), want, line);
+});
+
 test("software inventory: a newer version replaces the row, what left is deleted, both are logged, and a package can be found across the fleet", () => {
   const iid = "i-0feedfacecafe0010";
   db.prepare("insert or replace into inventory_ec2(instance_id, name, state, snapshot) values (?, 'web-1', 'running', '{}')").run(iid);

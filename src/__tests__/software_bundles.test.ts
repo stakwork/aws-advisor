@@ -30,12 +30,12 @@ test("parseDepends: every alternative, no constraints, no architecture qualifier
   assert.deepEqual(sw.parseDepends("Weird Thing, ok-pkg"), ["ok-pkg"]);
 });
 
-test("bundles: the runtime's libraries become rows under the binary's own version; the runtime and its ABI numbers are not libraries", () => {
+test("bundles: the runtime's libraries become rows under the binary's own version (the number alone, never the v); the runtime and its ABI numbers are not libraries", () => {
   const r = probe("2026-10-28T10:00:00Z")!;
   assert.equal(r.bundles, 4, "brotli, openssl, zlib, uv");
   const rows = sw.softwareOn(BOX).bundles;
   assert.deepEqual(rows.map((b) => [b.parent, b.parent_version, b.name, b.version]), [
-    ["node", "v22.12.0", "brotli", "1.1.0"], ["node", "v22.12.0", "openssl", "3.0.15+quic"], ["node", "v22.12.0", "uv", "1.49.2"], ["node", "v22.12.0", "zlib", "1.3.0.1-motley"],
+    ["node", "22.12.0", "brotli", "1.1.0"], ["node", "22.12.0", "openssl", "3.0.15+quic"], ["node", "22.12.0", "uv", "1.49.2"], ["node", "22.12.0", "zlib", "1.3.0.1-motley"],
   ]);
 });
 
@@ -54,7 +54,7 @@ test("a later probe replaces: a library gone from the runtime and a dependency g
   })!;
   assert.equal(r.bundles, 2);
   const after = sw.softwareOn(BOX);
-  assert.deepEqual(after.bundles.map((b) => [b.parent_version, b.name, b.version]), [["v22.13.0", "brotli", "1.1.1"], ["v22.13.0", "openssl", "3.0.15+quic"]]);
+  assert.deepEqual(after.bundles.map((b) => [b.parent_version, b.name, b.version]), [["22.13.0", "brotli", "1.1.1"], ["22.13.0", "openssl", "3.0.15+quic"]]);
   assert.deepEqual(after.depends.map((d) => [d.name, d.dep]), [["nodejs", "libc6"]]);
   assert.equal(after.depends[0]!.first_seen, "2026-10-28T10:00:00Z", "an unchanged dependency keeps when it was first seen");
 });
@@ -70,8 +70,8 @@ test("several Nodes on one box (nvm): each install is its own binary row and bun
     depends: [],
   });
   const sw2 = sw.softwareOn(BOX);
-  assert.deepEqual(sw2.binaries.filter((b) => b.name === "node").map((b) => b.version).sort(), ["v18.20.4", "v20.18.0", "v22.12.0"]);
-  assert.deepEqual(sw2.bundles.map((b) => [b.parent_version, b.name, b.version]), [["v18.20.4", "brotli", "1.0.9"], ["v20.18.0", "brotli", "1.1.0"], ["v22.12.0", "brotli", "1.1.0"]], "the Node 18 carries the older brotli, inside CVE-2026-111497's first range");
+  assert.deepEqual(sw2.binaries.filter((b) => b.name === "node").map((b) => b.version).sort(), ["18.20.4", "20.18.0", "22.12.0"]);
+  assert.deepEqual(sw2.bundles.map((b) => [b.parent_version, b.name, b.version]), [["18.20.4", "brotli", "1.0.9"], ["20.18.0", "brotli", "1.1.0"], ["22.12.0", "brotli", "1.1.0"]], "the Node 18 carries the older brotli, inside CVE-2026-111497's first range");
 });
 
 test("an older probe without the sections leaves the tables alone", () => {
