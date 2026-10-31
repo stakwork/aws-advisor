@@ -21,7 +21,9 @@ const statusWord: Record<string, string> = { current: "deployed, current", stale
  * update commands, and the script itself with an editor (saved edits take effect when the document is redeployed).
  */
 export function ProbesCard() {
-  const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number; uploads?: { configured: boolean; bucket: string | null; prefix: string | null; ok: boolean | null; error: string | null; checked_at: string | null; identity: string | null }; document_rows?: any[] } | null>(null);
+  const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number; uploads?: { configured: boolean; bucket: string | null; prefix: string | null; ok: boolean | null; error: string | null; checked_at: string | null; identity: string | null };
+    scanner?: { instance_id: string | null; configured: boolean; raw_setting: string | null; images: { distinct: number; ok: number; failed: number; by_scanner: number; packages: number; pullable_now: number; due_now: number; last_scanner_at: string | null }; policy: unknown }; document_rows?: any[] } | null>(null);
+  const [showPolicy, setShowPolicy] = useState(false);
   const [proposing, setProposing] = useState(false);
   const [proposeMsg, setProposeMsg] = useState<{ text: string; err: boolean } | null>(null);
   const [err, setErr] = useState("");
@@ -46,7 +48,7 @@ export function ProbesCard() {
       await load();
     } catch (e: any) { setProposeMsg({ err: true, text: e.message }); } finally { setProposing(false); }
   };
-  const pass = async (kind: string) => { setBusy(kind); note(kind, "Running the pass…"); try { const r = await api(`/probes/${kind}/pass`, { method: "POST", body: "{}" }); note(kind, `${r.probed.length} probed, ${r.failed.length} failed of ${r.candidates} candidates in ${Math.round(r.took_ms / 1000)} s${r.failed[0] ? `; first failure: ${r.failed[0].message}` : ""}`); await load(); } catch (e: any) { note(kind, e.message); } finally { setBusy(""); } };
+  const pass = async (kind: string) => { setBusy(kind); note(kind, "Running the pass…"); try { const r = await api(`/probes/${kind}/pass`, { method: "POST", body: "{}" }); note(kind, `${r.probed.length} ${kind === "images" ? "image(s) read" : "probed"}, ${r.failed.length} failed of ${r.candidates} ${kind === "images" ? "due" : "candidates"} in ${Math.round(r.took_ms / 1000)} s${r.images ? `; images: ${r.images.ok ? `${r.images.scanned.length} read, ${r.images.failed.length} failed of ${r.images.candidates} due on ${r.images.scanner}` : r.images.reason}` : ""}${r.failed[0] ? `; first failure: ${r.failed[0].message}` : ""}`); await load(); } catch (e: any) { note(kind, e.message); } finally { setBusy(""); } };
 
   if (err) return <Card title="Probes"><div className="text-sm text-red-300">{err}</div></Card>;
   if (!d) return <Card title="Probes"><div className="text-sm text-zinc-500">Loading…</div></Card>;
@@ -63,6 +65,16 @@ export function ProbesCard() {
             : d.uploads.ok ? <><span className="text-emerald-300">bucket {d.uploads.bucket} works</span> under <code className="text-zinc-200">{d.uploads.prefix}/</code>{d.uploads.identity ? <> as <code className="text-zinc-200">{d.uploads.identity}</code></> : null}{d.uploads.checked_at ? <> · checked {when(d.uploads.checked_at)}</> : null}.</>
             : <><span className="text-red-300">bucket {d.uploads.bucket} is not usable</span>{d.uploads.identity ? <> as <code className="text-zinc-200">{d.uploads.identity}</code></> : null}: {d.uploads.error}. The probes answer inline until it is. A bucket in another account needs a bucket policy for this role; the role needs s3:PutObject and s3:GetObject under the prefix and s3:ListBucket on the bucket.</>}
         </p>
+      )}
+      {d.scanner && (
+        <div className="mb-3 text-sm text-zinc-400">
+          Image scanner (the images probe):{" "}
+          {!d.scanner.configured ? <>not configured{d.scanner.raw_setting ? <> (<code className="text-zinc-200">{d.scanner.raw_setting}</code> is not an instance id)</> : null}. Every box scans its own container images in the sbom pass. Name one SSM-online Linux instance under Probe pass › Image scanner instance and the sbom pass reads each of the fleet's {d.scanner.images.pullable_now} registry image(s) once there, pulled by digest; the boxes then scan only what they built themselves.</>
+            : <><span className="text-emerald-300">{d.scanner.instance_id}</span> reads the registry images once for the fleet: {d.scanner.images.pullable_now} running image(s) with a digest, {d.scanner.images.due_now} due now, {d.scanner.images.distinct} scan(s) held ({d.scanner.images.ok} ok, {d.scanner.images.failed} failed; {d.scanner.images.by_scanner} by the scanner, the rest by the boxes), {d.scanner.images.packages} packages{d.scanner.images.last_scanner_at ? <> · last read {when(d.scanner.images.last_scanner_at)}</> : <> · the scanner has not answered yet</>}.</>}
+          {" "}The scanner needs the <code className="text-zinc-200">{d.base_document}-images</code> document, syft (installed by the probe when the install switch is on), the AWS CLI, egress to the registries and an instance role that may pull from ECR; Docker Hub logins and private registries go in the scanner's own <code className="text-zinc-200">~/.docker/config.json</code>, never here.{" "}
+          <button type="button" className="text-zinc-300 underline decoration-zinc-600 underline-offset-2" onClick={() => setShowPolicy(!showPolicy)}>{showPolicy ? "Hide" : "Show"} the scanner's role statements</button>
+          {showPolicy && <div className="mt-2"><div className="mb-1 flex justify-end"><CopyButton text={JSON.stringify(d.scanner.policy, null, 2)} /></div><Code>{JSON.stringify(d.scanner.policy, null, 2)}</Code><div className="mt-1 text-xs text-zinc-500">Attach to the scanner instance's role, not to the advisor's identity. A repository in a member account also needs a repository policy that lets this role pull.</div></div>}
+        </div>
       )}
       <table className="w-full border-collapse text-sm">
         <thead className="text-xs text-zinc-500"><tr><th className="py-1 text-left font-normal">Probe</th><th className="text-left font-normal">Document</th><th className="text-left font-normal">Schedule</th><th className="text-left font-normal">Scope</th><th className="text-right font-normal">Last 24 h</th><th className="text-right font-normal">Due now</th><th className="font-normal"></th></tr></thead>

@@ -20,17 +20,24 @@ test("every probe kind has a document of its own that passes sh -n, embeds its h
     assert.equal(doc.mainSteps[0].name, `probe_${kind}`);
     assert.equal(doc.mainSteps[0].inputs.timeoutSeconds, String(pr.PROBE_DEFS[kind].timeout_seconds));
     const script = doc.mainSteps[0].inputs.runCommand.join("\n");
-    const r = spawnSync("sh", ["-n"], { input: script.replace("{{ signals }}", "x=y").replace("{{ install }}", "yes").replace("{{ upload }}", ""), encoding: "utf8" });
+    const r = spawnSync("sh", ["-n"], { input: script.replace("{{ signals }}", "x=y").replace("{{ install }}", "yes").replace("{{ upload }}", "").replace("{{ images }}", kind === "sbom" ? "all" : "").replace("{{ timeout }}", "180"), encoding: "utf8" });
     assert.equal(r.status, 0, `${kind}: ${r.stderr}`);
+    assert.ok(!script.includes("__"), `${kind}: every placeholder is mapped to a document parameter`);
     assert.equal(pr.probeDocumentName(kind), `AwsAdvisorProbe-${kind}`);
     assert.ok(pr.probeDocumentInfo(kind).create_command.includes(`/api/probes/${kind}/document`));
   }
   assert.ok(Object.keys((pr.probeDocument("docker") as any).parameters).includes("signals"));
   assert.deepEqual((pr.probeDocument("host") as any).parameters, {});
-  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "upload"]);
+  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "images", "upload"]);
+  assert.deepEqual(Object.keys((pr.probeDocument("images") as any).parameters), ["install", "images", "timeout", "upload"]);
+  assert.deepEqual((pr.probeDocument("sbom") as any).parameters.images.allowedValues, ["all", "local"]);
+  assert.equal((pr.probeDocument("images") as any).parameters.images.default, "", "a batch is always passed");
   assert.deepEqual(Object.keys((pr.probeDocument("software") as any).parameters), ["upload"]);
-  for (const k of ["software", "sbom"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload='{{ upload }}'")), `${k}: the upload URL is a document parameter, quoted (a presigned URL is full of & and =)`);
-  assert.ok((pr.probeDocument("sbom") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("install={{ install }}")), "the install switch is a document parameter");
+  for (const k of ["software", "sbom", "images"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload='{{ upload }}'")), `${k}: the upload URL is a document parameter, quoted (a presigned URL is full of & and =)`);
+  for (const k of ["sbom", "images"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("install={{ install }}")), `${k}: the install switch is a document parameter`);
+  assert.ok((pr.probeDocument("sbom") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("imgmode={{ images }}")), "the sbom images mode is a document parameter");
+  assert.ok((pr.probeDocument("images") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("images='{{ images }}'") && l.includes("itmo={{ timeout }}")), "the batch and the per-image timeout are document parameters");
+  assert.equal(pr.PROBE_DEFS.images.per_box, false); assert.ok(pr.PROBE_KINDS.filter((k) => pr.PROBE_DEFS[k].per_box).length === pr.PROBE_KINDS.length - 1, "every other kind goes to the boxes");
   // SSM compiles allowedPattern with RE2, which rejects a repeat count above 1000 (CreateDocument: "invalid repeat count")
   for (const kind of pr.PROBE_KINDS) for (const p of Object.values((pr.probeDocument(kind) as any).parameters) as any[]) {
     const counts = [...String(p.allowedPattern || "").matchAll(/\{(\d+)(?:,(\d+))?\}/g)].flatMap((m) => [m[1], m[2]].filter(Boolean).map(Number));
@@ -164,7 +171,7 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const log = path.join(dir, "args.log");
   const w = (where: string, name: string, body: string) => fs.writeFileSync(path.join(where, name), body, { mode: 0o755 });
   for (const where of [bin, bare]) {
-    w(where, "docker", "#!/bin/sh\ncase \"$1 $2 $5\" in info*) exit 0;; ps*) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\nhuge:1\\n';; 'image inspect nginx:1.27') printf 'sha256:bbbb|nginx@sha256:cccc|52428800\\n';; 'image inspect app:latest') printf 'sha256:aaaa||104857600\\n';; 'image inspect huge:1') printf 'sha256:dddd|huge@sha256:eeee|9000000000000000000\\n';; *) exit 1;; esac\n");
+    w(where, "docker", "#!/bin/sh\ncase \"$1 $2 $5\" in info*) exit 0;; ps*) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\nhuge:1\\n';; 'image inspect nginx:1.27') printf 'sha256:bbbb|nginx@sha256:cccc|52428800|linux/amd64\\n';; 'image inspect app:latest') printf 'sha256:aaaa||104857600|linux/arm64\\n';; 'image inspect huge:1') printf 'sha256:dddd|huge@sha256:eeee|9000000000000000000|linux/amd64\\n';; *) exit 1;; esac\n");
     w(where, "dpkg-query", "#!/bin/sh\nexit 0\n");
     w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n"); // macOS has none; the script falls back to no bound either way
   }
@@ -180,14 +187,21 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   assert.ok(fs.existsSync(path.join(other, "keep")), "a scratch path that does not end in /aws-advisor-sbom is refused, not emptied");
   assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
   const j = parseProbeOutput(line);
-  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/3"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
-  assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0");
+  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/4"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
+  assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0"); assert.equal(j.sbom?.images_mode, "all", "the default: every running image, here");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
-  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept; a local build has an id and no digest");
-  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", status: "timeout", total: 0, note: null, purls: [] }, "a pulled image carries its registry digest");
-  assert.equal(by["image huge:1"]!.status, "skipped"); assert.match(by["image huge:1"]!.note ?? "", /^needs about \d+ MB of scratch space under .*, \d+ MB free$/, "an image the free disk cannot hold is skipped, not half-read");
+  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, platform: "linux/arm64", status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept; a local build has an id and no digest; the platform travels");
+  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", platform: "linux/amd64", status: "timeout", total: 0, note: null, purls: [] }, "a pulled image carries its registry digest");
+  assert.equal(by["image huge:1"]!.status, "skipped"); assert.equal(by["image huge:1"]!.platform, "linux/amd64"); assert.match(by["image huge:1"]!.note ?? "", /^needs about \d+ MB of scratch space under .*, \d+ MB free$/, "an image the free disk cannot hold is skipped, not half-read");
   assert.ok(!fs.readFileSync(log, "utf8").includes("docker:huge:1"), "syft was never asked for it");
-  assert.equal(by["dir /"]!.image_id, null); assert.equal(j.upload, undefined, "no upload URL: no receipt");
+  assert.equal(by["dir /"]!.image_id, null); assert.equal(by["dir /"]!.platform, null); assert.equal(j.upload, undefined, "no upload URL: no receipt");
+  // local mode (sbom 1.6): the images with a registry digest are the scanner's and are not listed; the local build and the filesystem stay
+  const nginxScans = () => fs.readFileSync(log, "utf8").split("\n").filter((l) => l.includes("docker:nginx:1.27")).length;
+  const beforeLocal = nginxScans();
+  const local = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__IMAGES_MODE__", "local"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  assert.equal(local.sbom?.images_mode, "local");
+  assert.deepEqual(local.sbom!.sources.map((s) => `${s.source} ${s.ref}`), ["image app:latest", "dir /"], "nginx (digest) and huge (digest) are left to the scanner, not even reported as skipped");
+  assert.equal(nginxScans(), beforeLocal, "the digested image was not scanned in local mode");
   assert.equal(by["dir /"]!.status, "ok"); assert.equal(by["dir /"]!.total, 6000, "the OS package is left to the software probe; the true count is reported");
   assert.ok(by["dir /"]!.purls.length < 6000 && by["dir /"]!.purls.length >= 100 && by["dir /"]!.purls.every((p) => p.startsWith("pkg:pypi/")), `trimmed to the budget (${by["dir /"]!.purls.length}, cap ${j.sbom!.cap})`);
   const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
@@ -197,7 +211,7 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   assert.ok(args.includes(`--exclude .${path.join(bin, "syft")}`), "syft does not catalog its own Go modules");
   // no syft and the install switch off: reported, left alone
   const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__INSTALL__", "no")));
-  assert.deepEqual(none.sbom, { available: false, tool: null, install: "not installed; the install parameter is no", cap: 3000, sources: [] });
+  assert.deepEqual(none.sbom, { available: false, tool: null, install: "not installed; the install parameter is no", images_mode: "all", cap: 3000, sources: [] });
   // the switch on (the default): the installer is fetched with curl and run; the fake one copies the fake syft into the target directory, then the scan runs with it
   const target = path.join(dir, "installed");
   w(bare, "curl", `#!/bin/sh\ncase "$*" in *get.anchore.io/syft*) printf 'mkdir -p "$2"; cp "%s" "$2/syft"\n' "${path.join(bin, "syft")}";; *) exit 22;; esac\n`);
@@ -252,13 +266,15 @@ test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, 
   assert.equal(sw.parsePurl("pkg:generic/node")!.version, null);
   assert.equal(sw.parsePurl("nonsense"), null);
   const iid = "i-0sbom00000000001";
-  const r1 = sw.recordSbom(iid, "2026-10-29T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, sources: [
+  const r1 = sw.recordSbom(iid, "2026-10-29T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, images_mode: "all", sources: [
     { source: "image", ref: "app:latest", status: "ok", total: 2, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?upstream=glibc&distro=debian-12"] },
     { source: "dir", ref: "/", status: "ok", total: 1, purls: ["pkg:pypi/requests@2.32.3"] } ] })!;
   assert.equal(r1.packages, 3); assert.equal(r1.sources, 2); assert.equal(r1.added, 0, "a first scan adds nothing");
+  assert.deepEqual(r1.images.ok, [`ref:${iid}|app:latest`], "an image with neither digest nor id is keyed by the box and the reference");
   let on = sw.softwareOn(iid).sbom;
-  assert.equal(on.scan?.available, true); assert.equal(on.scan?.packages, 3); assert.equal(on.scan?.tool, "syft 1.55.0");
+  assert.equal(on.scan?.available, true); assert.equal(on.scan?.packages, 3); assert.equal(on.scan?.tool, "syft 1.55.0"); assert.equal(on.scan?.images_mode, "all");
   assert.deepEqual(on.packages.map((p) => [p.ref, p.type, p.name, p.version]), [["app:latest", "deb", "libc6", "2.36-9"], ["app:latest", "npm", "express", "4.19.2"], ["/", "pypi", "requests", "2.32.3"]]);
+  assert.deepEqual(on.sources.map((s) => [s.source, s.ref, s.status, s.scanned_on, s.via]), [["image", "app:latest", "ok", iid, "box"], ["dir", "/", "ok", iid, "box"]], "the image's scan is the box's own, through the box's image row");
   // the image timed out this time (its rows stay), the filesystem moved on: one version replaced, one package new
   const r2 = sw.recordSbom(iid, "2026-10-30T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, sources: [
     { source: "image", ref: "app:latest", status: "timeout", total: 0, purls: [] },
@@ -269,13 +285,59 @@ test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, 
   assert.equal(on.packages.filter((p) => p.ref === "app:latest").length, 2, "a timed-out scan keeps the last good list");
   assert.deepEqual(on.packages.filter((p) => p.ref === "/").map((p) => p.version), ["2.32.4", "2.2.0"]);
   assert.deepEqual(sw.softwareOn(iid, { q: "url" }).sbom.packages.map((p) => p.name), ["urllib3"], "the search filters the sbom too");
-  // the container stopped: its scan is no longer reported, so its rows go; the fleet search still finds the rest
+  // the container stopped: the image's scan is no longer reported by this box, but what the image contains stays a fact about the image (the box's image row keeps it in view until the software probe drops the image; pruneImageSboms retires it a month after the last box)
   const r3 = sw.recordSbom(iid, "2026-10-31T10:00:00Z", { available: true, sources: [{ source: "dir", ref: "/", status: "ok", total: 2, purls: ["pkg:pypi/requests@2.32.4", "pkg:pypi/urllib3@2.2.0"] }] })!;
-  assert.equal(r3.removed, 2); assert.equal(sw.softwareOn(iid).sbom.sources.length, 1);
+  assert.equal(r3.removed, 0); assert.equal(sw.softwareOn(iid).sbom.sources.length, 2);
   assert.ok(sw.wherePackage("urllib3").some((w) => w.kind === "sbom" && w.instance_id === iid && w.ref === "/" && w.ecosystem === "pypi"));
-  assert.ok(sw.softwareSummary().sbom.boxes >= 1);
-  // syft uninstalled: what it read is no longer known to be there
+  assert.ok(sw.wherePackage("express").some((w) => w.kind === "sbom" && w.instance_id === iid && w.ref === "app:latest" && w.ecosystem === "npm"), "an image's package is found on every box running the image, with the box's name for it");
+  assert.ok(sw.softwareSummary().sbom.boxes >= 1); assert.ok(sw.softwareSummary().sbom.images.distinct >= 1);
+  // syft uninstalled: what it read of the filesystem is no longer known to be there; the image's contents remain the image's
   sw.recordSbom(iid, "2026-11-01T10:00:00Z", { available: false, sources: [] });
-  on = sw.softwareOn(iid).sbom; assert.equal(on.scan?.available, false); assert.equal(on.packages.length, 0); assert.equal(on.sources.length, 0);
+  on = sw.softwareOn(iid).sbom; assert.equal(on.scan?.available, false); assert.deepEqual(on.packages.map((p) => p.ref), ["app:latest", "app:latest"]); assert.deepEqual(on.sources.map((s) => s.ref), ["app:latest"]);
   assert.ok(sw.softwareSummary().sbom.without_syft >= 1);
+});
+
+test("the images script: each entry of the batch is pulled from its registry by digest with its platform, ECR hosts get a token through the AWS CLI into a syft config file, and each image's status is reported", async () => {
+  const { parseProbeOutput } = await import("../ssm.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-scanner-"));
+  const bin = path.join(dir, "bin"); fs.mkdirSync(bin); const noaws = path.join(dir, "noaws"); fs.mkdirSync(noaws);
+  const log = path.join(dir, "args.log"); const cfgcopy = path.join(dir, "cfg.yaml");
+  const w = (where: string, name: string, body: string) => fs.writeFileSync(path.join(where, name), body, { mode: 0o755 });
+  for (const where of [bin, noaws]) {
+    w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n");
+    // logs its arguments and keeps a copy of the config it was given (the scratch directory is emptied after every scan); one image times out, one is read
+    w(where, "syft", `#!/bin/sh\necho "$*" >> ${log}\nprev=""; for a in "$@"; do if [ "$prev" = "-c" ]; then cp "$a" ${cfgcopy}; fi; prev=$a; done\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *registry:nginx@sha256:*) exit 124;; *registry:*) printf 'pkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12\\n';; *) exit 2;; esac\n`);
+  }
+  w(bin, "aws", "#!/bin/sh\ncase \"$*\" in 'ecr get-login-password --region eu-west-1') printf 'TOKEN-EU\\n';; 'ecr-public get-login-password --region us-east-1') printf 'TOKEN-PUBLIC\\n';; *) exit 1;; esac\n");
+  const sha = (c: string) => `sha256:${c.repeat(64)}`;
+  const batch = [`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}|linux/arm64`, `nginx@${sha("b")}|linux/amd64`, `public.ecr.aws/docker/library/redis@${sha("c")}`, `123456789012.dkr.ecr.eu-west-1.amazonaws.com/web@${sha("d")}|linux/arm64`].join(" ");
+  const script = (images: string) => pr.defaultProbeScript("images").replace("__IMAGES__", images).replace("__IMAGE_TIMEOUT__", "90").replace("__INSTALL__", "no").replace("__UPLOAD__", "");
+  const run = (PATH: string, s: string) => { const r = spawnSync("sh", [], { input: s, encoding: "utf8", env: { ...process.env, PATH, AWS_ADVISOR_SBOM_TMP: path.join(dir, "aws-advisor-sbom") } }); assert.equal(r.status, 0, r.stderr); return parseProbeOutput(r.stdout.trim().split("\n").pop() || ""); };
+  const j = run(`${bin}:/usr/bin:/bin`, script(batch));
+  assert.equal(j.kind, "images"); assert.equal(j.probe, "aws-advisor/images/1"); assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.images_mode, null);
+  const by = Object.fromEntries(j.sbom!.sources.map((s) => [s.ref, s]));
+  assert.deepEqual(Object.keys(by), batch.split(" ").map((e) => e.split("|")[0]), "one record per entry, in order");
+  assert.deepEqual(by[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`], { source: "image", ref: `123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`, image_id: null, digest: sha("a"), platform: "linux/arm64", status: "ok", total: 2, note: null, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12"] }, "the digest from the entry, no docker id, the platform, distro purls kept (the image's OS packages are its own)");
+  assert.equal(by[`nginx@${sha("b")}`]!.status, "timeout"); assert.equal(by[`nginx@${sha("b")}`]!.platform, "linux/amd64");
+  assert.equal(by[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.status, "ok"); assert.equal(by[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.platform, null, "no platform in the entry: syft picks the host's");
+  const args = fs.readFileSync(log, "utf8").split("\n");
+  const api = args.find((l) => l.includes(`registry:123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@`))!;
+  assert.ok(api.includes("--platform linux/arm64") && api.includes("-o purls") && api.includes("-c ") && api.includes("/aws-advisor-sbom/syft.yaml"), `pulled from the registry for the box's platform with the config: ${api}`);
+  assert.ok(!args.find((l) => l.includes(`registry:public.ecr.aws`))!.includes("--platform"), "no platform flag without a platform");
+  const cfg = fs.readFileSync(cfgcopy, "utf8");
+  assert.ok(cfg.includes("authority: 123456789012.dkr.ecr.eu-west-1.amazonaws.com") && cfg.includes('password: "TOKEN-EU"') && cfg.includes("authority: public.ecr.aws") && cfg.includes('password: "TOKEN-PUBLIC"'), `one auth entry per ECR host, the token from the CLI: ${cfg}`);
+  assert.equal(cfg.split("authority: 123456789012").length, 2, "one entry per host, not per image");
+  assert.ok(!cfg.includes("nginx"), "Docker Hub is left to the scanner's own docker config");
+  assert.ok(!JSON.stringify(j).includes("TOKEN-"), "no token in the result");
+  assert.ok(!fs.existsSync(path.join(dir, "aws-advisor-sbom")), "the scratch directory, config included, is gone when the probe exits");
+  // no AWS CLI on the scanner: the ECR entries are skipped with the reason, never attempted; the rest is read
+  fs.writeFileSync(log, "");
+  const k = run(`${noaws}:/usr/bin:/bin`, script(batch));
+  const kb = Object.fromEntries(k.sbom!.sources.map((s) => [s.ref, s]));
+  assert.equal(kb[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`]!.status, "skipped"); assert.match(kb[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`]!.note ?? "", /^ECR auth needs the AWS CLI on the scanner/);
+  assert.equal(kb[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.status, "skipped");
+  assert.equal(kb[`nginx@${sha("b")}`]!.status, "timeout", "Docker Hub needs no token");
+  assert.ok(!fs.readFileSync(log, "utf8").includes("dkr.ecr"), "syft was never asked for an ECR image");
+  // an empty batch: nothing read, a valid answer
+  assert.deepEqual(run(`${bin}:/usr/bin:/bin`, script("")).sbom!.sources, []);
 });

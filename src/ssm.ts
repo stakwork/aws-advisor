@@ -1,4 +1,4 @@
-import { recordSbom, recordSoftware, type ProbeHibernation } from "./software_inventory.js";
+import { imageKey, instancesRunningImages, recordImageSbom, recordSbom, recordSoftware, type ProbeHibernation } from "./software_inventory.js";
 import { fetchProbeUpload, presignProbeUpload, probeUploadsReady, recordProbeUpload } from "./probe_uploads.js";
 import { gunzipSync } from "node:zlib";
 import { GetCommandInvocationCommand, SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
@@ -74,8 +74,8 @@ export interface ProbeProcessGroup { name: string; user: string; count: number; 
 export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: string; scope: "all" | "loopback" | "address"; process: string | null; pid: number | null; container: string | null; container_port: number | null }
 
 /** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
-export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem) */ image_id: string | null; digest: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; /** sbom 1.5: why a scan was skipped (scratch space, the time budget), null otherwise */ note: string | null; purls: string[] }
-export interface ProbeSbom { available: boolean; tool: string | null; /** sbom 1.1: what the probe did about a missing syft (installed, failed and why, or left alone), null when it was there */ install: string | null; cap: number; sources: ProbeSbomSource[] }
+export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem; the images probe knows no docker id) */ image_id: string | null; digest: string | null; /** sbom 1.6 / images 1.0: the image's os/arch (a multi-arch digest resolves differently per platform); null for the filesystem */ platform: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; /** sbom 1.5: why a scan was skipped (scratch space, the time budget), null otherwise */ note: string | null; purls: string[] }
+export interface ProbeSbom { available: boolean; tool: string | null; /** sbom 1.1: what the probe did about a missing syft (installed, failed and why, or left alone), null when it was there */ install: string | null; /** sbom 1.6: which images the box scanned: all of them, or only the local builds (the image scanner has the rest); null from an older probe and from the images probe */ images_mode: "all" | "local" | null; cap: number; sources: ProbeSbomSource[] }
 
 export interface ProbeResult {
   probe: string;
@@ -116,7 +116,8 @@ export interface ProbeResult {
   /** Software 4/5: what each runtime install bundles (Node's process.versions, with the install's path) and the dpkg Depends of the packages owning the probed programs. */
   bundles?: { name: string; path: string | null; versions: Record<string, string> }[];
   depends?: { n: string; d: string }[];
-  /** The sbom probe: the package URLs syft read from each running image and from the host filesystem, with every scan's status and true count. */
+  /** The sbom probe: the package URLs syft read from each running image and from the host filesystem, with every scan's status and true count.
+   *  The images probe (the scanner instance's batch of registry images) prints the same section. */
   sbom?: ProbeSbom;
   /** Probe 2.1 (software, sbom): the receipt of the whole result posted to S3 (`uploaded <bytes> <sha256>`, or why not), when the advisor passed an upload URL. */
   upload?: string | null;
@@ -178,9 +179,9 @@ export function parseSbom(s: any): ProbeSbom {
   const status = (v: unknown): ProbeSbomSource["status"] => (v === "timeout" || v === "error" || v === "skipped" ? v : "ok");
   const note = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
   const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
-    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, status: status(x.status), total: Math.max(0, int(x.total)), note: note(x.note, 200),
+    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, platform: x.source === "image" ? note(x.platform, 40) : null, status: status(x.status), total: Math.max(0, int(x.total)), note: note(x.note, 200),
     purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 50000) as string[] }));
-  return { available: s.available === true, tool: note(s.tool, 40), install: note(s.install, 200), cap: Math.max(0, int(s.cap)), sources };
+  return { available: s.available === true, tool: note(s.tool, 40), install: note(s.install, 200), images_mode: s.images_mode === "all" || s.images_mode === "local" ? s.images_mode : null, cap: Math.max(0, int(s.cap)), sources };
 }
 
 /** Parses the command's stdout: tolerates noise before the JSON line and validates the shape. */
@@ -472,7 +473,9 @@ function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" |
   return new ProbeError("failed", `${name ? name + ": " : ""}${msg}`);
 }
 
-export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind; /** the member account the instance lives in (src/accounts.ts); default: what the SSM inventory says, else the parent */ accountId?: string | null }
+export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind; /** the member account the instance lives in (src/accounts.ts); default: what the SSM inventory says, else the parent */ accountId?: string | null;
+  /** Further document parameters: the sbom kind's `images` mode (all | local), the images kind's `images` batch. A deployed sbom document that predates a parameter gets the call again without it. */
+  parameters?: Record<string, string> }
 
 /**
  * Sends one kind's probe to one SSM-managed instance, waits for it, parses and stores the result, and runs the hooks
@@ -513,11 +516,15 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
     try {
       // what a document takes: the docker one the use-signal patterns, the sbom one the install switch, the software and sbom ones the upload URL;
       // withSignals is the legacy combined document's case
+      // the extra parameters of this call: the sbom kind's images mode is dropped for a document that predates it (sbom 1.6); the images kind's batch never is (the document must be deployed)
+      let extra: Record<string, string> = { ...(opts.parameters ?? {}) };
+      if (kind === "images") { extra.install = probeInstallValue(); extra.timeout = extra.timeout ?? String(config.probeImagesTimeoutSeconds); if (!extra.images) throw new ProbeError("failed", "the images probe needs a batch of images (opts.parameters.images)"); }
       const parametersOf = (k: ProbeKind, withSignals: boolean, withUpload: boolean): Record<string, string[]> | null => {
         const p: Record<string, string[]> = {};
         if (k === "sbom") p.install = [probeInstallValue()];
+        for (const [name, v] of Object.entries(extra)) p[name] = [v];
         if (withUpload && upload) p.upload = [upload.url];
-        if (withSignals && k !== "sbom") p.signals = [config.probeSignals];
+        if (withSignals && k !== "sbom" && k !== "images") p.signals = [config.probeSignals];
         return Object.keys(p).length ? p : null;
       };
       const send = (document: string, withSignals: boolean, withUpload = true) => client.send(new SendCommandCommand({
@@ -531,8 +538,17 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
       try { sent = await send(documentUsed, def.takes_signals); }
       catch (e: any) {
         const name = String(e?.name || e?.Code || "");
+        const invalidParameters = /InvalidParameters/i.test(`${name} ${e?.message}`);
+        // the deployed sbom document predates the images parameter (sbom 1.6): the box scans every image, as that document always did
+        if (invalidParameters && kind === "sbom" && extra.images) {
+          if (!warnedNoImagesParameter.has(kind)) { warnedNoImagesParameter.add(kind); console.warn(`[probe] SSM document ${documentUsed} takes no images parameter: the box scans every running image itself (as before) until the document is redeployed from Settings > Probes`); }
+          extra = {}; try { sent = await send(documentUsed, def.takes_signals); } catch (e2: any) {
+            if (!(/InvalidParameters/i.test(`${String(e2?.name || e2?.Code || "")} ${e2?.message}`) && upload)) throw e2;
+            if (!warnedNoUploadParameter.has(kind)) { warnedNoUploadParameter.add(kind); console.warn(`[probe] SSM document ${documentUsed} takes no upload parameter: the ${kind} result stays inline (under SSM's output cap) until the document is redeployed from Settings > Probes`); }
+            upload = null; sent = await send(documentUsed, def.takes_signals, false);
+          }
         // the deployed document predates the upload parameter: the result stays inline until it is redeployed
-        if (/InvalidParameters/i.test(`${name} ${e?.message}`) && upload) {
+        } else if (invalidParameters && upload) {
           if (!warnedNoUploadParameter.has(kind)) { warnedNoUploadParameter.add(kind); console.warn(`[probe] SSM document ${documentUsed} takes no upload parameter: the ${kind} result stays inline (under SSM's output cap) until the document is redeployed from Settings > Probes`); }
           upload = null; sent = await send(documentUsed, def.takes_signals, false);
         } else if (/InvalidDocument\b/i.test(name) && legacyKindOf(kind) === "all" && legacyProbeDocumentName() !== documentUsed) {
@@ -604,14 +620,21 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
     } else if (data.inline === false) throw new ProbeError("failed", `the box answered with a stub (${data.upload ?? "no receipt"}) and no upload was arranged for this run`);
     else if (upload && data.upload) console.warn(`[probe] ${instanceId} ${kind}: the box could not post its result to S3 (${data.upload}); the inline answer is used${kind === "sbom" ? " (trimmed to the output cap)" : ""}`);
     else if (upload) console.warn(`[probe] ${instanceId} ${kind}: the box printed no upload receipt (an older document, or the script stopped before the upload); the inline answer is used`);
-    // an sbom row in instance_metrics keeps the scans without their package lists (the tables hold those): one row per box per day must stay small
-    return applyProbeResult(instanceId, data, kind === "sbom" ? { ...data, sbom: data.sbom ? { ...data.sbom, sources: data.sbom.sources.map((x) => ({ ...x, purls: [] })) } : data.sbom } : data);
+    // an sbom or images row in instance_metrics keeps the scans without their package lists (the tables hold those): one row per box per day must stay small
+    return applyProbeResult(instanceId, data, storedForm(data));
   } finally {
     client.destroy();
   }
 }
 const warnedLegacyDocument = new Set<ProbeKind>();
 const warnedNoUploadParameter = new Set<ProbeKind>();
+const warnedNoImagesParameter = new Set<ProbeKind>();
+
+/** What goes into instance_metrics for an sbom or images result: the scans without their package lists (the tables hold those; a row per box per day must stay small). */
+export function storedForm(data: ProbeResult): ProbeResult {
+  if ((data.kind !== "sbom" && data.kind !== "images") || !data.sbom) return data;
+  return { ...data, sbom: { ...data.sbom, sources: data.sbom.sources.map((s) => ({ ...s, purls: [] })) } };
+}
 
 /** A parsed probe result stored (as `storeAs`, which is `data` unless a lighter form is wanted) and fed to the hooks of its kind: the probe flow and the S3 replay both end here. */
 export function applyProbeResult(instanceId: string, data: ProbeResult, storeAs: ProbeResult = data): StoredProbe {
@@ -671,8 +694,19 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
     let r: ReturnType<typeof recordSbom> = null;
     try { r = recordSbom(instanceId, collectedAt, data.sbom); } catch (e: any) { console.error(`[probe] sbom not recorded for ${instanceId}: ${e?.message || e}`); }
     if (r) {
-      console.log(`[probe] ${instanceId} sbom: ${r.available ? `${r.tool ?? "syft"}: ${r.packages} packages in ${r.sources} scans${r.trimmed ? ` (${r.trimmed} more did not fit the output cap)` : ""}${r.failed.length ? `, ${r.failed.length} scan(s) ${r.failed.map((f) => `${f.ref} ${f.status}`).join(", ")}` : ""}${r.added ? `, ${r.added} added` : ""}${r.removed ? `, ${r.removed} removed` : ""}` : `syft is not installed on the box, nothing scanned${r.note ? ` (${r.note})` : ""}`}${r.available && r.note ? ` (${r.note})` : ""}`);
-      if (r.available) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([instanceId])).catch(() => { /* graph off */ });
+      console.log(`[probe] ${instanceId} sbom: ${r.available ? `${r.tool ?? "syft"}: ${r.packages} packages in ${r.sources} scans${r.images.scans ? ` (${r.images.scans} image(s)${data.sbom.images_mode === "local" ? ", local builds only: the scanner has the rest" : ""})` : data.sbom.images_mode === "local" ? " (images left to the scanner)" : ""}${r.trimmed ? ` (${r.trimmed} more did not fit the output cap)` : ""}${r.failed.length ? `, ${r.failed.length} scan(s) ${r.failed.map((f) => `${f.ref} ${f.status}`).join(", ")}` : ""}${r.added ? `, ${r.added} added` : ""}${r.removed ? `, ${r.removed} removed` : ""}` : `syft is not installed on the box, nothing scanned${r.note ? ` (${r.note})` : ""}`}${r.available && r.note ? ` (${r.note})` : ""}`);
+      if (r.available) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground([...new Set([instanceId, ...instancesRunningImages(r.images.ok)])])).catch(() => { /* graph off */ });
+    }
+  }
+  if (kinds.includes("images") && data.sbom) {
+    // the scanner's batch: what syft read inside each registry image, keyed by digest and platform, then the graph's CONTAINS edges for every box that runs one of them
+    let r: ReturnType<typeof recordImageSbom> | null = null;
+    const sbom = data.sbom;
+    try { r = recordImageSbom(instanceId, collectedAt, sbom, { via: "scanner", keyOf: (s) => imageKey({ digest: s.digest, image_id: null, platform: s.platform }) }); } catch (e: any) { console.error(`[probe] images not recorded from ${instanceId}: ${e?.message || e}`); }
+    if (r) {
+      console.log(`[probe] ${instanceId} images: ${sbom.available ? `${sbom.tool ?? "syft"}: ${r.ok.length} image(s) read, ${r.packages} packages${r.trimmed ? ` (${r.trimmed} more did not fit the output cap)` : ""}${r.failed.length ? `, ${r.failed.length} failed: ${r.failed.slice(0, 5).map((f) => `${f.ref} ${f.status}${f.note ? ` (${f.note})` : ""}`).join("; ")}${r.failed.length > 5 ? ", ..." : ""}` : ""}${r.added ? `, ${r.added} added` : ""}${r.removed ? `, ${r.removed} removed` : ""}` : `syft is not installed on the scanner, nothing read${sbom.install ? ` (${sbom.install})` : ""}`}`);
+      const boxes = instancesRunningImages(r.ok);
+      if (boxes.length) import("./graph_software.js").then((m) => m.mirrorSoftwareInBackground(boxes)).catch(() => { /* graph off */ });
     }
   }
 }

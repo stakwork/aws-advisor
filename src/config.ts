@@ -67,6 +67,8 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "probeSoftwareIntervalHours", env: "PROBE_SOFTWARE_INTERVAL_HOURS", kind: "number", def: "20", min: 1, max: 720, group: "Probe pass", label: "Minimum hours between software probes", help: "The software probe reads the whole package database; once a day is the intended cadence." },
   { key: "probeSbomScope", env: "PROBE_SBOM_SCOPE", kind: "enum", def: "all", options: ["idle", "all"], group: "Probe pass", label: "Scope (software bill of materials)", help: "all by default: what an image ships has to be known on every box that runs it." },
   { key: "probeSbomInstall", env: "PROBE_SBOM_INSTALL", kind: "enum", def: "on", options: ["on", "off"], group: "Probe pass", label: "Install syft where missing", help: "on: the sbom probe installs the pinned syft release (v1.55.0, fetched from GitHub by the official installer with its checksum verified) into /usr/local/bin on a box that lacks it; the one write a probe makes, and it needs curl and egress from the box. off: such a box is reported as not available and left alone." },
+  { key: "probeImagesScanner", env: "PROBE_IMAGES_SCANNER", kind: "string", def: "", group: "Probe pass", label: "Image scanner instance", help: "The id of one SSM-online Linux EC2 instance that reads the fleet's container images for the sbom probe: each pass it gets the distinct images the boxes run (registry digest and platform, from the software probe), pulls each from its registry by digest and runs syft on it once, so a box scans only what it built itself (the sbom document's images parameter is local). The scanner needs the AwsAdvisorProbe-images document deployed, syft (the probe installs it when the install switch is on), the AWS CLI and an instance role that may pull from ECR (ecr:GetAuthorizationToken, BatchGetImage, GetDownloadUrlForLayer, BatchCheckLayerAvailability; a member account's repository needs a repository policy for it), its own docker config for Docker Hub logins and private registries, egress to the registries (and to S3 with an upload bucket), and a few GB free under /var/tmp. Empty: every box scans its own images, as before." },
+  { key: "probeImagesTimeoutSeconds", env: "PROBE_IMAGES_TIMEOUT_SECONDS", kind: "number", def: "180", min: 30, max: 900, group: "Probe pass", label: "Seconds per image on the scanner", help: "What syft gets per image on the image scanner (pull and read); a batch stays within the document's 20-minute budget whatever this says." },
   { key: "probeUploadBucket", env: "PROBE_UPLOAD_BUCKET", kind: "string", def: "", group: "Probe pass", label: "Upload bucket (S3)", help: "An S3 bucket in the advisor's account the software and sbom probes post their whole result to (gzip-compressed JSON) through a presigned URL the advisor signs per run: the boxes need no IAM change, only egress to S3; the advisor's identity needs s3:PutObject and s3:GetObject under the prefix and s3:ListBucket on the bucket. Empty keeps the results inline, under SSM's 24,000-character output cap, where a big box is trimmed." },
   { key: "probeUploadRegion", env: "PROBE_UPLOAD_REGION", kind: "string", def: "", group: "Probe pass", label: "Upload bucket region", help: "The bucket's region; empty means the advisor's own." },
   { key: "probeUploadPrefix", env: "PROBE_UPLOAD_PREFIX", kind: "string", def: "aws-advisor/probes", group: "Probe pass", label: "Upload key prefix", help: "Objects land at <prefix>/<account>/<instance>/<kind>/<time>.json.gz and are kept, so a probe can be ingested again (Schedules > Probes: re-ingest the uploads in S3)." },
@@ -131,7 +133,7 @@ export const RUNTIME_SETTINGS: readonly RuntimeSpec[] = [
   { key: "actParkGraceHours", env: "ACT_PARK_GRACE_HOURS", kind: "number", def: "24", min: 0, max: 168, group: "Auto-actions", label: "Announce a parking this long before (hours)", help: "A swarm about to be parked is announced in the Sphinx chat when first proposed; the pass waits this long before stopping it so anyone can object. Apply on the page does not wait." },
   { key: "agentRunsPerHour", env: "AGENT_RUNS_PER_HOUR", kind: "number", def: "6", min: 1, max: 100, group: "Quotas", label: "Agent runs per hour", help: "Findings batches, investigations, resolutions and observations together; each costs a few USD. A hit raises a quota alert and refuses the run." },
   { key: "agentRunsPerDay", env: "AGENT_RUNS_PER_DAY", kind: "number", def: "20", min: 1, max: 500, group: "Quotas", label: "Agent runs per day", help: "" },
-  { key: "probesPerHour", env: "PROBES_PER_HOUR", kind: "number", def: "150", min: 1, max: 5000, group: "Quotas", label: "SSM probes per hour", help: "Every probe is one SendCommand on an instance; the hourly pass over the whole fleet is about 60 here." },
+  { key: "probesPerHour", env: "PROBES_PER_HOUR", kind: "number", def: "150", min: 1, max: 5000, group: "Quotas", label: "SSM probes per hour", help: "Every probe is one SendCommand on an instance; the hourly pass over the whole fleet is about 60 here. The sbom pass adds one per batch of images sent to the image scanner (about 20 for 300 images)." },
 ];
 const SPEC = new Map(RUNTIME_SETTINGS.map((r) => [r.key, r]));
 
@@ -166,6 +168,7 @@ export function validateRuntime(key: string, value: string): string {
       if (key === "notifyQuietHours" && v && !/^([01]?\d|2[0-3])-([01]?\d|2[0-3])$/.test(v)) throw new Error('HH-HH, e.g. "22-07", or empty');
       if (key === "actRoleArn" && v && (!ROLE_ARN_RE.test(v) || /\s/.test(v))) throw new Error("arn:aws:iam::<12 digits>:role/<name>, or empty");
       if (key === "doormanPublicIp" && v && !/^(\d{1,3}\.){3}\d{1,3}$/.test(v)) throw new Error("an IPv4 address, or empty");
+      if (key === "probeImagesScanner" && v && !/^i-[0-9a-f]{8,17}$/.test(v)) throw new Error("an EC2 instance id (i-0123456789abcdef0), or empty");
       if (key === "probeSignals") return serialiseSignals(parseSignals(v));
       if (key === "repoTagKeys") { for (const part of v.split(",").map((s) => s.trim()).filter(Boolean)) if (!/^[A-Za-z0-9_.:/=+@ -]{1,128}$/.test(part)) throw new Error(`"${part}" is not a valid tag key`); return v; }
       // a secret may be a whole key file (a GitHub App private key is ~1,700 characters); anything else stays short
@@ -270,6 +273,8 @@ export const config = {
   get probeSbomScope(): "idle" | "all" { return rtEnum("probeSbomScope"); },
   get probeSbomIntervalHours(): number { return rtNum("probeSbomIntervalHours"); },
   get probeSbomInstall(): "on" | "off" { return rtEnum("probeSbomInstall"); },
+  get probeImagesScanner(): string { return rt("probeImagesScanner"); },
+  get probeImagesTimeoutSeconds(): number { return rtNum("probeImagesTimeoutSeconds"); },
   get probeUploadBucket(): string { return rt("probeUploadBucket").trim(); },
   get probeUploadRegion(): string { return rt("probeUploadRegion").trim(); },
   get probeUploadPrefix(): string { return rt("probeUploadPrefix").trim(); },

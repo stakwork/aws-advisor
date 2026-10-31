@@ -1,6 +1,6 @@
 import { fetchProbeUpload, listProbeUploads, probeUploadIngested, probeUploadsConfigured, recordProbeUpload } from "./probe_uploads.js";
 import { PROBE_KINDS, type ProbeKind } from "./probes.js";
-import { applyProbeResult, parseProbeOutput, type ProbeResult } from "./ssm.js";
+import { applyProbeResult, parseProbeOutput, storedForm } from "./ssm.js";
 
 /**
  * The objects the probes left in S3 (src/probe_uploads.ts), ingested again: the newest per box and kind, parsed and
@@ -26,10 +26,4 @@ export async function ingestProbeUploads(opts: { kinds?: ProbeKind[]; replay?: b
     } catch (e: any) { res.failed.push({ key: o.key, error: String(e?.message || e).slice(0, 200) }); log(`${o.instance_id} ${o.kind}: ${o.key} failed: ${String(e?.message || e).slice(0, 200)}`); }
   }
   return res;
-}
-
-/** What goes into instance_metrics for an sbom result: the scans without their package lists (the tables hold those; a row per box per day must stay small). */
-export function storedForm(data: ProbeResult): ProbeResult {
-  if (data.kind !== "sbom" || !data.sbom) return data;
-  return { ...data, sbom: { ...data.sbom, sources: data.sbom.sources.map((s) => ({ ...s, purls: [] })) } };
 }

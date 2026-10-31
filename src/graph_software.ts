@@ -68,7 +68,7 @@ SET i:AdvisorImage, i.digest = coalesce(row.digest, i.digest), i.image_id = coal
 MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
 SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', is_deleted: false, deleted_at: null, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (i)-[r:CONTAINS]->(p)
-SET r += {first_seen: row.first_seen, last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
+SET r += {first_seen: row.first_seen, last_seen: row.last_seen, platform: row.platform, is_deleted: false, deleted_at: null, updated_at: $now}`;
 
 const PRUNE_CONTAINS_CYPHER = `
 UNWIND $rows AS row
@@ -187,7 +187,7 @@ export function imageRef(image: string): { id: string; repository: string; tag: 
  *  an image is CONTAINS from the image node (CONTAINS_CYPHER). The purl\'s own type is the ecosystem; a distro purl carries the image\'s
  *  distribution (distro qualifier, else the namespace) and source package (upstream), so its identity and advisory ecosystem are that
  *  distribution\'s, not the host\'s. The package id is the package\'s; the image id travels as image_id. Pure; null for a purl that does not parse. */
-export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string; digest?: string | null; image_id?: string | null }): { edge: "installed_on" | "contains"; row: Record<string, unknown> } | null {
+export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string; digest?: string | null; image_id?: string | null; platform?: string | null }): { edge: "installed_on" | "contains"; row: Record<string, unknown> } | null {
   const p = parsePurl(String(r.purl)); if (!p) return null;
   const version = String(r.version || p.version || "unknown");
   const upstream = p.qualifiers.upstream ? p.qualifiers.upstream.split("@")[0] || null : null;
@@ -202,8 +202,11 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
   const node = { id: packageId(eco, String(r.name), version), name: String(r.name), version, ecosystem: eco, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: eco === "binary" ? packageScope(String(r.name)).scope : "library", version_purl: String(r.purl), ...identity };
   if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen } };
   const im = imageRef(String(r.ref));
-  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };
+  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, platform: r.platform ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };
 }
+
+/** The image key of an instance_images row in SQL (software_inventory.ts IMG_KEY): its sbom_key, else the per-box fallback. */
+const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
 
 export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; provides: number; bundles: number; depends: number; superseded: number; took_ms: number }
 
@@ -241,17 +244,28 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     if (o.kernel) pkgRows.push({ instance_id: o.instance_id, version_purl: null, id: packageId("kernel", "linux", o.kernel), name: "linux", version: o.kernel, ecosystem: "kernel", source_name: null, source_kind: "uname", advisory_ecosystem: null, scope: "kernel", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, ...componentIdentity({ ecosystem: "kernel", name: "linux", version: o.kernel }) });
     if (o.os_id) pkgRows.push({ instance_id: o.instance_id, version_purl: null, id: packageId("os", o.os_id, o.os_version ?? "unknown"), name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", ecosystem: "os", source_name: o.os_id, source_kind: "os_release", advisory_ecosystem: ecosystemOf(o.package_manager, o.os_id, o.os_version)?.ecosystem ?? null, scope: "tool", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, ...componentIdentity({ ecosystem: "os", name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", source: o.os_id }) });
   }
-  // the sbom probe: a purl inside an image is CONTAINS from the image node; one on the filesystem is INSTALLED_ON the box like any package.
+  // the sbom probe: a purl on the filesystem is INSTALLED_ON the box like any package; a purl inside an image is CONTAINS from the image node, the
+  // image's contents being kept once per image (image_sbom, keyed by digest and platform; the scanner instance or a box read it) and reaching the
+  // graph through every box that runs the image (its instance_images row; the first box stamps the account). Two platforms of one multi-arch digest
+  // are two keys on one image node (imageNodeId is platform-less, as RUNS_IMAGE and BUILT_FROM are): the node's CONTAINS set is their union, each
+  // edge saying which platform it was read on.
   // The purl's own type is the ecosystem (npm, pypi, golang, deb, ...); a distro purl carries the image's distribution (namespace, distro qualifier)
   // and its source package (upstream), so its identity and advisory ecosystem are those of that distribution, not the host's
   // A program both collectors saw on a box (syft's pkg:generic/node and the probe's node, the same id through sbomEcosystem) is one row: the probe's,
   // which knows the path; the syft row would only rewrite the same node and edge with less
   const probed = new Set(pkgRows.filter((p) => p.ecosystem === "binary").map((p) => `${p.instance_id}\t${p.id}`));
   const containsRows: any[] = [];
-  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.first_seen, p.last_seen, s.digest, s.image_id from instance_sbom p left join instance_sbom_sources s on s.instance_id = p.instance_id and s.source = p.source and s.ref = p.ref where 1=1${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
+  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.first_seen, p.last_seen, null as digest, null as image_id, null as platform from instance_sbom p where p.source = 'dir'${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
     const g = sbomGraphRow(r); if (!g) continue;
     if (g.edge === "installed_on" && g.row.ecosystem === "binary" && probed.has(`${g.row.instance_id}\t${g.row.id}`)) continue;
     (g.edge === "installed_on" ? pkgRows : containsRows).push(g.row);
+  }
+  const containsSeen = new Set<string>();
+  for (const r of rows(`select ii.instance_id, 'image' as source, ii.image as ref, p.purl, p.name, p.version, p.first_seen, p.last_seen, coalesce(s.digest, ii.digest) as digest, coalesce(s.image_id, ii.image_id) as image_id, coalesce(s.platform, ii.platform) as platform
+    from image_sbom p join image_sbom_scans s on s.key = p.key join instance_images ii on ${IMG_KEY} = p.key where ii.gone = 0${where.replace(" instance_id in", " ii.instance_id in")} order by ii.instance_id`, ...args)) {
+    const g = sbomGraphRow(r); if (!g || g.edge !== "contains") continue;
+    const k = `${g.row.image_id}\t${g.row.id}`; if (containsSeen.has(k)) continue; containsSeen.add(k);
+    containsRows.push(g.row);
   }
   const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
   for (const b of chunks(osRows)) await w(OS_CYPHER, b);
@@ -290,10 +304,10 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of chunks(bundleEdges)) await w(BUNDLES_CYPHER, b);
   for (const b of chunks(dependEdges)) await w(DEPENDS_ON_CYPHER, b);
   for (const b of chunks(keepOf(imgRows), 50)) await w(PRUNE_IMAGES_CYPHER, b);
-  // what each image contains; an edge the scans no longer support goes (the keep list is every box's reading of that image, so one trimmed list does not drop what another box still lists)
+  // what each image contains; an edge the scans no longer support is retired (the keep list is every key's reading of that image node: the platforms of one digest add up)
   for (const b of chunks(containsRows)) await w(CONTAINS_CYPHER, b);
   const keepBy = new Map<string, Set<string>>();
-  for (const r of rows("select p.ref, p.purl, p.name, p.version, s.digest, s.image_id from instance_sbom p join instance_sbom_sources s on s.instance_id = p.instance_id and s.source = p.source and s.ref = p.ref where p.source = 'image' and s.status = 'ok'")) {
+  for (const r of rows(`select ii.image as ref, p.purl, p.name, p.version, coalesce(s.digest, ii.digest) as digest, coalesce(s.image_id, ii.image_id) as image_id from image_sbom p join image_sbom_scans s on s.key = p.key join instance_images ii on ${IMG_KEY} = p.key where ii.gone = 0`)) {
     const p = parsePurl(String(r.purl)); if (!p) continue;
     const nid = imageNodeId(String(r.ref), r.digest, r.image_id);
     if (!keepBy.has(nid)) keepBy.set(nid, new Set());

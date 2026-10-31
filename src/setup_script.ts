@@ -129,7 +129,7 @@ const ACCOUNT_PLACEHOLDER = "<ACCOUNT_ID>";
 /** What the script embeds; injectable so tests do not depend on the environment. */
 export interface SetupDocuments {
   policy: object;
-  /** One SSM document per probe kind (src/probes.ts): host, docker, apps, software. */
+  /** One SSM document per probe kind (src/probes.ts): host, docker, apps, software, sbom, images. */
   probeDocuments: { kind: ProbeKind; name: string; document: object }[];
   /** The base name the policy scopes ssm:SendCommand to (every kind's document starts with it). */
   probeDocumentName: string;
@@ -401,7 +401,7 @@ function probeDocumentStep(o: SetupOptions, d: SetupDocuments): SetupStep {
   const names = d.probeDocuments.map((p) => p.name).join(", ");
   return {
     title: `Create the read-only SSM probe documents (${names}) in ${o.region}`,
-    detail: `aws ssm create-document from the embedded scripts (${d.probeVersion}: one document per probe kind, host, docker, apps, software), or update-document when the content differs. ssm:SendCommand in the policy is granted on documents named $PROBE_DOCUMENT* only, never on AWS-RunShellScript. ${o.path === "ec2-role" ? "The instance role already carries AmazonSSMManagedInstanceCore, so the host is itself probe-able." : ""}`,
+    detail: `aws ssm create-document from the embedded scripts (${d.probeVersion}: one document per probe kind: host, docker, apps, software, sbom, images), or update-document when the content differs. ssm:SendCommand in the policy is granted on documents named $PROBE_DOCUMENT* only, never on AWS-RunShellScript. ${o.path === "ec2-role" ? "The instance role already carries AmazonSSMManagedInstanceCore, so the host is itself probe-able." : ""}`,
     bash: `
 for kind in ${d.probeDocuments.map((p) => p.kind).join(" ")}; do
   name="$PROBE_DOCUMENT-$kind"; file="$WORK/probe-$kind.json"

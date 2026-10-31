@@ -82,8 +82,24 @@ export const policyProbeDocument = () => (usesCustomProbeDocument() ? config.pro
  * text it is sent, so granting SendCommand on it hands out root on every instance to whoever holds the key.
  * When the stock document is configured, the policy still names the custom one and the permission check warns.
  */
-/** One ARN pattern covers the per-kind documents (AwsAdvisorProbe-host, -docker, -apps, -software; src/probes.ts) and the pre-2.0 combined one. */
+/** One ARN pattern covers the per-kind documents (AwsAdvisorProbe-host, -docker, -apps, -software, -sbom, -images; src/probes.ts) and the pre-2.0 combined one. */
 export const probeDocumentArn = (accountId = "*") => `arn:aws:ssm:*:${accountId}:document/${policyProbeDocument()}*`;
+
+/**
+ * What the image scanner instance's own role needs (not the advisor's identity): to pull the fleet's images from ECR by digest for the images
+ * probe (src/image_pass.ts). The token comes from ecr:GetAuthorizationToken; the layers from the three repository actions, here on every
+ * repository (narrow the Resource to the repositories the fleet runs when they are known). A repository in a member account additionally
+ * needs a repository policy that lets this role pull (or an aws:PrincipalOrgID condition). public.ecr.aws needs the two optional actions.
+ * Docker Hub and private registries are the scanner's own docker config, never the advisor's.
+ */
+export const IMAGE_SCANNER_POLICY = {
+  Version: "2012-10-17",
+  Statement: [
+    { Sid: "AdvisorImageScannerEcrToken", Effect: "Allow", Action: ["ecr:GetAuthorizationToken"], Resource: "*" },
+    { Sid: "AdvisorImageScannerEcrPull", Effect: "Allow", Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], Resource: "arn:aws:ecr:*:*:repository/*" },
+    { Sid: "AdvisorImageScannerEcrPublic", Effect: "Allow", Action: ["ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken"], Resource: "*" },
+  ],
+} as const;
 
 /** Steampipe table -> the IAM action its List/Describe call needs (only the tables this app and its benchmarks use). */
 export const TABLE_ACTIONS: Record<string, string> = {

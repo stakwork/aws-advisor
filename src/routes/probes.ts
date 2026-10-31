@@ -4,7 +4,9 @@ import { config } from "../config.js";
 import { db } from "../db.js";
 import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, defaultProbeScript, legacyKindOf, probeDocument, probeDocumentInfo, probeScriptOverride, probeScriptTemplate, resetProbeScript, setProbeScriptOverride } from "../probes.js";
 import { probeDocumentStatus } from "../probes_status.js";
-import { probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
+import { dueImagesNow, probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
+import { imageScanner } from "../image_pass.js";
+import { IMAGE_SCANNER_POLICY } from "../permissions.js";
 import { softwareOn, softwareSummary, wherePackage } from "../software_inventory.js";
 import { containersOn, whereImage } from "../container_inventory.js";
 import { appEvents } from "../instance_apps.js";
@@ -36,8 +38,15 @@ function describe(kind: ProbeKind) {
     document: info,
     script: { default: defaultProbeScript(kind), override: probeScriptOverride(kind), effective: probeScriptTemplate(kind), edited: probeScriptOverride(kind) != null, lines: probeScriptTemplate(kind).split("\n").length },
     last_24h: { at: last?.at ?? null, boxes: Number(last?.boxes || 0) }, ever: { boxes: Number(ever?.boxes || 0), rows: Number(ever?.rows_ || 0) },
-    candidates_now: probeTargets(kind).length,
+    candidates_now: def.per_box ? probeTargets(kind).length : dueImagesNow(),
   };
+}
+
+/** The image scanner as the page shows it: the configured instance, what the image tables hold, and the role statements the scanner needs. */
+function scannerStatus() {
+  const s = db.prepare("select count(*) as distinct_, sum(case when status = 'ok' then 1 else 0 end) as ok, sum(case when status <> 'ok' then 1 else 0 end) as failed, max(case when via = 'scanner' then collected_at end) as last_scanner_at, sum(case when via = 'scanner' then 1 else 0 end) as by_scanner, (select count(*) from image_sbom) as packages from image_sbom_scans").get() as any;
+  const pullable = Number((db.prepare("select count(distinct ii.sbom_key) as n from instance_images ii join inventory_ec2 i on i.instance_id = ii.instance_id and i.gone = 0 and i.state = 'running' where ii.gone = 0 and ii.sbom_key like 'dg:%'").get() as any)?.n || 0);
+  return { instance_id: imageScanner(), configured: Boolean(imageScanner()), raw_setting: config.probeImagesScanner || null, images: { distinct: Number(s?.distinct_ || 0), ok: Number(s?.ok || 0), failed: Number(s?.failed || 0), by_scanner: Number(s?.by_scanner || 0), packages: Number(s?.packages || 0), pullable_now: pullable, due_now: dueImagesNow(), last_scanner_at: s?.last_scanner_at ?? null }, policy: IMAGE_SCANNER_POLICY };
 }
 
 probes.get("/probes", async (req, res) => {
@@ -49,6 +58,7 @@ probes.get("/probes", async (req, res) => {
   let uploads: Awaited<ReturnType<typeof checkProbeUploads>>; try { uploads = await checkProbeUploads(); } catch (e: any) { uploads = { configured: true, bucket: config.probeUploadBucket || null, prefix: null, ok: false, error: String(e?.message || e), checked_at: new Date().toISOString(), identity: null }; }
   res.json({
     uploads,
+    scanner: scannerStatus(),
     base_document: config.probeDocument, kinds: PROBE_KINDS.map((k) => ({ ...describe(k), deployed: status?.find((s) => s.kind === k) ?? null })), legacy_rows: Number((db.prepare("select count(*) as n from instance_metrics where coalesce(kind, 'all') = 'all'").get() as any)?.n || 0),
     // the ledger rows that create or update the documents (src/actions/probe_document.ts): open ones wait for "Run as me"
     document_rows: listActions({ kind: "probe_document", page_size: 50 }).actions.filter((r) => r.status !== "stale"),

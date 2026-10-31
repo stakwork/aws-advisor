@@ -71,7 +71,7 @@ test("every probe script is a read-only shell script that prints its kind", () =
     assert.ok(script.includes(`"probe":"aws-advisor/${kind}/`) && script.includes(`"kind":"${kind}"`), `${kind} prints its probe id and kind`);
     // the sbom script's one exception: it removes the scratch directory it gives syft and the stereoscope-* leftovers of earlier runs, on lines that guard themselves
     const scratch = script.split("\n").filter((l) => /\brm\b/.test(l));
-    for (const l of scratch) assert.ok(kind === "sbom" && (/case "\$sbtmp" in \*\/aws-advisor-sbom\) rm -rf "\$sbtmp"/.test(l) || /-name 'stereoscope-\*' -mmin \+60 -exec rm -rf \{\}/.test(l)), `${kind}: an unguarded removal: ${l}`);
+    for (const l of scratch) assert.ok((kind === "sbom" || kind === "images") && (/case "\$sbtmp" in \*\/aws-advisor-sbom\) rm -rf "\$sbtmp"/.test(l) || /-name 'stereoscope-\*' -mmin \+60 -exec rm -rf \{\}/.test(l)), `${kind}: an unguarded removal: ${l}`);
     const rest = script.split("\n").filter((l) => !scratch.includes(l)).join("\n");
     for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(rest, forbidden);
   }
@@ -190,6 +190,7 @@ test("probe pass: an ISO-timestamped probe from earlier today does not hide the 
   assert.ok(probeTargets("sbom", 1000).some((t) => t.instance_id === iid), "syft was not available: due again so the installer runs");
   db.prepare("update instance_sbom_scans set available = 1 where instance_id = ?").run(iid);
   assert.ok(!probeTargets("sbom", 1000).some((t) => t.instance_id === iid), "syft there: the window applies");
+  assert.deepEqual(probeTargets("images", 1000), [], "the images kind goes to the scanner instance, never to the boxes");
   for (const t of ["inventory_ec2", "instance_metrics"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
 });
 
@@ -342,7 +343,11 @@ test("parseProbeOutput keeps a package's source (s) from probe software/2 and le
 test("parseProbeOutput types the sbom section: the scans with their status and counts, purls that look like purls, anything else dropped", () => {
   const p = parseProbeOutput('{"probe":"aws-advisor/sbom/1","kind":"sbom","hostname":"h","collected_at":"2026-10-29T10:00:00Z","sbom":{"available":true,"tool":"syft 1.55.0","install":"installed v1.55.0","cap":3000,"sources":[{"source":"image","ref":"nginx:1.27","image_id":"sha256:ab","digest":"sha256:cd","status":"ok","total":2,"purls":["pkg:deb/debian/nginx@1.27.0-1","not a purl",7]},{"source":"dir","ref":"/","image_id":"x","status":"timeout","total":0,"purls":[]},{"source":"other","ref":"x"}]},"upload":"uploaded 1234 ab"}');
   assert.equal(p.kind, "sbom");
-  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", install: "installed v1.55.0", cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", image_id: "sha256:ab", digest: "sha256:cd", status: "ok", total: 2, note: null, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", image_id: null, digest: null, status: "timeout", total: 0, note: null, purls: [] }] });
+  assert.deepEqual(p.sbom, { available: true, tool: "syft 1.55.0", install: "installed v1.55.0", images_mode: null, cap: 3000, sources: [{ source: "image", ref: "nginx:1.27", image_id: "sha256:ab", digest: "sha256:cd", platform: null, status: "ok", total: 2, note: null, purls: ["pkg:deb/debian/nginx@1.27.0-1"] }, { source: "dir", ref: "/", image_id: null, digest: null, platform: null, status: "timeout", total: 0, note: null, purls: [] }] });
+  // sbom 1.6 and the images probe: the platform per image, the box's images mode; the images kind prints the same section
+  const q = parseProbeOutput('{"probe":"aws-advisor/images/1","kind":"images","hostname":"h","collected_at":"2026-10-31T10:00:00Z","sbom":{"available":true,"tool":"syft 1.55.0","install":null,"cap":0,"sources":[{"source":"image","ref":"nginx@sha256:cd","image_id":"","digest":"sha256:cd","platform":"linux/arm64","status":"ok","total":1,"note":"","purls":["pkg:deb/debian/nginx@1.27.0-1"]}]}}');
+  assert.equal(q.kind, "images"); assert.equal(q.sbom?.images_mode, null); assert.deepEqual(q.sbom?.sources.map((s) => [s.ref, s.image_id, s.digest, s.platform]), [["nginx@sha256:cd", null, "sha256:cd", "linux/arm64"]]);
+  assert.equal(parseProbeOutput('{"probe":"aws-advisor/sbom/4","kind":"sbom","hostname":"h","collected_at":"2026-10-31T10:00:00Z","sbom":{"available":true,"images_mode":"local","cap":3000,"sources":[]}}').sbom?.images_mode, "local");
   assert.equal(p.upload, "uploaded 1234 ab"); assert.equal(p.inline, undefined);
   const stub = parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","inline":false,"upload":"uploaded 99 ff"}');
   assert.equal(stub.inline, false); assert.equal(stub.upload, "uploaded 99 ff"); assert.equal(stub.packages, undefined);

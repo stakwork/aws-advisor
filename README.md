@@ -679,17 +679,17 @@ preference enabled on the payer account), `pricing:GetProducts` the price list, 
 `AWS-RunShellScript` runs whatever shell it is handed, so a policy that allows `ssm:SendCommand` on it lets the
 credentials run *any* command on every instance, and IAM alone cannot make the probe read-only. The advisor
 therefore runs its probes through its own SSM Command documents, one per probe (`src/probes.ts`):
-`AwsAdvisorProbe-host`, `AwsAdvisorProbe-docker`, `AwsAdvisorProbe-apps`, `AwsAdvisorProbe-software` and
-`AwsAdvisorProbe-sbom` (the base name is `PROBE_DOCUMENT`, default `AwsAdvisorProbe`), each embedding its fixed script, and the policy above grants
+`AwsAdvisorProbe-host`, `AwsAdvisorProbe-docker`, `AwsAdvisorProbe-apps`, `AwsAdvisorProbe-software`,
+`AwsAdvisorProbe-sbom` and `AwsAdvisorProbe-images` (the base name is `PROBE_DOCUMENT`, default `AwsAdvisorProbe`), each embedding its fixed script, and the policy above grants
 `ssm:SendCommand` on `arn:aws:ssm:*:<account-id>:document/AwsAdvisorProbe*` and `arn:aws:ec2:*:*:instance/*` only.
 **Never grant the advisor `ssm:SendCommand` on `AWS-RunShellScript`** (or on `document/*`): with it a leaked key runs
-arbitrary commands on the fleet. The setup script creates the five documents and updates them when a probe changes;
+arbitrary commands on the fleet. The setup script creates the six documents and updates them when a probe changes;
 Settings › Probes shows each one's status (deployed and current, stale, missing) and the commands; by hand:
 
 ```
 curl -s -H "x-api-token: $API_TOKEN" http://localhost:9034/api/probes/host/document > probe-host.json   # schemaVersion 2.2, one aws:runShellScript step, the script lines, the timeout
 aws ssm create-document --name AwsAdvisorProbe-host --document-type Command --document-format JSON --content file://probe-host.json
-# the same for docker, apps, software and sbom
+# the same for docker, apps, software, sbom and images
 ```
 
 The `sbom` probe reads what the running container images and the host filesystem contain beyond the OS packages
@@ -699,13 +699,38 @@ official installer fetches it from GitHub, verifies its checksum and puts it in 
 write any probe makes and needs curl and egress from the box; with the setting off, or when the install fails, the box
 is reported as not available with the reason and nothing is scanned. It scans each image through the Docker daemon,
 then the filesystem with the kernel and device trees, runtime state, caches, logs, the container stores and every
-non-local mount excluded, within a 480 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 600 s),
-and trims the lists to fit SSM's 24,000-character output cap, each scan reporting its true count. What it finds is on
-the instance's Software tab and in the graph as `CONTAINS` edges from the image to its packages (`src/graph_software.ts`).
-An image is identified by its content there: the repository at its registry digest (`image:redis@sha256:…`), or the local
-image id for a build that never left the box, so two boxes on different builds of `redis:latest` are two nodes and a box
-that pulls the new build moves to a new node. (Cluster workloads' `BUILT_FROM` edges still point at `image:<ref>` nodes
-by name, since a workload spec names a tag.)
+non-local mount excluded, within a 1200 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 1500 s;
+images are unpacked in a scratch directory under `/var/tmp` that is emptied after every scan, and one the free disk
+cannot hold is skipped), and trims the lists to fit SSM's 24,000-character output cap, each scan reporting its true
+count. What it finds is on the instance's Software tab and in the graph as `CONTAINS` edges from the image to its
+packages (`src/graph_software.ts`). An image is identified by its content there: the repository at its registry digest
+(`image:redis@sha256:…`), or the local image id for a build that never left the box, so two boxes on different builds
+of `redis:latest` are two nodes and a box that pulls the new build moves to a new node. (Cluster workloads' `BUILT_FROM`
+edges still point at `image:<ref>` nodes by name, since a workload spec names a tag.)
+
+**The image scanner: each image once, not once per box.** The same image runs on many boxes and each used to unpack and
+read it; set `PROBE_IMAGES_SCANNER` (Settings › Probe pass › Image scanner instance) to the id of one SSM-online Linux
+instance and the sbom pass reads the fleet's registry images there instead (`src/image_pass.ts`, the `images` probe).
+Before the boxes run, the pass lists the distinct images the running boxes carry (the software probe's `instance_images`:
+registry digest and platform, keyed `digest|platform` because a multi-arch tag's digest is the index, the same on an
+amd64 and an arm64 box with different contents), skips those read ok within `PROBE_SBOM_INTERVAL_HOURS`, and sends the
+scanner the rest in batches of 15 as the document's `images` parameter (`repo@sha256:…|os/arch`, one command per batch,
+most shared images first, at most 300 per pass). The scanner pulls each by digest straight from its registry with syft's
+`registry:` source (no Docker daemon) for the box's platform, `PROBE_IMAGES_TIMEOUT_SECONDS` (180) per image, and
+answers with the same scan records; they are kept once per image (`image_sbom_scans`, `image_sbom`) and shown on every
+box that runs the image, whose `CONTAINS` edges carry the platform they were read on. The boxes then get
+`images=local` and scan only images with no registry digest (built or loaded on the box). Without a scanner, when it is
+not SSM-online, when its first batch fails, or when the sbom document predates the parameter, the boxes scan every image
+as before, so nothing is lost. Registry access is the scanner's own, never the advisor's: its instance role for ECR
+(`ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability`,
+shown on Settings › Probes; the script fetches a token per ECR registry with the AWS CLI into a syft config in the scratch
+directory, so the scanner needs the CLI; a repository in a member account additionally needs a repository policy that
+lets the scanner's role pull), Docker Hub anonymous pulls (rate-limited per IP; a Hub login in the scanner's
+`~/.docker/config.json` lifts that), and private registries through the same docker config and credential helpers,
+which syft reads. Images that fail there (a 403, a rate limit, a time-out) are retried next pass and the reason is on the
+box's Software tab; the scanner needs a few GB free under `/var/tmp` and, with an upload bucket, egress to S3 (without
+one the batches shrink to 4 so the inline answer is not trimmed). Scans of images no running box has carried for 30 days
+are retired after each pass.
 
 **Whole results through S3.** GetCommandInvocation returns 24,000 characters of stdout, and a box with a few thousand
 packages (a swarm host's images, a big Node application) outgrows it: the software probe's answer is then cut off and
@@ -976,7 +1001,7 @@ outcome under the row.
 - `PROBE_CRON` (default `30 5 * * *`, `off` to disable) runs the SSM probe automatically, but only where it can
   change a decision: running, SSM-online instances whose 30-day CPU is under `PROBE_IDLE_CPU` (default 20 %) or
   that carry an open idle-instance recommendation, skipping any probed more recently than `PROBE_MIN_INTERVAL_HOURS` (default 20; 1 with an hourly cron, 24 with a daily one; a five-minute margin is built in so the next pass is never skipped), at most `PROBE_MAX`
-  (default 25) per pass, three at a time (the sbom pass twenty: its boxes work for minutes each while the advisor only waits). `PROBE_SCOPE=all` widens the pass to every SSM-online running instance
+  (default 25) per pass, three at a time (the sbom pass twenty: its boxes work for minutes each while the advisor only waits; with an image scanner configured the sbom pass first sends it the fleet's registry images in batches, one command each). `PROBE_SCOPE=all` widens the pass to every SSM-online running instance
   (cap raised to 100), so the Inventory carries memory, disk and process data for the whole fleet. It runs half an hour before the daily collection so the idle-instance
   rule sees fresh memory and process data. Samples older than 30 days are pruned. `POST /api/probe-pass` runs it
   by hand and `GET /api/probe-pass/targets` previews the candidates.
