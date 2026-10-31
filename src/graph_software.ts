@@ -24,7 +24,7 @@ import { componentPurl, parsePurl } from "./software_inventory.js";
  * package a distribution's advisories name), `sort_key` (the version as a sortable string) and `version_purl`. One node
  * here is one installed version, so several share a product_key; the match reads (product_key, sort_key). Containment is edges between package nodes, the same two whatever the mechanism:
  * BUNDLES (a runtime to the libraries compiled into it, from Node's process.versions; the library is an SoftwareComponent
- * of ecosystem `bundled`) and DEPENDS_ON (a package to the installed packages its dpkg Depends names). A CVE in brotli
+ * in the `binary` ecosystem with source_kind process_versions, one node with the system copy of the same version) and DEPENDS_ON (a package to the installed packages its dpkg Depends names). A CVE in brotli
  * then reaches a box as (compute)<-[:INSTALLED_ON]-(node)-[:BUNDLES]->(brotli), with no lookup. The match itself is a
  * strut workflow against the public graph; nothing here decides vulnerability from these.
  *
@@ -46,7 +46,7 @@ UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
 MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', is_deleted: false, deleted_at: null, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
 SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
 
@@ -66,7 +66,7 @@ UNWIND $rows AS row
 MERGE (i:AdvisorResource {id: row.image_id}) ON CREATE SET i.first_seen = $now, i.name = row.image, i.kind = 'container', i.repository = row.repository, i.tag = row.tag, i.native_type = 'container_image', i.native_id = row.image, i.provider = $provider, i.account_id = coalesce(row.account_id, $account)
 SET i:AdvisorImage, i.digest = coalesce(row.digest, i.digest), i.image_id = coalesce(row.docker_image_id, i.image_id)
 MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', is_deleted: false, deleted_at: null, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (i)-[r:CONTAINS]->(p)
 SET r += {first_seen: row.first_seen, last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
 
@@ -117,6 +117,41 @@ MERGE (p)-[r:PROVIDES]->(a) SET r.updated_at = $now`;
 
 /** What happened to an old version: the inventory's package_changes row (box, name, from, to) as an edge between the two
  *  version nodes. One edge per pair however many boxes made the move; `at` is the latest probe that saw it, `boxes` how many. */
+/** Ids an older advisor wrote under ecosystems that merged into `binary` on 2026-10-31: syft's pkg:generic (a program recognised by its
+ *  contents) and pkg:bundled (a library a runtime ships) are the same kind of fact as a version read from the program, and the matcher counted
+ *  the same software on a box twice or three times. A node whose new id is free is renamed in place, history and all; one whose new id the
+ *  collector has already written is retired (its edges and itself marked deleted, `merged_into` naming the survivor), never deleted: what the
+ *  match attached to it stays attached. Idempotent: nothing matches once the fleet has been through it. */
+const MIGRATE_IDS_RENAME_CYPHER = `
+MATCH (o:SoftwareComponent) WHERE o.id STARTS WITH 'pkg:generic:' OR o.id STARTS WITH 'pkg:bundled:'
+WITH o, 'pkg:binary:' + substring(o.id, 12) AS nid
+OPTIONAL MATCH (n:SoftwareComponent {id: nid}) WITH o, nid, n WHERE n IS NULL
+SET o.id = nid, o.ecosystem = 'binary', o.updated_at = $now`;
+const MIGRATE_IDS_RETIRE_CYPHER = `
+MATCH (o:SoftwareComponent) WHERE o.id STARTS WITH 'pkg:generic:' OR o.id STARTS WITH 'pkg:bundled:'
+WITH o, 'pkg:binary:' + substring(o.id, 12) AS nid
+MATCH (n:SoftwareComponent {id: nid})
+OPTIONAL MATCH (o)-[i:INSTALLED_ON]->()
+FOREACH (r IN CASE WHEN i IS NULL OR coalesce(i.is_deleted, false) THEN [] ELSE [i] END | SET r.is_deleted = true, r.deleted_at = $now)
+WITH DISTINCT o, nid
+OPTIONAL MATCH ()-[c:CONTAINS]->(o)
+FOREACH (r IN CASE WHEN c IS NULL OR coalesce(c.is_deleted, false) THEN [] ELSE [c] END | SET r.is_deleted = true, r.deleted_at = $now)
+WITH DISTINCT o, nid
+SET o.is_deleted = true, o.deleted_at = coalesce(o.deleted_at, $now), o.merged_into = nid, o.updated_at = $now`;
+
+/** The node's own lifecycle, after the edges': a version no box holds and no image contains any more (every INSTALLED_ON and CONTAINS edge
+ *  to it retired) is marked `is_deleted: true, deleted_at`, and comes back the moment an edge does. The node stays: it is the history the
+ *  SUPERSEDED_BY chain and the match's findings hang from, and a reader that wants the present (the matcher, a fleet query) filters on it. */
+const ORPHAN_COMPONENTS_CYPHER = `
+MATCH (p:SoftwareComponent) WHERE coalesce(p.is_deleted, false) = false
+AND size([(p)-[r:INSTALLED_ON]->() WHERE coalesce(r.is_deleted, false) = false | 1]) = 0
+AND size([()-[r:CONTAINS]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) = 0
+SET p.is_deleted = true, p.deleted_at = $now`;
+const REVIVE_COMPONENTS_CYPHER = `
+MATCH (p:SoftwareComponent) WHERE p.is_deleted = true
+AND size([(p)-[r:INSTALLED_ON]->() WHERE coalesce(r.is_deleted, false) = false | 1]) + size([()-[r:CONTAINS]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) > 0
+SET p.is_deleted = false, p.deleted_at = null`;
+
 const SUPERSEDED_BY_CYPHER = `
 UNWIND $rows AS row
 MATCH (a:SoftwareComponent {id: row.from_id}) MATCH (b:SoftwareComponent {id: row.to_id})
@@ -182,6 +217,9 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   const w = (cypher: string, batch: any[]) => writeCypher(cypher, neoParams({ rows: batch.map((r) => (r && typeof r === "object" && "instance_id" in r && !("account_id" in r) ? { ...r, account_id: idx.of(String(r.instance_id)) } : r)), now, provider: AWS, account }));
   const where = instanceIds ? ` and instance_id in (${instanceIds.map(() => "?").join(",")})` : "";
   const args = instanceIds ?? [];
+  // ids from before the ecosystems merged (see MIGRATE_IDS_RENAME_CYPHER): renamed or retired before this sync writes, so it meets no twin
+  await writeCypher(MIGRATE_IDS_RENAME_CYPHER, neoParams({ now }));
+  await writeCypher(MIGRATE_IDS_RETIRE_CYPHER, neoParams({ now }));
   const os = new Map<string, any>(); for (const o of rows(`select * from instance_os where 1=1${where}`, ...args)) os.set(o.instance_id, o);
 
   // packages: one node per (ecosystem, name, version), the box's edge carries its own dates
@@ -190,10 +228,11 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     const o = os.get(p.instance_id); const eco = o ? ecosystemOf(o.package_manager, o.os_id, o.os_version) : null;
     pkgRows.push({ instance_id: p.instance_id, version_purl: null, id: packageId(p.ecosystem, p.name, p.version), name: p.name, version: p.version, ecosystem: p.ecosystem, source_name: p.source ?? null, source_kind: SOURCE_KIND[p.ecosystem] ?? p.ecosystem, advisory_ecosystem: eco?.ecosystem ?? null, scope: packageScope(p.source ?? p.name).scope, arch: p.arch ?? null, path: null, first_seen: p.first_seen, last_seen: p.last_seen, ...componentIdentity({ ecosystem: p.ecosystem, name: p.name, version: p.version, source: p.source ?? null, os_id: o?.os_id ?? null }) });
   }
-  // what the runtimes bundle (probe software/4): the library is a package of its own, installed on the box through the runtime
+  // what the runtimes bundle (probe software/4): the library is a package of its own, installed on the box through the runtime; a binary
+  // component (one node with the system copy of the same version, since 2026-10-31), its source_kind saying it was read from process.versions
   const bundleRows = rows(`select instance_id, parent, parent_version, name, version, first_seen, last_seen from instance_bundles where 1=1${where}`, ...args);
   for (const b of bundleRows) {
-    pkgRows.push({ instance_id: b.instance_id, version_purl: null, id: packageId("bundled", b.name, b.version), name: b.name, version: b.version, ecosystem: "bundled", source_name: null, source_kind: "process_versions", advisory_ecosystem: null, scope: "library", arch: null, path: null, first_seen: b.first_seen, last_seen: b.last_seen, ...componentIdentity({ ecosystem: "bundled", name: b.name, version: b.version }) });
+    pkgRows.push({ instance_id: b.instance_id, version_purl: null, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "process_versions", advisory_ecosystem: null, scope: "library", arch: null, path: null, first_seen: b.first_seen, last_seen: b.last_seen, ...componentIdentity({ ecosystem: "binary", name: b.name, version: b.version }) });
   }
   for (const b of rows(`select instance_id, name, version, path, first_seen, last_seen, gone from instance_binaries where 1=1${where}`, ...args)) {
     pkgRows.push({ instance_id: b.instance_id, version_purl: null, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "binary_version", advisory_ecosystem: null, scope: packageScope(b.name).scope, arch: null, path: b.path ?? null, first_seen: b.first_seen, last_seen: b.last_seen, ...componentIdentity({ ecosystem: "binary", name: b.name, version: b.version }) });
@@ -238,7 +277,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   const bundles: any[] = [];
   for (const b of bundleRows) {
     const parent_id = packageId("binary", b.parent, b.parent_version); // one box may hold several Nodes: the parent is the install of that version
-    bundles.push({ parent_id, child_id: packageId("bundled", b.name, b.version) });
+    bundles.push({ parent_id, child_id: packageId("binary", b.name, b.version) }); // the library is a binary component like the runtime: node's openssl 3.0.22 and the system's are one version node, reached by BUNDLES or INSTALLED_ON
   }
   const depends: any[] = [];
   for (const d of rows(`select instance_id, name, dep from instance_depends where 1=1${where}`, ...args)) {
@@ -284,6 +323,9 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of chunks(supersededRows)) await w(SUPERSEDED_BY_CYPHER, b);
   // the advisor's own vulnerability nodes (KnVulnerability, with their AFFECTS and VULNERABLE_TO edges) are not written since 2026-10-29: what an older advisor left goes on every sync, wipe or not
   await writeCypher("MATCH (n:KnVulnerability) DETACH DELETE n");
+  // the nodes' own lifecycle, from the edges': what came back is live again, what nothing holds any more is marked (never deleted)
+  await writeCypher(REVIVE_COMPONENTS_CYPHER);
+  await writeCypher(ORPHAN_COMPONENTS_CYPHER, neoParams({ now }));
   return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, superseded: supersededRows.length, took_ms: Date.now() - t0 };
 }
 
