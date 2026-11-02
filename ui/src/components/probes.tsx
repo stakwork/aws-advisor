@@ -24,6 +24,7 @@ export function ProbesCard() {
   const [d, setD] = useState<{ base_document: string; kinds: Kind[]; legacy_rows: number; uploads?: { configured: boolean; bucket: string | null; prefix: string | null; ok: boolean | null; error: string | null; checked_at: string | null; identity: string | null };
     scanner?: { instance_id: string | null; configured: boolean; raw_setting: string | null; images: { distinct: number; ok: number; failed: number; by_scanner: number; packages: number; pullable_now: number; due_now: number; last_scanner_at: string | null }; policy: unknown }; document_rows?: any[] } | null>(null);
   const [showPolicy, setShowPolicy] = useState(false);
+  const [showOlderRows, setShowOlderRows] = useState(false);
   const [proposing, setProposing] = useState(false);
   const [proposeMsg, setProposeMsg] = useState<{ text: string; err: boolean } | null>(null);
   const [err, setErr] = useState("");
@@ -52,6 +53,13 @@ export function ProbesCard() {
 
   if (err) return <Card title="Probes"><div className="text-sm text-red-300">{err}</div></Card>;
   if (!d) return <Card title="Probes"><div className="text-sm text-zinc-500">Loading…</div></Card>;
+  // the ledger rows: what was proposed in the last day up front, older rows (applied, reverted or long waiting) behind "see more"
+  const docRows: any[] = d.document_rows || [];
+  const dayAgo = Date.now() - 86_400_000;
+  const isRecent = (r: any) => { const t = Date.parse(r.created_at); return !Number.isFinite(t) || t >= dayAgo; };
+  const recentDocRows = docRows.filter(isRecent);
+  const olderDocRows = docRows.filter((r) => !isRecent(r));
+  const visibleDocRows = showOlderRows ? docRows : recentDocRows;
   return (
     <Card title={<span>Probes <span className="font-normal text-zinc-500">· read-only scripts run on the boxes through Systems Manager, one document per concern, each on its own schedule</span></span>}>
       <p className="mb-3 text-sm text-zinc-400">
@@ -103,11 +111,11 @@ export function ProbesCard() {
           <Button type="button" onClick={propose} disabled={proposing}>{proposing ? "Reading the documents…" : `Propose create / update${d.kinds.some((k) => k.deployed && (k.deployed.status === "missing" || k.deployed.status === "stale")) ? ` (${d.kinds.filter((k) => k.deployed && (k.deployed.status === "missing" || k.deployed.status === "stale")).length} here need it)` : ""}`}</Button>
           {proposeMsg && <span className={`text-xs ${proposeMsg.err ? "text-red-300" : "text-zinc-400"}`}>{proposeMsg.text}</span>}
         </div>
-        {(d.document_rows || []).length > 0 && (
+        {docRows.length > 0 && visibleDocRows.length > 0 && (
           <table className="mt-3 w-full table-fixed">
             <thead><tr><Th className="w-64">Document · account</Th><Th className="w-24">Status</Th><Th>What</Th><Th className="w-44">Run</Th></tr></thead>
             <tbody>
-              {(d.document_rows || []).map((r: any) => (
+              {visibleDocRows.map((r: any) => (
                 <tr key={r.id} className="border-t border-zinc-800 align-top">
                   <Td className="text-xs"><div className="font-mono text-zinc-200">{r.facts?.name || r.resource_name}</div><div className="text-zinc-500">{r.account_id || "parent"} · {r.region}</div></Td>
                   <Td><Badge>{r.status}</Badge><div className="mt-0.5 text-xs text-zinc-500">{r.facts?.op}</div></Td>
@@ -117,6 +125,12 @@ export function ProbesCard() {
               ))}
             </tbody>
           </table>
+        )}
+        {olderDocRows.length > 0 && (
+          <div className="mt-2 text-xs text-zinc-500">
+            {showOlderRows ? <>Showing every row, {olderDocRows.length} older than a day. </> : recentDocRows.length ? <>{olderDocRows.length} older row{olderDocRows.length === 1 ? "" : "s"} (more than a day old) hidden. </> : <>No row from the last day; {olderDocRows.length} older row{olderDocRows.length === 1 ? "" : "s"} hidden. </>}
+            <button type="button" className="text-zinc-300 underline decoration-zinc-600 underline-offset-2" onClick={() => setShowOlderRows(!showOlderRows)}>{showOlderRows ? "See fewer" : "See more"}</button>
+          </div>
         )}
       </div>
       {d.kinds.some((k) => msg[k.kind]) && <div className="mt-2 space-y-1 text-xs text-zinc-400">{d.kinds.filter((k) => msg[k.kind]).map((k) => <div key={k.kind}><span className="text-zinc-500">{k.title}:</span> {msg[k.kind]}</div>)}</div>}

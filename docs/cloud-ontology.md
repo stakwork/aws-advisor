@@ -258,7 +258,7 @@ comes from the adapter (`ResourceNode.compute`); the software probe fills in the
 |---|---|
 | `platform` | `linux` \| `windows` \| `macos` |
 | `os` / `os_id` / `os_version` | the distribution and version (`Ubuntu 24.04`, `ubuntu`, `24.04`); from `/etc/os-release`, the SSM platform name, or as declared |
-| `kernel` / `arch` / `package_manager` | from `uname` and the probe |
+| `kernel` / `arch` / `package_manager` | from `uname` and the probe; the AWS adapter also carries the probe's last reading (`instance_os`) onto the compute with the box itself, so a probed box has its kernel from the resource pass too, with `os_collected_at` saying when it was read |
 | `agent_kind` | `ssm` when the box has the agent the probe runs through |
 | `opaque` / `managed_by` | true when the provider never shows the machine (a Vercel team's runtime): nothing is known inside it |
 | `declared` | true when a person declared it (local machines) rather than an API or probe reporting it |

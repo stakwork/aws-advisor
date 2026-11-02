@@ -11,6 +11,7 @@ import { ALL_BENCHMARKS, DEFAULT_BENCHMARKS } from "../../powerpipe.js";
 import { CONTROL_SOURCES } from "../../playbooks.js";
 import { TELEMETRY, lambdaArn, resourceFromDnsRecord, resourceFromDynamodb, resourceFromEbs, resourceFromEc2, resourceFromElasticache, resourceFromElb, resourceFromIamUser, resourceFromLambda, resourceFromRole, resourceFromRootUser, resourceFromSsoUser, resourceFromRds, resourceFromS3, resourceFromService, resourceFromZone, type RoleMap } from "./resources.js";
 import { repoTagKeysList } from "../../function_facts.js";
+import "../../software_inventory.js"; // the instance_os table the box rows join (the probe's last OS and kernel reading)
 
 /**
  * The AWS adapter: Steampipe and the SDK behind the generic model. Credentials and the parent/member registry are
@@ -184,7 +185,9 @@ function inventoryIds(account: string): Set<string> {
 
 function rawResources(account: string, roles: ReturnType<typeof roleMap>): ResourceNode[] {
     return [
-      ...rows("select * from inventory_ec2").map((r) => resourceFromEc2(r, roles)),
+      // each box with the software probe's last reading of its operating system (kernel, distribution, package manager), when it has one
+      ...rows(`select e.*, o.kernel as probe_kernel, o.os_id as probe_os_id, o.os_version as probe_os_version, o.os_name as probe_os_name, o.arch as probe_arch, o.package_manager as probe_package_manager, o.collected_at as probe_os_at
+               from inventory_ec2 e left join instance_os o on o.instance_id = e.instance_id`).map((r) => resourceFromEc2(r, roles)),
       ...rows("select * from inventory_rds").map((r) => resourceFromRds(r, roles)),
       ...rows("select * from inventory_elasticache").map((r) => resourceFromElasticache(r, roles)),
       ...rows("select * from inventory_elb").map((r) => resourceFromElb(r, roles)),

@@ -75,6 +75,13 @@ const base = (id: string, label: ResourceLabel, nativeType: string, row: any, na
 
 const apiObserved = (row: any): ResourceNode["observed"][number] => ({ kind: "api", status: row.gone ? "stale" : "ok", last_at: str(row.last_seen), detail: null });
 
+/** What the software probe read of a box's operating system (uname, /etc/os-release), as the adapter joins it onto the inventory row; empty when never probed. */
+export function probedOs(row: any): Record<string, unknown> {
+  if (row.probe_kernel == null && row.probe_os_id == null) return {};
+  const os = [str(row.probe_os_name) ?? str(row.probe_os_id), str(row.probe_os_version)].filter(Boolean).join(" ") || null;
+  return { kernel: str(row.probe_kernel), os: os ?? str(row.ssm_platform), os_id: str(row.probe_os_id), os_version: str(row.probe_os_version), package_manager: str(row.probe_package_manager), os_collected_at: str(row.probe_os_at) };
+}
+
 export function resourceFromEc2(row: any, roles: RoleMap = new Map()): ResourceNode {
   const snap = safeJson(row.snapshot) || {};
   const net = snap.network || {};
@@ -88,8 +95,10 @@ export function resourceFromEc2(row: any, roles: RoleMap = new Map()): ResourceN
     zone: str(row.az), lifecycle: snap.instance_lifecycle === "spot" ? "spot" : "on_demand", launch_time: str(row.launch_time), cpu_30d: num(row.cpu_30d), ebs_gb: num(row.ebs_gb), volumes: num(row.volumes),
     probe_at: str(row.probe_at), probe_mem_pct: num(row.probe_mem_pct), vpc_id: str(net.vpc_id), subnet_id: str(net.subnet_id), security_groups: Array.isArray(net.security_groups) ? net.security_groups.map((g: any) => String(g?.GroupId ?? g?.group_id ?? g)) : [],
   }, observed);
-  // the operating system as the API knows it; the software probe adds the distribution, version and kernel (src/graph_software.ts)
-  n.compute = { platform, arch: str(snap.architecture), agent_kind: row.ssm_status != null ? "ssm" : null, os: str(row.ssm_platform), opaque: false };
+  // the operating system as the API knows it (platform, architecture, the SSM platform name), and, when the software probe has read the box
+  // (its instance_os row, joined by the adapter), the kernel, distribution and package manager it found: the compute node then carries the
+  // kernel from the resource pass too, not only after the software layer runs (src/graph_software.ts keeps writing the same fields per probe)
+  n.compute = { platform, arch: str(snap.architecture) ?? str(row.probe_arch), agent_kind: row.ssm_status != null ? "ssm" : null, os: str(row.ssm_platform), opaque: false, ...probedOs(row) };
   n.pool = row.pool ? String(row.pool) : poolOf(row.snapshot);
   n.pool_kind = row.pool_kind ? POOL_KIND[String(row.pool_kind)] ?? String(row.pool_kind) : n.pool ? (n.pool.includes("/") ? "node_group" : "asg") : null;
   return n;
