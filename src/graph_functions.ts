@@ -15,6 +15,7 @@ import { LINK_BY_ID } from "./graph_cypher.js";
 import { AWS } from "./adapters/types.js";
 import { normalizeTriggerTarget, type PolledTrigger, type PushTrigger } from "./adapters/aws/functions.js";
 import { repositoriesFor, repoTagKeysList, stacksManaging, type RepoEntry } from "./function_facts.js";
+import { linkCodeRepositoriesQuietly } from "./graph_repositories.js";
 
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
 const json = (v: unknown): any => { if (v == null) return null; if (typeof v === "string") { try { return JSON.parse(v); } catch { return null; } } return v; };
@@ -165,6 +166,8 @@ export async function mirrorFunctions(onLog: (l: string) => void = (l) => consol
     await writeCypher("MATCH ()-[r:BUILT_FROM]->(:AdvisorRepository) WHERE r.via IN ['function_tag', 'stack_tag'] AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r", { now });
     // a repository this layer named by a tag, with nothing pointing at or from it any more (not even CAN_ASSUME), goes; one the entitlements pass has since granted stays (and loses named_by there)
     await writeCypher("MATCH (n:AdvisorRepository {named_by: 'tag'}) WHERE NOT (n)--() DELETE n", {});
+    // the code graph's Repository of the same GitHub repository (src/graph_repositories.ts)
+    if (repoCount) await linkCodeRepositoriesQuietly(now);
 
     return { functions: fns.length, runs_as: runsAs.filter((r) => r.role_arn).length, triggers: triggerCount, urls: urlRows.length, repositories: repoCount };
   } finally {

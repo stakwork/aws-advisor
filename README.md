@@ -1151,7 +1151,7 @@ schedule, so the cheap hourly readings and the heavy daily ones never share a ca
 |---|---|---|---|---|
 | host | `AwsAdvisorProbe-host` | memory, swap, load, CPUs, uptime, disks (with the EBS volume behind each mount), top processes by CPU and memory; the disk, memory and load alerts, the daily roll-ups and the charts read it; the pass also refreshes the RDS load profiles | `PROBE_CRON` (daily; hourly `5 * * * *` fills the charts) | Schedules › Probe: host |
 | docker | `AwsAdvisorProbe-docker` | the containers (state, CPU, memory, network) and the [activity section](#activity-is-anyone-using-this-box): container logs and use signals, connections, the front door, logins, traffic; the usage profiles and the swarm costs read it | `PROBE_DOCKER_CRON` | Schedules › Probe: containers and activity |
-| apps | `AwsAdvisorProbe-apps` | [what runs](#what-runs-on-the-box-probe-16) (process groups), [what listens](#exposed-ports-and-who-serves-them-probe-18) and where the log agents ship; an opened internet-facing port raises `port_exposed`, and the graph's reachability verdicts are rebuilt for the box | `PROBE_APPS_CRON` | Schedules › Probe: programs and ports |
+| apps | `AwsAdvisorProbe-apps` | [what runs](#what-runs-on-the-box-probe-16) (process groups), [what listens](#exposed-ports-and-who-serves-them-probe-18), where the log agents ship, and the host firewall (apps 2.1: `iptables-save` / `ip6tables-save`, or `nft list ruleset`, read-only; the graph keeps one `AdvisorFilter {kind: host_firewall}` per distinct ruleset, shared by every box that runs it, with an `AdvisorFilterRule` per rule, and a box whose rules change gets a `firewall_changed` app event); an opened internet-facing port raises `port_exposed`, and the graph's reachability verdicts are rebuilt for the box | `PROBE_APPS_CRON` | Schedules › Probe: programs and ports |
 | software | `AwsAdvisorProbe-software` | the OS and kernel, every installed package with its version and its source package (dpkg, rpm or apk; the advisories name the source, `openssh`, not the binary, `openssh-server`), the version of well-known programs read from the binary (`ssh -V`, `nginx -v`, `openssl version`, …), the images behind the running containers with their digests; stored in `instance_os`, `instance_packages`, `instance_binaries`, `instance_images` with first and last seen and a change log (`src/software_inventory.ts`); the inventory a CVE is matched against | `PROBE_SOFTWARE_CRON` (daily) | Schedules › Probe: installed software |
 
 Host, docker and apps share the scope (`PROBE_SCOPE`: idle candidates, or every box) and the minimum interval
@@ -1361,7 +1361,12 @@ internet gateway), `AdvisorRouteTable` with `ROUTES` edges, `AdvisorGateway`, `A
 instance, balancer, function or gateway, `WEARS` its groups, `IN_SEGMENT`), `AdvisorPublicIp`, and `AdvisorFilter`
 (security groups and network ACLs) with one `AdvisorFilterRule` per rule or ACL entry and a `FROM` edge to the
 `AdvisorSource` it admits (`internet`, `cidr:<range>`, `prefix:<id>`) or to the group it references. Resources wear
-their groups directly too (`GUARDED_BY`).
+their groups directly too (`GUARDED_BY`). A box also wears its own packet filter: the apps probe (2.1) reads
+`iptables-save`, and `src/graph_host_firewall.ts` draws one `AdvisorFilter {kind: host_firewall, id: hostfw:<sha256 of the
+normalized rules>}` per distinct ruleset, shared by every box that runs it (`GUARDED_BY {via: 'iptables'}`), with an
+`AdvisorFilterRule` per rule of the filter table and per nat port publishing (`table`, `chain`, `priority` = position,
+`target`, `states`, interfaces, `raw`) and `FROM` the same shared `AdvisorSource` nodes; a ruleset no box wears any more
+is marked `is_deleted`. The verdicts below do not read host firewalls yet.
 
 On top of it the verdicts, so no agent query re-implements security group and ACL logic: every `AdvisorEndpoint` gets
 `REACHABLE_FROM` edges to the sources that can reach it (with the rule and the ACL entry it passed in `through`),

@@ -250,6 +250,8 @@ FOREACH (_ IN CASE WHEN row.source_label = 'AdvisorFilter' THEN [1] ELSE [] END 
 
 /**
  * Resources that wear filters directly (databases, caches, balancers, and compute without an interface row), plus
+ * every function. The old GUARDED_BY edges go first, except a box's host firewall (src/graph_host_firewall.ts writes
+ * and retires that one; it is not a provider filter and would otherwise vanish on every network mirror). Plus
  * every function from `inventory_lambda` (`replace_network: true`, `edge_props` carrying `stale`/`stale_since` from
  * `facts_missing.config`): a function that leaves its VPC or changes subnets must lose its old `IN_NETWORK` /
  * `IN_SEGMENT` edges, which a plain MERGE never removes, so `replace_network` rows also clear those two edge types
@@ -260,7 +262,7 @@ FOREACH (_ IN CASE WHEN row.source_label = 'AdvisorFilter' THEN [1] ELSE [] END 
 const GUARDED_CYPHER = `
 UNWIND $rows AS row
 MATCH (r:AdvisorResource {id: row.id})
-OPTIONAL MATCH (r)-[o:GUARDED_BY]->() DELETE o
+OPTIONAL MATCH (r)-[o:GUARDED_BY]->(of) WHERE coalesce(of.kind, '') <> 'host_firewall' DELETE o
 WITH DISTINCT r, row
 OPTIONAL MATCH (r)-[on:IN_NETWORK]->() WHERE coalesce(row.replace_network, false) DELETE on
 WITH DISTINCT r, row

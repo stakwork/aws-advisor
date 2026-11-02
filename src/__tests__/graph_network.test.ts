@@ -146,3 +146,8 @@ test("without NEO4J_URI the network mirror is a no-op", async () => {
   assert.equal(await gn.mirrorNetwork(), null);
   assert.deepEqual(await gn.mirrorReachability(), { endpoints: 0 });
 });
+
+test("the network mirror leaves a box's host firewall edge alone when it rewrites GUARDED_BY (src/graph_host_firewall.ts owns it)", () => {
+  const src = fs.readFileSync(new URL("../graph_network.ts", import.meta.url), "utf8");
+  assert.match(src, /OPTIONAL MATCH \(r\)-\[o:GUARDED_BY\]->\(of\) WHERE coalesce\(of\.kind, ''\) <> 'host_firewall' DELETE o/);
+});

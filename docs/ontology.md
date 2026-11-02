@@ -174,6 +174,8 @@ Rebuilt after every inventory and resource mirror; verdicts of one instance's po
 | `AdvisorPublicIp` | `elastic_ip` | allocation id (or the address) | `ip`, `kind: static`, `associated`, `allocation_id` |
 | `AdvisorFilter` | `security_group` \| `network_acl` | group id or ACL id | `kind`, `stateful` (true for groups, false for ACLs), `default_action: deny`, `default` (the VPC's default group or ACL), `name`, `description`, `rules` (count), `attached` (interfaces wearing it, or subnets under it) |
 | `AdvisorFilterRule` | `security_group_rule` \| `network_acl_entry` | the rule id (`sgr-…`), a synthesized key when AWS gave none, or `<acl>:in\|out:<rule number>` | `direction` (`ingress` \| `egress`), `action` (`allow` \| `deny`), `protocol` (`tcp` \| `udp` \| `icmp` \| `icmpv6` \| `any`), `from_port` / `to_port` (null = all), `priority` (ACL rule number; null for group rules), `source_kind` (`internet` \| `cidr` \| `filter` \| `prefix_list` \| `any`), `source` (the CIDR, group id or prefix list id), `description`, `dormant` (an IPv6-only rule in a network without IPv6), `filter_id`. The ACL's catch-all deny (rule 32767) is not a node: it is the implicit deny |
+| `AdvisorFilter` (host firewall, `src/graph_host_firewall.ts`) | `iptables` \| `nftables` | `hostfw:<sha256 of the normalized rules>` | `kind: host_firewall`, `stateful: true`, `default_action` (the INPUT policy, or `deny` for a trailing catch-all), `backend` (`legacy` \| `nf_tables` \| `iptables` \| `nftables`), `input_policy` / `forward_policy` / `output_policy`, `rules` (the rule nodes), `rule_total`, `chains`, `tables`, `truncated`, `attached` (boxes wearing it), `is_deleted` / `deleted_at` (no box wears it; back when one does). One node per distinct ruleset, shared by every box that runs it (apps probe 2.1); written per box after an apps probe, no `IN_NETWORK` |
+| `AdvisorFilterRule` (host firewall) | `iptables_rule` | `<filter id>:<family>:<table>:<chain>:<position>` | `table` (`filter`, or `nat` for DNAT/REDIRECT), `chain`, `family`, `priority` (0-based position in the chain), `direction` (`ingress` \| `egress` \| `forward` \| `chain`), `action` (`allow` \| `deny` \| `jump` \| `return` \| `nat` \| `log` \| `other`), `target`, `target_args`, `protocol`, `from_port` / `to_port`, `ports`, `source_ports`, `source` (a leading `!` when negated), `source_negated`, `destination`, `destination_negated`, `in_interface`, `out_interface`, `states`, `comment`, `raw`, `is_deleted`. `FROM` the source's `AdvisorSource` (the destination's on egress) when it names a CIDR or the world and is not negated |
 | `AdvisorSource` | `source` | `internet` \| `cidr:<cidr>` \| `prefix:<id>` | `kind` (`internet` \| `cidr` \| `prefix_list`), `label`, `cidr`, `private` (RFC 1918, link-local or loopback). Shared catalogue nodes, no `account_id`; `internet` also carries `KnDestination` |
 
 Edges: `IN_NETWORK` (segments, route tables, gateways, interfaces, filters and resources → network); `IN_SEGMENT`
@@ -182,7 +184,8 @@ main); `ROUTES {destination, state, origin}` (table → gateway, interface or th
 are not edges); `PEERS_WITH {state, cidrs, via}` both ways between peered networks; `ATTACHED_TO` (interface → its
 instance, balancer by name, function by name, or NAT gateway and endpoint by id); `WEARS` (interface → group);
 `ASSIGNED` (public IP → interface, or the NAT gateway that holds it); `GUARDED_BY` (segment → its ACL or the VPC's
-default; compute, databases, caches and balancers → their groups; endpoints with groups → their groups); `HAS_RULE`
+default; compute, databases, caches and balancers → their groups; endpoints with groups → their groups; a box → its
+host firewall with `via: 'iptables'`, an edge the network mirror leaves alone); `HAS_RULE`
 (filter → rule); `FROM` (rule → the source it admits, or the group it references); `MEMBER_OF` (NAT gateway → the
 priced `KnSystem nat:`).
 
@@ -201,8 +204,9 @@ sshd goes by the port endpoint's `process`, not by `RUNS`.
 | `BLOCKED_BY` | `AdvisorFilterRule` or `AdvisorFilter` | `source`, `reason`, `computed_at` | what stops a source a group rule would admit: the ACL entry that denies it or drops the replies, the ACL itself for its implicit deny, or every group the box wears when no rule matches the port |
 
 Not judged yet: ElastiCache endpoints (no endpoint node), egress, NACLs in front of balancers and databases (their
-subnets are not tied to them), network paths across peerings, the function invoke endpoint behind a balancer, and
-target ports of balancers the inventory marks gone.
+subnets are not tied to them), network paths across peerings, the function invoke endpoint behind a balancer, target
+ports of balancers the inventory marks gone, and the host firewall (its rules are in the graph in chain order; a
+first-match evaluator over INPUT is the follow-up).
 
 ### AdvisorApp
 

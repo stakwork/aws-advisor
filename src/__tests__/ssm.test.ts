@@ -353,3 +353,16 @@ test("parseProbeOutput types the sbom section: the scans with their status and c
   assert.equal(stub.inline, false); assert.equal(stub.upload, "uploaded 99 ff"); assert.equal(stub.packages, undefined);
   assert.equal(parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","packages":[]}').sbom, undefined, "another kind carries no sbom section");
 });
+
+test("parseProbeOutput types the firewall section of apps 2.1 (lists of printable lines, capped; the counts; a whitelisted backend) and leaves it undefined on an older row; the merged view carries it from the apps row", async () => {
+  const line = JSON.stringify({ probe: "aws-advisor/apps/3", kind: "apps", hostname: "h", collected_at: "2026-11-01T10:00:00Z", processes: [], listeners: [], log_shipping: [],
+    firewall: { available: true, backend: "legacy", v4: ["*filter", ":INPUT DROP", "-A INPUT -j ACCEPT\u0007", 5, "x".repeat(500)], v6: [], nft: null, v4_lines: "4", v6_lines: 0, nft_lines: -2, oversize: "yes" } });
+  const p = parseProbeOutput(line);
+  assert.deepEqual(p.firewall, { available: true, backend: "legacy", v4: ["*filter", ":INPUT DROP", "-A INPUT -j ACCEPT", "x".repeat(400)], v6: [], nft: [], v4_lines: 4, v6_lines: 0, nft_lines: 0, oversize: false });
+  assert.equal(parseProbeOutput(line.replace('"backend":"legacy"', '"backend":"other"')).firewall?.backend, null);
+  assert.equal(parseProbeOutput('{"probe":"aws-advisor/apps/2","kind":"apps","hostname":"h","collected_at":"2026-11-01T10:00:00Z","processes":[],"listeners":[]}').firewall, undefined);
+  const { PROBE_DEFS } = await import("../probes.js");
+  assert.ok(PROBE_DEFS.apps.sections.includes("firewall"), "the apps kind owns the section");
+  const apps = { id: 1, instance_id: "i-1", kind: "apps" as const, collected_at: "2026-11-01T10:00:00Z", data: p };
+  assert.equal(mergeProbes([apps])!.data.firewall?.v4_lines, 4);
+});

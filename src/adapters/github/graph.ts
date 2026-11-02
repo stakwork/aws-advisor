@@ -1,4 +1,5 @@
 import { enabled, writeCypher } from "../../graph_mirror.js";
+import { linkCodeRepositoriesQuietly } from "../../graph_repositories.js";
 import { githubOrgRow, listApps, listMembers, listRepoAccess, listRepos, listSecrets, listTeams } from "./inventory.js";
 import { GITHUB, appId, collaboratorId, memberId, repoNodeId, secretId, teamId } from "./index.js";
 
@@ -13,6 +14,7 @@ import { GITHUB, appId, collaboratorId, memberId, repoNodeId, secretId, teamId }
  *   The org-wide grants go to the org's AdvisorAccount instead of every repository: an owner (level admin, via owner),
  *   the base permission every member holds (via base_permission), an App installed on all repositories (via app).
  * - (secret)-[:STORED_IN]->(repository | account).
+ * - (repository)-[:SAME_AS]->(:Repository) the code graph's node of the same repository (src/graph_repositories.ts).
  * Then the people and credentials (src/graph_access.ts mirrorAccess), which need the repositories for deploy keys.
  */
 
@@ -56,6 +58,8 @@ export async function mirrorGitHub(): Promise<{ repos: number; access: number; t
   const repos = listRepos(account);
   for (const b of chunks(repos.map((r) => ({ ...r, id: repoNodeId(r.full_name) })))) await writeCypher(REPO_CYPHER, { rows: b, now, account });
   await writeCypher("MATCH (r:AdvisorRepository {source: 'github_org', org_id: $account}) WHERE r.updated_at <> $now SET r.gone = true", { account, now });
+  // the code graph's Repository of the same GitHub repository (src/graph_repositories.ts)
+  await linkCodeRepositoriesQuietly(now);
 
   const people = listMembers(account); const idOf = (login: string) => { const m = people.find((p) => p.login.toLowerCase() === login.toLowerCase()); return m ? (m.kind === "member" ? memberId(account, m.login) : collaboratorId(account, m.login)) : null; };
   const teams = listTeams(account);

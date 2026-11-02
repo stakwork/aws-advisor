@@ -59,6 +59,14 @@ export function repoIdFromTagValue(raw: string, canonical: Map<string, string>, 
   return GITHUB_ID_RE.test(id) ? id : null;
 }
 
+/** A resolver from one raw repository reference (a tag value, an image's OCI source label) to its `github:owner/repo` id, with
+ *  `github_repos` read once: the same rule as `repoIdFromTagValue`, so a function's tag and an image's label name the same node. */
+export function repoIdResolver(): (raw: string | null | undefined) => string | null {
+  const canonical = githubCanonical();
+  const org = config.githubOrg;
+  return (raw) => (raw == null || raw === "" ? null : repoIdFromTagValue(String(raw), canonical, org));
+}
+
 export interface RepoEntry { id: string; via: "function_tag" | "stack_tag"; tag_key: string; stack: string | null }
 
 /**

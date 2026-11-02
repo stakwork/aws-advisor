@@ -25,6 +25,7 @@ import { grade, gradeLine, permsOf } from "./policy_facts.js";
 import { db } from "./db.js";
 import { OURS } from "./graph_cypher.js";
 import { permissionSetOfRole } from "./sso_inventory.js";
+import { linkCodeRepositoriesQuietly } from "./graph_repositories.js";
 
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
 const rows = (sql: string, ...p: unknown[]): any[] => { try { return db.prepare(sql).all(...p) as any[]; } catch { return []; } };
@@ -203,7 +204,9 @@ export async function mirrorEntitlements(stamp: string): Promise<Record<string, 
   await writeCypher(`MATCH (s)-[r:GRANTED|IN_GROUP|PROVISIONED_AS|CAN_ACCESS|REACHES|CAN_ASSUME|CAN_SHELL_INTO|HOLDS_KEY_OF|TOUCHED]->() WHERE ${OURS("s")} AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
   await writeCypher("MATCH (:AdvisorResource)-[r:ASSIGNED]->(:AdvisorPermissionSet) WHERE r.updated_at IS NULL OR r.updated_at <> $now DELETE r", { now: stamp });
   await writeCypher(`MATCH (s)-[r:RUNS_AS]->() WHERE ${OURS("s")} AND r.via <> 'vercel_oidc' AND r.via <> 'execution_identity' AND (r.updated_at IS NULL OR r.updated_at <> $now) DELETE r`, { now: stamp });
-  // a repository the GitHub org adapter owns stays (it marks its own gone); one src/graph_functions.ts named by a tag and has since given CAN_ASSUME edges also stays (REPOSITORY_CYPHER above removed its named_by: this pass owns it now); only the stubs the OIDC trust alone made, with nothing else pointing at them, go
-  await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR (n:AdvisorRepository AND coalesce(n.source, '') <> 'github_org' AND coalesce(n.named_by, '') <> 'tag' AND NOT (n)<-[:BUILT_FROM {via: 'function_tag'}]-() AND NOT (n)<-[:BUILT_FROM {via: 'stack_tag'}]-())) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
+  // a repository the GitHub org adapter owns stays (it marks its own gone); one src/graph_functions.ts named by a tag or src/graph_containers.ts by an image's label, or that has since given CAN_ASSUME edges, also stays (REPOSITORY_CYPHER above removed its named_by: this pass owns it now); only the stubs the OIDC trust alone made, with nothing else pointing at them, go
+  await writeCypher("MATCH (n) WHERE (n:AdvisorPolicy OR n:AdvisorGroup OR n:AdvisorPermissionSet OR (n:AdvisorRepository AND coalesce(n.source, '') <> 'github_org' AND NOT coalesce(n.named_by, '') IN ['tag', 'image_label'] AND NOT (n)<-[:BUILT_FROM]-())) AND (n.updated_at IS NULL OR n.updated_at <> $now) DETACH DELETE n", { now: stamp });
+  // the code graph's Repository of the same GitHub repository (src/graph_repositories.ts)
+  await linkCodeRepositoriesQuietly(stamp);
   return counts;
 }

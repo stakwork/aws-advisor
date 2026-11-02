@@ -72,6 +72,8 @@ export interface ProbeLogShipping { group: string; via: string; source: string |
 export interface ProbeProcessGroup { name: string; user: string; count: number; cpu_pct: number; rss_bytes: number; oldest_seconds: number; command: string }
 /** Probe 1.8: one port the box answers on. `scope` says which interfaces (all, loopback, one address); a host socket names its process and pid, a port a container publishes names the container and the port inside it. */
 export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: string; scope: "all" | "loopback" | "address"; process: string | null; pid: number | null; container: string | null; container_port: number | null }
+/** Apps 2.1: the host's packet filter as `iptables-save` / `ip6tables-save` print it (counters and timestamp comments dropped on the box, 300 lines per family at most, the true counts alongside), or `nft list ruleset` where only nft exists; src/host_firewall.ts parses and hashes it. */
+export interface ProbeFirewall { available: boolean; backend: "legacy" | "nf_tables" | "iptables" | "nftables" | null; v4: string[]; v6: string[]; nft: string[]; v4_lines: number; v6_lines: number; nft_lines: number; /** the lists were left out because even compressed they would not fit the output cap */ oversize: boolean }
 
 /** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
 export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem; the images probe knows no docker id) */ image_id: string | null; digest: string | null; /** sbom 1.6 / images 1.0: the image's os/arch (a multi-arch digest resolves differently per platform); null for the filesystem */ platform: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; /** sbom 1.5: why a scan was skipped (scratch space, the time budget), null otherwise */ note: string | null; purls: string[] }
@@ -100,6 +102,8 @@ export interface ProbeResult {
   processes?: ProbeProcessGroup[];
   /** Present from probe 1.8: the listening ports, host sockets and published container ports alike. */
   listeners?: ProbeListener[];
+  /** Present from probe apps 2.1: the host firewall (iptables / nftables rules). */
+  firewall?: ProbeFirewall;
   /** Probe 2.0: which kind printed this row ("all" for the pre-2.0 combined probe); on a merged view, when each kind last ran. */
   kind?: ProbeKind | "all";
   probes_at?: Partial<Record<ProbeKind | "all", string>>;
@@ -164,6 +168,13 @@ const num = (v: unknown, what: string): number => {
 };
 
 /** The hibernation section of software 3, typed field by field: booleans, short strings, byte counts. */
+/** Apps 2.1: the firewall section typed and capped (400 lines of 400 printable characters per family). */
+function parseFirewall(f: any): ProbeFirewall {
+  const lines = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s) => typeof s === "string").slice(0, 400).map((s) => String(s).replace(/[^\x20-\x7e]/g, "").slice(0, 400)).filter(Boolean) : []);
+  const backend = f.backend === "legacy" || f.backend === "nf_tables" || f.backend === "iptables" || f.backend === "nftables" ? f.backend : null;
+  return { available: Boolean(f.available), backend, v4: lines(f.v4), v6: lines(f.v6), nft: lines(f.nft), v4_lines: Math.max(0, int(f.v4_lines)), v6_lines: Math.max(0, int(f.v6_lines)), nft_lines: Math.max(0, int(f.nft_lines)), oversize: f.oversize === true };
+}
+
 function parseHibernation(h: any): ProbeHibernation {
   const str = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
   const bytes = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : 0; };
@@ -239,6 +250,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
       proto: l.proto, port: Number(l.port), bind: String(l.bind ?? "").slice(0, 64), scope: l.scope === "loopback" || l.scope === "address" ? l.scope : "all",
       process: l.process == null ? null : String(l.process).slice(0, 64), pid: l.pid == null ? null : int(l.pid),
       container: l.container == null ? null : String(l.container).slice(0, 120), container_port: l.container_port == null ? null : int(l.container_port) })) : undefined,
+    firewall: raw.firewall && typeof raw.firewall === "object" ? parseFirewall(raw.firewall) : undefined,
     kind,
     os: raw.os && typeof raw.os === "object" ? { id: raw.os.id == null ? null : String(raw.os.id).slice(0, 40), version: raw.os.version == null ? null : String(raw.os.version).slice(0, 40), name: raw.os.name == null ? null : String(raw.os.name).slice(0, 120) } : undefined,
     kernel: raw.kernel === undefined ? undefined : raw.kernel == null ? null : String(raw.kernel).slice(0, 80),
@@ -671,6 +683,10 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
         const { recordApps, recordPorts } = await import("./instance_apps.js");
         const r = recordApps(instanceId, collectedAt, data, name);
         const pr = recordPorts(instanceId, collectedAt, data, name);
+        // apps 2.1: the host firewall, one shared ruleset row per distinct set of rules; the graph write rides on mirrorApps below
+        const { recordHostFirewall } = await import("./host_firewall.js");
+        const fw = recordHostFirewall(instanceId, collectedAt, data, name);
+        if (fw?.changed) console.log(`[probe] ${instanceId} firewall: ruleset ${fw.previous ? fw.previous.slice(0, 19) : "none"} -> ${fw.ruleset_id ? fw.ruleset_id.slice(0, 19) : "none"} (${fw.rules} rules${fw.truncated ? ", truncated" : ""})`);
         if (pr && (pr.opened.length || pr.closed.length)) console.log(`[probe] ${instanceId} ports: ${pr.ports} listening${pr.opened.length ? `, opened ${pr.opened.join(", ")}` : ""}${pr.closed.length ? `, closed ${pr.closed.join(", ")}` : ""}${pr.alerts ? `, ${pr.alerts} alert(s)` : ""}`);
         if (r && (r.appeared.length || r.disappeared.length || r.returned.length)) console.log(`[probe] ${instanceId} apps: ${r.apps} running${r.appeared.length ? `, appeared ${r.appeared.join(", ")}` : ""}${r.disappeared.length ? `, disappeared ${r.disappeared.join(", ")}` : ""}${r.returned.length ? `, returned ${r.returned.join(", ")}` : ""}`);
         const { mirrorAppsInBackground } = await import("./graph_mirror.js");

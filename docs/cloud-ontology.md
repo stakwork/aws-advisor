@@ -829,7 +829,13 @@ packages.
 | `public` | the image is public |
 | `scanned_at` | last package scan |
 
-Edges: `BUILT_FROM` ← compute, deployments, functions; `CONTAINS` → `AdvisorPackage`.
+Edges: `BUILT_FROM` ← compute, deployments, functions, containers; `CONTAINS` → `AdvisorPackage`; `BUILT_FROM {via:
+'image_label', source_url, revision, asserted_by: 'label', verified: false}` → `AdvisorRepository` when the image's
+`org.opencontainers.image.source` (or `org.label-schema.vcs-url`) label names a GitHub repository the advisor can
+resolve (the same rule and casing as a function's repository tag, so an image and the function built from the same
+code meet on one node; a repository nothing else knows is a stub `named_by: 'image_label'` that goes with its last
+image). The repository then `SAME_AS` → the code graph's `Repository` node of the same repository, so a running
+container reaches its code graph in three hops.
 
 ---
 
@@ -1025,7 +1031,7 @@ Anything that allows or denies traffic or access.
 
 | property | meaning |
 |---|---|
-| `kind` | `security_group` \| `network_acl` \| `firewall` (GCP firewall, Azure NSG) \| `network_policy` (Kubernetes) \| `waf` \| `deployment_protection` \| `password` \| `sso` \| `ip_allowlist` \| `rate_limit` \| `trusted_ips` |
+| `kind` | `security_group` \| `network_acl` \| `firewall` (GCP firewall, Azure NSG) \| `host_firewall` (iptables / nftables on the box itself, from the apps probe) \| `network_policy` (Kubernetes) \| `waf` \| `deployment_protection` \| `password` \| `sso` \| `ip_allowlist` \| `rate_limit` \| `trusted_ips` |
 | `stateful` | replies allowed automatically (security groups yes, NACLs no) |
 | `default_action` | `deny` \| `allow` when no rule matches |
 | `default` | the provider's default group or ACL |
@@ -1035,6 +1041,18 @@ Anything that allows or denies traffic or access.
 
 Edges: `IN_NETWORK`; `HAS_RULE` → `AdvisorFilterRule`; `WEARS` ← interfaces; `GUARDED_BY` ← segments, resources,
 deployments, endpoints.
+
+A host firewall (`kind: host_firewall`, `native_type: iptables | nftables`) is the packet filter inside the box, read
+by the apps probe (2.1) as `iptables-save` prints it and parsed by the advisor (`src/host_firewall.ts`). Its id is
+`hostfw:<sha256 of the normalized rules>` (the `filter` table and the `nat` DNAT/REDIRECT rules, in order, comments and
+counters left out), so one node stands for one ruleset and every box that runs the same rules `GUARDED_BY {via:
+'iptables', backend, collected_at}` the same node, as boxes share a package version or an image. It carries `backend`
+(`legacy` \| `nf_tables` \| `iptables` \| `nftables`), `default_action` (the INPUT policy, or `deny` when the chain ends
+in a catch-all REJECT/DROP), `input_policy` / `forward_policy` / `output_policy`, `rules` (the rule nodes), `rule_total`
+(every table), `chains`, `tables`, `truncated` (the probe cut the text at 300 lines per family), `attached` (boxes
+wearing it) and `is_deleted` / `deleted_at` (no box wears it any more; it comes back when one does). A box whose rules
+change moves its edge to another node and gets a `firewall_changed` instance app event; it has no `IN_NETWORK`. The
+verdicts below do not read host firewalls yet.
 
 A web application firewall (`kind: web_acl`: AWS WAF, Cloud Armor, Azure WAF, Cloudflare WAF) is a filter in front of
 HTTP rather than a packet filter, and the provider bills it, so it is also an `AdvisorResource` with a `monthly_usd`.
@@ -1048,8 +1066,8 @@ the balancers and APIs it is attached to.
 
 | property | meaning |
 |---|---|
-| `direction` | `ingress` \| `egress` |
-| `action` | `allow` \| `deny` |
+| `direction` | `ingress` \| `egress` \| `forward` (a host firewall's FORWARD chain) \| `chain` (a user chain several builtin chains jump to) |
+| `action` | `allow` \| `deny` \| `jump` \| `return` \| `nat` \| `log` \| `other` (the last five on host firewall rules only) |
 | `protocol` | `tcp` \| `udp` \| `icmp` \| `any` \| `http` (for L7 rules) |
 | `from_port` / `to_port` | null = all |
 | `priority` | evaluation order (NACL rule number, GCP priority, WAF order); null for unordered sets |
@@ -1058,8 +1076,17 @@ the balancers and APIs it is attached to.
 | `path` | (L7) the path pattern |
 | `description` | the provider's free-text description of the rule, often the only record of why a port was opened |
 | `dormant` | lets nothing in today (an IPv6 rule in a network without IPv6) |
+| `table` / `chain` / `family` | (host firewall) the iptables table (`filter`, `nat`), the chain, `ipv4` \| `ipv6`; `priority` is the 0-based position in the chain |
+| `target` / `target_args` | (host firewall) the `-j` target as written (`ACCEPT`, `DROP`, a user chain, `DNAT`) and its arguments (`--to-destination 172.17.0.2:80`) |
+| `ports` / `source_ports` | (host firewall) a multiport list as written (`80,443,8000:8100`; `from_port` / `to_port` hold its first range) and the source ports |
+| `source_negated` / `destination` / `destination_negated` | (host firewall) `! -s` and `-d`; a negated or absent source has no `FROM` edge and `source_kind: any` |
+| `in_interface` / `out_interface` / `states` | (host firewall) `-i` / `-o` (a leading `!` when negated) and the conntrack states |
+| `raw` / `comment` | (host firewall) the `-A` line as iptables-save printed it (the comment module removed) and the comment |
 
-Edges: `HAS_RULE` ← filter; `FROM` → `AdvisorSource` \| `AdvisorFilter` (group-referencing rules).
+Edges: `HAS_RULE` ← filter; `FROM` → `AdvisorSource` \| `AdvisorFilter` (group-referencing rules). A host firewall rule's
+id is `<filter id>:<family>:<table>:<chain>:<position>`, a function of the shared filter's id, so a filter's rules never
+change once written; its `FROM` peer is the rule's source (its destination on an egress rule) when it names a CIDR or the
+world.
 
 ### AdvisorSource
 
@@ -1515,6 +1542,8 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `BACKED_BY` | AdvisorDeployment → AdvisorLoadBalancer | the balancer in front of it |
 | `BUILT_FROM` | compute, deployment, function, container → AdvisorImage | the image it runs |
 | `BUILT_FROM {via: function_tag \| stack_tag, tag_key, stack, asserted_by: 'tag', verified: false, stale}` | AdvisorFunction → AdvisorRepository | the source repository a function's own tag or its stack's tag names (a different meaning than the row above: source code, not a built artifact) |
+| `BUILT_FROM {via: 'image_label', source_url, revision, asserted_by: 'label', verified: false}` | AdvisorImage → AdvisorRepository | the GitHub repository the image's `org.opencontainers.image.source` (or `org.label-schema.vcs-url`) label names, resolved by the same rule as a function's tag so the two meet on one node; the builder's word, not verified |
+| `SAME_AS {via: source_link \| name, matched}` | AdvisorRepository → Repository | the code graph's node (stakgraph / repo2graph, in the same Neo4j) of the same GitHub repository: its `source_link` (the URL it was ingested from), else its `<owner>/<repo>` name, matched case-insensitively; the advisor only joins it, never writes it |
 | `TRIGGERED_BY {kind, via, native_kind, state, batch_size, invoker, target_version, public, source_account, stale}` | AdvisorFunction → resource \| AdvisorResourceRef {guessed_type: queue\|stream\|event_rule\|api} | what invokes it, beyond SNS (`DELIVERS_TO`) and a load balancer target (`EXPOSES`/`FORWARDS_TO`), which keep their own edges |
 | `USES {environments}` | AdvisorDeployment → AdvisorDatabase, AdvisorCache, AdvisorStorage | the data stores a deployment is connected to (Vercel stores today) |
 | `RUNS_IMAGE` | compute → AdvisorImage | the container images a plain box runs (from the software probe) |
@@ -1566,6 +1595,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `ASSIGNED` | AdvisorPublicIp → interface, gateway, balancer | the static address is mapped to it |
 | `WEARS` | AdvisorInterface → AdvisorFilter | the groups on the interface |
 | `GUARDED_BY` | segment, resource, deployment, endpoint → AdvisorFilter | a filter that applies (a security group, an ACL, a web ACL) |
+| `GUARDED_BY {via: 'iptables', backend, collected_at}` | AdvisorBox → AdvisorFilter {kind: host_firewall} | the box's own packet filter: the one shared node of the ruleset it runs now (the network mirror leaves this edge alone; the host firewall mirror moves it when the rules change) |
 | `HAS_RULE` | AdvisorFilter → AdvisorFilterRule | the rules that make up the filter |
 | `FROM` | AdvisorFilterRule → AdvisorSource, AdvisorFilter | the rule's source |
 | `REACHABLE_FROM` | AdvisorEndpoint → source, filter, network | **verdict**: who can reach it, through what |

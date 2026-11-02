@@ -1,7 +1,10 @@
 import { db } from "./db.js";
-import { accountId, enabled, ensureSchema, inBackground, neoParams, writeCypher } from "./graph_mirror.js";
+import { accountId, enabled, ensureSchema, inBackground, neoParams, readQuery, writeCypher } from "./graph_mirror.js";
 import { imageRef } from "./graph_software.js";
 import { rowToContainer } from "./container_inventory.js";
+import { repoIdResolver } from "./function_facts.js";
+import { resolveRepoCasing } from "./graph_functions.js";
+import { linkCodeRepositoriesQuietly } from "./graph_repositories.js";
 import { AWS } from "./adapters/types.js";
 import { COMPUTE_OF } from "./graph_cypher.js";
 
@@ -12,6 +15,13 @@ import { COMPUTE_OF } from "./graph_cypher.js";
  * image nodes the software probe and the cluster workloads use, which also take the source repository and revision
  * the image's labels name), -[:SERVES]->(:AdvisorEndpoint) the ports it publishes, and -[:SHIPS_LOGS_TO]->(:KnLogGroup)
  * when its log driver writes to CloudWatch. A container is not an AdvisorResource: it costs nothing on its own.
+ *
+ * Then the image's own source: (:AdvisorImage)-[:BUILT_FROM {via: 'image_label', source_url, revision, asserted_by: 'label',
+ * verified: false}]->(:AdvisorRepository) when its `org.opencontainers.image.source` (or `org.label-schema.vcs-url`) label
+ * names a GitHub repository the advisor can resolve (src/function_facts.ts repoIdFromTagValue: the same rule and casing
+ * as a function's repository tag, so an image and the function built from the same code meet on one node). The
+ * repository node is the GitHub org adapter's when it has read it; else a stub `named_by: 'image_label'` that goes once
+ * no image names it. A label is the builder's word, not a verified provenance: `verified: false`, as the tag edge.
  */
 
 const CONTAINER_CYPHER = `
@@ -42,7 +52,43 @@ WITH DISTINCT r, c, row
 OPTIONAL MATCH (r)-[l:SHIPS_LOGS_TO]->(g:KnLogGroup) WHERE l.via = 'docker:' + row.name
 FOREACH (_ IN CASE WHEN g IS NULL THEN [] ELSE [1] END | MERGE (c)-[s:SHIPS_LOGS_TO]->(g) SET s.via = 'log driver', s.source = l.source, s.observed_at = l.observed_at, s.attributed_by = 'observed')`;
 
+// ---- the image's source repository, from its label (new nodes only: an existing node's source is never overwritten) --------------
+const REPO_NODE_CYPHER = `
+UNWIND $rows AS row
+MERGE (r:AdvisorRepository {id: row.id})
+ON CREATE SET r.first_seen = $now, r.source = 'derived', r.named_by = 'image_label', r.provider = 'github', r.native_type = 'repository', r.native_id = row.native_id, r.name = row.name
+SET r.updated_at = $now`;
+
+const IMAGE_REPO_CYPHER = `
+UNWIND $rows AS row
+MATCH (i:AdvisorImage {id: row.image_node}) MATCH (r:AdvisorRepository {id: row.repo_id})
+OPTIONAL MATCH (i)-[old:BUILT_FROM]->(o:AdvisorRepository) WHERE o.id <> r.id DELETE old
+WITH DISTINCT i, r, row
+MERGE (i)-[x:BUILT_FROM]->(r)
+SET x += {via: 'image_label', source_url: row.source_url, revision: row.revision, asserted_by: 'label', verified: false, updated_at: $now}`;
+
 const chunks = <T,>(items: T[], size = 250): T[][] => { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; };
+
+/** The repository nodes to create and the image -> repository edges to draw for the given container rows: one edge per image whose
+ *  source label resolves to a GitHub repository id (`resolve`: src/function_facts.ts repoIdResolver), on an existing AdvisorRepository
+ *  node's casing when one matches case-insensitively (`existing`), else on the label's own casing, created as a stub. A container
+ *  with no image node or no source label contributes nothing; the first row of an image wins (the caller passes the latest seen first),
+ *  a later one only filling in a missing revision. Pure. */
+export function imageRepositoryRows(rows: { image_node: string | null; source_url: string | null; revision: string | null }[], resolve: (raw: string | null) => string | null, existing: string[]): { nodes: { id: string; native_id: string; name: string }[]; edges: { image_node: string; repo_id: string; source_url: string; revision: string | null }[] } {
+  const byImage = new Map<string, { source_url: string; repo_id: string; revision: string | null }>();
+  for (const r of rows) {
+    if (!r.image_node || !r.source_url) continue;
+    const id = resolve(r.source_url);
+    if (!id) continue;
+    const prev = byImage.get(r.image_node);
+    if (!prev || (!prev.revision && r.revision)) byImage.set(r.image_node, { source_url: r.source_url, repo_id: id, revision: r.revision ?? prev?.revision ?? null });
+  }
+  const casing = resolveRepoCasing([...new Set([...byImage.values()].map((v) => v.repo_id))], existing);
+  const edges = [...byImage].map(([image_node, v]) => ({ image_node, repo_id: casing.get(v.repo_id) ?? v.repo_id, source_url: v.source_url, revision: v.revision }));
+  const have = new Set(existing);
+  const nodes = [...new Set(edges.map((e) => e.repo_id))].filter((id) => !have.has(id)).map((id) => { const m = /^github:([^/]+)\/(.+)$/.exec(id); return { id, native_id: m ? `${m[1]}/${m[2]}` : id, name: m ? m[2] : id }; });
+  return { nodes, edges };
+}
 
 /** The graph row of one stored container. Lists are flattened to strings Neo4j can hold: ports as 8080->80/tcp, mounts as type source:destination (ro). */
 export function containerGraphRow(r: any) {
@@ -61,20 +107,34 @@ export function containerGraphRow(r: any) {
 }
 
 /** Every stored container of the given instances (or all) as AdvisorContainer nodes with their image, ports and log groups. */
-export async function mirrorContainers(instanceIds?: string[]): Promise<{ containers: number } | null> {
+export async function mirrorContainers(instanceIds?: string[]): Promise<{ containers: number; repositories: number } | null> {
   if (!enabled()) return null;
   if (instanceIds && !instanceIds.length) return null;
   await ensureSchema();
   let raw: any[] = [];
   try { raw = instanceIds ? db.prepare(`select * from instance_containers where instance_id in (${instanceIds.map(() => "?").join(",")})`).all(...instanceIds) : db.prepare("select * from instance_containers").all(); }
-  catch { return { containers: 0 }; /* the table is created by src/container_inventory.ts on first load */ }
+  catch { return { containers: 0, repositories: 0 }; /* the table is created by src/container_inventory.ts on first load */ }
   const rows = raw.map(containerGraphRow);
   const now = new Date().toISOString();
   for (const b of chunks(rows)) {
     await writeCypher(CONTAINER_CYPHER, neoParams({ rows: b, now, provider: AWS, account: accountId() }));
     await writeCypher(WIRING_CYPHER, neoParams({ rows: b, now }));
   }
-  return { containers: rows.length };
+  // the image's source repository, from its label: the same resolver as a function's repository tag
+  let repositories = 0;
+  if (rows.some((r) => r.image_node && r.source_url)) {
+    const existing = (await readQuery("MATCH (r:AdvisorRepository) RETURN r.id AS id", {}, { rowCap: 10_000 })).rows.map((r) => String(r.id));
+    const latestFirst = [...rows].sort((a, b) => String(b.last_seen ?? "").localeCompare(String(a.last_seen ?? "")));
+    const { nodes, edges } = imageRepositoryRows(latestFirst, repoIdResolver(), existing);
+    for (const b of chunks(nodes)) await writeCypher(REPO_NODE_CYPHER, { rows: b, now });
+    for (const b of chunks(edges)) await writeCypher(IMAGE_REPO_CYPHER, { rows: b, now });
+    repositories = edges.length;
+  }
+  // an image whose label this pass no longer resolves loses its edge (one that resolved to another repository was moved above); a stub no image names any more goes
+  await writeCypher(`MATCH (i:AdvisorImage)-[x:BUILT_FROM {via: 'image_label'}]->(:AdvisorRepository) WHERE i.id IN $images AND (x.updated_at IS NULL OR x.updated_at <> $now) DELETE x`, { images: rows.map((r) => r.image_node).filter((id): id is string => id != null), now });
+  await writeCypher("MATCH (n:AdvisorRepository {named_by: 'image_label'}) WHERE NOT (n)--() DELETE n", {});
+  if (repositories) await linkCodeRepositoriesQuietly(now);
+  return { containers: rows.length, repositories };
 }
 
 export const mirrorContainersInBackground = (instanceIds?: string[]) => inBackground(`container mirror${instanceIds ? ` (${instanceIds.join(", ")})` : ""}`, () => mirrorContainers(instanceIds));
