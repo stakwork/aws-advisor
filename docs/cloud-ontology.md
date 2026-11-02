@@ -910,8 +910,12 @@ graph (`docs/vulnerability-graph-plan.md`). `PACKAGED_AS {source_kind: dpkg|rpm|
 `kernel`, `pkg:generic/linux`, whose `version` is the upstream x.y.z the kernel CNA's ranges name, never the ABI `uname -r`
 prints on Debian and Ubuntu; until the upstream version is known the node is named by `uname -r` with no `sort_key`) to the
 distribution package that owns its boot image (`pkg:deb:linux-image-6.1.0-54-cloud-amd64:6.1.176-1`, source `linux`): a
-kernel CVE reaches the box through either, upstream range or distribution advisory, and of several installed kernel
-packages the one with a `PACKAGED_AS` is the booted one.
+kernel CVE reaches the box through either, upstream range or distribution advisory. An installed kernel image that is
+not the booted one (apt keeps the previous kernel as the GRUB fallback and never removes one on its own; `linux-image-*`
+on deb, `kernel`/`kernel-core`/`kernel-modules*` on rpm, `linux-<flavor>` on apk, metapackages included) has no
+`INSTALLED_ON` edge at all: it runs no code, and a Finding on its version node would otherwise reach every box that keeps
+it as a fallback. The edge is retired like a removed package's and comes back if the box boots it; the box page's package
+list still shows it. A box that has not said which image it booted keeps every kernel image.
 
 ### KnVulnerability
 

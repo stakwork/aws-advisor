@@ -48,3 +48,24 @@ test("kernelComponent: the running kernel is versioned by its upstream x.y.z (sh
   assert.equal(unknown.id, "pkg:kernel:linux:6.8.0-45-generic"); assert.equal(unknown.version, "6.8.0-45-generic");
   assert.equal(unknown.sort_key, null, "an ABI name read as 6.8.0 would sit below every fix in the series forever: nothing to compare instead");
 });
+
+test("dormantKernelImage: an installed kernel image that is not the booted one gets no INSTALLED_ON edge; the booted one, headers, firmware, and every image on a box that has not said what it booted keep theirs", () => {
+  const deb = { kernel: "6.1.0-54-cloud-amd64", kernel_package: "linux-image-6.1.0-54-cloud-amd64" };
+  assert.equal(g.dormantKernelImage({ ecosystem: "deb", name: "linux-image-6.1.0-23-cloud-amd64", version: "6.1.99-1" }, deb), true, "the GRUB fallback apt kept");
+  assert.equal(g.dormantKernelImage({ ecosystem: "deb", name: "linux-image-6.1.0-54-cloud-amd64", version: "6.1.190-1" }, deb), false, "the booted one");
+  assert.equal(g.dormantKernelImage({ ecosystem: "deb", name: "linux-image-cloud-amd64", version: "6.1.190-1" }, deb), true, "a metapackage carries no code");
+  for (const name of ["linux-headers-6.1.0-23-cloud-amd64", "linux-libc-dev", "linux-base", "firmware-linux-free", "linux-kbuild-6.1"]) assert.equal(g.dormantKernelImage({ ecosystem: "deb", name, version: "1" }, deb), false, `${name} is not an image`);
+  assert.equal(g.dormantKernelImage({ ecosystem: "deb", name: "linux-image-6.1.0-23-cloud-amd64", version: "6.1.99-1" }, { kernel: "6.1.0-54-cloud-amd64", kernel_package: null }), false, "the box has not said what it booted: every image stays");
+  assert.equal(g.dormantKernelImage({ ecosystem: "deb", name: "linux-image-6.1.0-23-cloud-amd64", version: "6.1.99-1" }, undefined), false, "never probed");
+  // rpm keeps one inventory row per name, so the version tells the booted kernel apart
+  const rpm = { kernel: "6.1.134-150.224.amzn2023.x86_64", kernel_package: "kernel" };
+  assert.equal(g.dormantKernelImage({ ecosystem: "rpm", name: "kernel", version: "6.1.134-150.224.amzn2023", arch: "x86_64" }, rpm), false, "the booted kernel row, by name");
+  assert.equal(g.dormantKernelImage({ ecosystem: "rpm", name: "kernel-core", version: "6.1.141-155.222.amzn2023", arch: "x86_64" }, rpm), true, "a newer kernel installed, not yet booted");
+  assert.equal(g.dormantKernelImage({ ecosystem: "rpm", name: "kernel-core", version: "6.1.134-150.224.amzn2023", arch: "x86_64" }, rpm), false, "the running kernel's own core package");
+  assert.equal(g.dormantKernelImage({ ecosystem: "rpm", name: "kernel-devel", version: "6.1.141-155.222.amzn2023", arch: "x86_64" }, rpm), false, "headers are not an image");
+  // apk: the flavor package
+  const apk = { kernel: "6.6.30-0-virt", kernel_package: "linux-virt" };
+  assert.equal(g.dormantKernelImage({ ecosystem: "apk", name: "linux-lts", version: "6.6.30-r0" }, apk), true);
+  assert.equal(g.dormantKernelImage({ ecosystem: "apk", name: "linux-virt", version: "6.6.30-r0" }, apk), false);
+  assert.equal(g.dormantKernelImage({ ecosystem: "apk", name: "linux-firmware-none", version: "1" }, apk), false);
+});

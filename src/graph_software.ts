@@ -22,7 +22,11 @@ import { componentPurl, parsePurl } from "./software_inventory.js";
  * version, the x.y.z the kernel CNA's ranges name, and the distribution package that owns the booted image (a deb/rpm/apk node like any
  * other, what the distribution's advisories name). uname -r stays on the compute: on Debian and Ubuntu it is an ABI (6.1.0-54-cloud-amd64)
  * that never carries the point release, and read as a version it matched every fix in the series forever. Old kernel images linger after
- * upgrades, so PACKAGED_AS also says which of several installed linux-image packages is the one running.
+ * upgrades (apt keeps the previous kernel as the GRUB fallback and never removes one on its own), so PACKAGED_AS also says which of several
+ * installed linux-image packages is the one running, and a kernel image that is installed but not booted is not INSTALLED_ON at all
+ * (dormantKernelImage, 2026-11-02): it runs no code, and a Finding on its version node would reach every box that merely keeps it as a
+ * fallback. Its edge is retired like a removed package's and comes back if the box boots it; the inventory's package list still shows it.
+ * A box that does not say which image it booted keeps every kernel image, the conservative side.
  *
  * The label is the public vulnerability graph's: a SoftwareComponent there is keyed by `product_key` (scheme-specific;
  * for the purl scheme the purl without version), and every node here carries that key (`product_key` = `purl`, `scheme`
@@ -180,6 +184,22 @@ export const packageId = (ecosystem: string, name: string, version: string) => `
  *  syft found and the node the probe asked are one SoftwareComponent (pkg:binary:node:20.18.0) rather than two with the same purl and version. */
 export const sbomEcosystem = (type: string): string => (type === "generic" ? "binary" : type);
 
+/** An installed kernel image package that is not the one booted (probe software/6, the instance_os row's kernel_package; or on rpm, where
+ *  the inventory keeps one row per name, a kernel whose version-release.arch is not uname -r): a deb linux-image-*, an rpm kernel, kernel-core
+ *  or kernel-modules*, an apk linux-<flavor>. Such a package gets no INSTALLED_ON edge: the code is on disk but not running. Metapackages
+ *  (linux-image-amd64, linux-image-cloud-amd64) carry no code either and are never the booted name, so they count as dormant too. Headers,
+ *  libc-dev, firmware and tools are not images and are left alone. False when the box has not said what it booted. Pure. */
+export function dormantKernelImage(p: { ecosystem: string; name: string; version: string; arch?: string | null }, o: { kernel?: string | null; kernel_package?: string | null } | undefined): boolean {
+  if (!o?.kernel || !o.kernel_package) return false;
+  if (p.name === o.kernel_package) return false;
+  switch (p.ecosystem) {
+    case "deb": return /^linux-image-/.test(p.name);
+    case "rpm": return /^kernel(-core|-modules(-[a-z]+)?|-uek(-core)?|-lt|-ml)?$/.test(p.name) && `${p.version}.${p.arch ?? ""}` !== o.kernel && p.version !== o.kernel;
+    case "apk": return /^linux-(lts|virt|edge|rpi[0-9]*|asahi|vanilla)$/.test(p.name);
+    default: return false;
+  }
+}
+
 /** The running kernel as a component (an instance_os row; src/software_inventory.ts kernelFacts): the version is the upstream x.y.z the kernel
  *  CNA's ranges name, so every box on that upstream shares the node and its sort_key compares to a SecAffectedRange's keys; uname -r (on Debian
  *  and Ubuntu an ABI, 6.1.0-54-cloud-amd64, that never carries the point release) stays on the compute as `kernel`. Until the upstream version
@@ -253,6 +273,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   const pkgRows: any[] = [];
   for (const p of rows(`select instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone from instance_packages where 1=1${where}`, ...args)) {
     const o = os.get(p.instance_id); const eco = o ? ecosystemOf(o.package_manager, o.os_id, o.os_version) : null;
+    if (dormantKernelImage(p, o)) continue; // installed, not booted: no edge (left out of the keep list, so an edge an earlier sync wrote is retired)
     pkgRows.push({ instance_id: p.instance_id, version_purl: null, id: packageId(p.ecosystem, p.name, p.version), name: p.name, version: p.version, ecosystem: p.ecosystem, source_name: p.source ?? null, source_kind: SOURCE_KIND[p.ecosystem] ?? p.ecosystem, advisory_ecosystem: eco?.ecosystem ?? null, scope: packageScope(p.source ?? p.name).scope, arch: p.arch ?? null, path: null, first_seen: p.first_seen, last_seen: p.last_seen, ...componentIdentity({ ecosystem: p.ecosystem, name: p.name, version: p.version, source: p.source ?? null, os_id: o?.os_id ?? null }) });
   }
   // what the runtimes bundle (probe software/4): the library is a package of its own, installed on the box through the runtime; a binary
