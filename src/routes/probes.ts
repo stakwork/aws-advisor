@@ -98,10 +98,11 @@ probes.get("/probes/:kind/targets", (req, res) => {
   res.json({ kind, targets: probeTargets(kind) });
 });
 
+// Run pass now: by hand, so every box in scope is probed, however recently it was (the minimum-hours window is the cron's)
 probes.post("/probes/:kind/pass", async (req, res) => {
   const kind = String(req.params.kind);
   if (!isKind(kind)) return res.status(404).json({ error: `no probe kind ${kind}` });
-  try { res.json(await probePass(kind)); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  try { res.json(await probePass(kind, { force: true })); } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // ---- the containers (src/container_inventory.ts) ------------------------------------------------------------------

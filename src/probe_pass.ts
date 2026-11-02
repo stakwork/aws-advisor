@@ -47,7 +47,7 @@ const retryUnavailableSbom = (kind: ProbeKind): 0 | 1 => (kind === "sbom" && con
 export function probeWindowMinutes(hours: number): number { return Math.max(1, Math.round(hours * 60) - 5); }
 
 /** Why running instances were not probed in a pass, as counts per reason, for the log. */
-export function probeExclusions(kind: ProbeKind = "host", window = probeWindowMinutes(probeKindSettings(kind).intervalHours)): { running: number; not_ssm_online: number; batch: number; just_launched: number; outside_scope: number; probed_recently: number } {
+export function probeExclusions(kind: ProbeKind = "host", window: number | null = probeWindowMinutes(probeKindSettings(kind).intervalHours)): { running: number; not_ssm_online: number; batch: number; just_launched: number; outside_scope: number; probed_recently: number } {
   const n = (sql: string, ...p: unknown[]) => Number((db.prepare(sql).get(...p) as any)?.n ?? 0);
   const base = "from inventory_ec2 i where i.gone = 0 and i.state = 'running'";
   return {
@@ -57,13 +57,16 @@ export function probeExclusions(kind: ProbeKind = "host", window = probeWindowMi
     just_launched: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch' and i.launch_time is not null and datetime(i.launch_time) >= datetime('now', '-15 minutes')`),
     outside_scope: probeKindSettings(kind).scope === "all" ? 0 : n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
       and not ((i.cpu_30d is not null and i.cpu_30d < ?) or exists (select 1 from recommendations r where r.resource = i.instance_id and r.rule = 'idle_instance' and r.status in ('open', 'snoozed')))`, config.probeIdleCpu),
-    probed_recently: n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
+    probed_recently: window == null ? 0 : n(`select count(*) as n ${base} and i.ssm_status = 'Online' and coalesce(i.pool_kind, '') <> 'batch'
       and exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
       and not (? = 1 and exists (select 1 from instance_sbom_scans s where s.instance_id = i.instance_id and s.available = 0))`, kind, legacyKindOf(kind), `-${window} minutes`, retryUnavailableSbom(kind)),
   };
 }
 
-export function probeTargets(kind: ProbeKind = "host", limit?: number): { instance_id: string; name: string | null; cpu_30d: number | null }[] {
+/** How a pass picks its boxes beyond the kind's settings: `ignoreInterval` drops the minimum-hours window (a pass run by hand from Settings > Probes probes every box in scope, however recently it was probed). */
+export interface ProbeTargetOptions { ignoreInterval?: boolean }
+
+export function probeTargets(kind: ProbeKind = "host", limit?: number, opts: ProbeTargetOptions = {}): { instance_id: string; name: string | null; cpu_30d: number | null }[] {
   if (!PROBE_DEFS[kind].per_box) return []; // the images kind goes to the one scanner instance with the due images as its parameter (src/image_pass.ts dueImages)
   const { scope, intervalHours } = probeKindSettings(kind);
   const cap = limit ?? (scope === "all" ? Math.max(config.probeMax, 100) : config.probeMax);
@@ -84,17 +87,21 @@ export function probeTargets(kind: ProbeKind = "host", limit?: number): { instan
       -- against datetime('now') sorts every same-day probe as newer and would skip the instance for the rest of the day
       -- a pre-2.0 combined probe (kind 'all') counts for host, docker and apps, never for software
       -- a box where syft was not available is due again on every sbom pass while the install switch is on
-      and (not exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
+      -- a pass run by hand (ignoreInterval) takes every box in scope, the window notwithstanding
+      and (? = 1
+        or not exists (select 1 from instance_metrics m where m.instance_id = i.instance_id and coalesce(m.kind, 'all') in (?, ?) and datetime(m.collected_at) > datetime('now', ?))
         or (? = 1 and exists (select 1 from instance_sbom_scans s where s.instance_id = i.instance_id and s.available = 0)))
     order by coalesce(i.cpu_30d, 100) asc, i.instance_id
-    limit ?`).all(scope, config.probeIdleCpu, kind, legacyKindOf(kind), `-${probeWindowMinutes(intervalHours)} minutes`, retryUnavailableSbom(kind), cap) as any[];
+    limit ?`).all(scope, config.probeIdleCpu, opts.ignoreInterval ? 1 : 0, kind, legacyKindOf(kind), `-${probeWindowMinutes(intervalHours)} minutes`, retryUnavailableSbom(kind), cap) as any[];
 }
 
-/** One pass of one kind (host by default); a pass of a kind already running is joined, not doubled. The images kind is the scanner half of the sbom pass on its own. */
-export function probePass(kind: ProbeKind = "host"): Promise<ProbePassResult> {
+/** One pass of one kind (host by default); a pass of a kind already running is joined, not doubled (a forced pass joining a scheduled one gets the scheduled one's
+ *  selection). The images kind is the scanner half of the sbom pass on its own. `force` (Run pass now on Settings > Probes) ignores the minimum-hours window: every
+ *  box in scope is probed, however recently it was; the cron keeps the window. */
+export function probePass(kind: ProbeKind = "host", opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const running = inFlight.get(kind);
   if (running) return running;
-  const p = (kind === "images" ? runImages() : run(kind)).finally(() => { inFlight.delete(kind); });
+  const p = (kind === "images" ? runImages() : run(kind, opts)).finally(() => { inFlight.delete(kind); });
   inFlight.set(kind, p);
   return p;
 }
@@ -108,9 +115,10 @@ async function runImages(): Promise<ProbePassResult> {
   return { kind: "images", started_at: images.started_at, candidates: images.candidates, probed: images.scanned, failed, pruned: 0, databases: null, images, took_ms: Date.now() - t0 };
 }
 
-async function run(kind: ProbeKind): Promise<ProbePassResult> {
+async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const t0 = Date.now();
   const tag = `probe-pass:${kind}`;
+  const ignoreInterval = opts.force === true;
   const workers = Math.max(1, PROBE_DEFS[kind].concurrency);
   const longRunning = PROBE_DEFS[kind].timeout_seconds >= 600; // minutes per box: say when each finishes, so a slow pass is readable while it runs
   const gate = await credentialGate(tag);
@@ -125,13 +133,13 @@ async function run(kind: ProbeKind): Promise<ProbePassResult> {
   }
   const parameters = kind === "sbom" && imageScanner() ? { images: sbomImagesMode(images) } : undefined;
   const { scope, intervalHours } = probeKindSettings(kind);
-  const targets = probeTargets(kind);
+  const targets = probeTargets(kind, undefined, { ignoreInterval });
   const result: ProbePassResult = { kind, started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, databases: null, images, took_ms: 0 };
   try {
-    const x = probeExclusions(kind); const limit = scope === "all" ? Math.max(config.probeMax, 100) : config.probeMax;
+    const x = probeExclusions(kind, ignoreInterval ? null : undefined); const limit = scope === "all" ? Math.max(config.probeMax, 100) : config.probeMax;
     const why = [x.not_ssm_online && `${x.not_ssm_online} not SSM online`, x.batch && `${x.batch} Batch worker(s)`, x.just_launched && `${x.just_launched} launched under 15 min ago`,
       x.outside_scope && `${x.outside_scope} outside scope "idle" (CPU over ${config.probeIdleCpu} % and no idle recommendation)`, x.probed_recently && `${x.probed_recently} probed within ${probeWindowMinutes(intervalHours)} min`].filter(Boolean);
-    console.log(`[${tag}] ${PROBE_DEFS[kind].title}: ${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${scope}, limit ${limit}, interval ${intervalHours} h, ${workers} at a time`);
+    console.log(`[${tag}] ${PROBE_DEFS[kind].title}: ${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${scope}, limit ${limit}, ${ignoreInterval ? `interval ${intervalHours} h ignored (run by hand)` : `interval ${intervalHours} h`}, ${workers} at a time`);
   } catch (e: any) { console.error(`[${tag}] could not explain the selection: ${e?.message || e}`); }
   // as many at a time as the kind says (PROBE_DEFS concurrency): the boxes do the work and SSM runs them side by side, the advisor sends and waits
   const queue = [...targets];

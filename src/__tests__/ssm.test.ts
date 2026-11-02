@@ -180,9 +180,11 @@ test("probe pass: an ISO-timestamped probe from earlier today does not hide the 
   assert.ok(probeTargets("host", 1000).some((t) => t.instance_id === iid), "probed three hours ago: due again");
   db.prepare("insert into instance_metrics(instance_id, collected_at, json) values (?, ?, '{}')").run(iid, iso(10));
   assert.ok(!probeTargets("host", 1000).some((t) => t.instance_id === iid), "probed ten minutes ago: skipped");
+  assert.ok(probeTargets("host", 1000, { ignoreInterval: true }).some((t) => t.instance_id === iid), "a pass run by hand ignores the window: probed ten minutes ago, still a target");
   assert.ok(probeTargets("software", 1000).some((t) => t.instance_id === iid), "a combined row never counts as a software probe: the software pass is still due");
   db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, '{}', 'software')").run(iid, iso(10));
   assert.ok(!probeTargets("software", 1000).some((t) => t.instance_id === iid), "probed for software ten minutes ago: skipped");
+  assert.ok(probeTargets("software", 1000, { ignoreInterval: true }).some((t) => t.instance_id === iid), "Run pass now on the software probe reads the box again regardless");
   // the sbom probe: a box probed ten minutes ago is skipped like the others, unless syft was not available there and the install switch is on, then it is due again
   db.prepare("insert into instance_metrics(instance_id, collected_at, json, kind) values (?, ?, '{}', 'sbom')").run(iid, iso(10));
   assert.ok(!probeTargets("sbom", 1000).some((t) => t.instance_id === iid), "probed for sbom ten minutes ago: skipped");

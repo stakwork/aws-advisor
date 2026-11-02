@@ -1161,7 +1161,8 @@ script prints exactly one JSON object on its last line carrying `probe` (`aws-ad
 each row is stored in `instance_metrics` with its kind, and an instance is read back as one merged view (each section
 from its kind's newest row; a pre-2.0 combined row counts for host, docker and apps). **Settings › Probes** lists the
 probes with what each collects, its document and whether the deployed one matches, its schedule and scope, when it
-last ran and on how many boxes, "Run pass now", and the script itself: an edit is saved as a setting (refused when it
+last ran and on how many boxes, "Run pass now" (which probes every box in scope at once, the minimum-hours window
+being the schedule's, not the button's), and the script itself: an edit is saved as a setting (refused when it
 stops looking like a read-only probe), embedded in the document and takes effect when the document is redeployed;
 the status column says when that is due. `GET /api/probes`, `PUT/DELETE /api/probes/:kind/script`,
 `GET /api/probes/:kind/document`, `POST /api/probes/:kind/pass`; `POST /api/instances/:id/probe?kind=` runs one

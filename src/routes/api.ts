@@ -375,10 +375,10 @@ api.get("/agent-runs/:requestId/events", async (req, res) => {
   res.end();
 });
 
-// Runs the scheduled probe pass on demand (idle candidates only, see src/probe_pass.ts).
+// Runs the host probe pass on demand (its scope, see src/probe_pass.ts); by hand, so the minimum-hours window does not apply.
 api.post("/probe-pass", async (_req, res) => {
   const { probePass } = await import("../probe_pass.js");
-  try { res.json(await probePass()); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  try { res.json(await probePass("host", { force: true })); } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 api.get("/probe-pass/targets", async (_req, res) => {
   const { probeTargets } = await import("../probe_pass.js");

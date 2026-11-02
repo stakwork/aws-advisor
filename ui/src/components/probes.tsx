@@ -95,7 +95,7 @@ export function ProbesCard() {
               <td className="py-2 pr-3 text-xs text-zinc-400">{k.scope === "all" ? "every box" : "idle candidates"}</td>
               <td className="py-2 pr-3 text-right text-xs text-zinc-400">{k.last_24h.boxes} box{k.last_24h.boxes === 1 ? "" : "es"}<div className="text-zinc-600">{k.last_24h.at ? when(k.last_24h.at) : "never"}</div></td>
               <td className="py-2 pr-3 text-right text-xs text-zinc-400">{k.candidates_now}</td>
-              <td className="py-2 text-right"><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => pass(k.kind)} disabled={busy === k.kind}>{busy === k.kind ? "Running…" : "Run pass now"}</Button></td>
+              <td className="py-2 text-right"><Button variant="ghost" className="!px-2 !py-1 !text-xs" onClick={() => pass(k.kind)} disabled={busy === k.kind} title="runs the probe on every box in scope now, including boxes probed within the minimum hours (the schedule keeps that window)">{busy === k.kind ? "Running…" : "Run pass now"}</Button></td>
             </tr>
           ))}
         </tbody>
