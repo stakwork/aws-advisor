@@ -186,7 +186,7 @@ function inventoryIds(account: string): Set<string> {
 function rawResources(account: string, roles: ReturnType<typeof roleMap>): ResourceNode[] {
     return [
       // each box with the software probe's last reading of its operating system (kernel, distribution, package manager), when it has one
-      ...rows(`select e.*, o.kernel as probe_kernel, o.os_id as probe_os_id, o.os_version as probe_os_version, o.os_name as probe_os_name, o.arch as probe_arch, o.package_manager as probe_package_manager, o.collected_at as probe_os_at
+      ...rows(`select e.*, o.kernel as probe_kernel, o.kernel_upstream as probe_kernel_upstream, o.kernel_package as probe_kernel_package, o.kernel_package_version as probe_kernel_package_version, o.os_id as probe_os_id, o.os_version as probe_os_version, o.os_name as probe_os_name, o.arch as probe_arch, o.package_manager as probe_package_manager, o.collected_at as probe_os_at
                from inventory_ec2 e left join instance_os o on o.instance_id = e.instance_id`).map((r) => resourceFromEc2(r, roles)),
       ...rows("select * from inventory_rds").map((r) => resourceFromRds(r, roles)),
       ...rows("select * from inventory_elasticache").map((r) => resourceFromElasticache(r, roles)),

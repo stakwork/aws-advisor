@@ -101,6 +101,7 @@ test("software inventory: a newer version replaces the row, what left is deleted
   assert.deepEqual(second.added, ["curl"]); assert.deepEqual(second.removed, ["nginx"]);
   const on = sw.softwareOn(iid);
   assert.equal(on.os?.kernel, "6.8.0-45-generic"); assert.equal(on.os?.packages, 2);
+  assert.equal(on.os?.kernel_upstream, null, "an Ubuntu ABI name without /proc/version_signature: no upstream version, rather than 6.8.0"); assert.equal(on.os?.kernel_package, null);
   assert.deepEqual(on.packages.map((p) => p.name), ["curl", "openssh-server"]);
   assert.equal((db.prepare("select count(*) as n from instance_packages where instance_id = ?").get(iid) as any).n, 2, "the removed package is deleted, not kept");
   assert.equal(on.packages.find((p) => p.name === "openssh-server")?.first_seen, "2026-10-02T00:00:00Z", "since: when this version appeared");
@@ -129,8 +130,8 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-pm-"));
   const fake: Record<string, string> = {
     // dpkg-query answers the package list, and (probe software/4) a Depends field when asked for one; dpkg -S names the package owning a program; node prints what it bundles
-    "dpkg-query": "#!/bin/sh\ncase \"$*\" in *Depends*) printf 'libc6 (>= 2.34), nginx (>= 1), libnotinstalled (>= 1)';; *) printf 'ii\\topenssh-server\\t1:9.6p1-3ubuntu13.4\\tamd64\\topenssh\\n'; printf 'ii\\tnginx\\t1.24.0-2ubuntu7\\tamd64\\tnginx\\n'; printf 'rc\\tgone\\t1.0\\tall\\tgone\\n';; esac\n",
-    rpm: "#!/bin/sh\nprintf 'openssh-server\\t(none):8.7p1-38.el9\\tx86_64\\topenssh-8.7p1-38.el9.src.rpm\\n'; printf 'kernel\\t(none):5.14.0-427.el9\\tx86_64\\tkernel-5.14.0-427.el9.src.rpm\\n'\n",
+    "dpkg-query": "#!/bin/sh\ncase \"$*\" in *Depends*) printf 'libc6 (>= 2.34), nginx (>= 1), libnotinstalled (>= 1)';; *linux-image-unsigned-*) exit 1;; *linux-image-*) printf 'ii \\tlinux-image-%s\\t6.1.176-1\\tlinux' \"$(uname -r)\";; *) printf 'ii\\topenssh-server\\t1:9.6p1-3ubuntu13.4\\tamd64\\topenssh\\n'; printf 'ii\\tnginx\\t1.24.0-2ubuntu7\\tamd64\\tnginx\\n'; printf 'rc\\tgone\\t1.0\\tall\\tgone\\n';; esac\n",
+    rpm: "#!/bin/sh\ncase \"$*\" in '-qf '*) printf 'kernel-core\\t(none):6.1.134-150.224.amzn2023\\tkernel-6.1.134-150.224.amzn2023.src.rpm\\n'; exit 0;; esac\nprintf 'openssh-server\\t(none):8.7p1-38.el9\\tx86_64\\topenssh-8.7p1-38.el9.src.rpm\\n'; printf 'kernel\\t(none):5.14.0-427.el9\\tx86_64\\tkernel-5.14.0-427.el9.src.rpm\\n'\n",
     apk: "#!/bin/sh\ncase \"$1\" in list) printf 'openssh-server-9.6_p1-r0 x86_64 {openssh} (BSD) [installed]\\nmusl-1.2.4_git20230717-r4 x86_64 {musl} (MIT) [installed]\\n';; *) exit 1;; esac\n",
   };
   const expected: Record<string, unknown[]> = {
@@ -151,8 +152,14 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/5");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/6");
     assert.deepEqual(j.packages, expected[name], name);
+    // probe software/6: the package that owns the running kernel (dpkg by name, rpm by the modules directory it owns) and the upstream version read from it;
+    // a host that publishes /proc/version_signature (Ubuntu) names the upstream version itself, whatever the fakes say
+    const signed = fs.existsSync("/proc/version_signature");
+    if (name === "dpkg-query") { assert.deepEqual(j.kernel_package, { n: `linux-image-${os.release()}`, v: "6.1.176-1", s: "linux" }); if (!signed) assert.equal(j.kernel_upstream, "6.1.176", "Debian's package version starts with the upstream version"); }
+    else if (name === "rpm") { assert.deepEqual(j.kernel_package, { n: "kernel-core", v: "6.1.134-150.224.amzn2023", s: "kernel" }); if (!signed) assert.equal(j.kernel_upstream, "6.1.134"); }
+    else assert.equal(j.kernel_package, null, "apk: the fake owns no vmlinuz, so no package");
     assert.ok(Array.isArray(j.bundles) && Array.isArray(j.depends), `${name}: bundles and depends are arrays`);
     if (name === "dpkg-query") {
       // probe software/4: what the Node binary says it bundles, verbatim JSON; the Depends field of the package that owns each probed program
@@ -252,7 +259,7 @@ test("the software script with an upload URL: a result that fits goes inline wit
   assert.equal(small.kind, "software"); assert.equal(small.packages?.length, 3, "inline, whole"); assert.match(small.upload ?? "", /^uploaded \d+ /); assert.equal(small.inline, undefined);
   w("dpkg-query", dpkg(2000));
   const big = run();
-  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/5");
+  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/6");
   const whole = parseProbeOutput(gunzipSync(fs.readFileSync(capture)).toString("utf8"));
   assert.equal(whole.packages?.length, 2000, "the object holds every package"); assert.equal(whole.os?.id ?? null, whole.os?.id ?? null);
 });
@@ -363,4 +370,52 @@ test("the apps script reports the host firewall (apps 2.1): iptables-save stripp
   // the box has no iptables at all (the PATH has neither the stubs nor /sbin)
   const b = run("/usr/bin:/bin").firewall!;
   assert.equal(b.available, false); assert.equal(b.backend, null); assert.deepEqual(b.v4, []); assert.equal(b.v4_lines, 0);
+});
+
+test("kernelFacts: the running kernel's upstream version and owning package, from the probe or derived from the package list; uname -r alone is never read as a version when it is an ABI", () => {
+  const deb = [{ name: "linux-image-6.1.0-54-cloud-amd64", version: "6.1.176-1", arch: "amd64", source: "linux-signed-amd64" }, { name: "linux-image-6.1.0-37-cloud-amd64", version: "6.1.140-1", arch: "amd64", source: "linux-signed-amd64" }, { name: "linux-image-cloud-amd64", version: "6.1.176-1", arch: "amd64", source: "linux-signed-amd64" }];
+  // Debian, an older probe: the booted image's package is the one named by uname -r (not the newer one apt installed, not the metapackage), and its version starts with the upstream version
+  assert.deepEqual(sw.kernelFacts({ kernel: "6.1.0-54-cloud-amd64", os_id: "debian", package_manager: "deb" }, deb), { upstream: "6.1.176", pkg: { name: "linux-image-6.1.0-54-cloud-amd64", version: "6.1.176-1", source: "linux-signed-amd64" } });
+  // the probe's own reading wins (software/6): what dpkg said owns the image, what /proc/version_signature said the upstream version is
+  assert.deepEqual(sw.kernelFacts({ kernel: "6.8.0-45-generic", kernel_upstream: "6.8.12", kernel_package: { n: "linux-image-6.8.0-45-generic", v: "6.8.0-45.45", s: "linux-signed" }, os_id: "ubuntu", package_manager: "deb" }, []), { upstream: "6.8.12", pkg: { name: "linux-image-6.8.0-45-generic", version: "6.8.0-45.45", source: "linux-signed" } });
+  // Ubuntu without the probe's reading: the package is found, the upstream version is not guessed from 6.8.0-45.45
+  assert.deepEqual(sw.kernelFacts({ kernel: "6.8.0-45-generic", os_id: "ubuntu", package_manager: "deb" }, [{ name: "linux-image-6.8.0-45-generic", version: "6.8.0-45.45", arch: "amd64", source: "linux-signed" }]), { upstream: null, pkg: { name: "linux-image-6.8.0-45-generic", version: "6.8.0-45.45", source: "linux-signed" } });
+  assert.equal(sw.kernelFacts({ kernel: "6.8.0-45-generic", os_id: "ubuntu", package_manager: "deb" }, []).upstream, null, "an ABI name is never read as 6.8.0");
+  assert.equal(sw.kernelFacts({ kernel: "6.1.0-54-cloud-amd64", os_id: "debian", package_manager: "deb" }, []).upstream, null, "nor as 6.1.0 (a Debian kernel in a container, no dpkg)");
+  // rpm: uname -r is version-release.arch of the kernel package, and starts with the upstream version; the source equal to the name is dropped
+  assert.deepEqual(sw.kernelFacts({ kernel: "6.1.134-150.224.amzn2023.x86_64", os_id: "amzn", package_manager: "rpm" }, [{ name: "kernel", version: "6.1.134-150.224.amzn2023", arch: "x86_64", source: "kernel" }, { name: "kernel", version: "6.1.141-155.222.amzn2023", arch: "x86_64", source: null }]),
+    { upstream: "6.1.134", pkg: { name: "kernel", version: "6.1.134-150.224.amzn2023", source: null } });
+  assert.deepEqual(sw.kernelFacts({ kernel: "5.14.0-427.el9.x86_64", package_manager: "rpm" }, [{ name: "kernel-core", version: "5.14.0-427.el9", arch: "x86_64", source: "kernel" }]), { upstream: "5.14.0", pkg: { name: "kernel-core", version: "5.14.0-427.el9", source: "kernel" } });
+  // apk: linux-<flavor>; a self-built kernel: uname -r starts with the upstream version, no package
+  assert.deepEqual(sw.kernelFacts({ kernel: "6.6.30-0-virt", os_id: "alpine", package_manager: "apk" }, [{ name: "linux-virt", version: "6.6.30-r0", arch: null, source: null }]), { upstream: "6.6.30", pkg: { name: "linux-virt", version: "6.6.30-r0", source: null } });
+  assert.deepEqual(sw.kernelFacts({ kernel: "6.6.30-custom", os_id: "debian", package_manager: "deb" }, []), { upstream: "6.6.30", pkg: null });
+  assert.deepEqual(sw.kernelFacts({ kernel: null }, deb), { upstream: null, pkg: null });
+});
+
+test("software inventory: the kernel's upstream version and owning package are stored with the OS row, derived for an older probe, replaced by a newer one, cleared by a reboot into an unowned kernel, kept by a probe that did not read the kernel", () => {
+  const iid = "i-0feedfacecafe0011";
+  db.prepare("insert or replace into inventory_ec2(instance_id, name, state, snapshot) values (?, 'deb-1', 'running', '{}')").run(iid);
+  const pk = (n: string, v: string) => ({ n, v, a: "amd64", s: "linux-signed-amd64" });
+  // software/5 shape: no kernel facts from the probe; the package list has the booted image's package
+  sw.recordSoftware(iid, "2026-10-01T00:00:00Z", { os: { id: "debian", version: "12", name: "Debian GNU/Linux 12 (bookworm)" }, kernel: "6.1.0-54-cloud-amd64", arch: "x86_64", package_manager: "deb", packages: [pk("linux-image-6.1.0-54-cloud-amd64", "6.1.176-1"), { n: "bash", v: "5.2.15-2+b7", a: "amd64" }] });
+  let o = sw.softwareOn(iid).os!;
+  assert.deepEqual([o.kernel, o.kernel_upstream, o.kernel_package, o.kernel_package_version, o.kernel_package_source], ["6.1.0-54-cloud-amd64", "6.1.176", "linux-image-6.1.0-54-cloud-amd64", "6.1.176-1", "linux-signed-amd64"]);
+  // apt installed the fix, no reboot yet: the booted image is still the old package, a second linux-image row sits next to it
+  sw.recordSoftware(iid, "2026-10-02T00:00:00Z", { kernel: "6.1.0-54-cloud-amd64", package_manager: "deb", packages: [pk("linux-image-6.1.0-54-cloud-amd64", "6.1.176-1"), pk("linux-image-6.1.0-56-cloud-amd64", "6.1.190-1")] });
+  o = sw.softwareOn(iid).os!;
+  assert.deepEqual([o.kernel_upstream, o.kernel_package_version], ["6.1.176", "6.1.176-1"], "installed is not booted");
+  // rebooted, and the probe is software/6: its own reading replaces the derived one
+  sw.recordSoftware(iid, "2026-10-03T00:00:00Z", { kernel: "6.1.0-56-cloud-amd64", kernel_upstream: "6.1.190", kernel_package: { n: "linux-image-6.1.0-56-cloud-amd64", v: "6.1.190-1", s: "linux-signed-amd64" }, package_manager: "deb", packages: [pk("linux-image-6.1.0-56-cloud-amd64", "6.1.190-1")] });
+  o = sw.softwareOn(iid).os!;
+  assert.deepEqual([o.kernel, o.kernel_upstream, o.kernel_package, o.kernel_package_version], ["6.1.0-56-cloud-amd64", "6.1.190", "linux-image-6.1.0-56-cloud-amd64", "6.1.190-1"]);
+  // a probe that did not read the kernel (another section's shape) leaves the three names alone
+  sw.recordSoftware(iid, "2026-10-04T00:00:00Z", { package_manager: "deb", packages: [pk("linux-image-6.1.0-56-cloud-amd64", "6.1.190-1")] });
+  o = sw.softwareOn(iid).os!;
+  assert.deepEqual([o.kernel, o.kernel_upstream, o.kernel_package], ["6.1.0-56-cloud-amd64", "6.1.190", "linux-image-6.1.0-56-cloud-amd64"]);
+  // a reboot into a kernel no package owns (self-built): the package goes, the upstream version is the release's own
+  sw.recordSoftware(iid, "2026-10-05T00:00:00Z", { kernel: "6.6.30-custom", kernel_upstream: "6.6.30", kernel_package: null, package_manager: "deb", packages: [pk("linux-image-6.1.0-56-cloud-amd64", "6.1.190-1")] });
+  o = sw.softwareOn(iid).os!;
+  assert.deepEqual([o.kernel, o.kernel_upstream, o.kernel_package, o.kernel_package_version], ["6.6.30-custom", "6.6.30", null, null]);
+  for (const t of ["instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
+  db.prepare("delete from inventory_ec2 where instance_id = ?").run(iid);
 });

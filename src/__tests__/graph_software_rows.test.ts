@@ -37,3 +37,14 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   assert.equal(node.row.id, g.packageId("binary", "node", "20.18.0")); assert.equal(g.sbomEcosystem("npm"), "npm");
   assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "nonsense", name: "x", version: null }), null);
 });
+
+test("kernelComponent: the running kernel is versioned by its upstream x.y.z (shared across boxes, sortable against the kernel CNA's ranges); without it the node is named by uname -r and carries no sort_key", () => {
+  const deb = g.kernelComponent({ instance_id: "i-1", kernel: "6.1.0-54-cloud-amd64", kernel_upstream: "6.1.176", arch: "x86_64", collected_at: "2026-11-02T04:10:00Z" });
+  assert.equal(deb.id, "pkg:kernel:linux:6.1.176"); assert.equal(deb.version, "6.1.176"); assert.equal(deb.purl, "pkg:generic/linux"); assert.equal(deb.scope, "kernel"); assert.equal(deb.source_kind, "uname");
+  assert.equal(deb.sort_key, "00000006.00000001.00000176.00000000.00000000=", "6.1.176 < 6.1.190: inside a range fixed in 6.1.190, as it should be");
+  const amzn = g.kernelComponent({ instance_id: "i-2", kernel: "6.1.176-200.100.amzn2023.x86_64", kernel_upstream: "6.1.176", arch: "x86_64", collected_at: "2026-11-02T04:10:00Z" });
+  assert.equal(amzn.id, deb.id, "one node per upstream version, whatever each distribution calls its build");
+  const unknown = g.kernelComponent({ instance_id: "i-3", kernel: "6.8.0-45-generic", kernel_upstream: null, arch: "x86_64", collected_at: "2026-11-02T04:10:00Z" });
+  assert.equal(unknown.id, "pkg:kernel:linux:6.8.0-45-generic"); assert.equal(unknown.version, "6.8.0-45-generic");
+  assert.equal(unknown.sort_key, null, "an ABI name read as 6.8.0 would sit below every fix in the series forever: nothing to compare instead");
+});

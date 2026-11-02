@@ -79,7 +79,7 @@ const apiObserved = (row: any): ResourceNode["observed"][number] => ({ kind: "ap
 export function probedOs(row: any): Record<string, unknown> {
   if (row.probe_kernel == null && row.probe_os_id == null) return {};
   const os = [str(row.probe_os_name) ?? str(row.probe_os_id), str(row.probe_os_version)].filter(Boolean).join(" ") || null;
-  return { kernel: str(row.probe_kernel), os: os ?? str(row.ssm_platform), os_id: str(row.probe_os_id), os_version: str(row.probe_os_version), package_manager: str(row.probe_package_manager), os_collected_at: str(row.probe_os_at) };
+  return { kernel: str(row.probe_kernel), kernel_upstream: str(row.probe_kernel_upstream), kernel_package: str(row.probe_kernel_package), kernel_package_version: str(row.probe_kernel_package_version), os: os ?? str(row.ssm_platform), os_id: str(row.probe_os_id), os_version: str(row.probe_os_version), package_manager: str(row.probe_package_manager), os_collected_at: str(row.probe_os_at) };
 }
 
 export function resourceFromEc2(row: any, roles: RoleMap = new Map()): ResourceNode {

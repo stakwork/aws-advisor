@@ -259,6 +259,7 @@ comes from the adapter (`ResourceNode.compute`); the software probe fills in the
 | `platform` | `linux` \| `windows` \| `macos` |
 | `os` / `os_id` / `os_version` | the distribution and version (`Ubuntu 24.04`, `ubuntu`, `24.04`); from `/etc/os-release`, the SSM platform name, or as declared |
 | `kernel` / `arch` / `package_manager` | from `uname` and the probe; the AWS adapter also carries the probe's last reading (`instance_os`) onto the compute with the box itself, so a probed box has its kernel from the resource pass too, with `os_collected_at` saying when it was read |
+| `kernel_upstream` / `kernel_package` / `kernel_package_version` | probe software/6: `kernel` is `uname -r`, the boot image's name, on Debian and Ubuntu an ABI (`6.1.0-54-cloud-amd64`, `6.8.0-45-generic`) that never carries the point release; `kernel_upstream` is the x.y.z the kernel CNA's ranges name (`6.1.176`, from `/proc/version_signature` on Ubuntu, the owning package's version elsewhere, `uname -r` itself when it is not an ABI), `kernel_package` the installed package that owns the booted image (`linux-image-6.1.0-54-cloud-amd64` `6.1.176-1`): what the distribution's advisories name, and which of several installed kernels is running (an upgrade without a reboot keeps the old one) |
 | `agent_kind` | `ssm` when the box has the agent the probe runs through |
 | `opaque` / `managed_by` | true when the provider never shows the machine (a Vercel team's runtime): nothing is known inside it |
 | `declared` | true when a person declared it (local machines) rather than an API or probe reporting it |
@@ -905,7 +906,12 @@ libraries compiled into a runtime (`node 22.12.0 BUNDLES brotli 1.1.0`, one fact
 `DEPENDS_ON {source_kind: dpkg}` → the installed packages a package's Depends names, read for the packages that own
 the probed programs. Containment is these two edges whatever the mechanism, so a vulnerability in a library reaches a
 box along `INSTALLED_ON` then `BUNDLES|DEPENDS_ON*0..4`; the match itself runs in a strut workflow against the public
-graph (`docs/vulnerability-graph-plan.md`).
+graph (`docs/vulnerability-graph-plan.md`). `PACKAGED_AS {source_kind: dpkg|rpm|apk}` → from the running kernel (ecosystem
+`kernel`, `pkg:generic/linux`, whose `version` is the upstream x.y.z the kernel CNA's ranges name, never the ABI `uname -r`
+prints on Debian and Ubuntu; until the upstream version is known the node is named by `uname -r` with no `sort_key`) to the
+distribution package that owns its boot image (`pkg:deb:linux-image-6.1.0-54-cloud-amd64:6.1.176-1`, source `linux`): a
+kernel CVE reaches the box through either, upstream range or distribution advisory, and of several installed kernel
+packages the one with a `PACKAGED_AS` is the booted one.
 
 ### KnVulnerability
 

@@ -33,7 +33,9 @@ export function SoftwarePanel({ instanceId, canProbe, onProbe, busy }: { instanc
       <Section title={`Operating system · probed ${when(os.collected_at)}`} action={probeButton}>
         <dl className="grid grid-cols-[9.5rem_1fr] gap-x-3 gap-y-0.5 text-sm">
           <dt className="text-zinc-500">OS</dt><dd>{os.os_name || `${os.os_id ?? "?"} ${os.os_version ?? ""}`} <span className="text-zinc-500">({os.os_id} {os.os_version})</span></dd>
-          <dt className="text-zinc-500">Kernel</dt><dd className="font-mono text-xs">{os.kernel || "—"} <span className="font-sans text-zinc-500">{os.arch || ""}</span></dd>
+          <dt className="text-zinc-500">Kernel</dt><dd className="font-mono text-xs" title="uname -r; on Debian and Ubuntu an ABI name, so the upstream version (what kernel CVEs name) and the package that owns the booted image (what the distribution's advisories name) are shown too">{os.kernel || "—"} <span className="font-sans text-zinc-500">{os.arch || ""}</span>
+            {os.kernel_upstream && os.kernel_upstream !== os.kernel ? <span className="font-sans text-zinc-500"> · upstream </span> : null}{os.kernel_upstream && os.kernel_upstream !== os.kernel ? os.kernel_upstream : null}
+            {os.kernel_package ? <span className="font-sans text-zinc-500"> · booted from </span> : null}{os.kernel_package ? `${os.kernel_package} ${os.kernel_package_version ?? ""}`.trim() : null}</dd>
           <dt className="text-zinc-500">Packages</dt><dd>{os.packages} installed via {os.package_manager || "?"}{d.changes?.length ? <span className="text-zinc-500"> · {d.changes.length} recent changes</span> : null}</dd>
         </dl>
       </Section>

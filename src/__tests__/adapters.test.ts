@@ -39,10 +39,10 @@ test("the AWS adapter emits generic resource nodes from its storage, and the mir
   assert.equal(types.RESOURCE_LABELS.includes(web.label), true);
   assert.equal(web.compute?.kernel, undefined, "a box the software probe never read carries no kernel");
   // once the software probe has read the box, its kernel, distribution and package manager ride on the compute from the resource pass
-  db.prepare("insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages) values ('i-0abc', '2026-10-02T04:10:00Z', 'ubuntu', '24.04', 'Ubuntu', '6.8.0-1021-aws', 'x86_64', 'dpkg', 812)").run();
+  db.prepare("insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, kernel_upstream, kernel_package, kernel_package_version) values ('i-0abc', '2026-10-02T04:10:00Z', 'ubuntu', '24.04', 'Ubuntu', '6.8.0-1021-aws', 'x86_64', 'dpkg', 812, '6.8.12', 'linux-image-6.8.0-1021-aws', '6.8.0-1021.23')").run();
   const probed = aws.resources("123456789012").find((n) => n.id === "i-0abc")!;
-  assert.deepEqual([probed.compute?.kernel, probed.compute?.os, probed.compute?.os_id, probed.compute?.os_version, probed.compute?.package_manager, probed.compute?.arch, probed.compute?.os_collected_at],
-    ["6.8.0-1021-aws", "Ubuntu 24.04", "ubuntu", "24.04", "dpkg", "x86_64", "2026-10-02T04:10:00Z"]);
+  assert.deepEqual([probed.compute?.kernel, probed.compute?.kernel_upstream, probed.compute?.kernel_package, probed.compute?.kernel_package_version, probed.compute?.os, probed.compute?.os_id, probed.compute?.os_version, probed.compute?.package_manager, probed.compute?.arch, probed.compute?.os_collected_at],
+    ["6.8.0-1021-aws", "6.8.12", "linux-image-6.8.0-1021-aws", "6.8.0-1021.23", "Ubuntu 24.04", "ubuntu", "24.04", "dpkg", "x86_64", "2026-10-02T04:10:00Z"]);
   assert.equal(mirror.RESOURCE_LABELS, types.RESOURCE_LABELS);
   assert.equal(typeof mirror.resourceFromEc2, "function"); assert.equal(mirror.genericState("ec2_instance", "stopping"), "stopped");
   const accounts = await aws.accounts();

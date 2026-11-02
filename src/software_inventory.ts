@@ -46,6 +46,8 @@ create index if not exists package_changes_instance on package_changes(instance_
 if (!(db.prepare("pragma table_info(instance_packages)").all() as { name: string }[]).some((c) => c.name === "source")) db.exec("alter table instance_packages add column source text");
 // probe software/3 adds the guest's hibernation setup (JSON, ProbeHibernation); src/guest_hibernation.ts reads it
 if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "hibernation")) db.exec("alter table instance_os add column hibernation text");
+// probe software/6 adds the running kernel's upstream version and the package that owns the booted image (kernelFacts); older rows are filled in from their package list on the next probe
+for (const col of ["kernel_upstream", "kernel_package", "kernel_package_version", "kernel_package_source"]) if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === col)) db.exec(`alter table instance_os add column ${col} text`);
 // probe software/4 adds what the runtimes bundle (instance_bundles) and the dependencies of the packages owning the probed programs (instance_depends)
 // probe software/5 finds programs beyond PATH (nvm, /opt, /usr/local), so a box may hold several installs of one program: binaries are keyed by
 // (name, path) and bundles by the parent's version too. Older tables are rebuilt once with the wider key.
@@ -157,14 +159,19 @@ export interface ProbeHibernation {
 export interface SoftwareData {
   hibernation?: ProbeHibernation | null;
   os?: { id?: string | null; version?: string | null; name?: string | null } | null; kernel?: string | null; arch?: string | null; package_manager?: string | null;
+  /** Probe software/6: the running kernel's upstream version and the package that owns the booted image (kernelFacts derives both from older probes where it can). */
+  kernel_upstream?: string | null; kernel_package?: { n: string; v: string; s?: string | null } | null;
   packages?: ProbePackage[]; binaries?: ProbeBinary[]; images?: ProbeImage[];
   bundles?: ProbeBundle[]; depends?: ProbeDepend[];
 }
 
 export interface RecordSoftwareResult { packages: number; added: string[]; removed: string[]; changed: { name: string; from: string; to: string }[]; binaries: number; images: number; bundles: number; depends: number }
 
-const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages`);
+// the kernel's three names move together: a probe that read the kernel (uname -r) replaces the upstream version and owning package too, even with nothing (a reboot into a kernel no package owns)
+const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation, kernel_upstream, kernel_package, kernel_package_version, kernel_package_source) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages,
+    kernel_upstream = case when excluded.kernel is null then kernel_upstream else excluded.kernel_upstream end, kernel_package = case when excluded.kernel is null then kernel_package else excluded.kernel_package end,
+    kernel_package_version = case when excluded.kernel is null then kernel_package_version else excluded.kernel_package_version end, kernel_package_source = case when excluded.kernel is null then kernel_package_source else excluded.kernel_package_source end`);
 const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, ecosystem, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
@@ -214,10 +221,46 @@ export function binaryVersion(line: string): string {
 const NOT_LIBRARIES = new Set(["node", "modules", "napi", "unicode", "tz", "cldr"]);
 
 /** Records one software probe: upserts what is installed, deletes what was superseded or removed, and logs both in package_changes. */
+/** An upstream kernel version at the front of a string: `6.1.176-1` → 6.1.176, `1:6.1.0-54` → 6.1.0, `6.8` → 6.8; null when none. */
+const upstreamOf = (v: string): string | null => /^(?:\d+:)?(\d+\.\d+(?:\.\d+)?)/.exec(v)?.[1] ?? null;
+
+/**
+ * The running kernel's other two names (probe software/6), read from the probe or derived from its package list when the probe is
+ * older. `kernel` (uname -r) is the boot image's name: on Debian and Ubuntu an ABI, 6.1.0-54-cloud-amd64 or 6.8.0-45-generic, that
+ * never carries the point release, so matched as a version it says 6.1.0 and every upstream fix in the 6.1 series looks missing
+ * forever. `upstream` is the x.y.z the kernel CNA's ranges name; `pkg` is the installed package that owns the booted image, what
+ * the distribution's advisories name (Debian fixes CVE-2026-98432 in linux 6.1.190-1) and the one of several installed kernels
+ * that is running (old images linger after upgrades; a box that installed the fix and never rebooted still runs the old one).
+ * Without the probe's reading the package is found in the list (linux-image-<release> on deb, the kernel or kernel-core whose
+ * version-release.arch is the release on rpm, linux-<flavor> on apk) and the upstream version read from the front of its version,
+ * except on Ubuntu, whose package version carries the ABI (6.8.0-45.45) and whose point release only /proc/version_signature
+ * knows: null, nothing to compare, rather than a wrong 6.8.0. A release not shaped like an ABI (6.1.134-150.224.amzn2023.x86_64,
+ * 6.6.30-0-virt, a self-built 6.6.30-custom) starts with its upstream version. Pure.
+ */
+export function kernelFacts(data: { kernel?: string | null; kernel_upstream?: string | null; kernel_package?: { n: string; v: string; s?: string | null } | null; os_id?: string | null; package_manager?: string | null }, pkgs: { name: string; version: string; arch: string | null; source: string | null }[]): { upstream: string | null; pkg: { name: string; version: string; source: string | null } | null } {
+  const release = clean(data.kernel, 80);
+  let pkg = data.kernel_package && typeof data.kernel_package.n === "string" && data.kernel_package.n ? { name: clean(data.kernel_package.n, 120), version: clean(data.kernel_package.v, 120), source: data.kernel_package.s ? clean(data.kernel_package.s, 120) : null } : null;
+  if (!pkg && release) {
+    const eco = data.package_manager;
+    const found = eco === "deb" ? pkgs.find((p) => p.name === `linux-image-${release}`) ?? pkgs.find((p) => p.name === `linux-image-unsigned-${release}`)
+      : eco === "rpm" ? pkgs.find((p) => /^kernel(-core|-uek|-lt|-ml)?$/.test(p.name) && (`${p.version}.${p.arch}` === release || p.version === release))
+      : eco === "apk" ? pkgs.find((p) => p.name === `linux-${release.split("-").pop()}`) : undefined;
+    if (found) pkg = { name: found.name, version: found.version, source: found.source };
+  }
+  if (pkg && pkg.source === pkg.name) pkg.source = null;
+  let upstream = data.kernel_upstream ? upstreamOf(clean(data.kernel_upstream, 40)) : null;
+  if (!upstream && pkg && !(data.package_manager === "deb" && data.os_id === "ubuntu")) upstream = upstreamOf(pkg.version);
+  if (!upstream && release && !/^\d+\.\d+\.0-\d+-/.test(release)) upstream = upstreamOf(release);
+  return { upstream, pkg };
+}
+
 export function recordSoftware(instanceId: string, collectedAt: string, data: SoftwareData): RecordSoftwareResult | null {
   if (!Array.isArray(data.packages) && !Array.isArray(data.binaries) && !data.os) return null;
   const eco = clean(data.package_manager || "unknown", 20);
   const pkgs = (data.packages ?? []).filter((p) => p && typeof p.n === "string" && p.n).map((p) => ({ name: clean(p.n, 120), version: clean(p.v, 120), arch: p.a == null ? null : clean(p.a, 20), source: p.s == null || !String(p.s).trim() ? null : clean(p.s, 120) }));
+  // the kernel's names: a probe without the os section (the software 1.x shape) still names the distribution through its earlier row
+  const prevOs = db.prepare("select os_id, package_manager from instance_os where instance_id = ?").get(instanceId) as { os_id: string | null; package_manager: string | null } | undefined;
+  const kernel = data.kernel ? kernelFacts({ ...data, os_id: data.os?.id ?? prevOs?.os_id ?? null, package_manager: data.package_manager ?? prevOs?.package_manager ?? null }, pkgs) : { upstream: null, pkg: null };
   const res: RecordSoftwareResult = { packages: pkgs.length, added: [], removed: [], changed: [], binaries: 0, images: 0, bundles: 0, depends: 0 };
   db.transaction(() => {
     const all = db.prepare("select ecosystem, name, version from instance_packages where instance_id = ?").all(instanceId) as { ecosystem: string; name: string; version: string }[];
@@ -276,7 +319,8 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
     }
     if (Array.isArray(data.images)) db.prepare(`delete from instance_images where instance_id = ?${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
     res.images = imgs.length;
-    upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null);
+    upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null,
+      kernel.upstream, kernel.pkg?.name ?? null, kernel.pkg?.version ?? null, kernel.pkg?.source ?? null);
   })();
   return res;
 }
@@ -454,7 +498,7 @@ export function hibernationSetupOf(instanceId: string): { probe: ProbeHibernatio
 }
 
 export interface InstanceSoftware {
-  os: { instance_id: string; collected_at: string; os_id: string | null; os_version: string | null; os_name: string | null; kernel: string | null; arch: string | null; package_manager: string | null; packages: number } | null;
+  os: { instance_id: string; collected_at: string; os_id: string | null; os_version: string | null; os_name: string | null; kernel: string | null; kernel_upstream: string | null; kernel_package: string | null; kernel_package_version: string | null; kernel_package_source: string | null; arch: string | null; package_manager: string | null; packages: number } | null;
   packages: { ecosystem: string; name: string; version: string; arch: string | null; source: string | null; first_seen: string; last_seen: string; gone: boolean }[];
   binaries: { name: string; version: string; path: string | null; first_seen: string; last_seen: string; gone: boolean }[];
   images: { image: string; image_id: string | null; digest: string | null; created: string | null; platform: string | null; first_seen: string; last_seen: string; gone: boolean }[];

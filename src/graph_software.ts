@@ -18,6 +18,12 @@ import { componentPurl, parsePurl } from "./software_inventory.js";
  * pypi, deb of the image's distribution, ...) and on the filesystem (INSTALLED_ON like any package); PROVIDES edges
  * from a package to the program (AdvisorApp) it ships, so "which package is this listening process from" is one hop.
  *
+ * The kernel is two nodes joined by PACKAGED_AS (probe software/6): the running kernel (ecosystem kernel, pkg:generic/linux) at its upstream
+ * version, the x.y.z the kernel CNA's ranges name, and the distribution package that owns the booted image (a deb/rpm/apk node like any
+ * other, what the distribution's advisories name). uname -r stays on the compute: on Debian and Ubuntu it is an ABI (6.1.0-54-cloud-amd64)
+ * that never carries the point release, and read as a version it matched every fix in the series forever. Old kernel images linger after
+ * upgrades, so PACKAGED_AS also says which of several installed linux-image packages is the one running.
+ *
  * The label is the public vulnerability graph's: a SoftwareComponent there is keyed by `product_key` (scheme-specific;
  * for the purl scheme the purl without version), and every node here carries that key (`product_key` = `purl`, `scheme`
  * = purl, `package` = the name) next to its own identity (src/sec/identity.ts): `purl`, `source_purl` (the source
@@ -81,7 +87,7 @@ const OS_CYPHER = `
 UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
-SET c += {os: row.os, os_id: row.os_id, os_version: row.os_version, kernel: row.kernel, arch: coalesce(row.arch, c.arch), package_manager: row.package_manager, os_collected_at: row.collected_at, updated_at: $now}`;
+SET c += {os: row.os, os_id: row.os_id, os_version: row.os_version, kernel: row.kernel, kernel_upstream: row.kernel_upstream, kernel_package: row.kernel_package, kernel_package_version: row.kernel_package_version, arch: coalesce(row.arch, c.arch), package_manager: row.package_manager, os_collected_at: row.collected_at, updated_at: $now}`;
 
 /** A box's package and image edges the probe no longer reports (an older version, something removed): the node id is
  *  per version, so an upgrade adds an edge and only this retires the superseded one. Retired, not deleted: the edge keeps
@@ -109,6 +115,13 @@ const DEPENDS_ON_CYPHER = `
 UNWIND $rows AS row
 MATCH (a:SoftwareComponent {id: row.from_id}) MATCH (b:SoftwareComponent {id: row.to_id})
 MERGE (a)-[r:DEPENDS_ON]->(b) SET r += {source_kind: row.source_kind, updated_at: $now}`;
+
+/** The running kernel to the distribution package that owns its boot image: one fact per (upstream version, package version) pair, so a
+ *  distribution advisory against the package reaches the kernel node, and the booted image is told from the installed ones. */
+const PACKAGED_AS_CYPHER = `
+UNWIND $rows AS row
+MATCH (k:SoftwareComponent {id: row.kernel_id}) MATCH (p:SoftwareComponent {id: row.package_id})
+MERGE (k)-[r:PACKAGED_AS]->(p) SET r += {source_kind: row.source_kind, updated_at: $now}`;
 
 const PROVIDES_CYPHER = `
 UNWIND $rows AS row
@@ -167,6 +180,17 @@ export const packageId = (ecosystem: string, name: string, version: string) => `
  *  syft found and the node the probe asked are one SoftwareComponent (pkg:binary:node:20.18.0) rather than two with the same purl and version. */
 export const sbomEcosystem = (type: string): string => (type === "generic" ? "binary" : type);
 
+/** The running kernel as a component (an instance_os row; src/software_inventory.ts kernelFacts): the version is the upstream x.y.z the kernel
+ *  CNA's ranges name, so every box on that upstream shares the node and its sort_key compares to a SecAffectedRange's keys; uname -r (on Debian
+ *  and Ubuntu an ABI, 6.1.0-54-cloud-amd64, that never carries the point release) stays on the compute as `kernel`. Until the upstream version
+ *  is known the node is named by uname -r and carries no sort_key: 6.1.0-54 read as 6.1.0 would miss every fix in the 6.1 series forever. Pure. */
+export function kernelComponent(o: { instance_id: string; kernel: string; kernel_upstream?: string | null; arch?: string | null; collected_at: string }) {
+  const version = o.kernel_upstream || o.kernel;
+  const row = { instance_id: o.instance_id, version_purl: null as string | null, id: packageId("kernel", "linux", version), name: "linux", version, ecosystem: "kernel", source_name: null as string | null, source_kind: "uname", advisory_ecosystem: null as string | null, scope: "kernel", arch: o.arch ?? null, path: null as string | null, first_seen: o.collected_at, last_seen: o.collected_at, ...componentIdentity({ ecosystem: "kernel", name: "linux", version }) };
+  if (!o.kernel_upstream) row.sort_key = null;
+  return row;
+}
+
 /** The node id of an image: its content when known (the repository at its registry digest, else the local image id for a build that never
  *  left the box), the bare reference otherwise. A tag such as latest moves; two boxes on different builds of it are two nodes, and a box that
  *  pulls the new build moves to a new node while the old one is pruned once nobody runs it. Pure. */
@@ -208,7 +232,7 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
 /** The image key of an instance_images row in SQL (software_inventory.ts IMG_KEY): its sbom_key, else the per-box fallback. */
 const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
 
-export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; provides: number; bundles: number; depends: number; superseded: number; took_ms: number }
+export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; provides: number; bundles: number; depends: number; packaged_as: number; superseded: number; took_ms: number }
 
 /** Everything the software and sbom probes know about the given boxes (or all). */
 export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGraphCounts | null> {
@@ -241,7 +265,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     pkgRows.push({ instance_id: b.instance_id, version_purl: null, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "binary_version", advisory_ecosystem: null, scope: packageScope(b.name).scope, arch: null, path: b.path ?? null, first_seen: b.first_seen, last_seen: b.last_seen, ...componentIdentity({ ecosystem: "binary", name: b.name, version: b.version }) });
   }
   for (const o of os.values()) {
-    if (o.kernel) pkgRows.push({ instance_id: o.instance_id, version_purl: null, id: packageId("kernel", "linux", o.kernel), name: "linux", version: o.kernel, ecosystem: "kernel", source_name: null, source_kind: "uname", advisory_ecosystem: null, scope: "kernel", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, ...componentIdentity({ ecosystem: "kernel", name: "linux", version: o.kernel }) });
+    if (o.kernel) pkgRows.push(kernelComponent(o));
     if (o.os_id) pkgRows.push({ instance_id: o.instance_id, version_purl: null, id: packageId("os", o.os_id, o.os_version ?? "unknown"), name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", ecosystem: "os", source_name: o.os_id, source_kind: "os_release", advisory_ecosystem: ecosystemOf(o.package_manager, o.os_id, o.os_version)?.ecosystem ?? null, scope: "tool", arch: o.arch ?? null, path: null, first_seen: o.collected_at, last_seen: o.collected_at, ...componentIdentity({ ecosystem: "os", name: o.os_name ?? o.os_id, version: o.os_version ?? "unknown", source: o.os_id }) });
   }
   // the sbom probe: a purl on the filesystem is INSTALLED_ON the box like any package; a purl inside an image is CONTAINS from the image node, the
@@ -267,7 +291,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     const k = `${g.row.image_id}\t${g.row.id}`; if (containsSeen.has(k)) continue; containsSeen.add(k);
     containsRows.push(g.row);
   }
-  const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
+  const osRows = [...os.values()].map((o) => ({ instance_id: o.instance_id, os: [o.os_name ?? o.os_id, o.os_version].filter(Boolean).join(" ") || null, os_id: o.os_id ?? null, os_version: o.os_version ?? null, kernel: o.kernel ?? null, kernel_upstream: o.kernel_upstream ?? null, kernel_package: o.kernel_package ?? null, kernel_package_version: o.kernel_package_version ?? null, arch: o.arch ?? null, package_manager: o.package_manager ?? null, collected_at: o.collected_at ?? null }));
   for (const b of chunks(osRows)) await w(OS_CYPHER, b);
   for (const b of chunks(pkgRows)) await w(PACKAGE_CYPHER, b);
 
@@ -303,6 +327,15 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   const bundleEdges = uniq(bundles, (r) => `${r.parent_id}\t${r.child_id}`); const dependEdges = uniq(depends, (r) => `${r.from_id}\t${r.to_id}`);
   for (const b of chunks(bundleEdges)) await w(BUNDLES_CYPHER, b);
   for (const b of chunks(dependEdges)) await w(DEPENDS_ON_CYPHER, b);
+  // the running kernel to the package that owns its boot image (the package row of the same probe, so the versions agree)
+  const packaged: any[] = [];
+  for (const o of os.values()) {
+    if (!o.kernel || !o.kernel_package || !o.package_manager) continue;
+    const package_id = byInstanceName.get(`${o.instance_id}\t${o.package_manager}\t${o.kernel_package}`); if (!package_id) continue;
+    packaged.push({ kernel_id: kernelComponent(o).id, package_id, source_kind: SOURCE_KIND[o.package_manager] ?? o.package_manager });
+  }
+  const packagedEdges = uniq(packaged, (r) => `${r.kernel_id}\t${r.package_id}`);
+  for (const b of chunks(packagedEdges)) await w(PACKAGED_AS_CYPHER, b);
   for (const b of chunks(keepOf(imgRows), 50)) await w(PRUNE_IMAGES_CYPHER, b);
   // what each image contains; an edge the scans no longer support is retired (the keep list is every key's reading of that image node: the platforms of one digest add up)
   for (const b of chunks(containsRows)) await w(CONTAINS_CYPHER, b);
@@ -340,7 +373,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // the nodes' own lifecycle, from the edges': what came back is live again, what nothing holds any more is marked (never deleted)
   await writeCypher(REVIVE_COMPONENTS_CYPHER);
   await writeCypher(ORPHAN_COMPONENTS_CYPHER, neoParams({ now }));
-  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, superseded: supersededRows.length, took_ms: Date.now() - t0 };
+  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, packaged_as: packagedEdges.length, superseded: supersededRows.length, took_ms: Date.now() - t0 };
 }
 
 

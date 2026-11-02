@@ -110,6 +110,10 @@ export interface ProbeResult {
   /** The software probe: the OS, the kernel, every package, the versions of well-known programs, the container images. */
   os?: { id: string | null; version: string | null; name: string | null };
   kernel?: string | null;
+  /** Software 6: the running kernel's upstream version (the x.y.z the kernel CNA's ranges name; uname -r is an ABI on Debian and Ubuntu) and the
+   *  installed package that owns the booted image (what the distribution's advisories name, and which of several installed kernels is running). */
+  kernel_upstream?: string | null;
+  kernel_package?: { n: string; v: string; s: string | null } | null;
   arch?: string | null;
   package_manager?: string | null;
   packages?: { n: string; v: string; a: string | null; s?: string | null }[];
@@ -254,6 +258,9 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     kind,
     os: raw.os && typeof raw.os === "object" ? { id: raw.os.id == null ? null : String(raw.os.id).slice(0, 40), version: raw.os.version == null ? null : String(raw.os.version).slice(0, 40), name: raw.os.name == null ? null : String(raw.os.name).slice(0, 120) } : undefined,
     kernel: raw.kernel === undefined ? undefined : raw.kernel == null ? null : String(raw.kernel).slice(0, 80),
+    kernel_upstream: raw.kernel_upstream === undefined ? undefined : raw.kernel_upstream == null ? null : String(raw.kernel_upstream).slice(0, 40),
+    kernel_package: raw.kernel_package === undefined ? undefined : raw.kernel_package && typeof raw.kernel_package === "object" && typeof raw.kernel_package.n === "string" && raw.kernel_package.n
+      ? { n: String(raw.kernel_package.n).slice(0, 120), v: String(raw.kernel_package.v ?? "").slice(0, 120), s: raw.kernel_package.s == null || raw.kernel_package.s === "" ? null : String(raw.kernel_package.s).slice(0, 120) } : null,
     arch: raw.arch === undefined ? undefined : raw.arch == null ? null : String(raw.arch).slice(0, 20),
     package_manager: raw.package_manager === undefined ? undefined : raw.package_manager == null ? null : String(raw.package_manager).slice(0, 20),
     packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,

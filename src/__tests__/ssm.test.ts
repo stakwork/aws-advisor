@@ -368,3 +368,14 @@ test("parseProbeOutput types the firewall section of apps 2.1 (lists of printabl
   const apps = { id: 1, instance_id: "i-1", kind: "apps" as const, collected_at: "2026-11-01T10:00:00Z", data: p };
   assert.equal(mergeProbes([apps])!.data.firewall?.v4_lines, 4);
 });
+
+test("parseProbeOutput: the running kernel's upstream version and owning package (software/6) are read and bounded; an older probe leaves them undefined, a malformed package is null", () => {
+  const p = parseProbeOutput('{"probe":"aws-advisor/software/6","kind":"software","hostname":"h","collected_at":"2026-11-02T09:00:00Z","os":{"id":"debian","version":"12","name":"Debian GNU/Linux 12 (bookworm)"},"kernel":"6.1.0-54-cloud-amd64","kernel_upstream":"6.1.176","kernel_package":{"n":"linux-image-6.1.0-54-cloud-amd64","v":"6.1.176-1","s":"linux-signed-amd64"},"arch":"x86_64","package_manager":"deb","packages":[],"binaries":[],"images":[]}');
+  assert.equal(p.kernel, "6.1.0-54-cloud-amd64"); assert.equal(p.kernel_upstream, "6.1.176");
+  assert.deepEqual(p.kernel_package, { n: "linux-image-6.1.0-54-cloud-amd64", v: "6.1.176-1", s: "linux-signed-amd64" });
+  const old = parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-11-02T09:00:00Z","kernel":"6.8.0-45-generic","package_manager":"deb","packages":[]}');
+  assert.equal(old.kernel_upstream, undefined); assert.equal(old.kernel_package, undefined);
+  const none = parseProbeOutput('{"probe":"aws-advisor/software/6","kind":"software","hostname":"h","collected_at":"2026-11-02T09:00:00Z","kernel":"6.6.30-custom","kernel_upstream":null,"kernel_package":{"v":"1"},"package_manager":"deb","packages":[]}');
+  assert.equal(none.kernel_upstream, null); assert.equal(none.kernel_package, null, "a package without a name is no package");
+  assert.equal(parseProbeOutput('{"probe":"aws-advisor/software/6","kind":"software","hostname":"h","collected_at":"2026-11-02T09:00:00Z","kernel_package":{"n":"k","v":"1"}}').kernel_package?.s, null, "no source: null, never undefined");
+});
