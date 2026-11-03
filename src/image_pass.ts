@@ -22,6 +22,13 @@ import { ProbeError, probeInstance } from "./ssm.js";
 
 /** A batch of the images document: entries per command and characters of the `images` parameter (an entry is ~100 to 210 characters; SSM parameters stay well under their limit). */
 export const IMAGE_BATCH = { maxEntries: 15, maxChars: 3500 } as const;
+/** The images document's time budget (src/probes.ts, `budget=1200`): what is left once the running image times out is skipped, "the time budget ran out". */
+export const IMAGES_BUDGET_SECONDS = 1200;
+/** The batch for a per-image timeout (Settings > Probe pass > Seconds per image on the scanner): as many images as can each use their whole
+ *  timeout within the document's budget, so a batch of slow images times out image by image instead of skipping the tail (8 images at 180 s
+ *  each: 2 read, 2 timed out, 4 skipped on 2026-11-03), at most IMAGE_BATCH's count, at least one. Pure. */
+export const imageBatch = (timeoutSeconds: number, base: { maxEntries: number; maxChars: number } = IMAGE_BATCH): { maxEntries: number; maxChars: number } =>
+  ({ maxEntries: Math.max(1, Math.min(base.maxEntries, Math.floor(IMAGES_BUDGET_SECONDS / Math.max(1, timeoutSeconds || 180)))), maxChars: base.maxChars });
 /** Without an upload bucket the answer is inline, trimmed to 3,000 purls shared across the batch: small batches, so each image keeps most of its list. */
 export const INLINE_IMAGE_BATCH = { maxEntries: 4, maxChars: 3500 } as const;
 /** Distinct images per pass, at most. */
@@ -88,7 +95,7 @@ export const sbomImagesMode = (r: ImagePassResult | null): "all" | "local" => (r
 const FATAL = new Set(["not_managed", "permission", "no_credentials", "quota"]);
 
 /** The image half of the sbom pass: due images in batches to the scanner, one command at a time; the hooks record each answer. */
-export async function imagePass(): Promise<ImagePassResult> {
+export async function imagePass(passId: number | null = null): Promise<ImagePassResult> {
   const t0 = Date.now(); const tag = "probe-pass:images";
   const res: ImagePassResult = { started_at: new Date().toISOString(), scanner: imageScanner(), ok: false, reason: null, candidates: 0, batches: 0, scanned: [], failed: [], commands_failed: [], took_ms: 0 };
   const done = (reason: string | null, ok = false) => { res.ok = ok; res.reason = reason; res.took_ms = Date.now() - t0; return res; };
@@ -98,14 +105,14 @@ export async function imagePass(): Promise<ImagePassResult> {
   const due = dueImages(); res.candidates = due.length;
   if (!due.length) { console.log(`[${tag}] nothing due: every registry image the running boxes carry was read within ${windowMinutes()} min, or none has a digest`); return done(null, true); }
   const uploads = await probeUploadsReady();
-  const batches = batchImages(due.map(imageEntry), uploads ? IMAGE_BATCH : INLINE_IMAGE_BATCH);
+  const batches = batchImages(due.map(imageEntry), imageBatch(config.probeImagesTimeoutSeconds, uploads ? IMAGE_BATCH : INLINE_IMAGE_BATCH));
   res.batches = batches.length;
   console.log(`[${tag}] ${due.length} image(s) due on ${res.scanner} (${due.reduce((n, d) => n + d.boxes, 0)} box-image pairs) in ${batches.length} batch(es)${uploads ? "" : "; no upload bucket, so small batches under the inline output cap (Settings > Probe pass > Upload bucket lifts that)"}`);
   let answered = 0;
   for (const [i, batch] of batches.entries()) {
     const t1 = Date.now();
     try {
-      const stored = await probeInstance(res.scanner, { kind: "images", parameters: { images: batch.join(" ") } });
+      const stored = await probeInstance(res.scanner, { kind: "images", parameters: { images: batch.join(" ") }, origin: "pass", passId });
       const sbom = stored.data.sbom;
       if (!sbom?.available) { console.error(`[${tag}] syft is not available on ${res.scanner}: ${sbom?.install || "not installed"}; the boxes scan every image themselves this pass`); return done(`syft is not available on the scanner ${res.scanner}${sbom?.install ? ` (${sbom.install})` : ""}`); }
       answered++;

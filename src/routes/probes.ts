@@ -6,6 +6,7 @@ import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, defaultProbeScript, legacyKind
 import { probeDocumentStatus } from "../probes_status.js";
 import { dueImagesNow, probeKindSettings, probePass, probeTargets } from "../probe_pass.js";
 import { imageScanner } from "../image_pass.js";
+import { listPasses, listRuns, probeHistoryOverview } from "../probe_log.js";
 import { IMAGE_SCANNER_POLICY } from "../permissions.js";
 import { softwareOn, softwareSummary, wherePackage } from "../software_inventory.js";
 import { containersOn, whereImage } from "../container_inventory.js";
@@ -66,6 +67,17 @@ probes.get("/probes", async (req, res) => {
 });
 
 // One ledger row per account and kind whose document is missing or stale; body.kinds narrows. Nothing is written: each row is applied with "Run as me".
+// History > Probes (src/probe_log.ts): per kind the last pass and the last 24 hours; the passes; the runs of a pass, a box, a kind or an outcome
+probes.get("/probes/history", (_req, res) => res.json(probeHistoryOverview()));
+probes.get("/probes/history/passes", (req, res) => {
+  const kind = String(req.query.kind || "");
+  res.json(listPasses({ kind: isKind(kind) ? kind : null, limit: req.query.limit }));
+});
+probes.get("/probes/history/runs", (req, res) => {
+  const kind = String(req.query.kind || ""); const status = String(req.query.status || "");
+  res.json(listRuns({ passId: req.query.pass_id, instanceId: String(req.query.instance || "").trim().slice(0, 80) || null, kind: isKind(kind) ? kind : null, status: status === "ok" || status === "failed" ? status : null, code: String(req.query.code || "").slice(0, 40) || null, limit: req.query.limit }));
+});
+
 probes.post("/probes/documents/propose", async (req, res) => {
   const kinds = Array.isArray(req.body?.kinds) ? req.body.kinds.map(String).filter(isKind) : undefined;
   try { res.json(await proposeProbeDocuments({ kinds, by: typeof req.body?.by === "string" && req.body.by.trim() ? req.body.by.trim().slice(0, 80) : "a person" })); }

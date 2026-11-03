@@ -291,7 +291,7 @@ const safeJson = (s: string | null) => { if (!s) return null; try { return JSON.
 
 async function instanceProbe(a: { instance_id: string }) {
   try {
-    const p = await probeInstance(a.instance_id);
+    const p = await probeInstance(a.instance_id, { origin: "agent" });
     return text({ instance_id: p.instance_id, collected_at: p.collected_at, summary: summarizeProbe(p.data), data: p.data });
   } catch (e: any) {
     if (e instanceof ProbeError) return fail(`probe ${e.code}: ${e.message}`);

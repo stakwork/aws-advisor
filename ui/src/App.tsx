@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ConnectionBanner } from "./components/connection";
-import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert, Network as NetworkIcon, Bot, ClipboardCheck } from "lucide-react";
+import { Activity, Bell, LayoutDashboard, ListChecks, Search, Server, Settings as SettingsIcon, BookOpen, Receipt, History, MessageSquare, Wand2, ShieldAlert, Network as NetworkIcon, Bot, ClipboardCheck, ScrollText } from "lucide-react";
 import { api, currentScope, onScopeChange, setScope, signIn, token } from "./api";
 import { useScopeInfo, type Capability } from "./scope";
 import { Gate } from "./components/gate";
@@ -22,9 +22,10 @@ import Actions from "./pages/Actions";
 import Security from "./pages/Security";
 import Network from "./pages/Network";
 import Claims from "./pages/Claims";
+import ProbeHistory from "./pages/ProbeHistory";
 
 /** The pages, each with the capability it needs; a page the scoped provider cannot serve is hidden here and gated on its route. */
-const nav: { to: string; label: string; icon: any; need?: Capability }[] = [
+const nav: { to: string; label: string; icon: any; need?: Capability; /** a group: its pages, shown under it while one of them is open */ children?: { to: string; label: string }[] }[] = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
   { to: "/runs", label: "Runs", icon: Activity, need: "cost" },
   { to: "/alerts", label: "Alerts", icon: Bell, need: "alerts" },
@@ -38,6 +39,7 @@ const nav: { to: string; label: string; icon: any; need?: Capability }[] = [
   { to: "/bill", label: "This month", icon: Receipt, need: "bill" },
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
   { to: "/actions", label: "Auto-actions", icon: Wand2, need: "executor" },
+  { to: "/history", label: "History", icon: ScrollText, children: [{ to: "/history/probes", label: "Probes" }] },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/agent", label: "Agent", icon: Bot },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
@@ -96,16 +98,26 @@ export default function App() {
 function AppShell() {
   const scopeInfo = useScopeInfo();
   const [aws, setAws] = useState<any>(null);
+  const location = useLocation();
   useEffect(() => { api("/settings").then((s) => setAws(s.aws)).catch(() => setAws(null)); }, []);
   return (
     <div className="flex min-h-screen">
       <aside className="w-56 shrink-0 border-r border-zinc-800 bg-zinc-950 p-4">
         <div className="mb-6 text-lg font-semibold text-zinc-100">Cloud Advisor</div>
         <nav className="space-y-1">
-          {nav.filter((n) => !n.need || scopeInfo.has(n.need)).map(({ to, label, icon: Icon }) => (
-            <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => `flex items-center gap-2 rounded px-2 py-1.5 text-sm ${isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"}`}>
-              <Icon size={16} /> {label}
-            </NavLink>
+          {nav.filter((n) => !n.need || scopeInfo.has(n.need)).map(({ to, label, icon: Icon, children }) => (
+            <div key={to}>
+              <NavLink to={to} end={to === "/"} className={({ isActive }) => `flex items-center gap-2 rounded px-2 py-1.5 text-sm ${isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"}`}>
+                <Icon size={16} /> {label}
+              </NavLink>
+              {children && location.pathname.startsWith(to) ? (
+                <div className="ml-6 mt-0.5 space-y-0.5 border-l border-zinc-800 pl-2">
+                  {children.map((c) => (
+                    <NavLink key={c.to} to={c.to} className={({ isActive }) => `block rounded px-2 py-1 text-sm ${isActive ? "text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}>{c.label}</NavLink>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           ))}
         </nav>
         <div className="mt-8 text-xs text-zinc-500">
@@ -137,6 +149,8 @@ function AppShell() {
           <Route path="/bill" element={<Gate need="bill"><Bill /></Gate>} />
           <Route path="/changes" element={<Gate need="changes"><Changes /></Gate>} />
           <Route path="/actions" element={<Gate need="executor"><Actions /></Gate>} />
+          <Route path="/history" element={<Navigate to="/history/probes" replace />} />
+          <Route path="/history/probes" element={<ProbeHistory />} />
           <Route path="/chat" element={<Chat />} />
           <Route path="/agent" element={<Agent />} />
           <Route path="/settings" element={<Settings />} />

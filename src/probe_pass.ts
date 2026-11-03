@@ -16,6 +16,7 @@ import { pruneHistory, rollupDaily } from "./history.js";
 import { checkAllDiskLevels } from "./disk_alerts.js";
 import { checkAllHostLevels } from "./host_alerts.js";
 import { RdsLoadPassResult, rdsLoadPass } from "./rds_load.js";
+import { finishPass, notePassSelection, startPass } from "./probe_log.js";
 
 export interface ProbePassResult {
   kind: ProbeKind;
@@ -29,6 +30,8 @@ export interface ProbePassResult {
   /** The image half of the sbom pass (src/image_pass.ts): the registry images read on the scanner instance before the boxes ran; null for other kinds and when no scanner is configured. */
   images?: ImagePassResult | null;
   took_ms: number;
+  /** The pass's row in probe_passes (History > Probes); 0 when it could not be written. */
+  pass_id?: number;
 }
 
 const inFlight = new Map<ProbeKind, Promise<ProbePassResult>>();
@@ -109,11 +112,15 @@ export function probePass(kind: ProbeKind = "host", opts: { force?: boolean } = 
 /** The images kind by hand (Settings > Probes, or POST /api/probes/images/pass): the scanner half alone, as a pass result (candidates are the due images, probed the keys read). */
 async function runImages(): Promise<ProbePassResult> {
   const t0 = Date.now();
-  const images = await imagePass();
+  const passId = startPass("images", "manual");
+  const images = await imagePass(passId);
   const failed = [...images.failed.map((f) => ({ instance_id: f.ref, code: f.status, message: f.note || `${f.status} on the scanner` })), ...images.commands_failed.map((c) => ({ instance_id: images.scanner || "*", code: c.code, message: c.message }))];
   if (!images.ok && images.reason && !failed.length) failed.push({ instance_id: images.scanner || "*", code: "skipped", message: images.reason });
-  return { kind: "images", started_at: images.started_at, candidates: images.candidates, probed: images.scanned, failed, pruned: 0, databases: null, images, took_ms: Date.now() - t0 };
+  finishPass(passId, { candidates: images.candidates, probed: images.scanned.length, failed, note: imagesNote(images) });
+  return { kind: "images", started_at: images.started_at, candidates: images.candidates, probed: images.scanned, failed, pruned: 0, databases: null, images, took_ms: Date.now() - t0, pass_id: passId };
 }
+/** One line on the scanner's half of a pass, for the pass row. */
+const imagesNote = (images: ImagePassResult | null): string | null => (images ? `images on ${images.scanner ?? "no scanner"}: ${images.scanned.length} read, ${images.failed.length} not read of ${images.candidates} due in ${images.batches} batch(es)${images.reason ? `; ${images.reason}` : ""}` : null);
 
 async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const t0 = Date.now();
@@ -123,24 +130,31 @@ async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<Pro
   const longRunning = PROBE_DEFS[kind].timeout_seconds >= 600; // minutes per box: say when each finishes, so a slow pass is readable while it runs
   const gate = await credentialGate(tag);
   if (!gate.ok) console.log(`[${tag}] skipped: ${gate.error || "credentials not working"}`);
-  if (!gate.ok) return { kind, started_at: new Date().toISOString(), candidates: 0, probed: [], failed: [{ instance_id: "*", code: "no_credentials", message: gate.error || "credentials not working" }], pruned: 0, databases: null, took_ms: Date.now() - t0 };
+  const passId = startPass(kind, ignoreInterval ? "manual" : "cron");
+  if (!gate.ok) {
+    const failed = [{ instance_id: "*", code: "no_credentials", message: gate.error || "credentials not working" }];
+    finishPass(passId, { candidates: 0, probed: 0, failed, note: `skipped: ${failed[0]!.message}` });
+    return { kind, started_at: new Date().toISOString(), candidates: 0, probed: [], failed, pruned: 0, databases: null, took_ms: Date.now() - t0, pass_id: passId };
+  }
   // the sbom pass's image half first (src/image_pass.ts): the registry images once each on the scanner, so the boxes below scan only their own builds;
   // without a scanner, or when it did not answer, the boxes scan every image themselves as they always did
   let images: ImagePassResult | null = null;
   if (kind === "sbom" && imageScanner()) {
-    try { images = await imagePass(); } catch (e: any) { console.error(`[${tag}] the image half failed: ${e?.message || e}`); }
+    try { images = await imagePass(passId); } catch (e: any) { console.error(`[${tag}] the image half failed: ${e?.message || e}`); }
     console.log(`[${tag}] image scanner ${imageScanner()}: ${images?.ok ? `${images.scanned.length} image(s) read${images.failed.length ? `, ${images.failed.length} not read` : ""} of ${images.candidates} due; the boxes scan only their local builds (images=local)` : `${images?.reason || "failed"}; the boxes scan every running image themselves this pass (images=all)`}`);
   }
   // the sbom document's parameters: the images mode while a scanner is configured, and what the box reads of itself (Settings > Probe pass; sbom 1.7)
   const parameters = kind === "sbom" ? { ...(imageScanner() ? { images: sbomImagesMode(images) } : {}), host: config.probeSbomHost } : undefined;
   const { scope, intervalHours } = probeKindSettings(kind);
   const targets = probeTargets(kind, undefined, { ignoreInterval });
-  const result: ProbePassResult = { kind, started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, databases: null, images, took_ms: 0 };
+  const result: ProbePassResult = { kind, started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, databases: null, images, took_ms: 0, pass_id: passId };
   try {
     const x = probeExclusions(kind, ignoreInterval ? null : undefined); const limit = scope === "all" ? Math.max(config.probeMax, 100) : config.probeMax;
     const why = [x.not_ssm_online && `${x.not_ssm_online} not SSM online`, x.batch && `${x.batch} Batch worker(s)`, x.just_launched && `${x.just_launched} launched under 15 min ago`,
       x.outside_scope && `${x.outside_scope} outside scope "idle" (CPU over ${config.probeIdleCpu} % and no idle recommendation)`, x.probed_recently && `${x.probed_recently} probed within ${probeWindowMinutes(intervalHours)} min`].filter(Boolean);
-    console.log(`[${tag}] ${PROBE_DEFS[kind].title}: ${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${scope}, limit ${limit}, ${ignoreInterval ? `interval ${intervalHours} h ignored (run by hand)` : `interval ${intervalHours} h`}, ${workers} at a time`);
+    const selection = `${targets.length} candidate(s) of ${x.running} running${why.length ? `: left out ${why.join(", ")}` : ""}; scope ${scope}, limit ${limit}, ${ignoreInterval ? `interval ${intervalHours} h ignored (run by hand)` : `interval ${intervalHours} h`}, ${workers} at a time`;
+    console.log(`[${tag}] ${PROBE_DEFS[kind].title}: ${selection}`);
+    notePassSelection(passId, selection);
   } catch (e: any) { console.error(`[${tag}] could not explain the selection: ${e?.message || e}`); }
   // as many at a time as the kind says (PROBE_DEFS concurrency): the boxes do the work and SSM runs them side by side, the advisor sends and waits
   const queue = [...targets];
@@ -148,7 +162,7 @@ async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<Pro
     for (let t = queue.shift(); t; t = queue.shift()) {
       const t1 = Date.now();
       try {
-        await probeInstance(t.instance_id, { kind, parameters });
+        await probeInstance(t.instance_id, { kind, parameters, origin: "pass", passId });
         result.probed.push(t.instance_id);
         if (longRunning) console.log(`[${tag}] ${t.instance_id}${t.name ? ` (${t.name})` : ""} done in ${Math.round((Date.now() - t1) / 1000)} s; ${result.probed.length + result.failed.length} of ${targets.length} finished, ${queue.length} waiting`);
       } catch (e: any) {
@@ -184,6 +198,7 @@ async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<Pro
   // image scans nobody runs any more (the image left every box a month ago) go; the graph keeps their retired edges
   if (kind === "sbom") { try { const p = pruneImageSboms(); if (p.scans) console.log(`[${tag}] retired ${p.scans} image scan(s) nobody runs (${p.packages} package rows)`); } catch (e: any) { console.error(`[${tag}] image scan prune failed: ${e?.message || e}`); } }
   result.took_ms = Date.now() - t0;
+  finishPass(passId, { candidates: result.candidates, probed: result.probed.length, failed: result.failed, note: imagesNote(images) });
   const byCode = new Map<string, number>(); for (const f of result.failed) byCode.set(f.code, (byCode.get(f.code) || 0) + 1);
   console.log(`[${tag}] ${result.probed.length} probed, ${result.failed.length} failed of ${result.candidates} candidates in ${result.took_ms} ms${byCode.size ? ` (failures: ${[...byCode].map(([c, n]) => `${c} ${n}`).join(", ")})` : ""}${images ? `; images: ${images.ok ? `${images.scanned.length} read, ${images.failed.length} failed of ${images.candidates} due on ${images.scanner}` : images.reason}` : ""}`);
   return result;

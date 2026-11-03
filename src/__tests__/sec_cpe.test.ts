@@ -64,3 +64,11 @@ test("sbomCpe: the CPEs a syft row stores (a JSON list or a list), typed, bounde
   assert.deepEqual(sbomCpe("not json", fallback), componentCpe(fallback)); assert.deepEqual(sbomCpe("[]", fallback), componentCpe(fallback));
   assert.equal(sbomCpe(JSON.stringify(Array.from({ length: 12 }, (_, i) => `cpe:2.3:a:v${i}:p:1:*:*:*:*:*:*:*`)), fallback).cpes.length, 8, "at most eight");
 });
+
+test("componentCpe: a package or program named like an Object.prototype member gets the plain guess, not the prototype's member", () => {
+  for (const name of ["constructor", "__proto__", "hasOwnProperty", "toString"]) {
+    const r = componentCpe({ ecosystem: "binary", name, version: "1.0" });
+    assert.deepEqual(r.cpes, [cpe23("a", name, name, "1.0")], name);
+    assert.deepEqual(componentCpe({ ecosystem: "os", name, version: "1.0", source: name }).cpes, [], `${name} as an os id`);
+  }
+});

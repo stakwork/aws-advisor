@@ -101,6 +101,10 @@ export interface CpeRow {
   declared?: string | null;
 }
 
+/** A table entry by a name the probe read: own entries only. A plain index would hand back Object.prototype's members for a package or
+ *  program named `constructor` or `__proto__` (a function, not a list: "known.map is not a function" took a box out of the mirror on 2026-11-03). Pure. */
+const own = <T>(table: Record<string, T>, key: string): T | undefined => (Object.hasOwn(table, key) ? table[key] : undefined);
+
 /** The CPE candidates of a row the software probe read (no syft): see the module comment for the rules. Pure. */
 export function componentCpe(row: CpeRow): ComponentCpe {
   const eco = row.ecosystem.toLowerCase(); const name = row.name.trim().toLowerCase(); const version = row.version;
@@ -110,7 +114,7 @@ export function componentCpe(row: CpeRow): ComponentCpe {
     case "os": {
       const declared = normalizeCpe(row.declared);
       const id = slug(row.source ?? name);
-      const known = KNOWN_OS[id];
+      const known = own(KNOWN_OS, id);
       cpes = [...(declared ? [declared] : []), ...(known ? [cpe23("o", known[0], known[1], version === "unknown" ? null : version)] : [])];
       break;
     }
@@ -122,7 +126,7 @@ export function componentCpe(row: CpeRow): ComponentCpe {
       break;
     }
     default: {
-      const known = KNOWN_PRODUCTS[name];
+      const known = own(KNOWN_PRODUCTS, name);
       cpes = known ? known.map(([v, p]) => cpe23("a", v, p, version)) : [cpe23("a", name, name, version)];
     }
   }

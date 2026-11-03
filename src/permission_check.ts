@@ -160,7 +160,7 @@ export const CAPABILITIES: Capability[] = [
   { id: "ssm_probe", label: "SSM probe (SendCommand + GetCommandInvocation)", group: "ssm", actions: ["ssm:SendCommand", "ssm:GetCommandInvocation"],
     sdk: async (ctx) => {
       if (!ctx.instanceId) return { skipped: "pass instance_id (an SSM-online Linux instance) to run the real probe once; SendCommand has no dry run" };
-      const p = await probeInstance(ctx.instanceId, { kind: "host", accountId: ctx.is_parent ? null : ctx.account_id });
+      const p = await probeInstance(ctx.instanceId, { kind: "host", accountId: ctx.is_parent ? null : ctx.account_id, origin: "check" });
       return `probed ${ctx.instanceId} (host probe) at ${p.collected_at}: ${p.data.hostname}, ${p.data.cpus} CPUs`;
     } },
 ];

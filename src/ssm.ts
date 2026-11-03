@@ -10,6 +10,7 @@ import { NoSdkCredentials, credentialRemedy } from "./aws_config.js";
 import { S, credentialsMeta, query } from "./steampipe.js";
 import { accountCredentials } from "./accounts.js";
 import { checkProbeQuota } from "./quota.js";
+import { finishRun, startRun, type ProbeOrigin } from "./probe_log.js";
 import { checkDiskLevels } from "./disk_alerts.js";
 import { applyProbeDisks } from "./ebs_inventory.js";
 import { checkHostLevels } from "./host_alerts.js";
@@ -509,6 +510,8 @@ function classifyAwsError(e: any, instanceId: string, operation: "SendCommand" |
 }
 
 export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind; /** the member account the instance lives in (src/accounts.ts); default: what the SSM inventory says, else the parent */ accountId?: string | null;
+  /** Where the probe comes from, for History > Probes (src/probe_log.ts): a pass, a click on a box's page (the default), the agent, a permission check; and the pass it belongs to. */
+  origin?: ProbeOrigin; passId?: number | null;
   /** Further document parameters: the sbom kind's `images` mode (all | local) and `host` reading (processes | filesystem | both | none), the images kind's `images` batch. A deployed sbom document that predates a parameter gets the call again without it. */
   parameters?: Record<string, string> }
 
@@ -520,6 +523,23 @@ export interface ProbeOptions { timeoutMs?: number; kind?: ProbeKind; /** the me
  */
 export async function probeInstance(instanceId: string, opts: ProbeOptions = {}): Promise<StoredProbe> {
   const kind: ProbeKind = opts.kind ?? "host";
+  // every probe leaves a row in probe_runs (History > Probes), whichever way it ends: what was sent, to which box, from where, and the outcome
+  const trace: ProbeTrace = { accountId: null, commandId: null, document: null, upload: null };
+  const runId = startRun({ instanceId, kind, origin: opts.origin ?? "manual", passId: opts.passId ?? null });
+  try {
+    const stored = await probeInstanceInner(instanceId, kind, opts, trace);
+    finishRun(runId, { status: "ok", ...trace, metricsId: stored.id });
+    return stored;
+  } catch (e: any) {
+    const code = e instanceof ProbeError ? e.code : e?.name === "QuotaError" ? "quota" : "failed";
+    finishRun(runId, { status: "failed", code, message: String(e?.message || e), ...trace });
+    throw e;
+  }
+}
+/** What a probe found out on the way, for its probe_runs row: filled in as the probe goes, so a failure still says how far it got. */
+interface ProbeTrace { accountId: string | null; commandId: string | null; document: string | null; /** where the result came from: s3, inline (the SSM output), or null when nothing came back */ upload: string | null }
+
+async function probeInstanceInner(instanceId: string, kind: ProbeKind, opts: ProbeOptions, trace: ProbeTrace): Promise<StoredProbe> {
   if (!/^i-[0-9a-f]{8,17}$/.test(instanceId)) throw new ProbeError("not_managed", `"${instanceId}" is not an EC2 instance id`);
   checkProbeQuota(instanceId);
   // The same identity Steampipe uses (keys, profile or default chain, with the role when one is set), as an SDK provider.
@@ -533,6 +553,7 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
   let creds: ReturnType<typeof accountCredentials>;
   try { creds = accountCredentials(opts.accountId ?? (m.account_id ? String(m.account_id) : null)); }
   catch (e: any) { throw new ProbeError("no_credentials", `${e instanceof NoSdkCredentials ? e.message : String(e?.message || e)}; the probe uses the credentials saved in Settings.`); }
+  trace.accountId = creds.account_id;
 
   const client = new SSMClient({ region: m.region || creds.region, credentials: creds.provider });
   const def = PROBE_DEFS[kind];
@@ -597,6 +618,7 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
         } else throw e;
       }
       commandId = sent.Command?.CommandId || "";
+      trace.document = documentUsed; trace.commandId = commandId || null;
       if (!commandId) throw new ProbeError("failed", "SSM returned no command id");
     } catch (e: any) {
       if (e instanceof ProbeError) throw e;
@@ -640,12 +662,12 @@ export async function probeInstance(instanceId: string, opts: ProbeOptions = {})
       throw new ProbeError("bad_output", `${e.message}: ${detail}`);
     }
     // the whole result from S3 when the script posted it there; the inline object (trimmed, or a stub) is what fit in 24,000 characters
-    const inline = data;
+    const inline = data; trace.upload = "inline";
     if (upload && typeof data.upload === "string" && data.upload.startsWith("uploaded ")) {
       try {
         const full = parseProbeOutput(await fetchProbeUpload(upload.key, data.upload));
         if (full.kind !== data.kind) throw new Error(`the object is a ${full.kind} probe, not ${data.kind}`);
-        full.upload = data.upload; data = full;
+        full.upload = data.upload; data = full; trace.upload = "s3";
         recordProbeUpload({ key: upload.key, instanceId, accountId: creds.account_id, kind, receipt: inline.upload, collectedAt: data.collected_at });
       } catch (e: any) {
         const msg = String(e?.message || e).slice(0, 200);
@@ -751,10 +773,10 @@ function runProbeHooks(instanceId: string, rowId: number, collectedAt: string, d
 }
 
 /** Every kind in turn (host, docker, apps, software unless `kinds` narrows it); the merged view afterwards, and which kinds failed. */
-export async function probeInstanceAll(instanceId: string, kinds: readonly ProbeKind[] = PROBE_KINDS): Promise<{ probe: StoredProbe | null; ran: ProbeKind[]; failed: { kind: ProbeKind; code: string; message: string }[] }> {
+export async function probeInstanceAll(instanceId: string, kinds: readonly ProbeKind[] = PROBE_KINDS, origin: ProbeOrigin = "manual"): Promise<{ probe: StoredProbe | null; ran: ProbeKind[]; failed: { kind: ProbeKind; code: string; message: string }[] }> {
   const ran: ProbeKind[] = []; const failed: { kind: ProbeKind; code: string; message: string }[] = [];
   for (const kind of kinds) {
-    try { await probeInstance(instanceId, { kind }); ran.push(kind); }
+    try { await probeInstance(instanceId, { kind, origin }); ran.push(kind); }
     catch (e: any) { failed.push({ kind, code: e instanceof ProbeError ? e.code : "failed", message: String(e?.message || e).slice(0, 300) }); if (e instanceof ProbeError && (e.code === "no_credentials" || e.code === "not_managed" || e.code === "permission")) break; }
   }
   return { probe: latestProbe(instanceId), ran, failed };

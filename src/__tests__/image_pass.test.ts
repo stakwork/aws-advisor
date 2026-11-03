@@ -107,3 +107,12 @@ test("a Kubernetes node's pod images (recordNodeImages, source cluster) are due 
   sw.recordSoftware(D, iso(0), { os: { id: "debian" }, package_manager: "dpkg-query", packages: [{ n: "bash", v: "5.2" }], images: [] });
   assert.equal((db.prepare("select count(*) as n from instance_images where instance_id = ?").get(D) as any).n, 0, "the probe owns it and no longer lists it");
 });
+
+test("imageBatch sizes a scanner batch by the per-image timeout: each image can use its whole timeout within the document's budget", () => {
+  assert.equal(ip.imageBatch(180).maxEntries, 6, "1200 / 180");
+  assert.equal(ip.imageBatch(60).maxEntries, 15, "never more than IMAGE_BATCH");
+  assert.equal(ip.imageBatch(900).maxEntries, 1, "never none");
+  assert.equal(ip.imageBatch(0).maxEntries, 6, "an unset timeout is the script's default of 180");
+  assert.equal(ip.imageBatch(180).maxChars, ip.IMAGE_BATCH.maxChars);
+  assert.deepEqual(ip.imageBatch(180, ip.INLINE_IMAGE_BATCH), { maxEntries: 4, maxChars: ip.INLINE_IMAGE_BATCH.maxChars }, "the inline batch stays small");
+});

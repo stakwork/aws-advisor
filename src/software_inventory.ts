@@ -14,9 +14,9 @@ db.exec(`create table if not exists instance_os (
   instance_id text primary key, collected_at text not null, os_id text, os_version text, os_name text, kernel text, arch text, package_manager text, packages integer not null default 0
 );
 create table if not exists instance_packages (
-  instance_id text not null, ecosystem text not null, name text not null, version text not null, arch text,
+  instance_id text not null, ecosystem text not null, name text not null, version text not null, arch text, source text,
   first_seen text not null, last_seen text not null, gone integer not null default 0,
-  primary key (instance_id, ecosystem, name)
+  primary key (instance_id, ecosystem, name, version)
 );
 create index if not exists instance_packages_name on instance_packages(name, version);
 create table if not exists instance_binaries (
@@ -51,16 +51,19 @@ for (const col of ["kernel_upstream", "kernel_package", "kernel_package_version"
 // probe software/4 adds what the runtimes bundle (instance_bundles) and the dependencies of the packages owning the probed programs (instance_depends)
 // probe software/5 finds programs beyond PATH (nvm, /opt, /usr/local), so a box may hold several installs of one program: binaries are keyed by
 // (name, path) and bundles by the parent's version too. Older tables are rebuilt once with the wider key.
-for (const [table, want, create] of [
-  ["instance_binaries", ["instance_id", "name", "path"], "create table instance_binaries (instance_id text not null, name text not null, version text not null, path text not null default '', first_seen text not null, last_seen text not null, gone integer not null default 0, primary key (instance_id, name, path))"],
-  ["instance_bundles", ["instance_id", "parent", "parent_version", "name"], "create table instance_bundles (instance_id text not null, parent text not null, parent_version text not null, name text not null, version text not null, first_seen text not null, last_seen text not null, primary key (instance_id, parent, parent_version, name))"],
+// A package is keyed by its version too (2026-11-03): rpm keeps several kernels installed under one name (and several gpg-pubkey
+// entries), so a row per name compared each of them against the one stored and logged a change every pass (kernel 6.1.189 -> 6.1.119
+// -> 6.1.189, the stored version flipping, SUPERSEDED_BY edges piling up); the graph already takes one node per version.
+for (const [table, want, create, into, cols] of [
+  ["instance_binaries", ["instance_id", "name", "path"], "create table instance_binaries (instance_id text not null, name text not null, version text not null, path text not null default '', first_seen text not null, last_seen text not null, gone integer not null default 0, primary key (instance_id, name, path))", "instance_id, name, version, path, first_seen, last_seen, gone", "instance_id, name, version, coalesce(path, ''), first_seen, last_seen, gone"],
+  ["instance_bundles", ["instance_id", "parent", "parent_version", "name"], "create table instance_bundles (instance_id text not null, parent text not null, parent_version text not null, name text not null, version text not null, first_seen text not null, last_seen text not null, primary key (instance_id, parent, parent_version, name))", "instance_id, parent, parent_version, name, version, first_seen, last_seen", "instance_id, parent, parent_version, name, version, first_seen, last_seen"],
+  ["instance_packages", ["instance_id", "ecosystem", "name", "version"], "create table instance_packages (instance_id text not null, ecosystem text not null, name text not null, version text not null, arch text, source text, first_seen text not null, last_seen text not null, gone integer not null default 0, primary key (instance_id, ecosystem, name, version))", "instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone", "instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone"],
 ] as const) {
   const pk = (db.prepare(`pragma table_info(${table})`).all() as { name: string; pk: number }[]).filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
   if (pk.join(",") === want.join(",")) continue;
-  const cols = table === "instance_binaries" ? "instance_id, name, version, coalesce(path, ''), first_seen, last_seen, gone" : "instance_id, parent, parent_version, name, version, first_seen, last_seen";
-  const into = table === "instance_binaries" ? "instance_id, name, version, path, first_seen, last_seen, gone" : "instance_id, parent, parent_version, name, version, first_seen, last_seen";
   db.exec(`alter table ${table} rename to ${table}_old; ${create}; insert or ignore into ${table}(${into}) select ${cols} from ${table}_old; drop table ${table}_old`);
 }
+db.exec("create index if not exists instance_packages_name on instance_packages(name, version)");
 // rows marked gone before superseded software was deleted (2026-10-13): the column stays, nothing sets it any more
 db.exec("delete from instance_packages where gone = 1; delete from instance_binaries where gone = 1; delete from instance_images where gone = 1");
 // the advisor's own OSV/ALAS matcher (src/software_vulns.ts, src/alas_feed.ts) was removed on 2026-10-29: the strut workflows match against the graph now; its tables go
@@ -183,7 +186,7 @@ const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, 
     kernel_upstream = case when excluded.kernel is null then kernel_upstream else excluded.kernel_upstream end, kernel_package = case when excluded.kernel is null then kernel_package else excluded.kernel_package end,
     kernel_package_version = case when excluded.kernel is null then kernel_package_version else excluded.kernel_package_version end, kernel_package_source = case when excluded.kernel is null then kernel_package_source else excluded.kernel_package_source end`);
 const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosystem, name, version, arch, source, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, 0)
-  on conflict(instance_id, ecosystem, name) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
+  on conflict(instance_id, ecosystem, name, version) do update set arch = excluded.arch, source = coalesce(excluded.source, source), last_seen = excluded.last_seen, gone = 0`);
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, name, path) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, path = excluded.path, last_seen = excluded.last_seen, gone = 0`);
 const upsertImg = db.prepare(`insert into instance_images(instance_id, image, image_id, digest, created, platform, sbom_key, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -226,6 +229,21 @@ export function binaryVersion(line: string): string {
     if (m) return m[1]!;
   }
   return raw;
+}
+/** Version order for pairing a box's installed versions of one package (an epoch first, then numbers by value, then text): `1:6.1.189-236` after `6.1.119-129`, `4.14.355-271` before `4.14.355-277`. Pure. */
+export function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => { const m = /^(\d+):(.*)$/.exec(v); return { epoch: m ? Number(m[1]) : 0, rest: (m ? m[2]! : v).split(/[^0-9A-Za-z]+/).filter(Boolean) }; };
+  const x = parts(a), y = parts(b);
+  if (x.epoch !== y.epoch) return x.epoch - y.epoch;
+  for (let i = 0; i < Math.max(x.rest.length, y.rest.length); i++) {
+    const p = x.rest[i] ?? "", q = y.rest[i] ?? "";
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p), qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) - Number(q);
+    if (pn !== qn) return pn ? 1 : -1; // a number outranks a word at the same spot (6.1.0-1 after 6.1.0~rc1-1); a shorter version comes first
+    return p < q ? -1 : 1;
+  }
+  return 0;
 }
 /** process.versions keys that are not libraries: the runtime itself and its ABI numbers. */
 const NOT_LIBRARIES = new Set(["node", "modules", "napi", "unicode", "tz", "cldr"]);
@@ -273,21 +291,35 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
   const kernel = data.kernel ? kernelFacts({ ...data, os_id: data.os?.id ?? prevOs?.os_id ?? null, package_manager: data.package_manager ?? prevOs?.package_manager ?? null }, pkgs) : { upstream: null, pkg: null };
   const res: RecordSoftwareResult = { packages: pkgs.length, added: [], removed: [], changed: [], binaries: 0, images: 0, bundles: 0, depends: 0 };
   db.transaction(() => {
+    // one row per installed version: rpm keeps several kernels (and gpg-pubkey entries) under one name, so a name maps to its versions
     const all = db.prepare("select ecosystem, name, version from instance_packages where instance_id = ?").all(instanceId) as { ecosystem: string; name: string; version: string }[];
-    const prev = new Map(all.filter((r) => r.ecosystem === eco).map((r) => [r.name, r]));
+    const prev = new Map<string, string[]>();
+    for (const r of all) if (r.ecosystem === eco) prev.set(r.name, [...(prev.get(r.name) ?? []), r.version]);
     const first = prev.size === 0;
-    const seen = new Set<string>();
+    const seen = new Set<string>(); const cur = new Map<string, string[]>();
     for (const p of pkgs) {
-      seen.add(p.name);
-      const was = prev.get(p.name);
+      const k = `${p.name}\t${p.version}`; if (seen.has(k)) continue; seen.add(k);
+      cur.set(p.name, [...(cur.get(p.name) ?? []), p.version]);
       upsertPkg.run(instanceId, eco, p.name, p.version, p.arch, p.source, collectedAt, collectedAt);
-      if (!was && !first) res.added.push(p.name);
-      else if (was && was.version !== p.version) { res.changed.push({ name: p.name, from: was.version, to: p.version }); insertChange.run(instanceId, eco, p.name, was.version, p.version, collectedAt); }
     }
-    // what the probe no longer lists is gone from the box (or from a package manager it no longer uses): deleted, the removal logged
-    if (pkgs.length) for (const was of all) if (was.ecosystem !== eco || !seen.has(was.name)) {
-      db.prepare("delete from instance_packages where instance_id = ? and ecosystem = ? and name = ?").run(instanceId, was.ecosystem, was.name);
-      insertChange.run(instanceId, was.ecosystem, was.name, was.version, null, collectedAt); res.removed.push(was.name);
+    const change = (name: string, from: string, to: string | null) => { if (to != null) res.changed.push({ name, from, to }); insertChange.run(instanceId, eco, name, from, to, collectedAt); };
+    for (const [name, versions] of cur) {
+      const was = prev.get(name);
+      if (!was) { if (!first) res.added.push(name); continue; }
+      const gone = was.filter((v) => !versions.includes(v)).sort(compareVersions); const fresh = versions.filter((v) => !was.includes(v)).sort(compareVersions);
+      if (!gone.length && !fresh.length) continue;
+      // a version that left paired with one that arrived is an upgrade (oldest with oldest); one that arrived beside the versions kept
+      // follows the newest of them (a new kernel installed, the old image kept as the fallback); one that left alone is that version's removal
+      const n = Math.min(gone.length, fresh.length);
+      for (let i = 0; i < n; i++) change(name, gone[i]!, fresh[i]!);
+      const kept = was.filter((v) => versions.includes(v)).sort(compareVersions);
+      for (const to of fresh.slice(n)) if (kept.length) change(name, kept[kept.length - 1]!, to);
+      for (const from of gone.slice(n)) change(name, from, null);
+    }
+    // what the probe no longer lists is gone from the box (or from a package manager it no longer uses): deleted; a name gone altogether is logged as removed
+    if (pkgs.length) for (const was of all) if (was.ecosystem !== eco || !seen.has(`${was.name}\t${was.version}`)) {
+      db.prepare("delete from instance_packages where instance_id = ? and ecosystem = ? and name = ? and version = ?").run(instanceId, was.ecosystem, was.name, was.version);
+      if (was.ecosystem !== eco || !cur.has(was.name)) { insertChange.run(instanceId, was.ecosystem, was.name, was.version, null, collectedAt); if (!res.removed.includes(was.name)) res.removed.push(was.name); }
     }
     // one row per install: a box may hold several Nodes (nvm), each at its own path
     const bins = (data.binaries ?? []).filter((b) => b && typeof b.name === "string" && b.name && b.version).map((b) => ({ name: clean(b.name, 64), version: clean(binaryVersion(b.version), 120), path: b.path == null ? "" : clean(b.path, 200) }));

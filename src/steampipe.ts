@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
@@ -7,7 +8,7 @@ import { getSetting, setSetting } from "./db.js";
 import { describeError, hasOpenIssues, noteSuccessForTables, tablesIn } from "./permissions.js";
 import {
   CredentialMode, CredentialPaths, CredentialSettings, CredentialSource, DEFAULT_CREDENTIAL_SOURCE, MemberConnection, NoSdkCredentials, ProviderKind, SdkCredentials,
-  credentialRemedy, describeSettings, parentConnectionName, readStaticKeys, removeCredentialFiles, sdkCredentialsFor, writeCredentialFiles,
+  credentialRemedy, describeSettings, memoizeProvider, parentConnectionName, readStaticKeys, removeCredentialFiles, sdkCredentialsFor, writeCredentialFiles,
 } from "./aws_config.js";
 
 /** Schema (= Steampipe connection name) every query is qualified with. */
@@ -216,13 +217,23 @@ export const hasConnectionFile = () => fs.existsSync(spcPath());
  * chain, or STS AssumeRole on top of one of them), for the calls Steampipe cannot make (SSM Run Command,
  * the identity check). Throws NoSdkCredentials when nothing is configured. Never log the provider's output.
  */
+// built once per saved credential set (the meta, the file paths and, for keys, a digest of the keys) and shared by every client:
+// a provider built per call resolved the credentials anew for every SSM, S3 and STS client, and a wide pass (20 sbom workers
+// beside the host and software probes) timed the instance metadata endpoint out with "Could not load credentials from any
+// providers" on the advisor's own side (2026-11-03). The SDK refreshes a session inside the provider; memoizeProvider shares it.
+let sdkCache: { key: string; value: SdkCredentials & { region: string } } | null = null;
 export function sdkCredentials(): SdkCredentials & { region: string } {
   const meta = credentialsMeta();
-  if (!meta || !hasConnectionFile()) throw new NoSdkCredentials(`no AWS credentials are configured (no "${S}" connection file); save them in Settings`);
+  if (!meta || !hasConnectionFile()) { sdkCache = null; throw new NoSdkCredentials(`no AWS credentials are configured (no "${S}" connection file); save them in Settings`); }
   const p = credentialPaths();
   const keys = meta.mode === "keys" ? readStaticKeys(p) : null;
   const region = meta.defaultRegion && meta.defaultRegion !== "*" ? meta.defaultRegion : "us-east-1";
-  return { ...sdkCredentialsFor(meta, p, keys), region };
+  const key = JSON.stringify([meta, p, keys ? createHash("sha256").update(`${keys.accessKey}\n${keys.secretKey}\n${keys.sessionToken ?? ""}`).digest("hex") : null]);
+  if (sdkCache?.key === key) return sdkCache.value;
+  const built = sdkCredentialsFor(meta, p, keys);
+  const value = { ...built, provider: memoizeProvider(built.provider), region };
+  sdkCache = { key, value };
+  return value;
 }
 
 /**

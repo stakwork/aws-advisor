@@ -503,3 +503,37 @@ test("software inventory: the kernel's upstream version and owning package are s
   for (const t of ["instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
   db.prepare("delete from inventory_ec2 where instance_id = ?").run(iid);
 });
+
+test("software inventory: several installed versions of one package (rpm kernels) are rows of their own; the change log pairs what left with what arrived", () => {
+  const iid = "i-0feedfacecafe0020";
+  db.prepare("insert or replace into inventory_ec2(instance_id, name, state, snapshot) values (?, 'al-1', 'running', '{}')").run(iid);
+  for (const t of ["instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
+  const two = [{ n: "kernel", v: "6.1.119-129.201.amzn2023", a: "x86_64" }, { n: "kernel", v: "6.1.189-236.400.amzn2023", a: "x86_64" }, { n: "gpg-pubkey", v: "d832c631-6515c85e" }, { n: "gpg-pubkey", v: "cf8e292a-63c8e149" }, { n: "curl", v: "8.5.0", a: "x86_64" }];
+  const first = sw.recordSoftware(iid, "2026-11-01T00:00:00Z", { os: { id: "amzn", version: "2023" }, kernel: "6.1.189-236.400.amzn2023.x86_64", arch: "x86_64", package_manager: "rpm", packages: two, binaries: [], images: [] })!;
+  assert.equal(first.packages, 5); assert.equal(first.changed.length, 0);
+  assert.equal((db.prepare("select count(*) as n from instance_packages where instance_id = ? and name = 'kernel'").get(iid) as any).n, 2, "one row per installed kernel");
+  const same = sw.recordSoftware(iid, "2026-11-02T00:00:00Z", { package_manager: "rpm", packages: [...two].reverse(), binaries: [], images: [] })!;
+  assert.deepEqual([same.changed, same.added, same.removed], [[], [], []], "the same list in another order changes nothing");
+  assert.equal((db.prepare("select count(*) as n from package_changes where instance_id = ?").get(iid) as any).n, 0);
+  // a newer kernel installed, the oldest image purged: an upgrade from the one that left to the one that arrived
+  const third = sw.recordSoftware(iid, "2026-11-03T00:00:00Z", { package_manager: "rpm", packages: [two[1]!, { n: "kernel", v: "6.1.200-240.500.amzn2023", a: "x86_64" }, two[2]!, two[3]!, two[4]!], binaries: [], images: [] })!;
+  assert.deepEqual(third.changed, [{ name: "kernel", from: "6.1.119-129.201.amzn2023", to: "6.1.200-240.500.amzn2023" }]); assert.deepEqual(third.removed, [], "the name is still installed");
+  // a kernel added beside the two kept: logged as following the newest kept; a version purged on its own: that version's removal, the name stays
+  const fourth = sw.recordSoftware(iid, "2026-11-04T00:00:00Z", { package_manager: "rpm", packages: [two[1]!, { n: "kernel", v: "6.1.200-240.500.amzn2023", a: "x86_64" }, { n: "kernel", v: "6.1.210-250.600.amzn2023", a: "x86_64" }, two[2]!, two[4]!], binaries: [], images: [] })!;
+  assert.deepEqual(fourth.changed, [{ name: "kernel", from: "6.1.200-240.500.amzn2023", to: "6.1.210-250.600.amzn2023" }]); assert.deepEqual(fourth.removed, []);
+  assert.deepEqual(db.prepare("select name, from_version, to_version from package_changes where instance_id = ? order by id").all(iid), [
+    { name: "kernel", from_version: "6.1.119-129.201.amzn2023", to_version: "6.1.200-240.500.amzn2023" },
+    { name: "kernel", from_version: "6.1.200-240.500.amzn2023", to_version: "6.1.210-250.600.amzn2023" },
+    { name: "gpg-pubkey", from_version: "cf8e292a-63c8e149", to_version: null },
+  ]);
+  assert.deepEqual(sw.softwareOn(iid).packages.filter((p) => p.name === "kernel").map((p) => p.version).sort(), ["6.1.189-236.400.amzn2023", "6.1.200-240.500.amzn2023", "6.1.210-250.600.amzn2023"]);
+  assert.equal(sw.softwareOn(iid).packages.find((p) => p.version === "6.1.189-236.400.amzn2023")?.first_seen, "2026-11-01T00:00:00Z", "a version row keeps when it was first seen");
+  const whole = sw.recordSoftware(iid, "2026-11-05T00:00:00Z", { package_manager: "rpm", packages: [two[4]!], binaries: [], images: [] })!;
+  assert.deepEqual([...whole.removed].sort(), ["gpg-pubkey", "kernel"], "a name gone altogether is removed once, however many versions it had");
+  for (const t of ["instance_os", "instance_packages", "instance_binaries", "instance_images", "package_changes"]) db.prepare(`delete from ${t} where instance_id = ?`).run(iid);
+});
+
+test("compareVersions orders an epoch first, then numbers by value, then text", () => {
+  const sorted = ["6.1.189-236.400.amzn2023", "1:6.1.119-129.201.amzn2023", "6.1.119-129.201.amzn2023", "4.14.355-277.647.amzn2", "4.14.355-271.569.amzn2", "6.1.0~rc1-1", "6.1.0-1"].sort(sw.compareVersions);
+  assert.deepEqual(sorted, ["4.14.355-271.569.amzn2", "4.14.355-277.647.amzn2", "6.1.0~rc1-1", "6.1.0-1", "6.1.119-129.201.amzn2023", "6.1.189-236.400.amzn2023", "1:6.1.119-129.201.amzn2023"]);
+});

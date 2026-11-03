@@ -245,3 +245,20 @@ test("credentialRemedy names the fix for the usual failures", () => {
   assert.match(credentialRemedy(Object.assign(new Error("The security token included in the request is expired"), { name: "ExpiredToken" }), { mode: "keys" }), /save a valid key/);
   assert.equal(credentialRemedy(new Error("something else"), { mode: "chain" }), "something else");
 });
+
+test("memoizeProvider resolves once and shares the result until it nears expiry; a failure is not kept", async () => {
+  const { memoizeProvider } = await import("../aws_config.js");
+  let calls = 0;
+  const far = memoizeProvider(async () => { calls++; return { accessKeyId: `k${calls}`, secretAccessKey: "s", expiration: new Date(Date.now() + 3600e3) }; });
+  const [a, b] = await Promise.all([far(), far()]);
+  assert.equal(a.accessKeyId, "k1"); assert.equal(b.accessKeyId, "k1"); assert.equal(calls, 1, "two callers at once share one resolution");
+  assert.equal((await far()).accessKeyId, "k1"); assert.equal(calls, 1);
+  const near = memoizeProvider(async () => { calls++; return { accessKeyId: `k${calls}`, secretAccessKey: "s", expiration: new Date(Date.now() + 60e3) }; });
+  await near(); await near(); assert.equal(calls, 3, "credentials within the margin of expiry are resolved again");
+  const forever = memoizeProvider(async () => { calls++; return { accessKeyId: "static", secretAccessKey: "s" }; });
+  await forever(); await forever(); assert.equal(calls, 4, "no expiration: resolved once");
+  let fail = true;
+  const flaky = memoizeProvider(async () => { calls++; if (fail) throw new Error("Could not load credentials from any providers"); return { accessKeyId: "ok", secretAccessKey: "s" }; });
+  await assert.rejects(flaky(), /Could not load/); fail = false;
+  assert.equal((await flaky()).accessKeyId, "ok"); assert.equal(calls, 6, "the failure was not kept; the next call resolved");
+});

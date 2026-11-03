@@ -116,6 +116,7 @@ export function recordAccountTest(accountId: string, result: { ok: boolean; arn?
 }
 
 const providers = new Map<string, AwsCredentialIdentityProvider>();
+let providersBase: AwsCredentialIdentityProvider | null = null;
 
 /**
  * The SDK provider for an account: the parent's own provider for the parent (or an unknown id), else the
@@ -123,6 +124,8 @@ const providers = new Map<string, AwsCredentialIdentityProvider>();
  */
 export function accountCredentials(accountId: string | null | undefined): { provider: AwsCredentialIdentityProvider; region: string; account_id: string; is_parent: boolean } {
   const base = sdkCredentials();
+  // the member providers chain on the parent's: a parent provider rebuilt (credentials saved again) retires them
+  if (providersBase !== base.provider) { providers.clear(); providersBase = base.provider; }
   const parentId = credentialsMeta()?.accountId || "";
   const m = accountId && accountId !== parentId ? listMembers().find((x) => x.account_id === accountId) : undefined;
   if (!m) return { provider: base.provider, region: base.region, account_id: parentId, is_parent: true };

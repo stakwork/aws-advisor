@@ -362,6 +362,22 @@ export function sdkCredentialsFor(
   return { kind: "assume-role", describe: `static access key assuming ${s.roleArn}`, provider: factory.fromTemporaryCredentials({ masterCredentials: master, params: { RoleArn: s.roleArn, RoleSessionName: "aws-advisor" }, clientConfig: { region } }) };
 }
 
+/**
+ * One resolution shared by every caller until it nears expiry: the credentials are fetched once and the promise handed out
+ * while they last (a resolution that fails is not kept, so the next call tries again). The SDK's clients memoize their own
+ * provider but a client built per call starts over, and the chain's providers (instance metadata, SSO, STS) are what a
+ * wide probe pass then hit dozens of times at once. Pure apart from the cache.
+ */
+export function memoizeProvider(provider: AwsCredentialIdentityProvider, marginMs = 5 * 60_000): AwsCredentialIdentityProvider {
+  let pending: Promise<AwsCredentialIdentity> | null = null;
+  const fresh = (c: AwsCredentialIdentity) => !c.expiration || c.expiration.getTime() - Date.now() > marginMs;
+  return async () => {
+    if (pending) { try { const c = await pending; if (fresh(c)) return c; } catch { /* resolved again below */ } }
+    const next = provider(); pending = next;
+    try { return await next; } catch (e) { if (pending === next) pending = null; throw e; }
+  };
+}
+
 export class NoSdkCredentials extends Error {
   constructor(message: string) { super(message); this.name = "NoSdkCredentials"; }
 }
