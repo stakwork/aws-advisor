@@ -729,10 +729,20 @@ Before the boxes run, the pass lists the distinct images the running boxes carry
 registry digest and platform, keyed `digest|platform` because a multi-arch tag's digest is the index, the same on an
 amd64 and an arm64 box with different contents), skips those read ok within `PROBE_SBOM_INTERVAL_HOURS`, and sends the
 scanner the rest in batches of 15 as the document's `images` parameter (`repo@sha256:…|os/arch`, one command per batch,
-most shared images first, at most 300 per pass). The scanner pulls each by digest straight from its registry with syft's
-`registry:` source (no Docker daemon) for the box's platform, `PROBE_IMAGES_TIMEOUT_SECONDS` (180, up to 1800) per image
-within the document's 40-minute budget (a batch holds as many images as can each use the whole allowance), and
-answers with the same scan records; they are kept once per image (`image_sbom_scans`, `image_sbom`) and shown on every
+most shared images first, at most 300 per pass). The scanner reads each by digest for the box's platform, within
+`PROBE_IMAGES_TIMEOUT_SECONDS` (180, up to 1800) per image and the document's 40-minute budget (a batch holds as many
+images as can each use the whole allowance). With a Docker daemon on the scanner (overlay2 storage, the default of
+Docker Engine on Linux) the daemon pulls the image, three layers at a time, unpacked once under `/var/lib/docker`, and
+syft reads the unpacked layers in place through a read-only overlay mount the probe makes beside its scratch directory:
+no container is created, nothing from the image runs, the mount and the daemon's copy go after the scan. The daemon
+and syft work from a copy of root's `~/.docker/config.json` made beside the scratch directory, so a Docker Hub login or a
+credential helper set up on the scanner applies to both, with the batch's ECR tokens logged in on top; root's file is
+never written. Without a daemon, with one that keeps images in the
+containerd store (`docker info` says `overlayfs`, not `overlay2`), or for an image the daemon could not pull, syft
+pulls from the registry itself (its `registry:` source), which fetches the layers one by one and writes them out twice:
+an 8 GB image means some 50 GB of scratch traffic before a package is read, so a scanner that reads such images wants the
+daemon (Docker Engine, the AWS CLI, syft, which the probe installs, and a volume with the room and the throughput: a gp3
+volume at its 125 MB/s floor spends minutes on the unpack alone). The scanner answers with the same scan records; they are kept once per image (`image_sbom_scans`, `image_sbom`) and shown on every
 box that runs the image, whose `CONTAINS` edges carry the platform they were read on. The boxes then get
 `images=local` and scan only images with no registry digest (built or loaded on the box). Without a scanner, when it is
 not SSM-online, when its first batch fails, or when the sbom document predates the parameter, the boxes scan every image

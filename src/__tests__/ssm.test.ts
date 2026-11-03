@@ -71,7 +71,9 @@ test("every probe script is a read-only shell script that prints its kind", () =
     assert.ok(script.includes(`"probe":"aws-advisor/${kind}/`) && script.includes(`"kind":"${kind}"`), `${kind} prints its probe id and kind`);
     // the sbom script's one exception: it removes the scratch directory it gives syft and the stereoscope-* leftovers of earlier runs, on lines that guard themselves
     const scratch = script.split("\n").filter((l) => /\brm\b/.test(l));
-    for (const l of scratch) assert.ok((kind === "sbom" || kind === "images") && (/case "\$sbtmp" in \*\/aws-advisor-sbom\) rm -rf "\$sbtmp"/.test(l) || /-name 'stereoscope-\*' -mmin \+60 -exec rm -rf \{\}/.test(l)), `${kind}: an unguarded removal: ${l}`);
+    // the images script's own (images 1.3): the image the daemon pulled for the scan, on lines that test for it, and the docker config copy it made beside the scratch directory
+    const imagesOwn = (l: string) => kind === "images" && (/\[ -n "\$dkref" \]; then docker image rm -f "\$dkref"/.test(l) || /if \[ "\$rc" -ne 0 \]; then .*docker image rm -f "\$dref"/.test(l) || /case "\$dkcfg" in \*\/aws-advisor-sbom-docker\) rm -rf "\$dkcfg"/.test(l));
+    for (const l of scratch) assert.ok((kind === "sbom" || kind === "images") && (/case "\$sbtmp" in \*\/aws-advisor-sbom\) rm -rf "\$sbtmp"/.test(l) || /-name 'stereoscope-\*' -mmin \+60 -exec rm -rf \{\}/.test(l) || imagesOwn(l)), `${kind}: an unguarded removal: ${l}`);
     const rest = script.split("\n").filter((l) => !scratch.includes(l)).join("\n");
     for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(rest, forbidden);
   }

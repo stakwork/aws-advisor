@@ -403,7 +403,7 @@ test("the images script: each entry of the batch is pulled from its registry by 
   const sha = (c: string) => `sha256:${c.repeat(64)}`;
   const batch = [`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}|linux/arm64`, `nginx@${sha("b")}|linux/amd64`, `public.ecr.aws/docker/library/redis@${sha("c")}`, `123456789012.dkr.ecr.eu-west-1.amazonaws.com/web@${sha("d")}|linux/arm64`].join(" ");
   const script = (images: string) => pr.defaultProbeScript("images").replace("__IMAGES__", images).replace("__IMAGE_TIMEOUT__", "90").replace("__INSTALL__", "no").replace("__UPLOAD__", "");
-  const run = (PATH: string, s: string) => { const r = spawnSync("sh", [], { input: s, encoding: "utf8", env: { ...process.env, PATH, AWS_ADVISOR_SBOM_TMP: path.join(dir, "aws-advisor-sbom") } }); assert.equal(r.status, 0, r.stderr); return parseProbeOutput(r.stdout.trim().split("\n").pop() || ""); };
+  const run = (PATH: string, s: string, extra: Record<string, string> = {}) => { const r = spawnSync("sh", [], { input: s, encoding: "utf8", env: { ...process.env, PATH, AWS_ADVISOR_SBOM_TMP: path.join(dir, "aws-advisor-sbom"), ...extra } }); assert.equal(r.status, 0, r.stderr); return parseProbeOutput(r.stdout.trim().split("\n").pop() || ""); };
   const j = run(`${bin}:/usr/bin:/bin`, script(batch));
   assert.equal(j.kind, "images"); assert.equal(j.probe, "aws-advisor/images/2"); assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.images_mode, null);
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [s.ref, s]));
@@ -429,6 +429,41 @@ test("the images script: each entry of the batch is pulled from its registry by 
   assert.equal(kb[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.status, "skipped");
   assert.equal(kb[`nginx@${sha("b")}`]!.status, "timeout", "Docker Hub needs no token");
   assert.ok(!fs.readFileSync(log, "utf8").includes("dkr.ecr"), "syft was never asked for an ECR image");
+  // a scanner with a Docker daemon on overlay2: the daemon is logged in with the ECR token, pulls each image for its platform, its layers are mounted
+  // read-only and syft reads the mount; a pull that times out is the image's timeout, a pull that fails leaves the image to the registry source
+  const withdk = path.join(dir, "withdk"); fs.mkdirSync(withdk);
+  w(withdk, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n");
+  w(withdk, "aws", fs.readFileSync(path.join(bin, "aws"), "utf8"));
+  w(withdk, "syft", `#!/bin/sh\necho "$*" >> ${log}\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *dir:*) printf 'pkg:pypi/flask@3.0.0\\tcpe:2.3:a:palletsprojects:flask:3.0.0:*:*:*:*:*:*:*\\n';; *registry:*) printf 'pkg:npm/express@4.19.2\\t\\n';; *) exit 2;; esac\n`);
+  w(withdk, "docker", `#!/bin/sh\necho "docker $* config=\${DOCKER_CONFIG:-}" >> ${log}\ncase "$1 $2" in "info --format") case "$3" in '{{.Driver}}') echo overlay2;; '{{.DockerRootDir}}') echo /var/lib/docker;; esac;; "login --username") cat > ${dir}/login-$5;; "pull -q") [ -f "$DOCKER_CONFIG/config.json" ] && cp "$DOCKER_CONFIG/config.json" ${dir}/cfg-at-pull.json; for a in "$@"; do ref=$a; done; case "$ref" in *nginx@*) exit 124;; *web@*) exit 1;; *) exit 0;; esac;; "image inspect") for a in "$@"; do ref=$a; done; case "$ref" in *redis@*) printf '/var/lib/docker/overlay2/only/diff:<no value>\\n';; *) printf '/var/lib/docker/overlay2/up/diff:/var/lib/docker/overlay2/l1/diff:/var/lib/docker/overlay2/l2/diff\\n';; esac;; "image rm") exit 0;; *) exit 1;; esac\n`);
+  w(withdk, "mount", `#!/bin/sh\necho "mount $*" >> ${log}\n`);
+  w(withdk, "umount", `#!/bin/sh\necho "umount $*" >> ${log}\n`);
+  fs.writeFileSync(log, "");
+  // root's docker config on the scanner: a Docker Hub login the daemon and syft must keep using
+  const home = path.join(dir, "home"); fs.mkdirSync(path.join(home, ".docker"), { recursive: true }); fs.writeFileSync(path.join(home, ".docker", "config.json"), '{"auths":{"https://index.docker.io/v1/":{"auth":"aHVi"}}}');
+  const d = run(`${withdk}:/usr/bin:/bin`, script(batch), { HOME: home });
+  const db = Object.fromEntries(d.sbom!.sources.map((s) => [s.ref, s]));
+  const apiRef = `123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`; const webRef = `123456789012.dkr.ecr.eu-west-1.amazonaws.com/web@${sha("d")}`;
+  assert.equal(db[apiRef]!.status, "ok"); assert.deepEqual(db[apiRef]!.purls, ["pkg:pypi/flask@3.0.0"], "read through the mount, not the registry"); assert.equal(db[apiRef]!.platform, "linux/arm64");
+  assert.equal(db[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.status, "ok"); assert.deepEqual(db[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.purls, ["pkg:pypi/flask@3.0.0"], "a single-layer image mounts too");
+  assert.equal(db[`nginx@${sha("b")}`]!.status, "timeout"); assert.match(db[`nginx@${sha("b")}`]!.note ?? "", /^the daemon did not finish pulling the image within 90 s/);
+  assert.equal(db[webRef]!.status, "ok"); assert.deepEqual(db[webRef]!.purls, ["pkg:npm/express@4.19.2"], "the daemon could not pull it: the registry source read it");
+  const dl = fs.readFileSync(log, "utf8").split("\n");
+  const mnt = path.join(dir, "aws-advisor-sbom-mnt"); const dcfg = path.join(dir, "aws-advisor-sbom-docker");
+  assert.ok(dl.some((l) => l === `docker pull -q --platform linux/arm64 ${apiRef} config=${dcfg}`), `pulled by the daemon for the box's platform with the probe's docker config: ${dl.join(" | ")}`);
+  assert.ok(dl.some((l) => l.startsWith(`docker pull -q public.ecr.aws/docker/library/redis@`) && !l.includes("--platform")), "no platform flag without a platform");
+  assert.ok(dl.includes("mount -t overlay overlay -o ro,lowerdir=/var/lib/docker/overlay2/up/diff:/var/lib/docker/overlay2/l1/diff:/var/lib/docker/overlay2/l2/diff " + mnt), "the image's layers, top first, mounted read-only");
+  assert.ok(dl.includes("mount -t overlay overlay -o ro,lowerdir=/var/lib/docker/overlay2/only/diff " + mnt), "one layer: no stray separator");
+  assert.ok(dl.some((l) => l.startsWith(`scan dir:${mnt} --base-path ${mnt} -o template`)), `syft reads the mount: ${dl.filter((l) => l.startsWith("scan")).join(" | ")}`);
+  assert.ok(dl.some((l) => l.startsWith(`scan -c `) && l.includes(`registry:${webRef}`)), "the registry fallback carries the syft config");
+  assert.equal(dl.filter((l) => l.startsWith("umount ")).length, 2, "each mount is undone, once");
+  assert.equal(fs.readFileSync(path.join(dir, "login-123456789012.dkr.ecr.eu-west-1.amazonaws.com"), "utf8"), "TOKEN-EU", "the daemon logged in with the CLI's token on stdin");
+  assert.equal(fs.readFileSync(path.join(dir, "login-public.ecr.aws"), "utf8"), "TOKEN-PUBLIC");
+  assert.ok(!fs.existsSync(mnt) && !fs.existsSync(dcfg), "the mount point and the docker config are gone when the probe exits");
+  assert.equal(fs.readFileSync(path.join(dir, "cfg-at-pull.json"), "utf8"), '{"auths":{"https://index.docker.io/v1/":{"auth":"aHVi"}}}', "the pull ran with a copy of root's docker config: the Hub login applies");
+  assert.equal(fs.readFileSync(path.join(home, ".docker", "config.json"), "utf8"), '{"auths":{"https://index.docker.io/v1/":{"auth":"aHVi"}}}', "root's own file is untouched");
+  assert.equal(dl.filter((l) => l.startsWith("docker image rm -f ")).length, 4, "the two scanned images and the two failed pulls");
+  assert.ok(!JSON.stringify(d).includes("TOKEN-"), "no token in the result");
   // an empty batch: nothing read, a valid answer
   assert.deepEqual(run(`${bin}:/usr/bin:/bin`, script("")).sbom!.sources, []);
 });
