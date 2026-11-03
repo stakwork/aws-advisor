@@ -1,6 +1,6 @@
 import { db } from "./db.js";
 import { accountId, enabled, writeCypher } from "./graph_mirror.js";
-import { listClusters, listIngresses, listNetworkPolicies, listServices, listWorkloads, selects } from "./cluster_inventory.js";
+import { listClusters, listIngresses, listNetworkPolicies, listServices, listWorkloads, nodeBoxResolver, selects } from "./cluster_inventory.js";
 import { AWS } from "./adapters/types.js";
 import { COMPUTE_OF } from "./graph_cypher.js";
 
@@ -143,12 +143,8 @@ export async function mirrorClusters(): Promise<ClusterGraphCounts | null> {
 
   const policies = listNetworkPolicies();
   const workloads = listWorkloads(undefined, true);
-  // Kubernetes names a pod's node by its hostname (ip-10-0-1-2.ec2.internal), not the instance id: matched to the box by its private DNS name (a live box first, a reused name's latest otherwise)
-  const byDns = new Map<string, string>();
-  for (const r of rows("select instance_id, json_extract(snapshot, '$.network.private_dns') as dns from inventory_ec2 where json_extract(snapshot, '$.network.private_dns') is not null order by gone desc, last_seen asc")) {
-    const dns = String(r.dns).toLowerCase(); byDns.set(dns, String(r.instance_id)); byDns.set(dns.split(".")[0], String(r.instance_id));
-  }
-  const boxOf = (node: string) => /^i-[0-9a-f]+$/.test(node) ? node : byDns.get(node.toLowerCase()) ?? byDns.get(node.toLowerCase().split(".")[0]) ?? null;
+  // Kubernetes names a pod's node by its hostname (ip-10-0-1-2.ec2.internal), not the instance id: matched to the box by its private DNS name (cluster_inventory.ts nodeBoxResolver)
+  const boxOf = nodeBoxResolver();
   const platformOf = (clusterArn: string) => clusters.find((c) => c.arn === clusterArn)?.kind === "ecs" ? "ecs" : "eks";
   const workloadRows = workloads.map((wl) => ({
     id: wl.id, account_id: clusterAccount.get(wl.cluster_arn) ?? null, cluster_arn: wl.cluster_arn, name: wl.name, kind: wl.kind, namespace: wl.namespace, platform: platformOf(wl.cluster_arn), native_type: wl.kind === "ecs_service" ? "ecs_service" : `kubernetes_${wl.kind}`, uid: wl.uid ?? wl.id,

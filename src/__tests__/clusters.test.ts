@@ -115,3 +115,28 @@ test("clusterSummary and listClusters follow the account scope: a parent looking
   assert.deepEqual([parent.total, parent.eks, parent.ecs, parent.nodes, parent.workloads], [1, 0, 1, 1, 0]);
   assert.deepEqual(ci.listClusters({ id: "222222222222", primary: true }).map((c) => c.name), ["parent-ecs"]);
 });
+
+test("nodeImagesFromPods: the Running pods' container images per node, named as the spec names them, with the digest the kubelet pulled; init containers and pods that are not running are out", () => {
+  const sha = (c: string) => `sha256:${c.repeat(64)}`;
+  const pods2 = [
+    { metadata: { name: "api-1" }, spec: { nodeName: "ip-10-0-1-2.ec2.internal", containers: [{ name: "api", image: "nginx:1.27" }, { name: "side", image: "ghcr.io/example/side:v2" }], initContainers: [{ name: "init", image: "busybox:1" }] },
+      status: { phase: "Running", containerStatuses: [{ name: "api", image: "docker.io/library/nginx:1.27", imageID: `docker.io/library/nginx@${sha("1")}` }, { name: "side", image: "ghcr.io/example/side:v2", imageID: `docker-pullable://ghcr.io/example/side@${sha("2")}` }], initContainerStatuses: [{ name: "init", image: "busybox:1", imageID: `docker.io/library/busybox@${sha("9")}` }] } },
+    // the same image on the same node again, and a build that never left the node (a bare image id)
+    { metadata: { name: "api-2" }, spec: { nodeName: "ip-10-0-1-2.ec2.internal", containers: [{ name: "api", image: "nginx:1.27" }, { name: "dev", image: "local:dev" }] }, status: { phase: "Running", containerStatuses: [{ name: "api", imageID: `docker.io/library/nginx@${sha("1")}` }, { name: "dev", imageID: sha("8") }] } },
+    { metadata: { name: "pending" }, spec: { nodeName: "ip-10-0-1-3.ec2.internal", containers: [{ name: "x", image: "pending:1" }] }, status: { phase: "Pending" } },
+    { metadata: { name: "done" }, spec: { nodeName: "ip-10-0-1-3.ec2.internal", containers: [{ name: "x", image: "job:1" }] }, status: { phase: "Succeeded", containerStatuses: [{ name: "x", imageID: `job@${sha("3")}` }] } },
+    { metadata: { name: "unscheduled" }, spec: { containers: [{ name: "x", image: "nowhere:1" }] }, status: { phase: "Running" } },
+  ];
+  const by = ci.nodeImagesFromPods(pods2);
+  assert.deepEqual([...by.keys()], ["ip-10-0-1-2.ec2.internal"], "only nodes with Running pods");
+  assert.deepEqual(by.get("ip-10-0-1-2.ec2.internal"), [
+    { image: "nginx:1.27", digest: `docker.io/library/nginx@${sha("1")}`, image_id: null, platform: null },
+    { image: "ghcr.io/example/side:v2", digest: `ghcr.io/example/side@${sha("2")}`, image_id: null, platform: null },
+    { image: "local:dev", digest: null, image_id: sha("8"), platform: null },
+  ]);
+  const facts = ci.nodeFacts([
+    { metadata: { name: "ip-10-0-1-2.ec2.internal" }, spec: { providerID: "aws:///us-east-1a/i-0abc0000000000001" }, status: { nodeInfo: { operatingSystem: "linux", architecture: "arm64" } } },
+    { metadata: { name: "fargate-ip-10-0-9-9.ec2.internal" }, spec: { providerID: "aws:///us-east-1a/fargate-ip-10-0-9-9" }, status: {} },
+  ]);
+  assert.deepEqual([...facts], [["ip-10-0-1-2.ec2.internal", { instance_id: "i-0abc0000000000001", platform: "linux/arm64" }], ["fargate-ip-10-0-9-9.ec2.internal", { instance_id: null, platform: null }]]);
+});

@@ -83,3 +83,27 @@ test("imagePass: no scanner configured says so and leaves the boxes scanning eve
     assert.equal(ip.sbomImagesMode(gated), "all");
   } finally { if (before === undefined) delete process.env.PROBE_IMAGES_SCANNER; else process.env.PROBE_IMAGES_SCANNER = before; }
 });
+
+test("a Kubernetes node's pod images (recordNodeImages, source cluster) are due on the scanner like any registry image; the software probe's empty docker list leaves them alone, and a probe-listed row stays the probe's", () => {
+  const N = "i-0pass00000000000n", D = "i-0pass00000000000d";
+  box(N); box(D);
+  const one = (id: string, list: Parameters<typeof sw.recordNodeImages>[1] extends Map<string, infer T> ? T : never) => sw.recordNodeImages(iso(1), new Map([[id, list]]));
+  one(N, [{ image: "nginx:1.27", digest: `docker.io/library/nginx@${SHA("a")}`, image_id: null, platform: "linux/arm64" }, { image: "local:dev", digest: null, image_id: SHA("b"), platform: "linux/arm64" }]);
+  assert.deepEqual(db.prepare("select image, source, sbom_key, platform from instance_images where instance_id = ? order by image").all(N), [{ image: "local:dev", source: "cluster", sbom_key: `id:${SHA("b")}`, platform: "linux/arm64" }, { image: "nginx:1.27", source: "cluster", sbom_key: `dg:${SHA("a")}|linux/arm64`, platform: "linux/arm64" }]);
+  const due = ip.dueImages().filter((d) => d.key === `dg:${SHA("a")}|linux/arm64`);
+  assert.deepEqual(due.map((d) => d.pull_ref), [`docker.io/library/nginx@${SHA("a")}`], "the registry image is due with the kubelet's pull reference; the local build is the box's own");
+  // the software probe on the node: containerd, no docker, an empty image list; the cluster rows survive it
+  sw.recordSoftware(N, iso(0), { os: { id: "amzn" }, package_manager: "rpm", packages: [{ n: "bash", v: "5.2" }], images: [] });
+  assert.equal((db.prepare("select count(*) as n from instance_images where instance_id = ? and source = 'cluster'").get(N) as any).n, 2);
+  // a pod that left the node takes its row; a node with no pods at all loses them all
+  one(N, [{ image: "nginx:1.27", digest: `docker.io/library/nginx@${SHA("a")}`, image_id: null, platform: "linux/arm64" }]);
+  assert.deepEqual(db.prepare("select image from instance_images where instance_id = ? order by image").all(N), [{ image: "nginx:1.27" }]);
+  one(N, []);
+  assert.equal((db.prepare("select count(*) as n from instance_images where instance_id = ?").get(N) as any).n, 0);
+  // a Docker node the probe listed itself: the cluster's reading fills the blanks but the row stays the probe's, and the probe still prunes it
+  sw.recordSoftware(D, iso(2), { os: { id: "debian" }, package_manager: "dpkg-query", packages: [{ n: "bash", v: "5.2" }], images: [{ image: "redis:7", id: SHA("c"), digests: null, platform: "linux/amd64" }] });
+  one(D, [{ image: "redis:7", digest: `docker.io/library/redis@${SHA("d")}`, image_id: null, platform: "linux/amd64" }]);
+  assert.deepEqual(db.prepare("select source, digest, image_id from instance_images where instance_id = ? and image = 'redis:7'").get(D), { source: "probe", digest: `docker.io/library/redis@${SHA("d")}`, image_id: SHA("c") });
+  sw.recordSoftware(D, iso(0), { os: { id: "debian" }, package_manager: "dpkg-query", packages: [{ n: "bash", v: "5.2" }], images: [] });
+  assert.equal((db.prepare("select count(*) as n from instance_images where instance_id = ?").get(D) as any).n, 0, "the probe owns it and no longer lists it");
+});

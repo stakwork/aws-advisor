@@ -264,7 +264,7 @@ comes from the adapter (`ResourceNode.compute`); the software probe fills in the
 | `opaque` / `managed_by` | true when the provider never shows the machine (a Vercel team's runtime): nothing is known inside it |
 | `declared` | true when a person declared it (local machines) rather than an API or probe reporting it |
 
-Edges: `HOSTS` ← `AdvisorBox`; `RUNS` → `AdvisorApp`, `AdvisorContainer`; `RUNS_IMAGE` → `AdvisorImage`;
+Edges: `HOSTS` ← `AdvisorBox`; `RUNS` → `AdvisorApp`, `AdvisorContainer`; `RUNS_IMAGE` → `AdvisorImage` (the images the software probe saw `docker ps` run; on a Kubernetes node, where containerd leaves the probe nothing to list, the images of the pods the cluster API places there);
 `INSTALLED_ON` ← `AdvisorPackage`; `VULNERABLE_TO` → `KnVulnerability`; `RUNS_ON {via, pods}` ← `AdvisorDeployment`
 (`via`: `kubernetes` \| `ecs` (the nodes a workload's pods or tasks run on) \| `beanstalk` (the live boxes of the
 environment's group) \| `vercel_functions` (every live project of the team, to its opaque runtime) \| `local`).

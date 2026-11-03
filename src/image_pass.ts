@@ -1,7 +1,8 @@
 /**
  * The image half of the sbom pass: the distinct container images the fleet runs, read once each on the designated scanner
  * instance (Settings > Probe pass > Image scanner instance) instead of once per box. The software probe lists every box's
- * running images with their registry digest and platform (instance_images, keyed by imageKey); this pass takes the keys
+ * running images with their registry digest and platform (instance_images, keyed by imageKey), and the cluster inventory lists
+ * the pods' images on every Kubernetes node the same way (the probe sees none there: containerd, no docker command); this pass takes the keys
  * with a digest that have no ok scan inside the sbom interval, turns them into pull references (`repo@sha256:…|os/arch`),
  * and sends the scanner one `images` document per batch (src/probes.ts, kind images; src/ssm.ts probeInstance with
  * opts.parameters). The scanner pulls each image from its registry with its own credentials and answers with the same

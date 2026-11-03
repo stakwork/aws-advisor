@@ -103,6 +103,10 @@ create table if not exists image_sbom (
 );
 create index if not exists image_sbom_name on image_sbom(name, version)`);
 if (!hasColumn("instance_images", "sbom_key")) db.exec("alter table instance_images add column sbom_key text");
+// who listed the image on the box (2026-11-03): probe = the software probe's `docker ps`; cluster = the cluster inventory, from the pods the cluster API
+// places on the node (src/cluster_inventory.ts, recordNodeImages below). A Kubernetes node runs containerd and has no docker command, so the probe
+// lists no images there and must not delete the rows the cluster inventory wrote; a row both saw is the probe's.
+if (!hasColumn("instance_images", "source")) db.exec("alter table instance_images add column source text not null default 'probe'");
 if (!hasColumn("instance_sbom_scans", "images_mode")) db.exec("alter table instance_sbom_scans add column images_mode text");
 /** The image key of an instance_images row in SQL: its sbom_key, else the per-box fallback a box's own scan of an image without digest or id gets (`ii` is the alias). */
 const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
@@ -177,7 +181,7 @@ const upsertPkg = db.prepare(`insert into instance_packages(instance_id, ecosyst
 const upsertBin = db.prepare(`insert into instance_binaries(instance_id, name, version, path, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, 0)
   on conflict(instance_id, name, path) do update set first_seen = case when version = excluded.version then first_seen else excluded.first_seen end, version = excluded.version, path = excluded.path, last_seen = excluded.last_seen, gone = 0`);
 const upsertImg = db.prepare(`insert into instance_images(instance_id, image, image_id, digest, created, platform, sbom_key, first_seen, last_seen, gone) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-  on conflict(instance_id, image) do update set image_id = excluded.image_id, digest = excluded.digest, created = excluded.created, platform = excluded.platform, sbom_key = coalesce(excluded.sbom_key, sbom_key), last_seen = excluded.last_seen, gone = 0`);
+  on conflict(instance_id, image) do update set image_id = excluded.image_id, digest = excluded.digest, created = excluded.created, platform = excluded.platform, sbom_key = coalesce(excluded.sbom_key, sbom_key), source = 'probe', last_seen = excluded.last_seen, gone = 0`);
 // the sbom probe's view of an image it scanned on the box: enough of a row for the scan to show on the box's page before the software probe lists the image (which then owns the row)
 const upsertImgSeen = db.prepare(`insert into instance_images(instance_id, image, image_id, digest, created, platform, sbom_key, first_seen, last_seen, gone) values (?, ?, ?, ?, null, ?, ?, ?, ?, 0)
   on conflict(instance_id, image) do update set image_id = coalesce(excluded.image_id, image_id), digest = coalesce(excluded.digest, digest), platform = coalesce(excluded.platform, platform), sbom_key = coalesce(excluded.sbom_key, sbom_key), last_seen = excluded.last_seen, gone = 0`);
@@ -317,7 +321,8 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
       const row = { image_id: i.id == null ? null : clean(i.id, 100), digest: i.digests ? clean(String(i.digests).split(",")[0], 300) : null, platform: i.platform == null ? null : clean(i.platform, 40) };
       upsertImg.run(instanceId, clean(i.image, 300), row.image_id, row.digest, i.created == null ? null : clean(i.created, 40), row.platform, imageKey(row), collectedAt, collectedAt);
     }
-    if (Array.isArray(data.images)) db.prepare(`delete from instance_images where instance_id = ?${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
+    // only the probe's own rows: a cluster node's pod images are the cluster inventory's (source cluster) and the probe, with no docker there, reports none
+    if (Array.isArray(data.images)) db.prepare(`delete from instance_images where instance_id = ? and source = 'probe'${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
     res.images = imgs.length;
     upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null,
       kernel.upstream, kernel.pkg?.name ?? null, kernel.pkg?.version ?? null, kernel.pkg?.source ?? null);
@@ -412,6 +417,35 @@ export function recordImageSbom(scannedOn: string, collectedAt: string, sbom: Sb
     }
   })();
   return res;
+}
+
+/** One image a pod runs on a node, as the cluster API reports it (src/cluster_inventory.ts nodeImagesFromPods): the reference the pod spec names,
+ *  the registry digest the kubelet pulled (`repo@sha256:…`, the scanner's pull reference) or the local image id, and the node's os/arch. */
+export interface NodeImage { image: string; digest: string | null; image_id: string | null; platform: string | null }
+const upsertNodeImg = db.prepare(`insert into instance_images(instance_id, image, image_id, digest, created, platform, sbom_key, source, first_seen, last_seen, gone) values (?, ?, ?, ?, null, ?, ?, 'cluster', ?, ?, 0)
+  on conflict(instance_id, image) do update set image_id = coalesce(excluded.image_id, image_id), digest = coalesce(excluded.digest, digest), platform = coalesce(excluded.platform, platform), sbom_key = coalesce(excluded.sbom_key, sbom_key), last_seen = excluded.last_seen, gone = 0`);
+
+/**
+ * The images the cluster API says each node runs (the containers of its Running pods), as image rows of the node's box with source cluster (2026-11-03):
+ * the scanner then reads them by digest like any registry image (src/image_pass.ts dueImages), and the graph gets the compute's RUNS_IMAGE and the
+ * image's CONTAINS through the box (src/graph_software.ts), the same way as for an image the software probe listed. A row the probe owns (a Docker
+ * node it listed itself) keeps its source and only gains what it lacked; a cluster row for an image no pod on the node runs any more goes.
+ * `byInstance` has every node of the cluster, an empty list for a node without pods, so a node that emptied loses its rows.
+ */
+export function recordNodeImages(collectedAt: string, byInstance: Map<string, NodeImage[]>): { nodes: number; images: number } {
+  let images = 0;
+  db.transaction(() => {
+    for (const [instanceId, list] of byInstance) {
+      const seen = new Set<string>();
+      for (const i of list) {
+        const image = clean(i.image, 300); if (!image || seen.has(image)) continue; seen.add(image);
+        const row = { image_id: i.image_id ? clean(i.image_id, 100) || null : null, digest: i.digest ? clean(i.digest, 300) || null : null, platform: i.platform ? clean(i.platform, 40).toLowerCase() || null : null };
+        upsertNodeImg.run(instanceId, image, row.image_id, row.digest, row.platform, imageKey(row), collectedAt, collectedAt); images++;
+      }
+      db.prepare(`delete from instance_images where instance_id = ? and source = 'cluster'${seen.size ? ` and image not in (${[...seen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...seen);
+    }
+  })();
+  return { nodes: byInstance.size, images };
 }
 
 /** The boxes that run any of the given image keys (inventory rows the software or sbom probe wrote), for a graph sync after the scanner's batch. */
@@ -521,7 +555,7 @@ export function softwareOn(instanceId: string, opts: { q?: string; limit?: numbe
     os: (db.prepare("select * from instance_os where instance_id = ?").get(instanceId) as any) ?? null,
     packages: (db.prepare(`select ecosystem, name, version, arch, source, first_seen, last_seen, gone from instance_packages where instance_id = ?${q ? " and (lower(name) like ? or lower(source) like ?)" : ""} order by name limit ?`).all(...(q ? [instanceId, q, q, limit] : [instanceId, limit])) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
     binaries: (db.prepare(`select name, version, path, first_seen, last_seen, gone from instance_binaries where instance_id = ? order by name`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
-    images: (db.prepare(`select image, image_id, digest, created, platform, first_seen, last_seen, gone from instance_images where instance_id = ? order by image`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
+    images: (db.prepare(`select image, image_id, digest, created, platform, source, first_seen, last_seen, gone from instance_images where instance_id = ? order by image`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
     changes: db.prepare("select ecosystem, name, from_version, to_version, at from package_changes where instance_id = ? order by id desc limit 50").all(instanceId) as any[],
     bundles: db.prepare("select parent, parent_version, name, version, first_seen, last_seen from instance_bundles where instance_id = ? order by parent, name").all(instanceId) as any[],
     depends: db.prepare("select name, dep, first_seen, last_seen from instance_depends where instance_id = ? order by name, dep").all(instanceId) as any[],

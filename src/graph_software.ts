@@ -13,7 +13,8 @@ import { componentPurl, parsePurl } from "./software_inventory.js";
  * (ecosystem, name, version), INSTALLED_ON the operating system (AdvisorCompute) the box HOSTS, which also takes the
  * distribution, version and kernel; the OS and the kernel as packages of their
  * own ecosystems; the versions read from well-known binaries as packages of the `binary` ecosystem; the container
- * images the box runs (RUNS_IMAGE → AdvisorImage, the same nodes cluster workloads are BUILT_FROM), what syft read
+ * images the box runs (RUNS_IMAGE → AdvisorImage, the same nodes cluster workloads are BUILT_FROM; on a Kubernetes node, where the
+ * probe has no docker command, the images of the pods the cluster API places there, src/cluster_inventory.ts), what syft read
  * inside each image (the sbom probe: CONTAINS from the image to SoftwareComponent nodes of the purl's own ecosystem, npm,
  * pypi, deb of the image's distribution, ...) and on the filesystem (INSTALLED_ON like any package); PROVIDES edges
  * from a package to the program (AdvisorApp) it ships, so "which package is this listening process from" is one hop.
@@ -323,8 +324,8 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   });
   for (const b of chunks(imgRows)) await w(IMAGE_CYPHER, b);
   // only the boxes the software probe has read (an instance_os row): what they no longer have loses its edge
-  const keepOf = (items: { instance_id: string; id: string }[]) => {
-    const by = new Map<string, string[]>([...os.keys()].map((id) => [id, []]));
+  const keepOf = (items: { instance_id: string; id: string }[], boxes: Iterable<string> = os.keys()) => {
+    const by = new Map<string, string[]>([...boxes].map((id) => [id, []]));
     for (const x of items) by.get(x.instance_id)?.push(x.id);
     return [...by].map(([instance_id, keep]) => ({ instance_id, keep }));
   };
@@ -357,7 +358,9 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   }
   const packagedEdges = uniq(packaged, (r) => `${r.kernel_id}\t${r.package_id}`);
   for (const b of chunks(packagedEdges)) await w(PACKAGED_AS_CYPHER, b);
-  for (const b of chunks(keepOf(imgRows), 50)) await w(PRUNE_IMAGES_CYPHER, b);
+  // the image edges are pruned on the probed boxes and on the cluster nodes (their rows are the cluster inventory's, probed or not)
+  const clusterNodes = rows(`select distinct instance_id from instance_images where source = 'cluster'${where}`, ...args).map((r) => String(r.instance_id));
+  for (const b of chunks(keepOf(imgRows, new Set([...os.keys(), ...clusterNodes])), 50)) await w(PRUNE_IMAGES_CYPHER, b);
   // what each image contains; an edge the scans no longer support is retired (the keep list is every key's reading of that image node: the platforms of one digest add up)
   for (const b of chunks(containsRows)) await w(CONTAINS_CYPHER, b);
   const keepBy = new Map<string, Set<string>>();

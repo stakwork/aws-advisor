@@ -3,6 +3,7 @@ import { S } from "./steampipe.js";
 import { K8sError, type K8sCluster, eksToken, k8sListAll } from "./k8s_client.js";
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 import { accountCredentials } from "./accounts.js";
+import { recordNodeImages, type NodeImage } from "./software_inventory.js";
 
 /**
  * Clusters and the workloads inside them (docs/cloud-ontology.md §8 step 4): EKS clusters with their Kubernetes
@@ -11,6 +12,12 @@ import { accountCredentials } from "./accounts.js";
  * Every workload is one row with its containers and images, its replicas, where its pods run, and what exposes it,
  * so the graph can draw `AdvisorDeployment` nodes inside `AdvisorCluster` with endpoints and reachability. A cluster
  * the advisor cannot read keeps its row with `access_status` and the reason, and the page shows how to grant access.
+ *
+ * The pods also say what each node runs (2026-11-03): a Kubernetes node runs containerd, so the software probe's `docker ps`
+ * lists no images there and the sbom probe scans none; the Running pods' container images, with the digest the kubelet
+ * pulled, go onto the node's box as image rows (src/software_inventory.ts recordNodeImages), where the image scanner and
+ * the graph's RUNS_IMAGE / CONTAINS take them like any image the probe listed. ECS container instances run Docker and
+ * list their own; Fargate tasks have no box.
  */
 
 db.exec(`create table if not exists inventory_cluster (
@@ -117,6 +124,56 @@ export function policyFromK8s(clusterArn: string, o: any): NetworkPolicyRow {
   return { id: `${clusterArn}/${meta.namespace || "_"}/NetworkPolicy/${meta.name}`, cluster_arn: clusterArn, namespace: str(meta.namespace), name: String(meta.name || ""), pod_selector: spec.podSelector?.matchLabels || {}, policy_types: spec.policyTypes || (spec.egress ? ["Ingress", "Egress"] : ["Ingress"]), ingress: spec.ingress || [], egress: spec.egress || [] };
 }
 
+// ---- what the nodes run: the pods' images onto the nodes' boxes --------------------------------------------------------------
+
+/** The node name → the EC2 instance behind it and its platform, from the cluster's Node objects (`spec.providerID` is `aws:///us-east-1a/i-0abc…`,
+ *  `status.nodeInfo` the os and arch). Pure. */
+export function nodeFacts(nodes: any[]): Map<string, { instance_id: string | null; platform: string | null }> {
+  const out = new Map<string, { instance_id: string | null; platform: string | null }>();
+  for (const n of nodes) {
+    const name = String(n?.metadata?.name || ""); if (!name) continue;
+    const m = /\/(i-[0-9a-f]{8,17})$/.exec(String(n.spec?.providerID || ""));
+    const info = n.status?.nodeInfo || {};
+    out.set(name, { instance_id: m ? m[1]! : null, platform: info.operatingSystem && info.architecture ? `${info.operatingSystem}/${info.architecture}`.toLowerCase() : null });
+  }
+  return out;
+}
+
+/** The images each node runs, by node name: the containers of every Running pod on it, named as the pod spec names the image (the string the
+ *  workload's BUILT_FROM uses) with the digest the kubelet pulled (`status.containerStatuses[].imageID`: `repo@sha256:…`, behind a
+ *  `docker-pullable://` prefix on the old Docker shim; a bare `sha256:…` is a local image id, a build that never left the node). Init containers
+ *  have exited and are left out, as `docker ps` leaves them out. Pure. */
+export function nodeImagesFromPods(pods: any[]): Map<string, NodeImage[]> {
+  const out = new Map<string, NodeImage[]>();
+  for (const p of pods) {
+    const node = String(p?.spec?.nodeName || ""); if (!node || p.status?.phase !== "Running") continue;
+    const specImage = new Map<string, string>((p.spec?.containers || []).map((c: any) => [String(c.name || ""), String(c.image || "")]));
+    const list = out.get(node) ?? []; out.set(node, list);
+    for (const cs of p.status?.containerStatuses || []) {
+      const image = specImage.get(String(cs.name || "")) || String(cs.image || ""); if (!image) continue;
+      const id = String(cs.imageID || "").replace(/^docker-pullable:\/\/|^docker:\/\//, "");
+      const digest = /@sha256:[0-9a-f]{64}$/.test(id) ? id : null;
+      const image_id = !digest && /^sha256:[0-9a-f]{12,64}$/.test(id) ? id : null;
+      const have = list.find((x) => x.image === image);
+      if (!have) list.push({ image, digest, image_id, platform: null });
+      else { have.digest = have.digest ?? digest; have.image_id = have.image_id ?? image_id; }
+    }
+  }
+  return out;
+}
+
+/** Kubernetes names a pod's node by its hostname (ip-10-0-1-2.ec2.internal), not the instance id: the box by its private DNS name (a live box
+ *  first, a reused name's latest otherwise), from the EC2 inventory's snapshots. A node name that is an instance id is itself. */
+export function nodeBoxResolver(): (node: string) => string | null {
+  const byDns = new Map<string, string>();
+  for (const r of rows("select instance_id, json_extract(snapshot, '$.network.private_dns') as dns from inventory_ec2 where json_extract(snapshot, '$.network.private_dns') is not null order by gone desc, last_seen asc")) {
+    const dns = String(r.dns).toLowerCase(); byDns.set(dns, String(r.instance_id)); byDns.set(dns.split(".")[0]!, String(r.instance_id));
+  }
+  return (node) => (/^i-[0-9a-f]+$/.test(node) ? node : byDns.get(node.toLowerCase()) ?? byDns.get(node.toLowerCase().split(".")[0]!) ?? null);
+}
+/** The platform of each live box as EC2 states its architecture (x86_64 → linux/amd64, arm64 → linux/arm64): the fallback when the Node objects could not be listed. */
+const boxPlatforms = (): Map<string, string> => new Map(rows("select instance_id, json_extract(snapshot, '$.architecture') as arch from inventory_ec2 where gone = 0 and json_extract(snapshot, '$.architecture') is not null").map((r) => [String(r.instance_id), String(r.arch) === "x86_64" ? "linux/amd64" : String(r.arch) === "arm64" ? "linux/arm64" : `linux/${String(r.arch).toLowerCase()}`]));
+
 /** An ECS service as a workload: containers from its task definition, nodes from its running tasks' container instances. Pure. */
 export function workloadFromEcs(service: any, taskDef: any | undefined, tasks: any[], instanceByCi: Map<string, string>): WorkloadRow {
   const defs = arr(taskDef?.container_definitions);
@@ -131,7 +188,7 @@ export function workloadFromEcs(service: any, taskDef: any | undefined, tasks: a
 
 // ---- refresh ----------------------------------------------------------------------------------------------------------------
 
-export interface ClusterRefreshResult { clusters: number; workloads: number; services: number; ingresses: number; policies: number; access: Record<string, string>; errors: string[]; took_ms: number }
+export interface ClusterRefreshResult { clusters: number; workloads: number; services: number; ingresses: number; policies: number; /** pod images written onto the nodes' boxes (recordNodeImages) */ node_images: number; access: Record<string, string>; errors: string[]; took_ms: number }
 
 const upsertCluster = db.prepare(`insert into inventory_cluster(arn, kind, name, region, account_id, version, platform_version, status, endpoint, endpoint_public, public_cidrs, endpoint_private, vpc_id, security_groups, subnets, authentication_mode, oidc_issuer, ca_data, nodes, workloads, namespaces, access_status, access_error, access_checked_at, first_seen, last_seen, gone)
   values (@arn, @kind, @name, @region, @account_id, @version, @platform_version, @status, @endpoint, @endpoint_public, @public_cidrs, @endpoint_private, @vpc_id, @security_groups, @subnets, @authentication_mode, @oidc_issuer, @ca_data, @nodes, @workloads, @namespaces, @access_status, @access_error, @access_checked_at, @now, @now, 0)
@@ -156,7 +213,10 @@ function markGone(table: string, clusterArn: string, keep: string[], at: string)
 /** Reads every cluster and what runs in it; `attempt` is the inventory's Steampipe runner (records a failure, returns undefined). */
 export async function refreshClusters(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<ClusterRefreshResult> {
   const t0 = Date.now(); const at = now();
-  const res: ClusterRefreshResult = { clusters: 0, workloads: 0, services: 0, ingresses: 0, policies: 0, access: {}, errors: [], took_ms: 0 };
+  const res: ClusterRefreshResult = { clusters: 0, workloads: 0, services: 0, ingresses: 0, policies: 0, node_images: 0, access: {}, errors: [], took_ms: 0 };
+  const boxOf = nodeBoxResolver(); const platformOfBox = boxPlatforms();
+  // the boxes that are cluster nodes this pass, and whether every EKS cluster was read: only then may a box that is no node any more lose its cluster image rows
+  const nodeBoxes = new Set<string>(); let everyEksRead = true;
   const [eks, nodeGroups, ecs, ecsServices, taskDefs, tasks, cis] = await Promise.all([attempt("EKS clusters", CLUSTER_SQL.eks), attempt("EKS node groups", CLUSTER_SQL.eks_nodes), attempt("ECS clusters", CLUSTER_SQL.ecs), attempt("ECS services", CLUSTER_SQL.ecs_services), attempt("ECS task definitions", CLUSTER_SQL.ecs_task_definitions), attempt("ECS tasks", CLUSTER_SQL.ecs_tasks), attempt("ECS container instances", CLUSTER_SQL.ecs_container_instances)]);
   const seenClusters: string[] = [];
   // EKS: the cluster from Steampipe, the workloads from the cluster API
@@ -169,10 +229,12 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
     if (cluster.endpoint) {
       try {
         const token = await eksToken(cluster, accountCredentials(str(c.account_id)));
-        const [deploys, statefuls, daemons, jobs, cronjobs, services, ingresses, policies, pods] = await Promise.all([
+        // the Node objects give each node's instance id and platform; the stock view ClusterRole does not cover them, so a refusal costs only that (the node's private DNS name and EC2's architecture stand in)
+        const [deploys, statefuls, daemons, jobs, cronjobs, services, ingresses, policies, pods, nodeObjs] = await Promise.all([
           k8sListAll(cluster, "/apis/apps/v1/deployments", token), k8sListAll(cluster, "/apis/apps/v1/statefulsets", token), k8sListAll(cluster, "/apis/apps/v1/daemonsets", token),
           k8sListAll(cluster, "/apis/batch/v1/jobs", token), k8sListAll(cluster, "/apis/batch/v1/cronjobs", token), k8sListAll(cluster, "/api/v1/services", token),
           k8sListAll(cluster, "/apis/networking.k8s.io/v1/ingresses", token), k8sListAll(cluster, "/apis/networking.k8s.io/v1/networkpolicies", token), k8sListAll(cluster, "/api/v1/pods", token),
+          k8sListAll(cluster, "/api/v1/nodes", token).catch((e: any) => { console.log(`[clusters] ${c.name}: nodes not listed (${e instanceof K8sError ? e.code : "error"}): the pods' images go by the nodes' DNS names`); return [] as any[]; }),
         ]);
         const kinds: [any[], string][] = [[deploys, "Deployment"], [statefuls, "StatefulSet"], [daemons, "DaemonSet"], [jobs, "Job"], [cronjobs, "CronJob"]];
         const rows: WorkloadRow[] = [];
@@ -186,13 +248,23 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
           markGone("cluster_workloads", String(c.arn), rows.map((r) => r.id), at); markGone("cluster_services", String(c.arn), svcRows.map((r) => r.id), at); markGone("cluster_ingresses", String(c.arn), ingRows.map((r) => r.id), at); markGone("cluster_network_policies", String(c.arn), polRows.map((r) => r.id), at);
         })();
         workloads = rows.length; res.workloads += rows.length; res.services += svcRows.length; res.ingresses += ingRows.length; res.policies += polRows.length;
+        // the pods' images onto the nodes' boxes: every node of the cluster (so one that emptied loses its rows), its instance from the Node's providerID, else its DNS name
+        const facts = nodeFacts(nodeObjs); const byNode = nodeImagesFromPods(pods); const byInstance = new Map<string, NodeImage[]>();
+        for (const name of new Set([...facts.keys(), ...byNode.keys()])) {
+          const instance = facts.get(name)?.instance_id ?? boxOf(name); if (!instance) continue;
+          const platform = facts.get(name)?.platform ?? platformOfBox.get(instance) ?? null;
+          const list = byInstance.get(instance) ?? []; byInstance.set(instance, list);
+          for (const i of byNode.get(name) ?? []) list.push({ ...i, platform: i.platform ?? platform });
+        }
+        res.node_images += recordNodeImages(at, byInstance).images; for (const id of byInstance.keys()) nodeBoxes.add(id);
         access = "ok";
       } catch (e: any) {
+        everyEksRead = false;
         access = e instanceof K8sError ? e.code : "error"; accessError = String(e?.message || e).slice(0, 300);
         res.errors.push(`${c.name}: ${accessError}`);
         workloads = Number((db.prepare("select count(*) as n from cluster_workloads where cluster_arn = ? and gone = 0").get(String(c.arn)) as any)?.n || 0);
       }
-    } else { access = "unreachable"; accessError = "no endpoint"; }
+    } else { access = "unreachable"; accessError = "no endpoint"; everyEksRead = false; }
     res.access[String(c.name)] = access;
     upsertCluster.run({ arn: String(c.arn), kind: "eks", name: String(c.name), region: str(c.region), account_id: str(c.account_id), version: str(c.version), platform_version: str(c.platform_version), status: str(c.status), endpoint: str(c.endpoint),
       endpoint_public: vpc.EndpointPublicAccess == null ? null : vpc.EndpointPublicAccess ? 1 : 0, public_cidrs: json(vpc.PublicAccessCidrs ?? []), endpoint_private: vpc.EndpointPrivateAccess == null ? null : vpc.EndpointPrivateAccess ? 1 : 0, vpc_id: str(vpc.VpcId),
@@ -214,6 +286,8 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
       authentication_mode: null, oidc_issuer: null, ca_data: null, nodes: num(c.registered_container_instances_count), workloads: rows.length, namespaces: "[]", access_status: "ok", access_error: null, access_checked_at: at, now: at });
     seenClusters.push(String(c.cluster_arn)); res.clusters++; res.workloads += rows.length;
   }
+  // a box that was a node and is one no more (scaled out of the cluster, moved to another): its pod images go with the pods; an unread cluster keeps its nodes' rows
+  if (eks && everyEksRead) db.prepare(`delete from instance_images where source = 'cluster'${nodeBoxes.size ? ` and instance_id not in (${[...nodeBoxes].map(() => "?").join(",")})` : ""}`).run(...nodeBoxes);
   if (eks && ecs) db.prepare(`update inventory_cluster set gone = 1 where gone = 0${seenClusters.length ? ` and arn not in (${seenClusters.map(() => "?").join(",")})` : ""}`).run(...seenClusters);
   res.took_ms = Date.now() - t0;
   return res;
