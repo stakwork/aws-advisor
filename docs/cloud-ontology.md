@@ -830,7 +830,7 @@ packages.
 | `public` | the image is public |
 | `scanned_at` | last package scan |
 
-Edges: `BUILT_FROM` ← compute, deployments, functions, containers; `CONTAINS` → `AdvisorPackage`; `BUILT_FROM {via:
+Edges: `BUILT_FROM` ← compute, deployments, functions, containers; `CONTAINS {source_kind: image_scan | proc, observed, path, platform}` → `SoftwareComponent` (what syft read inside the image, and the executables seen running inside containers built from it); `BUILT_FROM {via:
 'image_label', source_url, revision, asserted_by: 'label', verified: false}` → `AdvisorRepository` when the image's
 `org.opencontainers.image.source` (or `org.label-schema.vcs-url`) label names a GitHub repository the advisor can
 resolve (the same rule and casing as a function's repository tag, so an image and the function built from the same
@@ -877,7 +877,12 @@ leaves stays with `gone: true`. Not an `AdvisorResource`: it costs nothing on it
 The environment, the command arguments and every other label are never read: they hold secrets.
 
 Edges: `RUNS {first_seen, last_seen, gone}` ← compute; `BUILT_FROM {image_id, revision}` → `AdvisorImage` (the
-image node also takes `source_url`, `revision`, `version`, `title`, `built_at` from the labels); `SERVES` →
+image node also takes `source_url`, `revision`, `version`, `title`, `built_at` from the labels; the node is the
+digest-keyed one the box's software probe recorded, `image:<repository>@<digest>`, the bare reference only until that
+probe has listed the image, so a container and the box's `RUNS_IMAGE` meet on one node); `EXECUTES {path, sha256, size,
+first_seen, last_seen, is_deleted, deleted_at}` → `SoftwareComponent` (the executables of the processes running inside the
+container, read in place by the sbom probe through the container's root, sbom 1.7: what this container runs, one hop; retired,
+never removed, when a pass no longer sees the process); `SERVES` →
 `AdvisorEndpoint` (the ports it publishes); `SHIPS_LOGS_TO` → `KnLogGroup` (its awslogs log driver). Its changes
 (appeared, gone, returned, redeployed with the image and revision before and after, recreated, restarted, stopped,
 started) are instance app events with user `container`.
@@ -895,14 +900,14 @@ An installed software component with a version. The vulnerability layer matches 
 | `source_name` | the source package the distribution advisories name (`openssh` for `openssh-server`); null when it is the name itself |
 | `advisory_ecosystem` | the feed's name for the distribution the package was installed from (`Ubuntu:24.04:LTS`, `Debian:12`, `Alpine:v3.19`, `Rocky Linux:9`, `AlmaLinux:9`, `Amazon Linux:2023`); null when no feed covers it |
 | `scope` | `service` (a program that may listen) \| `library` (linked by others) \| `kernel` \| `tool` (nothing listens as it): what the verdict can say about reachability |
-| `classified` | false for a running executable nothing identified (sbom 1.7): a `binary` component named by the file at version `unknown`, source_kind `unclassified`, with no CPE or sort_key; its `INSTALLED_ON` edge carries the path, the container and the file's `sha256` and `size`. The fleet's list of what no rule names yet; true (or absent, from an older sync) for everything else |
+| `classified` | false for a running executable nothing identified (sbom 1.7): a `binary` component named by the file at version `unknown`, source_kind `unclassified`, with no CPE or sort_key; its edge (`INSTALLED_ON` for a host process, `CONTAINS` from the image and `EXECUTES` from the container for a container process) carries the path and the file's `sha256` and `size`. The fleet's list of what no rule names yet; true (or absent, from an older sync) for everything else |
 | `cpe` / `cpes` | the CPE 2.3 string this version is best known by, and every candidate with it first (`src/sec/cpe.ts`): for a purl syft read, what syft assigned (the NVD dictionary match or a binary classifier's declaration first, its own name permutations after: `cpe:2.3:a:nodejs:node.js:22.12.0:*:*:*:*:*:*:*`); for the OS, the CPE the distribution declares in `/etc/os-release` (`CPE_NAME`, read by the software probe) or NVD's name for it (`canonical:ubuntu_linux`); for a program the software probe asked by name, NVD's vendor and product as syft's classifiers declare them; for the kernel `linux:linux_kernel`; for a distribution package the syft-style guesses (`<name>:<name>`, then the source package as vendor). A CVE whose only identity is a CPE configuration is matched by vendor and product against these; the purl stays the key |
 | `purl` | the component without its version, by rules only (`src/sec/purl.ts`): `pkg:deb/ubuntu/libbrotli1`, `pkg:rpm/amzn/openssl`, `pkg:generic/node` (a probed binary), `pkg:generic/brotli` (a bundled library, as `process.versions` names it), `pkg:generic/linux`, `pkg:generic/ubuntu`; a syft purl keeps its own path, namespace included: `pkg:golang/github.com/andybalholm/brotli`, `pkg:npm/%40aws-sdk/core`, `pkg:maven/org.apache.commons/commons-lang3`. The key the public vulnerability graph's `SecComponent` nodes use; spellings are joined there by `SAME_AS`, never by a table here |
 | `source_purl` | the source package's purl, what a distribution's advisories name (`pkg:deb/ubuntu/brotli` for `libbrotli1`); equals `purl` when there is no separate source |
 | `sort_key` | the version rewritten so plain string order is version order (`src/sec/version.ts`, the same function the public graph's ranges use): a version is affected when `introduced_key <= sort_key < fixed_key`. For deb/rpm an index hint; their own ordering decides |
 
-Edges: `INSTALLED_ON {path, container, first_seen, last_seen, is_deleted, deleted_at}` → compute, deployment, function or image (`path` where a probed program or a running executable lives; `container`, 12 hex, when syft read it from a running container's root, sbom 1.7); `PROVIDES` →
-`AdvisorApp`; `CONTAINED_IN` ← `AdvisorImage` (`CONTAINS`); `BUNDLES {source_kind: process_versions}` → the
+Edges: `INSTALLED_ON {path, container, first_seen, last_seen, is_deleted, deleted_at}` → compute, deployment, function or image (`path` where a probed program or a host process's executable lives; `container`, 12 hex, only for a container process whose executable sits on a bind mount or a volume, so it is not the image's); `CONTAINS {source_kind, observed, path, platform, first_seen, last_seen, is_deleted}` ← `AdvisorImage` (`source_kind: image_scan`: syft's reading of the image's filesystem on the scanner or the box; `source_kind: proc, observed: running`: a process the sbom probe read running inside a container built from the image, 2026-11-03, the executable being a file of that image; each writer retires only its own kind); `EXECUTES {path, sha256, size, first_seen, last_seen, is_deleted, deleted_at}` ← `AdvisorContainer` (the container runs it now); `PROVIDES` →
+`AdvisorApp`; `BUNDLES {source_kind: process_versions}` → the
 libraries compiled into a runtime (`node 22.12.0 BUNDLES brotli 1.1.0`, one fact however many boxes have it);
 `DEPENDS_ON {source_kind: dpkg}` → the installed packages a package's Depends names, read for the packages that own
 the probed programs. Containment is these two edges whatever the mechanism, so a vulnerability in a library reaches a

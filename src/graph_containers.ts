@@ -1,6 +1,6 @@
 import { db } from "./db.js";
 import { accountId, enabled, ensureSchema, inBackground, neoParams, readQuery, writeCypher } from "./graph_mirror.js";
-import { imageRef } from "./graph_software.js";
+import { imageNodeResolver, imageRef, type ContainerImageRef } from "./graph_software.js";
 import { rowToContainer } from "./container_inventory.js";
 import { repoIdResolver } from "./function_facts.js";
 import { resolveRepoCasing } from "./graph_functions.js";
@@ -15,6 +15,11 @@ import { COMPUTE_OF } from "./graph_cypher.js";
  * image nodes the software probe and the cluster workloads use, which also take the source repository and revision
  * the image's labels name), -[:SERVES]->(:AdvisorEndpoint) the ports it publishes, and -[:SHIPS_LOGS_TO]->(:KnLogGroup)
  * when its log driver writes to CloudWatch. A container is not an AdvisorResource: it costs nothing on its own.
+ * The image node is the one the software layer uses (src/graph_software.ts imageNodeId through imageNodeResolver, 2026-11-03):
+ * keyed by the digest the box's instance_images row recorded, so a container, the box's RUNS_IMAGE, the scanner's CONTAINS
+ * and the container's own running executables (EXECUTES from the container, CONTAINS from the image) meet on one node;
+ * the bare reference only while the software probe has not listed the image on that box. A tag-keyed node nothing points
+ * at any more is removed after each sync.
  *
  * Then the image's own source: (:AdvisorImage)-[:BUILT_FROM {via: 'image_label', source_url, revision, asserted_by: 'label',
  * verified: false}]->(:AdvisorRepository) when its `org.opencontainers.image.source` (or `org.label-schema.vcs-url`) label
@@ -91,9 +96,10 @@ export function imageRepositoryRows(rows: { image_node: string | null; source_ur
 }
 
 /** The graph row of one stored container. Lists are flattened to strings Neo4j can hold: ports as 8080->80/tcp, mounts as type source:destination (ro). */
-export function containerGraphRow(r: any) {
+export function containerGraphRow(r: any, imageNodeOf?: (instanceId: string, image: string | null | undefined, imageId?: string | null) => ContainerImageRef | null) {
   const c = rowToContainer(r);
   const ref = c.image ? imageRef(c.image) : null;
+  const node = c.image ? imageNodeOf?.(c.instance_id, c.image, c.image_id) ?? null : null;
   return {
     instance_id: c.instance_id, id: `container:${c.instance_id}:${c.name}`, name: c.name, container_id: c.container_id, image: c.image, image_id: c.image_id, state: c.state, health: c.health, exit_code: c.exit_code, oom_killed: c.oom_killed,
     created: c.created, started_at: c.started_at, finished_at: c.finished_at, restarts: c.restarts, restart_policy: c.restart_policy, privileged: c.privileged, network_mode: c.network_mode, user: c.user, entrypoint: c.entrypoint,
@@ -102,7 +108,7 @@ export function containerGraphRow(r: any) {
     source_url: c.source_url, revision: c.revision, image_version: c.image_version, image_title: c.image_title, image_built: c.image_built,
     compose_project: c.compose_project, compose_service: c.compose_service, compose_dir: c.compose_dir, cpu_pct: c.cpu_pct, mem_bytes: c.mem_bytes,
     first_seen: c.first_seen, last_seen: c.last_seen, probes: c.probes, gone: c.gone,
-    image_node: ref?.id ?? null, repository: ref?.repository ?? null, tag: ref?.tag ?? null,
+    image_node: node?.image_id ?? ref?.id ?? null, repository: ref?.repository ?? null, tag: ref?.tag ?? null,
   };
 }
 
@@ -114,7 +120,11 @@ export async function mirrorContainers(instanceIds?: string[]): Promise<{ contai
   let raw: any[] = [];
   try { raw = instanceIds ? db.prepare(`select * from instance_containers where instance_id in (${instanceIds.map(() => "?").join(",")})`).all(...instanceIds) : db.prepare("select * from instance_containers").all(); }
   catch { return { containers: 0, repositories: 0 }; /* the table is created by src/container_inventory.ts on first load */ }
-  const rows = raw.map(containerGraphRow);
+  // the image node by the box's digest, so the container meets the node the software layer writes (graph_software.ts imageNodeResolver)
+  let images: any[] = [];
+  try { images = instanceIds ? db.prepare(`select instance_id, image, image_id, digest from instance_images where gone = 0 and instance_id in (${instanceIds.map(() => "?").join(",")})`).all(...instanceIds) : db.prepare("select instance_id, image, image_id, digest from instance_images where gone = 0").all(); } catch { /* no software probe yet */ }
+  const imageNodeOf = imageNodeResolver(images);
+  const rows = raw.map((r) => containerGraphRow(r, imageNodeOf));
   const now = new Date().toISOString();
   for (const b of chunks(rows)) {
     await writeCypher(CONTAINER_CYPHER, neoParams({ rows: b, now, provider: AWS, account: accountId() }));
@@ -133,6 +143,8 @@ export async function mirrorContainers(instanceIds?: string[]): Promise<{ contai
   // an image whose label this pass no longer resolves loses its edge (one that resolved to another repository was moved above); a stub no image names any more goes
   await writeCypher(`MATCH (i:AdvisorImage)-[x:BUILT_FROM {via: 'image_label'}]->(:AdvisorRepository) WHERE i.id IN $images AND (x.updated_at IS NULL OR x.updated_at <> $now) DELETE x`, { images: rows.map((r) => r.image_node).filter((id): id is string => id != null), now });
   await writeCypher("MATCH (n:AdvisorRepository {named_by: 'image_label'}) WHERE NOT (n)--() DELETE n", {});
+  // an image node nothing reaches any more (a container moved from the tag-keyed node to the digest one; its own BUILT_FROM to a repository does not keep it)
+  await writeCypher("MATCH (n:AdvisorImage) WHERE NOT (n)<--() AND NOT (n)-[:CONTAINS]->() DETACH DELETE n", {});
   if (repositories) await linkCodeRepositoriesQuietly(now);
   return { containers: rows.length, repositories };
 }

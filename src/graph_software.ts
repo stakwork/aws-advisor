@@ -20,6 +20,15 @@ import { componentPurl, parsePurl } from "./software_inventory.js";
  * pypi, deb of the image's distribution, ...) and on the filesystem (INSTALLED_ON like any package); PROVIDES edges
  * from a package to the program (AdvisorApp) it ships, so "which package is this listening process from" is one hop.
  *
+ * A running executable (the sbom probe's proc sources, sbom 1.7) is attached where it lives (2026-11-03). A host process is
+ * INSTALLED_ON the compute at its path. A process inside a container is a file of the image the container was built from, so
+ * it is CONTAINS {source_kind: proc, observed: running, path} from that image node (the same node the scanner's reading of the
+ * image fills, keyed by digest) and EXECUTES {path, sha256, size} from the AdvisorContainer that runs it, so "what runs in this
+ * container" and "what does this image carry" are one hop each; the compute reaches it through RUNS → EXECUTES and RUNS_IMAGE →
+ * CONTAINS. An executable on a bind mount or a volume (its path under one of the container's mount destinations) is not the
+ * image's: it keeps INSTALLED_ON the compute with the container id on the edge, plus EXECUTES. The two writers of CONTAINS
+ * (the scanner's image_scan edges, the boxes' proc edges) each retire only their own kind.
+ *
  * The kernel is two nodes joined by PACKAGED_AS (probe software/6): the running kernel (ecosystem kernel, pkg:generic/linux) at its upstream
  * version, the x.y.z the kernel CNA's ranges name, and the distribution package that owns the booted image (a deb/rpm/apk node like any
  * other, what the distribution's advisories name). uname -r stays on the compute: on Debian and Ubuntu it is an ABI (6.1.0-54-cloud-amd64)
@@ -83,11 +92,27 @@ SET i:AdvisorImage, i.digest = coalesce(row.digest, i.digest), i.image_id = coal
 MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
 SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, cpe: row.cpe, cpes: row.cpes, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', is_deleted: false, deleted_at: null, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (i)-[r:CONTAINS]->(p)
-SET r += {first_seen: row.first_seen, last_seen: row.last_seen, platform: row.platform, is_deleted: false, deleted_at: null, updated_at: $now}`;
+SET r += {first_seen: row.first_seen, last_seen: row.last_seen, platform: row.platform, source_kind: coalesce(row.edge_source_kind, 'image_scan'), observed: row.observed, path: row.path, sha256: row.sha256, size: row.size, is_deleted: false, deleted_at: null, updated_at: $now}`;
 
+/** Scoped by who wrote the edge (`source_kind`): the scanner's keep list retires only image_scan edges, a box's proc keep list only proc edges. */
 const PRUNE_CONTAINS_CYPHER = `
 UNWIND $rows AS row
 MATCH (i:AdvisorImage {id: row.image_id})-[r:CONTAINS]->(p:SoftwareComponent)
+WHERE NOT p.id IN row.keep AND coalesce(r.is_deleted, false) = false AND coalesce(r.source_kind, 'image_scan') = row.source_kind
+SET r.is_deleted = true, r.deleted_at = $now`;
+
+/** A container to the executables it runs (sbom 1.7 proc sources read through the container's root): the container node is the docker
+ *  probe's (src/graph_containers.ts), matched, never merged; a container that probe has not written yet gets its edges on the next sync. */
+const EXECUTES_CYPHER = `
+UNWIND $rows AS row
+MATCH (k:AdvisorContainer {id: row.container_node}) MATCH (p:SoftwareComponent {id: row.id})
+MERGE (k)-[r:EXECUTES]->(p)
+SET r.first_seen = CASE WHEN r.first_seen IS NULL OR coalesce(r.is_deleted, false) THEN row.first_seen ELSE r.first_seen END,
+    r += {path: row.path, sha256: row.sha256, size: row.size, last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
+
+const PRUNE_EXECUTES_CYPHER = `
+UNWIND $rows AS row
+MATCH (k:AdvisorContainer {id: row.container_node})-[r:EXECUTES]->(p:SoftwareComponent)
 WHERE NOT p.id IN row.keep AND coalesce(r.is_deleted, false) = false
 SET r.is_deleted = true, r.deleted_at = $now`;
 
@@ -168,10 +193,11 @@ const ORPHAN_COMPONENTS_CYPHER = `
 MATCH (p:SoftwareComponent) WHERE coalesce(p.is_deleted, false) = false
 AND size([(p)-[r:INSTALLED_ON]->() WHERE coalesce(r.is_deleted, false) = false | 1]) = 0
 AND size([()-[r:CONTAINS]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) = 0
+AND size([()-[r:EXECUTES]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) = 0
 SET p.is_deleted = true, p.deleted_at = $now`;
 const REVIVE_COMPONENTS_CYPHER = `
 MATCH (p:SoftwareComponent) WHERE p.is_deleted = true
-AND size([(p)-[r:INSTALLED_ON]->() WHERE coalesce(r.is_deleted, false) = false | 1]) + size([()-[r:CONTAINS]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) > 0
+AND size([(p)-[r:INSTALLED_ON]->() WHERE coalesce(r.is_deleted, false) = false | 1]) + size([()-[r:CONTAINS]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) + size([()-[r:EXECUTES]->(p) WHERE coalesce(r.is_deleted, false) = false | 1]) > 0
 SET p.is_deleted = false, p.deleted_at = null`;
 
 const SUPERSEDED_BY_CYPHER = `
@@ -237,7 +263,21 @@ export function imageRef(image: string): { id: string; repository: string; tag: 
  *  an image is CONTAINS from the image node (CONTAINS_CYPHER). The purl\'s own type is the ecosystem; a distro purl carries the image\'s
  *  distribution (distro qualifier, else the namespace) and source package (upstream), so its identity and advisory ecosystem are that
  *  distribution\'s, not the host\'s. The package id is the package\'s; the image id travels as image_id. Pure; null for a purl that does not parse. */
-export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string; digest?: string | null; image_id?: string | null; platform?: string | null; /** the CPEs syft assigned, as the row stores them (a JSON list) or as a list; the rule forms candidates when none */ cpes?: string | string[] | null }): { edge: "installed_on" | "contains"; row: Record<string, unknown> } | null {
+/** The image a container process belongs to (the container's BUILT_FROM node: imageNodeId of the box's instance_images row) and the container's own node, as the caller resolves them. */
+export interface ContainerContext {
+  /** The image node and its reference fields, as CONTAINS_CYPHER merges them; null when the box has no image row for the container. */
+  container_image?: ContainerImageRef | null;
+  /** The executable lives under one of the container's mount destinations (a bind mount or a volume): not a file of the image. */
+  on_mount?: boolean;
+  /** The AdvisorContainer node id (container:<instance>:<name>); null when the docker probe has not recorded the container. */
+  container_node?: string | null;
+  sha256?: string | null; size?: number | null;
+}
+export interface ContainerImageRef { image_id: string; image: string; repository: string; tag: string | null; digest: string | null; docker_image_id: string | null }
+export interface ExecutesRow { container_node: string; id: string; path: string | null; sha256: string | null; size: number | null; first_seen: string; last_seen: string }
+export interface SbomGraphRow { edge: "installed_on" | "contains"; row: Record<string, unknown>; /** the container's edge to the executable, when it runs in a recorded container */ executes?: ExecutesRow }
+
+export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string; digest?: string | null; image_id?: string | null; platform?: string | null; /** the CPEs syft assigned, as the row stores them (a JSON list) or as a list; the rule forms candidates when none */ cpes?: string | string[] | null } & ContainerContext): SbomGraphRow | null {
   const p = parsePurl(String(r.purl)); if (!p) return null;
   const version = String(r.version || p.version || "unknown");
   const upstream = p.qualifiers.upstream ? p.qualifiers.upstream.split("@")[0] || null : null;
@@ -251,10 +291,61 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
   const eco = sbomEcosystem(p.type);
   const node = { id: packageId(eco, String(r.name), version), name: String(r.name), version, ecosystem: eco, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: eco === "binary" ? packageScope(String(r.name)).scope : "library", version_purl: String(r.purl), ...identity, ...sbomCpe(r.cpes, { ecosystem: eco, name: String(r.name), version, source: upstream }) };
   if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, container: null, first_seen: r.first_seen, last_seen: r.last_seen } };
-  // a running executable (sbom 1.7): INSTALLED_ON the box at the path it runs from, with the container it runs in when it is a container process
-  if (r.source === "proc") { const m = /^(?:host|container:([0-9a-f]{12})):(\/.*)$/.exec(String(r.ref)); return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: m?.[2] ?? null, container: m?.[1] ?? null, first_seen: r.first_seen, last_seen: r.last_seen } }; }
+  // a running executable (sbom 1.7): a host process INSTALLED_ON the box at its path; a container process CONTAINS from the container's image (a file of it)
+  // and EXECUTES from the container; one on a mount keeps the compute edge with the container id (placement, 2026-11-03)
+  if (r.source === "proc") return placeProcess(r, node, p.qualifiers.arch ?? null);
   const im = imageRef(String(r.ref));
-  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, platform: r.platform ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };
+  return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, platform: r.platform ?? null, path: null, sha256: null, size: null, edge_source_kind: "image_scan", observed: null, first_seen: r.first_seen, last_seen: r.last_seen } };
+}
+
+/** Where a running executable's node hangs (sbomGraphRow and unclassifiedGraphRow share it): the ref says host or container and the path. Pure. */
+function placeProcess(r: { instance_id: string; ref: string; first_seen: string; last_seen: string } & ContainerContext, node: Record<string, unknown> & { id: string }, arch: string | null): SbomGraphRow | null {
+  const m = /^(?:host|container:([0-9a-f]{12})):(\/.*)$/.exec(String(r.ref)); if (!m) return null;
+  const path = m[2]!; const container = m[1] ?? null;
+  const executes: ExecutesRow | undefined = container && r.container_node ? { container_node: r.container_node, id: node.id, path, sha256: r.sha256 ?? null, size: r.size ?? null, first_seen: r.first_seen, last_seen: r.last_seen } : undefined;
+  if (container && r.container_image && !r.on_mount) {
+    const i = r.container_image;
+    return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: i.image_id, image: i.image, repository: i.repository, tag: i.tag, digest: i.digest, docker_image_id: i.docker_image_id, platform: null, path, container, sha256: r.sha256 ?? null, size: r.size ?? null, edge_source_kind: "proc", observed: "running", first_seen: r.first_seen, last_seen: r.last_seen }, executes };
+  }
+  return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch, path, container, sha256: r.sha256 ?? null, size: r.size ?? null, first_seen: r.first_seen, last_seen: r.last_seen }, executes };
+}
+
+/** An executable's path is under one of the container's mount destinations (`instance_containers.mounts`, a JSON list of {type, source, destination, rw}):
+ *  a bind mount or a volume, so the file is not the image's. A destination of `/` is ignored (it would claim everything). Pure; false for anything unparsable. */
+export function onMount(path: string | null | undefined, mounts: string | unknown[] | null | undefined): boolean {
+  if (!path) return false;
+  let list: unknown[] = [];
+  try { list = Array.isArray(mounts) ? mounts : mounts ? JSON.parse(String(mounts)) : []; } catch { return false; }
+  if (!Array.isArray(list)) return false;
+  for (const m of list) {
+    const d = m && typeof m === "object" ? String((m as any).destination ?? "") : "";
+    if (!d || d === "/" ) continue;
+    const dest = d.replace(/\/+$/, "");
+    if (path === dest || path.startsWith(dest + "/")) return true;
+  }
+  return false;
+}
+
+/** A running executable nothing identified, placed like an identified one (placeProcess): on the compute when it is a host process or on a mount, on the
+ *  container's image and the container otherwise. Null for a ref that does not parse. */
+export function unclassifiedGraphRow(s: { instance_id: string; ref: string; container?: string | null; sha256?: string | null; size?: number | null; collected_at: string } & ContainerContext): SbomGraphRow | null {
+  const row = unclassifiedComponentRow(s); if (!row) return null;
+  const { path: _p, container: _c, sha256: _h, size: _z, arch: _a, ...node } = row as Record<string, unknown> & { id: string };
+  return placeProcess({ instance_id: s.instance_id, ref: s.ref, first_seen: s.collected_at, last_seen: s.collected_at, container_image: s.container_image, on_mount: s.on_mount, container_node: s.container_node, sha256: s.sha256 ?? null, size: s.size ?? null }, node, null);
+}
+
+/** The image node a box's image reference resolves to, from its instance_images rows (digest or docker id when the probe recorded one, the bare
+ *  reference otherwise: imageNodeId), so a container's BUILT_FROM and a process's CONTAINS meet the node RUNS_IMAGE and the scanner use. Looked up
+ *  by (box, reference), then by (box, docker image id); null when the box has no row for it. Pure over the rows given. */
+export function imageNodeResolver(rows: { instance_id: string; image: string; image_id?: string | null; digest?: string | null }[]): (instanceId: string, image: string | null | undefined, imageId?: string | null) => ContainerImageRef | null {
+  const byRef = new Map<string, (typeof rows)[number]>(); const byId = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) { byRef.set(`${r.instance_id}\t${r.image}`, r); if (r.image_id) byId.set(`${r.instance_id}\t${r.image_id}`, r); }
+  return (instanceId, image, imageId) => {
+    const r = (image ? byRef.get(`${instanceId}\t${image}`) : undefined) ?? (imageId ? byId.get(`${instanceId}\t${imageId}`) : undefined);
+    const ref = image ?? r?.image; if (!ref) return null;
+    const im = imageRef(ref);
+    return { image_id: imageNodeId(ref, r?.digest ?? null, r?.image_id ?? imageId ?? null), image: ref, repository: im.repository, tag: im.tag, digest: r?.digest ? String(r.digest).split("@").pop()! : null, docker_image_id: r?.image_id ?? imageId ?? null };
+  };
 }
 
 /** A running executable nothing identified (sbom 1.7: syft found no package in it and the probe's text read knew it no better), as the graph keeps it: a binary
@@ -270,7 +361,7 @@ export function unclassifiedComponentRow(s: { instance_id: string; ref: string; 
 /** The image key of an instance_images row in SQL (software_inventory.ts IMG_KEY): its sbom_key, else the per-box fallback. */
 const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
 
-export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; provides: number; bundles: number; depends: number; packaged_as: number; superseded: number; took_ms: number }
+export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; /** EXECUTES edges, container → running executable */ executes: number; provides: number; bundles: number; depends: number; packaged_as: number; superseded: number; took_ms: number }
 
 /** Everything the software and sbom probes know about the given boxes (or all). */
 export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGraphCounts | null> {
@@ -320,16 +411,47 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // which knows the path; the syft row would only rewrite the same node and edge with less
   const probed = new Set(pkgRows.filter((p) => p.ecosystem === "binary").map((p) => `${p.instance_id}\t${p.id}`));
   const containsRows: any[] = [];
-  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.cpes, p.first_seen, p.last_seen, null as digest, null as image_id, null as platform from instance_sbom p where p.source in ('dir', 'proc')${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
-    const g = sbomGraphRow(r); if (!g) continue;
-    if (g.edge === "installed_on" && g.row.ecosystem === "binary" && !g.row.container && probed.has(`${g.row.instance_id}\t${g.row.id}`)) continue; // a container's own copy keeps its row: the edge says which container
+  // a container process (2026-11-03) is placed on the container's image and the container (sbomGraphRow placeProcess): the container's node and image
+  // from the docker probe's rows, the image node from the box's instance_images row (imageNodeResolver, the node BUILT_FROM and RUNS_IMAGE share).
+  // The proc rows are read fleet-wide: a proc CONTAINS edge on an image node may come from any box that runs the image, so the keep list that
+  // retires an image's proc edges must be the union over every box, not only the boxes this sync writes
+  const scope = instanceIds ? new Set(instanceIds) : null;
+  const imageNodeOf = imageNodeResolver(rows("select instance_id, image, image_id, digest from instance_images where gone = 0"));
+  const containers = new Map<string, { node: string; image: string | null; image_id: string | null; mounts: string | null }>(); // `${instance}\t${12-hex}` → the container
+  const containersOfBox = new Map<string, { node: string; image_node: string | null }[]>(); // every container of a box, gone or not: a container with nothing readable retires its edges, and its image's proc edges are re-judged
+  for (const c of rows("select instance_id, name, container_id, image, image_id, mounts from instance_containers")) {
+    const node = `container:${c.instance_id}:${c.name}`;
+    containersOfBox.set(c.instance_id, [...(containersOfBox.get(c.instance_id) ?? []), { node, image_node: imageNodeOf(c.instance_id, c.image ?? null, c.image_id ?? null)?.image_id ?? null }]);
+    if (c.container_id) containers.set(`${c.instance_id}\t${String(c.container_id).slice(0, 12)}`, { node, image: c.image ?? null, image_id: c.image_id ?? null, mounts: c.mounts ?? null });
+  }
+  const contextOf = (instanceId: string, ref: string, imageIdSeen: string | null, path: string | null): ContainerContext => {
+    const m = /^container:([0-9a-f]{12}):/.exec(ref); if (!m) return {};
+    const c = containers.get(`${instanceId}\t${m[1]}`);
+    const image = imageNodeOf(instanceId, c?.image ?? null, c?.image_id ?? imageIdSeen);
+    return { container_node: c?.node ?? null, container_image: image, on_mount: c ? onMount(path, c.mounts) : false };
+  };
+  const executesRows: ExecutesRow[] = [];
+  const procKeep = new Map<string, Set<string>>(); // image node → the proc-sourced package ids any box's processes put on it (the keep list of its proc CONTAINS edges)
+  const procTouched = new Set<string>(); // image nodes a box in scope wrote proc edges to
+  const place = (g: SbomGraphRow, instanceId: string) => {
+    if (g.edge === "contains") { const nid = String(g.row.image_id); if (!procKeep.has(nid)) procKeep.set(nid, new Set()); procKeep.get(nid)!.add(String(g.row.id)); if (!scope || scope.has(instanceId)) procTouched.add(nid); }
+    if (scope && !scope.has(instanceId)) return;
     (g.edge === "installed_on" ? pkgRows : containsRows).push(g.row);
+    if (g.executes) executesRows.push(g.executes);
+  };
+  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.cpes, p.first_seen, p.last_seen, null as digest, null as image_id, null as platform, s.image_id as image_id_seen, s.sha256, s.size from instance_sbom p left join instance_sbom_sources s on s.instance_id = p.instance_id and s.source = p.source and s.ref = p.ref where p.source in ('dir', 'proc')`)) {
+    if (r.source === "dir" && scope && !scope.has(r.instance_id)) continue;
+    const path = /^(?:host|container:[0-9a-f]{12}):(\/.*)$/.exec(String(r.ref))?.[1] ?? null;
+    const g = sbomGraphRow({ ...r, ...(r.source === "proc" ? contextOf(r.instance_id, String(r.ref), r.image_id_seen ?? null, path) : {}) }); if (!g) continue;
+    if (g.edge === "installed_on" && g.row.ecosystem === "binary" && !g.row.container && probed.has(`${g.row.instance_id}\t${g.row.id}`)) continue; // a container's own copy keeps its row: the edge says which container
+    place(g, r.instance_id);
   }
   // running executables nothing identified (sbom 1.7): kept as unclassified components, except a host program a package owns or the software probe versioned at that path (those are identified)
-  for (const s of rows(`select s.instance_id, s.ref, s.container, s.image_id, s.sha256, s.size, s.package, s.collected_at from instance_sbom_sources s where s.source = 'proc' and s.status = 'ok' and s.listed = 0${where.replace(" instance_id in", " s.instance_id in")}`, ...args)) {
-    const r = unclassifiedComponentRow(s); if (!r) continue;
-    if (!r.container && (s.package || versionedPaths.has(`${s.instance_id}\t${r.path}`))) continue;
-    pkgRows.push(r);
+  for (const s of rows("select s.instance_id, s.ref, s.container, s.image_id, s.sha256, s.size, s.package, s.collected_at from instance_sbom_sources s where s.source = 'proc' and s.status = 'ok' and s.listed = 0")) {
+    const path = /^(?:host|container:[0-9a-f]{12}):(\/.*)$/.exec(String(s.ref))?.[1] ?? null;
+    const g = unclassifiedGraphRow({ ...s, ...contextOf(s.instance_id, String(s.ref), s.image_id ?? null, path) }); if (!g) continue;
+    if (g.edge === "installed_on" && !g.row.container && (s.package || versionedPaths.has(`${s.instance_id}\t${path}`))) continue;
+    place(g, s.instance_id);
   }
   const containsSeen = new Set<string>();
   for (const r of rows(`select ii.instance_id, 'image' as source, ii.image as ref, p.purl, p.name, p.version, p.cpes, p.first_seen, p.last_seen, coalesce(s.digest, ii.digest) as digest, coalesce(s.image_id, ii.image_id) as image_id, coalesce(s.platform, ii.platform) as platform
@@ -395,9 +517,21 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
     if (!keepBy.has(nid)) keepBy.set(nid, new Set());
     keepBy.get(nid)!.add(packageId(sbomEcosystem(p.type), String(r.name), String(r.version || p.version || "unknown")));
   }
-  const inScope = new Set(containsRows.map((r) => String(r.image_id)));
-  const keepContains = [...keepBy].filter(([nid]) => inScope.has(nid)).map(([image_id, keep]) => ({ image_id, keep: [...keep] }));
+  const inScope = new Set(containsRows.filter((r) => r.edge_source_kind !== "proc").map((r) => String(r.image_id)));
+  const keepContains = [...keepBy].filter(([nid]) => inScope.has(nid)).map(([image_id, keep]) => ({ image_id, keep: [...keep], source_kind: "image_scan" }));
   for (const b of chunks(keepContains, 50)) await w(PRUNE_CONTAINS_CYPHER, b);
+  // the proc edges of every image a box in scope touched, or runs a container of (a process that stopped leaves no row, so the image must be re-judged
+  // even when the box wrote nothing to it this time): retired when no box's processes put them there any more (the fleet-wide keep list)
+  for (const box of os.keys()) for (const c of containersOfBox.get(box) ?? []) if (c.image_node) procTouched.add(c.image_node);
+  const keepProc = [...procTouched].map((image_id) => ({ image_id, keep: [...(procKeep.get(image_id) ?? [])], source_kind: "proc" }));
+  for (const b of chunks(keepProc, 50)) await w(PRUNE_CONTAINS_CYPHER, b);
+  // what each container runs; every container of the probed boxes gets its keep list, an empty one retiring all its edges (nothing readable this pass, or gone)
+  const execEdges = uniq(executesRows, (r) => `${r.container_node}\t${r.id}`);
+  for (const b of chunks(execEdges)) await w(EXECUTES_CYPHER, b);
+  const execKeep = new Map<string, Set<string>>();
+  for (const box of os.keys()) for (const c of containersOfBox.get(box) ?? []) execKeep.set(c.node, new Set());
+  for (const e of execEdges) { if (!execKeep.has(e.container_node)) execKeep.set(e.container_node, new Set()); execKeep.get(e.container_node)!.add(e.id); }
+  for (const b of chunks([...execKeep].map(([container_node, keep]) => ({ container_node, keep: [...keep] })), 50)) await w(PRUNE_EXECUTES_CYPHER, b);
 
   // the program a package ships, where that program is seen running (AdvisorApp nodes are keyed by name)
   const apps = new Set(rows(`select distinct name from instance_apps where gone = 0${where}`, ...args).map((a) => String(a.name)));
@@ -422,7 +556,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // the nodes' own lifecycle, from the edges': what came back is live again, what nothing holds any more is marked (never deleted)
   await writeCypher(REVIVE_COMPONENTS_CYPHER);
   await writeCypher(ORPHAN_COMPONENTS_CYPHER, neoParams({ now }));
-  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, packaged_as: packagedEdges.length, superseded: supersededRows.length, took_ms: Date.now() - t0 };
+  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, executes: execEdges.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, packaged_as: packagedEdges.length, superseded: supersededRows.length, took_ms: Date.now() - t0 };
 }
 
 

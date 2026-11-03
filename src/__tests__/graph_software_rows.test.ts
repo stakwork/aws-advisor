@@ -36,17 +36,39 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   assert.equal(node.row.id, "pkg:binary:node:20.18.0", "the id the probe's reading of the same node gets"); assert.equal(node.row.ecosystem, "binary"); assert.equal(node.row.purl, "pkg:generic/node");
   assert.equal(node.row.id, g.packageId("binary", "node", "20.18.0")); assert.equal(g.sbomEcosystem("npm"), "npm");
   assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "nonsense", name: "x", version: null }), null);
-  // a running executable (sbom 1.7): INSTALLED_ON the box at its path, with the container it runs in; the same node syft and the software probe give that program
-  const cnode = g.sbomGraphRow({ ...base, source: "proc", ref: "container:abcdefabcdef:/usr/local/bin/node", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0" })!;
-  assert.equal(cnode.edge, "installed_on"); assert.equal(cnode.row.id, "pkg:binary:node:20.18.0"); assert.equal(cnode.row.path, "/usr/local/bin/node"); assert.equal(cnode.row.container, "abcdefabcdef");
-  const hnode = g.sbomGraphRow({ ...base, source: "proc", ref: "host:/usr/sbin/sshd", purl: "pkg:generic/openssh@9.2p1", name: "openssh", version: "9.2p1" })!;
-  assert.equal(hnode.row.path, "/usr/sbin/sshd"); assert.equal(hnode.row.container, null, "a host process");
+  // a running executable (sbom 1.7) inside a container whose node and image are known (2026-11-03): a file of the image, so CONTAINS from the image node the
+  // container is BUILT_FROM, and EXECUTES from the container; the same node syft and the software probe give that program
+  const img = { image_id: "image:ghcr.io/stakwork/strut-browser@sha256:" + "1".repeat(64), image: "ghcr.io/stakwork/strut-browser:latest", repository: "ghcr.io/stakwork/strut-browser", tag: "latest", digest: "sha256:" + "1".repeat(64), docker_image_id: "sha256:" + "2".repeat(64) };
+  const ctx = { container_image: img, container_node: "container:i-1:browser.sphinx", sha256: "cd".repeat(32), size: 4242 };
+  const cnode = g.sbomGraphRow({ ...base, source: "proc", ref: "container:abcdefabcdef:/usr/local/bin/node", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0", ...ctx })!;
+  assert.equal(cnode.edge, "contains"); assert.equal(cnode.row.id, "pkg:binary:node:20.18.0"); assert.equal(cnode.row.image_id, img.image_id); assert.equal(cnode.row.image, img.image); assert.equal(cnode.row.digest, img.digest);
+  assert.equal(cnode.row.edge_source_kind, "proc"); assert.equal(cnode.row.observed, "running"); assert.equal(cnode.row.path, "/usr/local/bin/node"); assert.equal(cnode.row.container, "abcdefabcdef"); assert.equal(cnode.row.platform, null);
+  assert.deepEqual(cnode.executes, { container_node: "container:i-1:browser.sphinx", id: "pkg:binary:node:20.18.0", path: "/usr/local/bin/node", sha256: "cd".repeat(32), size: 4242, first_seen: base.first_seen, last_seen: base.last_seen });
+  // the same executable on a bind mount: not the image's; INSTALLED_ON the compute with the container id, EXECUTES from the container all the same
+  const mounted = g.sbomGraphRow({ ...base, source: "proc", ref: "container:abcdefabcdef:/vol/bin/node", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0", ...ctx, on_mount: true })!;
+  assert.equal(mounted.edge, "installed_on"); assert.equal(mounted.row.container, "abcdefabcdef"); assert.equal(mounted.row.path, "/vol/bin/node"); assert.equal(mounted.executes?.container_node, "container:i-1:browser.sphinx");
+  // a container the docker probe has not recorded (no node, no image): the compute edge with the container id, as before 2026-11-03, and no EXECUTES
+  const unknownCt = g.sbomGraphRow({ ...base, source: "proc", ref: "container:abcdefabcdef:/usr/local/bin/node", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0" })!;
+  assert.equal(unknownCt.edge, "installed_on"); assert.equal(unknownCt.row.container, "abcdefabcdef"); assert.equal(unknownCt.executes, undefined);
+  // a known container whose image the box has no row for yet: EXECUTES from the container, the compute edge until the image is known
+  const noImage = g.sbomGraphRow({ ...base, source: "proc", ref: "container:abcdefabcdef:/usr/local/bin/node", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0", container_node: "container:i-1:x", container_image: null })!;
+  assert.equal(noImage.edge, "installed_on"); assert.equal(noImage.executes?.container_node, "container:i-1:x");
+  const hnode = g.sbomGraphRow({ ...base, source: "proc", ref: "host:/usr/sbin/sshd", purl: "pkg:generic/openssh@9.2p1", name: "openssh", version: "9.2p1", ...ctx })!;
+  assert.equal(hnode.edge, "installed_on"); assert.equal(hnode.row.path, "/usr/sbin/sshd"); assert.equal(hnode.row.container, null, "a host process"); assert.equal(hnode.executes, undefined, "no container runs it");
   assert.equal(npm.row.container, null, "the filesystem: no container, no path");
+  assert.equal(arm.row.edge_source_kind, "image_scan", "the scanner's reading of an image is told from a process's by the edge's source_kind"); assert.equal(arm.row.observed, null);
   // an executable nothing identified: a binary component at version unknown, classified false, hash and size on the edge
   const un = g.unclassifiedComponentRow({ instance_id: "i-1", ref: "container:abcdefabcdef:/ms-playwright/chromium-1243/chrome-linux64/chrome_crashpad_handler", container: "abcdefabcdef", sha256: "ab".repeat(32), size: 1234567, collected_at: "2026-11-03T12:00:00Z" })!;
   assert.deepEqual([un.id, un.name, un.version, un.ecosystem, un.source_kind, un.classified, un.purl, un.sort_key, un.cpe, un.cpes, un.path, un.container, un.sha256, un.size, un.scope], ["pkg:binary:chrome_crashpad_handler:unknown", "chrome_crashpad_handler", "unknown", "binary", "unclassified", false, "pkg:generic/chrome-crashpad-handler", null, null, [], "/ms-playwright/chromium-1243/chrome-linux64/chrome_crashpad_handler", "abcdefabcdef", "ab".repeat(32), 1234567, "tool"]);
   assert.equal(g.unclassifiedComponentRow({ instance_id: "i-1", ref: "host:/usr/sbin/sshd", collected_at: "2026-11-03T12:00:00Z" })!.container, null);
   assert.equal(g.unclassifiedComponentRow({ instance_id: "i-1", ref: "nonsense", collected_at: "2026-11-03T12:00:00Z" }), null);
+  // placed like an identified executable: on the container's image and the container when both are known, on the compute otherwise
+  const unG = g.unclassifiedGraphRow({ instance_id: "i-1", ref: "container:abcdefabcdef:/ms-playwright/chromium-1243/chrome-linux64/chrome", collected_at: "2026-11-03T12:00:00Z", ...ctx, sha256: "ab".repeat(32), size: 99 })!;
+  assert.equal(unG.edge, "contains"); assert.equal(unG.row.id, "pkg:binary:chrome:unknown"); assert.equal(unG.row.classified, false); assert.equal(unG.row.image_id, img.image_id); assert.equal(unG.row.edge_source_kind, "proc"); assert.equal(unG.row.sha256, "ab".repeat(32)); assert.equal(unG.row.size, 99);
+  assert.deepEqual(unG.executes, { container_node: "container:i-1:browser.sphinx", id: "pkg:binary:chrome:unknown", path: "/ms-playwright/chromium-1243/chrome-linux64/chrome", sha256: "ab".repeat(32), size: 99, first_seen: "2026-11-03T12:00:00Z", last_seen: "2026-11-03T12:00:00Z" });
+  const unH = g.unclassifiedGraphRow({ instance_id: "i-1", ref: "host:/opt/thing/bin/thing", sha256: "ab".repeat(32), size: 1, collected_at: "2026-11-03T12:00:00Z" })!;
+  assert.equal(unH.edge, "installed_on"); assert.equal(unH.row.path, "/opt/thing/bin/thing"); assert.equal(unH.row.container, null); assert.equal(unH.row.classified, false); assert.equal(unH.executes, undefined);
+  assert.equal(g.unclassifiedGraphRow({ instance_id: "i-1", ref: "nonsense", collected_at: "2026-11-03T12:00:00Z" }), null);
   // the CPEs (src/sec/cpe.ts): what syft assigned when the row has them (stored as a JSON list, best first), the rule's candidates when not
   const withCpes = g.sbomGraphRow({ ...base, source: "image", ref: "nginx:1.27", purl: "pkg:deb/debian/libssl3@3.0.11-1~deb12u2?upstream=openssl&distro=debian-12", name: "libssl3", version: "3.0.11-1~deb12u2", cpes: JSON.stringify(["cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "cpe:2.3:a:libssl3:libssl3:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "junk"]) })!;
   assert.equal(withCpes.row.cpe, "cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "the first CPE the probe listed is the one the node is known by");
@@ -89,4 +111,28 @@ test("dormantKernelImage: an installed kernel image that is not the booted one g
   assert.equal(g.dormantKernelImage({ ecosystem: "apk", name: "linux-lts", version: "6.6.30-r0" }, apk), true);
   assert.equal(g.dormantKernelImage({ ecosystem: "apk", name: "linux-virt", version: "6.6.30-r0" }, apk), false);
   assert.equal(g.dormantKernelImage({ ecosystem: "apk", name: "linux-firmware-none", version: "1" }, apk), false);
+});
+
+test("onMount: an executable under a bind mount or a volume destination is not the image's; the root destination claims nothing; junk is false", () => {
+  const mounts = JSON.stringify([{ type: "bind", name: null, source: "/home/admin/vol", destination: "/vol", rw: true }, { type: "volume", name: "data", source: "/var/lib/docker/volumes/data/_data", destination: "/data/", rw: true }]);
+  assert.equal(g.onMount("/vol/app/bin/x", mounts), true);
+  assert.equal(g.onMount("/vol", mounts), true, "the mount point itself");
+  assert.equal(g.onMount("/volume/x", mounts), false, "a sibling path that merely starts with the same letters");
+  assert.equal(g.onMount("/data/bin/x", mounts), true, "a trailing slash on the destination is fine");
+  assert.equal(g.onMount("/ms-playwright/chromium-1243/chrome-linux64/chrome", mounts), false);
+  assert.equal(g.onMount("/usr/bin/x", JSON.stringify([{ type: "bind", destination: "/", rw: true }])), false, "a bind of / would claim everything: ignored");
+  assert.equal(g.onMount("/usr/bin/x", "not json"), false); assert.equal(g.onMount("/usr/bin/x", null), false); assert.equal(g.onMount(null, mounts), false);
+  assert.equal(g.onMount("/vol/x", [{ destination: "/vol" }]), true, "a parsed list is taken as it is");
+});
+
+test("imageNodeResolver: a box's image reference resolves to the digest-keyed node its instance_images row gives (what RUNS_IMAGE, CONTAINS and BUILT_FROM must share), by reference first, then by docker image id; the bare reference when the box has no row", () => {
+  const rows = [{ instance_id: "i-1", image: "ghcr.io/stakwork/strut-browser:latest", image_id: "sha256:" + "2".repeat(64), digest: "ghcr.io/stakwork/strut-browser@sha256:" + "1".repeat(64) }, { instance_id: "i-2", image: "ghcr.io/stakwork/strut-browser:latest", image_id: null, digest: null }];
+  const of = g.imageNodeResolver(rows);
+  const a = of("i-1", "ghcr.io/stakwork/strut-browser:latest")!;
+  assert.equal(a.image_id, "image:ghcr.io/stakwork/strut-browser@sha256:" + "1".repeat(64)); assert.equal(a.repository, "ghcr.io/stakwork/strut-browser"); assert.equal(a.tag, "latest"); assert.equal(a.digest, "sha256:" + "1".repeat(64)); assert.equal(a.docker_image_id, "sha256:" + "2".repeat(64));
+  assert.equal(of("i-1", null, "sha256:" + "2".repeat(64))!.image_id, a.image_id, "by docker image id when the reference is not known");
+  assert.equal(of("i-2", "ghcr.io/stakwork/strut-browser:latest")!.image_id, "image:ghcr.io/stakwork/strut-browser:latest", "no digest recorded on that box: the bare reference, as imageNodeId gives it");
+  assert.equal(of("i-3", "ghcr.io/stakwork/strut-browser:latest")!.image_id, "image:ghcr.io/stakwork/strut-browser:latest", "a box with no row at all still names the image");
+  assert.equal(of("i-3", "ghcr.io/stakwork/strut-browser:latest", "sha256:" + "3".repeat(64))!.image_id, "image:sha256:" + "3".repeat(64), "a docker image id in hand outranks the reference, as imageNodeId has it");
+  assert.equal(of("i-3", null, "sha256:" + "9".repeat(64)), null, "nothing to name it by");
 });
