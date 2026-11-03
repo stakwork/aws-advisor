@@ -116,7 +116,163 @@ test("rulesetOf: the id is the hash of the rules alone, so two boxes with the sa
   assert.equal(hf.rulesetOf(probe([], [], { available: false })), null, "no tool");
   assert.equal(hf.rulesetOf(probe([], [])), null, "a tool with no tables loaded");
   const nft = hf.rulesetOf(probe([], [], { backend: "nftables", nft: ["table inet filter {", "chain input {", "type filter hook input priority 0; policy drop;", "tcp dport 22 accept", "}", "}"], nft_lines: 6 }))!;
-  assert.equal(nft.rules.length, 0); assert.ok(nft.id.startsWith("hostfw:")); assert.equal(nft.default_action, "allow", "no iptables chains to read a policy from");
+  assert.equal(nft.rules.length, 1); assert.ok(nft.id.startsWith("hostfw:")); assert.equal(nft.default_action, "deny", "the nft input chain's policy"); assert.equal(nft.input_policy, "drop");
+});
+
+/** A firewalld host (one inet table: sets, filter and nat base chains, zone dispatch by goto) beside the ip table iptables-nft mirrors, as `nft list ruleset` prints it. */
+export const FIREWALLD_HOST = `table inet firewalld { # progname firewalld
+\tct helper helper-ftp-tcp {
+\t\ttype "ftp" protocol tcp
+\t\tl3proto inet
+\t}
+\tset office {
+\t\ttype ipv4_addr
+\t\tflags interval
+\t\telements = { 10.0.0.0/8, 172.16.0.0/12,
+\t\t\t     192.168.1.0/24 comment "lan" }
+\t}
+\tset admin_ports {
+\t\ttype inet_service
+\t\telements = { 22, 8443 }
+\t}
+\tchain filter_INPUT {
+\t\ttype filter hook input priority filter + 10; policy accept;
+\t\tct state { established, related } accept
+\t\tct status dnat accept
+\t\tiifname "lo" accept
+\t\tct state invalid drop
+\t\tjump filter_INPUT_ZONES
+\t\treject with icmpx type admin-prohibited
+\t}
+\tchain filter_FORWARD {
+\t\ttype filter hook forward priority filter + 10; policy accept;
+\t\tct state { established, related } accept
+\t\tjump filter_FORWARD_ZONES
+\t\tlog prefix "fwd drop: " drop
+\t}
+\tchain filter_OUTPUT {
+\t\ttype filter hook output priority filter + 10; policy accept;
+\t\tip daddr 198.51.100.7 udp dport 53 accept
+\t}
+\tchain filter_INPUT_ZONES {
+\t\tiifname "eth0" goto filter_IN_public
+\t\tgoto filter_IN_public
+\t}
+\tchain filter_FORWARD_ZONES {
+\t\tiifname "eth0" goto filter_FWD_public
+\t}
+\tchain filter_IN_public {
+\t\tjump filter_IN_public_allow
+\t\tmeta l4proto { icmp, ipv6-icmp } accept
+\t}
+\tchain filter_IN_public_allow {
+\t\ttcp dport 22 ct state { new, untracked } accept comment "ssh"
+\t\tip saddr @office tcp dport @admin_ports accept
+\t\tip saddr 203.0.113.5 tcp dport { 80, 443 } accept
+\t\tip saddr != 10.0.0.0/8 tcp dport 5432 drop
+\t\tmeta nfproto ipv4 tcp dport 3306 limit rate 10/second counter packets 1 bytes 60 accept
+\t\tip6 saddr fe80::/10 th dport 8000-8100 accept
+\t\ttcp dport vmap { 25 : drop, 465 : accept }
+\t}
+\tchain filter_FWD_public {
+\t\treturn
+\t}
+\tchain nat_PREROUTING {
+\t\ttype nat hook prerouting priority dstnat + 10; policy accept;
+\t\tjump nat_PRE_public
+\t}
+\tchain nat_PRE_public {
+\t\ttcp dport 8080 dnat ip to 172.17.0.2:80 comment "web"
+\t}
+\tchain nat_POSTROUTING {
+\t\ttype nat hook postrouting priority srcnat + 10; policy accept;
+\t\toifname "eth0" masquerade
+\t}
+}
+table ip filter {
+\tchain INPUT {
+\t\ttype filter hook input priority filter; policy drop;
+\t\tmeta l4proto tcp tcp dport 22 counter packets 3 bytes 180 accept # handle 7
+\t}
+}`.split("\n");
+/** What the probe sends: leading whitespace, counters and handles gone. */
+const cleaned = (lines: string[]) => lines.map((l) => l.replace(/ counter packets \d+ bytes \d+/g, "").replace(/ # handle \d+$/, "").trim()).filter(Boolean);
+
+test("parseNftRuleset: tables, base chains with hook, type and policy, regular chains typed and directed by the chains that reach them, sets expanded, every match an iptables rule gives, the verdicts", () => {
+  const { chains, rules } = hf.parseNftRuleset(cleaned(FIREWALLD_HOST));
+  const byName = Object.fromEntries(chains.map((c) => [`${c.family}/${c.table}/${c.name}`, c]));
+  assert.equal(chains.length, 12);
+  assert.deepEqual(byName["inet/firewalld/filter_INPUT"], { family: "inet", table: "firewalld", name: "filter_INPUT", policy: "accept", builtin: true, rules: 6, hook: "input", type: "filter", engine: "nft" });
+  assert.deepEqual(byName["inet/firewalld/filter_IN_public_allow"], { family: "inet", table: "firewalld", name: "filter_IN_public_allow", policy: null, builtin: false, rules: 7, hook: null, type: "filter", engine: "nft" }, "reached from the input hook through goto and jump");
+  assert.equal(byName["inet/firewalld/nat_PRE_public"].type, "nat"); assert.equal(byName["ipv4/filter/INPUT"].policy, "drop"); assert.equal(byName["ipv4/filter/INPUT"].hook, "input");
+  const rule = (chain: string, i: number) => rules.find((r) => r.chain === chain && r.index === i)!;
+  const est = rule("filter_INPUT", 0);
+  assert.deepEqual(est.states, ["ESTABLISHED", "RELATED"]); assert.equal(est.action, "allow"); assert.equal(est.target, "accept"); assert.equal(est.direction, "ingress"); assert.equal(est.protocol, "any"); assert.equal(est.engine, "nft"); assert.equal(est.chain_type, "filter");
+  assert.equal(rule("filter_INPUT", 2).in_interface, "lo"); assert.equal(rule("filter_INPUT", 3).action, "deny");
+  const jump = rule("filter_INPUT", 4); assert.equal(jump.action, "jump"); assert.equal(jump.target, "filter_INPUT_ZONES"); assert.equal(jump.target_args, null);
+  const rej = rule("filter_INPUT", 5); assert.equal(rej.action, "deny"); assert.equal(rej.target, "reject"); assert.equal(rej.target_args, "with icmpx type admin-prohibited"); assert.equal(rej.raw, "reject with icmpx type admin-prohibited");
+  const logdrop = rule("filter_FORWARD", 2); assert.equal(logdrop.action, "deny", "log is not terminal: the drop after it is the verdict"); assert.equal(logdrop.direction, "forward");
+  const dns = rule("filter_OUTPUT", 0); assert.equal(dns.direction, "egress"); assert.equal(dns.destination, "198.51.100.7/32", "a bare host address gets its mask"); assert.equal(dns.protocol, "udp"); assert.equal(dns.from_port, 53);
+  const zone = rule("filter_INPUT_ZONES", 0); assert.equal(zone.action, "jump"); assert.equal(zone.target, "filter_IN_public"); assert.equal(zone.target_args, "goto"); assert.equal(zone.in_interface, "eth0"); assert.equal(zone.direction, "ingress");
+  assert.equal(rule("filter_IN_public", 1).protocol, "icmp,ipv6-icmp");
+  const ssh = rule("filter_IN_public_allow", 0);
+  assert.equal(ssh.protocol, "tcp"); assert.equal(ssh.from_port, 22); assert.equal(ssh.to_port, 22); assert.equal(ssh.ports, null); assert.deepEqual(ssh.states, ["NEW", "UNTRACKED"]); assert.equal(ssh.comment, "ssh"); assert.equal(ssh.raw, "tcp dport 22 ct state { new, untracked } accept", "the comment is not part of raw"); assert.equal(ssh.direction, "ingress"); assert.equal(ssh.chain_type, "filter");
+  const office = rule("filter_IN_public_allow", 1);
+  assert.equal(office.source, "10.0.0.0/8,172.16.0.0/12,192.168.1.0/24", "a named set expanded to its elements, over two lines, the element comment dropped"); assert.equal(office.ports, "22,8443"); assert.equal(office.from_port, 22); assert.equal(office.raw, "ip saddr @office tcp dport @admin_ports accept");
+  const web = rule("filter_IN_public_allow", 2); assert.equal(web.source, "203.0.113.5/32"); assert.equal(web.ports, "80,443"); assert.equal(web.from_port, 80); assert.equal(web.to_port, 80);
+  const pg = rule("filter_IN_public_allow", 3); assert.equal(pg.source, "10.0.0.0/8"); assert.equal(pg.source_negated, true); assert.equal(pg.action, "deny"); assert.equal(pg.from_port, 5432);
+  const mysql = rule("filter_IN_public_allow", 4); assert.equal(mysql.from_port, 3306); assert.equal(mysql.action, "allow"); assert.equal(mysql.raw, "meta nfproto ipv4 tcp dport 3306 limit rate 10/second accept", "counters are not part of raw");
+  const v6 = rule("filter_IN_public_allow", 5); assert.equal(v6.source, "fe80::/10"); assert.equal(v6.protocol, "any", "th names no protocol"); assert.equal(v6.from_port, 8000); assert.equal(v6.to_port, 8100); assert.equal(v6.ports, null, "one range: as --dport a:b");
+  const vmap = rule("filter_IN_public_allow", 6); assert.equal(vmap.action, "other"); assert.equal(vmap.target, "vmap"); assert.equal(vmap.target_args, "25:drop,465:accept");
+  assert.equal(rule("filter_FWD_public", 0).action, "return"); assert.equal(rule("filter_FWD_public", 0).direction, "forward");
+  const dnat = rule("nat_PRE_public", 0); assert.equal(dnat.action, "nat"); assert.equal(dnat.target, "dnat"); assert.equal(dnat.target_args, "ip to 172.17.0.2:80"); assert.equal(dnat.comment, "web"); assert.equal(dnat.chain_type, "nat"); assert.equal(dnat.direction, "ingress"); assert.equal(hf.isGraphRule(dnat), true);
+  const masq = rule("nat_POSTROUTING", 0); assert.equal(masq.action, "nat"); assert.equal(masq.out_interface, "eth0"); assert.equal(hf.isGraphRule(masq), false);
+  const mirrored = rule("INPUT", 0); assert.equal(mirrored.family, "ipv4"); assert.equal(mirrored.table, "filter"); assert.equal(mirrored.protocol, "tcp"); assert.equal(mirrored.from_port, 22); assert.equal(mirrored.raw, "meta l4proto tcp tcp dport 22 accept");
+  assert.equal(rules.length, 27); assert.equal(rules.filter(hf.isGraphRule).length, 25, "every filter rule, the dnat; not the nat jump nor the masquerade");
+  // the probe's text and the raw text (tabs, counters, handles, the progname comment) read the same
+  const raw = hf.parseNftRuleset(FIREWALLD_HOST);
+  assert.deepEqual(raw.rules, rules); assert.deepEqual(raw.chains, chains);
+});
+
+test("rulesetOf with nft: the ip/ip6 tables iptables-save already printed are read once, the native tables beside them are rules of the same ruleset; the id ignores comments, counters and the order of tables and chains", () => {
+  const v4 = ["*filter", ":INPUT DROP [0:0]", "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT", "COMMIT"];
+  const both = hf.rulesetOf(probe(v4, [], { nft: cleaned(FIREWALLD_HOST), nft_lines: cleaned(FIREWALLD_HOST).length }))!;
+  assert.equal(both.rules.filter((r) => r.engine === "iptables").length, 1); assert.equal(both.rules.filter((r) => r.engine === "nft").length, 26, "the nft copy of the ip filter table is dropped");
+  assert.equal(both.rules.length, 27); assert.equal(both.graph_rules, 25); assert.deepEqual(both.tables, { filter: 1, firewalld: 26 });
+  assert.equal(both.input_policy, "DROP", "the iptables INPUT first"); assert.equal(both.default_action, "deny");
+  assert.equal(both.chains.filter((c) => c.engine === "nft" && c.family === "ipv4").length, 0);
+  const only = hf.rulesetOf(probe([], [], { backend: "nftables", nft: cleaned(FIREWALLD_HOST), nft_lines: cleaned(FIREWALLD_HOST).length }))!;
+  assert.equal(only.rules.length, 27, "no iptables-save: the ip filter table is nft's own"); assert.equal(only.input_policy, "drop"); assert.equal(only.default_action, "deny");
+  assert.notEqual(only.id, both.id, "the same rules spelled by two tools are two rulesets");
+  const inetOnly = cleaned(FIREWALLD_HOST).slice(0, cleaned(FIREWALLD_HOST).indexOf("table ip filter {"));
+  const fwd = hf.rulesetOf(probe([], [], { backend: "nftables", nft: inetOnly, nft_lines: inetOnly.length }))!;
+  assert.equal(fwd.input_policy, "accept"); assert.equal(fwd.default_action, "deny", "the input chain ends in a catch-all reject");
+  assert.equal(fwd.truncated, false);
+  assert.equal(hf.rulesetOf(probe([], [], { backend: "nftables", nft: inetOnly, nft_lines: inetOnly.length + 50 }))!.truncated, true);
+  // the same ruleset: comments changed, counters present, the ip table printed first, the chains in another order
+  const reordered = [...cleaned(FIREWALLD_HOST.slice(FIREWALLD_HOST.indexOf("table ip filter {"))), ...inetOnly];
+  assert.equal(hf.rulesetOf(probe([], [], { backend: "nftables", nft: reordered, nft_lines: reordered.length }))!.id, only.id, "table order");
+  const i = inetOnly.indexOf("chain filter_FWD_public {"); const j = inetOnly.indexOf("chain nat_PREROUTING {");
+  const swapped = [...inetOnly.slice(0, i), ...inetOnly.slice(j, j + 4), ...inetOnly.slice(i, j), ...inetOnly.slice(j + 4)];
+  assert.equal(hf.rulesetOf(probe([], [], { backend: "nftables", nft: swapped, nft_lines: swapped.length }))!.id, fwd.id, "chain order");
+  assert.equal(hf.rulesetOf(probe([], [], { backend: "nftables", nft: inetOnly.map((l) => l.replace('comment "ssh"', 'comment "shell"')), nft_lines: inetOnly.length }))!.id, fwd.id, "a comment");
+  assert.notEqual(hf.rulesetOf(probe([], [], { backend: "nftables", nft: inetOnly.map((l) => l.replace("tcp dport 22 ct state", "tcp dport 2222 ct state")), nft_lines: inetOnly.length }))!.id, fwd.id, "a port");
+  const k = inetOnly.indexOf("iifname \"lo\" accept"); const rswap = [...inetOnly]; [rswap[k], rswap[k + 1]] = [rswap[k + 1], rswap[k]];
+  assert.notEqual(hf.rulesetOf(probe([], [], { backend: "nftables", nft: rswap, nft_lines: rswap.length }))!.id, fwd.id, "rule order within a chain is evaluation order");
+  // an iptables-only ruleset hashes as it did before nft was parsed (the stored ids stay valid)
+  assert.equal(hf.rulesetOf(probe(DOCKER_HOST))!.id, hf.rulesetId(hf.normalizedText(hf.parseIptablesSave(DOCKER_HOST, "ipv4").chains, hf.parseIptablesSave(DOCKER_HOST, "ipv4").rules)));
+  assert.ok(!hf.normalizedText(hf.parseIptablesSave(DOCKER_HOST, "ipv4").chains, hf.parseIptablesSave(DOCKER_HOST, "ipv4").rules).includes("nft "));
+});
+
+test("parseNftRuleset tolerates a text cut mid-chain and a set over many lines; a block it does not know is skipped whole", () => {
+  const cut = cleaned(FIREWALLD_HOST).slice(0, 20);
+  const { chains, rules } = hf.parseNftRuleset(cut);
+  assert.ok(chains.length >= 1); assert.ok(rules.length >= 1);
+  const odd = ["table inet t {", "flowtable ft {", "hook ingress priority 0", "devices = { eth0, eth1 }", "}", "map ports {", "type inet_service : verdict", "elements = { 22 : accept,", "80 : drop }", "}", "chain c {", "type filter hook input priority 0; policy drop;", "tcp dport vmap @ports", "ip saddr { 10.0.0.1, 10.0.0.2 } drop", "}", "}"];
+  const t = hf.parseNftRuleset(odd);
+  assert.equal(t.chains.length, 1); assert.equal(t.rules.length, 2);
+  assert.equal(t.rules[0].target, "vmap"); assert.equal(t.rules[1].source, "10.0.0.1/32,10.0.0.2/32"); assert.equal(t.rules[1].action, "deny");
+  assert.deepEqual(hf.tokenizeNft('ip saddr { 10.0.0.1, 10.0.0.2 } tcp dport { 80, 443 } log prefix "a b" accept'), ["ip", "saddr", "{10.0.0.1,10.0.0.2}", "tcp", "dport", "{80,443}", "log", "prefix", "a b", "accept"]);
 });
 
 test("recordHostFirewall: the first probe is silent, the same rules again change nothing, a changed ruleset is a firewall_changed event, two boxes with the same rules share one ruleset row, a box without a filter has none", () => {

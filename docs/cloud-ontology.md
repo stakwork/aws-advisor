@@ -1054,13 +1054,18 @@ Edges: `IN_NETWORK`; `HAS_RULE` → `AdvisorFilterRule`; `WEARS` ← interfaces;
 deployments, endpoints.
 
 A host firewall (`kind: host_firewall`, `native_type: iptables | nftables`) is the packet filter inside the box, read
-by the apps probe (2.1) as `iptables-save` prints it and parsed by the advisor (`src/host_firewall.ts`). Its id is
-`hostfw:<sha256 of the normalized rules>` (the `filter` table and the `nat` DNAT/REDIRECT rules, in order, comments and
-counters left out), so one node stands for one ruleset and every box that runs the same rules `GUARDED_BY {via:
-'iptables', backend, collected_at}` the same node, as boxes share a package version or an image. It carries `backend`
-(`legacy` \| `nf_tables` \| `iptables` \| `nftables`), `default_action` (the INPUT policy, or `deny` when the chain ends
-in a catch-all REJECT/DROP), `input_policy` / `forward_policy` / `output_policy`, `rules` (the rule nodes), `rule_total`
-(every table), `chains`, `tables`, `truncated` (the probe cut the text at 300 lines per family), `attached` (boxes
+by the apps probe (2.1) as `iptables-save` / `ip6tables-save` print it and, wherever the box has `nft`, as `nft list
+ruleset` prints the native nftables tables (firewalld's `inet firewalld`, a hand-written `inet filter`; the `ip` / `ip6`
+tables iptables-nft mirrors into nft are read once), parsed by the advisor into one shape (`src/host_firewall.ts`). Its
+id is `hostfw:<sha256 of the normalized rules>` (the rules of the filter chains and the nat DNAT/REDIRECT rules, in
+order, comments and counters left out; nft tables and chains sorted by name, since nft prints them in creation order),
+so one node stands for one ruleset and every box that runs the same rules `GUARDED_BY {via: 'iptables' | 'nftables',
+backend, collected_at}` the same node, as boxes share a package version or an image. It carries `backend` (`legacy` \|
+`nf_tables` \| `iptables` \| `nftables`: the iptables flavour, or `nftables` for a box with nft alone), `default_action`
+(the input chain's policy, or `deny` when the chain ends in a catch-all REJECT/DROP; with an iptables INPUT and an nft
+`inet` input chain, deny when either denies), `input_policy` / `forward_policy` / `output_policy`, `rules` (the rule
+nodes), `rule_total` (every table), `chains` (the filter chains), `tables` (iptables tables and nft table names),
+`truncated` (the probe cut the text at 300 lines per family, 400 for nft), `attached` (boxes
 wearing it) and `is_deleted` / `deleted_at` (no box wears it any more; it comes back when one does). A box whose rules
 change moves its edge to another node and gets a `firewall_changed` instance app event; it has no `IN_NETWORK`. The
 verdicts below do not read host firewalls yet.
@@ -1087,12 +1092,12 @@ the balancers and APIs it is attached to.
 | `path` | (L7) the path pattern |
 | `description` | the provider's free-text description of the rule, often the only record of why a port was opened |
 | `dormant` | lets nothing in today (an IPv6 rule in a network without IPv6) |
-| `table` / `chain` / `family` | (host firewall) the iptables table (`filter`, `nat`), the chain, `ipv4` \| `ipv6`; `priority` is the 0-based position in the chain |
+| `table` / `chain` / `family` | (host firewall) the iptables table (`filter`, `nat`) or the nft table's name, the chain, `ipv4` \| `ipv6` \| `inet` (an nft table that sees both) \| `arp` \| `bridge` \| `netdev`; `priority` is the 0-based position in the chain |
 | `target` / `target_args` | (host firewall) the `-j` target as written (`ACCEPT`, `DROP`, a user chain, `DNAT`) and its arguments (`--to-destination 172.17.0.2:80`) |
 | `ports` / `source_ports` | (host firewall) a multiport list as written (`80,443,8000:8100`; `from_port` / `to_port` hold its first range) and the source ports |
 | `source_negated` / `destination` / `destination_negated` | (host firewall) `! -s` and `-d`; a negated or absent source has no `FROM` edge and `source_kind: any` |
 | `in_interface` / `out_interface` / `states` | (host firewall) `-i` / `-o` (a leading `!` when negated) and the conntrack states |
-| `raw` / `comment` | (host firewall) the `-A` line as iptables-save printed it (the comment module removed) and the comment |
+| `raw` / `comment` | (host firewall) the `-A` line as iptables-save printed it (the comment module removed), or the nft rule as `nft list ruleset` printed it (the comment statement removed), and the comment |
 
 Edges: `HAS_RULE` ← filter; `FROM` → `AdvisorSource` \| `AdvisorFilter` (group-referencing rules). A host firewall rule's
 id is `<filter id>:<family>:<table>:<chain>:<position>`, a function of the shared filter's id, so a filter's rules never
@@ -1606,7 +1611,7 @@ account, with `AFFECTS` edges to the package nodes it matches and `VULNERABLE_TO
 | `ASSIGNED` | AdvisorPublicIp → interface, gateway, balancer | the static address is mapped to it |
 | `WEARS` | AdvisorInterface → AdvisorFilter | the groups on the interface |
 | `GUARDED_BY` | segment, resource, deployment, endpoint → AdvisorFilter | a filter that applies (a security group, an ACL, a web ACL) |
-| `GUARDED_BY {via: 'iptables', backend, collected_at}` | AdvisorBox → AdvisorFilter {kind: host_firewall} | the box's own packet filter: the one shared node of the ruleset it runs now (the network mirror leaves this edge alone; the host firewall mirror moves it when the rules change) |
+| `GUARDED_BY {via: 'iptables' \| 'nftables', backend, collected_at}` | AdvisorBox → AdvisorFilter {kind: host_firewall} | the box's own packet filter: the one shared node of the ruleset it runs now (`via` names the tool that read it: `iptables`, with nft's native tables beside it where the box has both; `nftables` for a box with nft alone; the network mirror leaves this edge alone; the host firewall mirror moves it when the rules change) |
 | `HAS_RULE` | AdvisorFilter → AdvisorFilterRule | the rules that make up the filter |
 | `FROM` | AdvisorFilterRule → AdvisorSource, AdvisorFilter | the rule's source |
 | `REACHABLE_FROM` | AdvisorEndpoint → source, filter, network | **verdict**: who can reach it, through what |

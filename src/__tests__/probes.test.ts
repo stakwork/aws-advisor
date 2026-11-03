@@ -454,6 +454,17 @@ test("the apps script reports the host firewall (apps 2.1): iptables-save stripp
   // the box has no iptables at all (the PATH has neither the stubs nor /sbin)
   const b = run("/usr/bin:/bin").firewall!;
   assert.equal(b.available, false); assert.equal(b.backend, null); assert.deepEqual(b.v4, []); assert.equal(b.v4_lines, 0);
+  // nft beside iptables: its ruleset is read too (counters and handles dropped, the indentation gone), the backend stays iptables'
+  const nftbin = path.join(dir, "nftbin"); fs.mkdirSync(nftbin);
+  const nft = ["table inet firewalld {", "\tchain filter_INPUT {", "\t\ttype filter hook input priority filter + 10; policy accept;", "\t\tct state { established, related } counter packets 10 bytes 900 accept # handle 3", "\t\ttcp dport 22 accept comment \"ssh\"", "\t\treject with icmpx type admin-prohibited", "\t}", "}"];
+  fs.writeFileSync(path.join(nftbin, "nft"), `#!/bin/sh\n[ "$1" = list ] || exit 1\ncat <<'X'\n${nft.join("\n")}\nX\n`, { mode: 0o755 });
+  const c = run(`${bin}:${nftbin}:/usr/bin:/bin`).firewall!;
+  assert.equal(c.backend, "nf_tables"); assert.equal(c.available, true);
+  assert.deepEqual(c.nft, ["table inet firewalld {", "chain filter_INPUT {", "type filter hook input priority filter + 10; policy accept;", "ct state { established, related } accept", 'tcp dport 22 accept comment "ssh"', "reject with icmpx type admin-prohibited", "}", "}"]);
+  assert.equal(c.nft_lines, 8); assert.equal(c.v4_lines, 10, "iptables-save is still read");
+  // nft alone: the backend is nftables
+  const d = run(`${nftbin}:/usr/bin:/bin`).firewall!;
+  assert.equal(d.available, true); assert.equal(d.backend, "nftables"); assert.equal(d.nft_lines, 8); assert.deepEqual(d.v4, []); assert.equal(d.v4_lines, 0);
 });
 
 test("kernelFacts: the running kernel's upstream version and owning package, from the probe or derived from the package list; uname -r alone is never read as a version when it is an ABI", () => {
