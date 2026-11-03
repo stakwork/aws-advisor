@@ -730,7 +730,8 @@ registry digest and platform, keyed `digest|platform` because a multi-arch tag's
 amd64 and an arm64 box with different contents), skips those read ok within `PROBE_SBOM_INTERVAL_HOURS`, and sends the
 scanner the rest in batches of 15 as the document's `images` parameter (`repo@sha256:…|os/arch`, one command per batch,
 most shared images first, at most 300 per pass). The scanner pulls each by digest straight from its registry with syft's
-`registry:` source (no Docker daemon) for the box's platform, `PROBE_IMAGES_TIMEOUT_SECONDS` (180) per image, and
+`registry:` source (no Docker daemon) for the box's platform, `PROBE_IMAGES_TIMEOUT_SECONDS` (180, up to 1800) per image
+within the document's 40-minute budget (a batch holds as many images as can each use the whole allowance), and
 answers with the same scan records; they are kept once per image (`image_sbom_scans`, `image_sbom`) and shown on every
 box that runs the image, whose `CONTAINS` edges carry the platform they were read on. The boxes then get
 `images=local` and scan only images with no registry digest (built or loaded on the box). Without a scanner, when it is

@@ -109,10 +109,11 @@ test("a Kubernetes node's pod images (recordNodeImages, source cluster) are due 
 });
 
 test("imageBatch sizes a scanner batch by the per-image timeout: each image can use its whole timeout within the document's budget", () => {
-  assert.equal(ip.imageBatch(180).maxEntries, 6, "1200 / 180");
+  assert.equal(ip.imageBatch(180).maxEntries, 13, "2400 / 180");
   assert.equal(ip.imageBatch(60).maxEntries, 15, "never more than IMAGE_BATCH");
-  assert.equal(ip.imageBatch(900).maxEntries, 1, "never none");
-  assert.equal(ip.imageBatch(0).maxEntries, 6, "an unset timeout is the script's default of 180");
+  assert.equal(ip.imageBatch(900).maxEntries, 2, "two at the old cap");
+  assert.equal(ip.imageBatch(1800).maxEntries, 1, "never none");
+  assert.equal(ip.imageBatch(0).maxEntries, 13, "an unset timeout is the script's default of 180");
   assert.equal(ip.imageBatch(180).maxChars, ip.IMAGE_BATCH.maxChars);
   assert.deepEqual(ip.imageBatch(180, ip.INLINE_IMAGE_BATCH), { maxEntries: 4, maxChars: ip.INLINE_IMAGE_BATCH.maxChars }, "the inline batch stays small");
 });

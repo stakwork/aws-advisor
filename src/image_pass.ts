@@ -22,11 +22,11 @@ import { ProbeError, probeInstance } from "./ssm.js";
 
 /** A batch of the images document: entries per command and characters of the `images` parameter (an entry is ~100 to 210 characters; SSM parameters stay well under their limit). */
 export const IMAGE_BATCH = { maxEntries: 15, maxChars: 3500 } as const;
-/** The images document's time budget (src/probes.ts, `budget=1200`): what is left once the running image times out is skipped, "the time budget ran out". */
-export const IMAGES_BUDGET_SECONDS = 1200;
+/** The images document's time budget (src/probes.ts, `budget=2400` in the images script, twice the sbom probe's): what is left once the running image times out is skipped, "the time budget ran out". */
+export const IMAGES_BUDGET_SECONDS = 2400;
 /** The batch for a per-image timeout (Settings > Probe pass > Seconds per image on the scanner): as many images as can each use their whole
  *  timeout within the document's budget, so a batch of slow images times out image by image instead of skipping the tail (8 images at 180 s
- *  each: 2 read, 2 timed out, 4 skipped on 2026-11-03), at most IMAGE_BATCH's count, at least one. Pure. */
+ *  each in a 1200 s budget: 2 read, 2 timed out, 4 skipped on 2026-11-03), at most IMAGE_BATCH's count, at least one. Pure. */
 export const imageBatch = (timeoutSeconds: number, base: { maxEntries: number; maxChars: number } = IMAGE_BATCH): { maxEntries: number; maxChars: number } =>
   ({ maxEntries: Math.max(1, Math.min(base.maxEntries, Math.floor(IMAGES_BUDGET_SECONDS / Math.max(1, timeoutSeconds || 180)))), maxChars: base.maxChars });
 /** Without an upload bucket the answer is inline, trimmed to 3,000 purls shared across the batch: small batches, so each image keeps most of its list. */
