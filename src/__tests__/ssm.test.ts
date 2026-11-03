@@ -72,7 +72,7 @@ test("every probe script is a read-only shell script that prints its kind", () =
     // the sbom script's one exception: it removes the scratch directory it gives syft and the stereoscope-* leftovers of earlier runs, on lines that guard themselves
     const scratch = script.split("\n").filter((l) => /\brm\b/.test(l));
     // the images script's own (images 1.3): the image the daemon pulled for the scan, on lines that test for it, and the docker config copy it made beside the scratch directory
-    const imagesOwn = (l: string) => kind === "images" && (/\[ -n "\$dkref" \]; then docker image rm -f "\$dkref"/.test(l) || /if \[ "\$rc" -ne 0 \]; then .*docker image rm -f "\$dref"/.test(l) || /case "\$dkcfg" in \*\/aws-advisor-sbom-docker\) rm -rf "\$dkcfg"/.test(l));
+    const imagesOwn = (l: string) => kind === "images" && (/dkclean\(\) \{ if \[ -n "\$dkcid" \]; then docker rm -f "\$dkcid".*if \[ -n "\$dkref" \]; then docker image rm -f "\$dkref"/.test(l) || /if \[ "\$rc" -ne 0 \]; then .*docker image rm -f "\$dref"/.test(l) || /case "\$dkcfg" in \*\/aws-advisor-sbom-docker\) rm -rf "\$dkcfg"/.test(l));
     for (const l of scratch) assert.ok((kind === "sbom" || kind === "images") && (/case "\$sbtmp" in \*\/aws-advisor-sbom\) rm -rf "\$sbtmp"/.test(l) || /-name 'stereoscope-\*' -mmin \+60 -exec rm -rf \{\}/.test(l) || imagesOwn(l)), `${kind}: an unguarded removal: ${l}`);
     const rest = script.split("\n").filter((l) => !scratch.includes(l)).join("\n");
     for (const forbidden of [/\brm\b/, /\bkill\b/, /\bsystemctl\b/, /\bsudo\b/, />\s*\/(etc|var|usr)/]) assert.doesNotMatch(rest, forbidden);
@@ -262,7 +262,8 @@ test("probe 1.4: the activity section parses, is tolerant, and the use summary p
 test("probe 1.4: the activity script reads logs and counters only, and the history keeps the signals per container and per day", async () => {
   assert.match(PROBE_SCRIPT, /docker logs --since 24h --tail 2000 --timestamps/);
   assert.match(PROBE_SCRIPT, /"activity":%s/);
-  assert.doesNotMatch(PROBE_SCRIPT, /docker (exec|run|restart|stop|start|rm)\b/);
+  // the one container a probe ever removes is the one the images probe created itself from a pulled image, never started, to export its filesystem (images 1.4)
+  assert.doesNotMatch(PROBE_SCRIPT.replace(/docker rm -f "\$dkcid"/g, ""), /docker (exec|run|restart|stop|start|rm)\b/);
   const { db } = await import("../db.js");
   const { recordContainerSamples, rollupDaily, instanceHistory, counterDelta } = await import("../history.js");
   const id = "i-0activity000000001";
