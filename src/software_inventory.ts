@@ -47,7 +47,7 @@ if (!(db.prepare("pragma table_info(instance_packages)").all() as { name: string
 // probe software/3 adds the guest's hibernation setup (JSON, ProbeHibernation); src/guest_hibernation.ts reads it
 if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === "hibernation")) db.exec("alter table instance_os add column hibernation text");
 // probe software/6 adds the running kernel's upstream version and the package that owns the booted image (kernelFacts); older rows are filled in from their package list on the next probe
-for (const col of ["kernel_upstream", "kernel_package", "kernel_package_version", "kernel_package_source"]) if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === col)) db.exec(`alter table instance_os add column ${col} text`);
+for (const col of ["kernel_upstream", "kernel_package", "kernel_package_version", "kernel_package_source", "os_cpe"]) if (!(db.prepare("pragma table_info(instance_os)").all() as { name: string }[]).some((c) => c.name === col)) db.exec(`alter table instance_os add column ${col} text`);
 // probe software/4 adds what the runtimes bundle (instance_bundles) and the dependencies of the packages owning the probed programs (instance_depends)
 // probe software/5 finds programs beyond PATH (nvm, /opt, /usr/local), so a box may hold several installs of one program: binaries are keyed by
 // (name, path) and bundles by the parent's version too. Older tables are rebuilt once with the wider key.
@@ -107,6 +107,8 @@ if (!hasColumn("instance_images", "sbom_key")) db.exec("alter table instance_ima
 // places on the node (src/cluster_inventory.ts, recordNodeImages below). A Kubernetes node runs containerd and has no docker command, so the probe
 // lists no images there and must not delete the rows the cluster inventory wrote; a row both saw is the probe's.
 if (!hasColumn("instance_images", "source")) db.exec("alter table instance_images add column source text not null default 'probe'");
+// sbom 1.7 / images 1.1: the CPEs syft assigned a purl, a JSON list best first (null from an older probe; the graph then forms the candidates itself, src/sec/cpe.ts)
+for (const t of ["instance_sbom", "image_sbom"]) if (!hasColumn(t, "cpes")) db.exec(`alter table ${t} add column cpes text`);
 if (!hasColumn("instance_sbom_scans", "images_mode")) db.exec("alter table instance_sbom_scans add column images_mode text");
 /** The image key of an instance_images row in SQL: its sbom_key, else the per-box fallback a box's own scan of an image without digest or id gets (`ii` is the alias). */
 const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
@@ -162,7 +164,7 @@ export interface ProbeHibernation {
 }
 export interface SoftwareData {
   hibernation?: ProbeHibernation | null;
-  os?: { id?: string | null; version?: string | null; name?: string | null } | null; kernel?: string | null; arch?: string | null; package_manager?: string | null;
+  os?: { id?: string | null; version?: string | null; name?: string | null; /** software/7: the CPE os-release declares (CPE_NAME) */ cpe?: string | null } | null; kernel?: string | null; arch?: string | null; package_manager?: string | null;
   /** Probe software/6: the running kernel's upstream version and the package that owns the booted image (kernelFacts derives both from older probes where it can). */
   kernel_upstream?: string | null; kernel_package?: { n: string; v: string; s?: string | null } | null;
   packages?: ProbePackage[]; binaries?: ProbeBinary[]; images?: ProbeImage[];
@@ -172,7 +174,7 @@ export interface SoftwareData {
 export interface RecordSoftwareResult { packages: number; added: string[]; removed: string[]; changed: { name: string; from: string; to: string }[]; binaries: number; images: number; bundles: number; depends: number }
 
 // the kernel's three names move together: a probe that read the kernel (uname -r) replaces the upstream version and owning package too, even with nothing (a reboot into a kernel no package owns)
-const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation, kernel_upstream, kernel_package, kernel_package_version, kernel_package_source) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation, kernel_upstream, kernel_package, kernel_package_version, kernel_package_source, os_cpe) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(instance_id) do update set collected_at = excluded.collected_at, hibernation = coalesce(excluded.hibernation, hibernation), os_id = coalesce(excluded.os_id, os_id), os_version = coalesce(excluded.os_version, os_version), os_name = coalesce(excluded.os_name, os_name), kernel = coalesce(excluded.kernel, kernel), arch = coalesce(excluded.arch, arch), package_manager = coalesce(excluded.package_manager, package_manager), packages = excluded.packages,
     kernel_upstream = case when excluded.kernel is null then kernel_upstream else excluded.kernel_upstream end, kernel_package = case when excluded.kernel is null then kernel_package else excluded.kernel_package end,
     kernel_package_version = case when excluded.kernel is null then kernel_package_version else excluded.kernel_package_version end, kernel_package_source = case when excluded.kernel is null then kernel_package_source else excluded.kernel_package_source end`);
@@ -325,7 +327,7 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
     if (Array.isArray(data.images)) db.prepare(`delete from instance_images where instance_id = ? and source = 'probe'${imgSeen.size ? ` and image not in (${[...imgSeen].map(() => "?").join(",")})` : ""}`).run(instanceId, ...imgSeen);
     res.images = imgs.length;
     upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null,
-      kernel.upstream, kernel.pkg?.name ?? null, kernel.pkg?.version ?? null, kernel.pkg?.source ?? null);
+      kernel.upstream, kernel.pkg?.name ?? null, kernel.pkg?.version ?? null, kernel.pkg?.source ?? null, data.os?.cpe && /^cpe:/i.test(String(data.os.cpe)) ? clean(data.os.cpe, 200) || null : null);
   })();
   return res;
 }
@@ -364,7 +366,7 @@ export function componentPurl(p: Purl): string {
 }
 
 /** One syft scan as the probe prints it (src/ssm.ts ProbeSbomSource). */
-export interface SbomSource { source: "image" | "dir"; ref: string; image_id?: string | null; digest?: string | null; /** sbom 1.6 / images 1.0: the image's os/arch */ platform?: string | null; status: string; total?: number; /** why a scan was skipped */ note?: string | null; purls?: string[] }
+export interface SbomSource { source: "image" | "dir"; ref: string; image_id?: string | null; digest?: string | null; /** sbom 1.6 / images 1.0: the image's os/arch */ platform?: string | null; status: string; total?: number; /** why a scan was skipped */ note?: string | null; purls?: string[]; /** sbom 1.7 / images 1.1: the CPEs syft assigned each purl, best first */ cpes?: Record<string, string[]> }
 export interface SbomData { available?: boolean; tool?: string | null; install?: string | null; /** sbom 1.6: all, or local (only the images without a registry digest; the scanner has the rest) */ images_mode?: "all" | "local" | null; cap?: number; sources?: SbomSource[] }
 export interface RecordSbomResult { available: boolean; tool: string | null; /** what the probe did about a missing syft */ note: string | null; sources: number; packages: number; /** purls syft found that did not fit the probe's output budget */ trimmed: number; failed: { ref: string; status: string }[]; added: number; removed: number; /** the image scans, written to the image tables (recordImageSbom) */ images: RecordImageSbomResult }
 export interface RecordImageSbomResult { scans: number; /** the keys scanned ok this time */ ok: string[]; failed: { key: string; ref: string; status: string; note: string | null }[]; packages: number; /** purls syft found that did not fit the probe's output budget */ trimmed: number; added: number; removed: number }
@@ -373,14 +375,20 @@ const upsertSbomScan = db.prepare(`insert into instance_sbom_scans(instance_id, 
   on conflict(instance_id) do update set collected_at = excluded.collected_at, available = excluded.available, tool = excluded.tool, cap = excluded.cap, sources = excluded.sources, packages = excluded.packages, note = excluded.note, images_mode = excluded.images_mode`);
 const upsertSbomSource = db.prepare(`insert into instance_sbom_sources(instance_id, source, ref, status, total, listed, collected_at, image_id, digest, note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(instance_id, source, ref) do update set status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, collected_at = excluded.collected_at, image_id = coalesce(excluded.image_id, image_id), digest = coalesce(excluded.digest, digest), note = excluded.note`);
-const upsertSbomRow = db.prepare(`insert into instance_sbom(instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id, source, ref, purl) do update set last_seen = excluded.last_seen`);
+const upsertSbomRow = db.prepare(`insert into instance_sbom(instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen, cpes) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id, source, ref, purl) do update set last_seen = excluded.last_seen, cpes = coalesce(excluded.cpes, cpes)`);
 const upsertImageScan = db.prepare(`insert into image_sbom_scans(key, ref, repository, digest, image_id, platform, status, total, listed, tool, note, scanned_on, via, collected_at, ok_at, first_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(key) do update set ref = excluded.ref, repository = excluded.repository, digest = coalesce(excluded.digest, digest), image_id = coalesce(excluded.image_id, image_id), platform = coalesce(excluded.platform, platform),
     status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, tool = coalesce(excluded.tool, tool), note = excluded.note, scanned_on = excluded.scanned_on, via = excluded.via,
     collected_at = excluded.collected_at, ok_at = case when excluded.status = 'ok' then excluded.collected_at else ok_at end`);
-const upsertImageRow = db.prepare(`insert into image_sbom(key, purl, type, namespace, name, version, first_seen, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(key, purl) do update set last_seen = excluded.last_seen`);
+const upsertImageRow = db.prepare(`insert into image_sbom(key, purl, type, namespace, name, version, first_seen, last_seen, cpes) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(key, purl) do update set last_seen = excluded.last_seen, cpes = coalesce(excluded.cpes, cpes)`);
+/** The CPEs a probe listed for a purl as the row stores them: a JSON list of up to 8 printable CPE 2.3 strings, best first; null when none. */
+const cpesOf = (s: SbomSource, purl: string): string | null => {
+  const list = s.cpes && typeof s.cpes === "object" ? s.cpes[purl] : undefined;
+  const cpes = (Array.isArray(list) ? list : []).filter((c) => typeof c === "string" && /^cpe:2\.3:[aoh]:/.test(c)).map((c) => clean(c, 300)).filter(Boolean).slice(0, 8);
+  return cpes.length ? JSON.stringify(cpes) : null;
+};
 const int = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0; };
 const sbomStatus = (s: unknown): string => (["ok", "timeout", "error", "skipped"].includes(String(s)) ? String(s) : "error");
 
@@ -411,7 +419,7 @@ export function recordImageSbom(scannedOn: string, collectedAt: string, sbom: Sb
         const p = parsePurl(purl); if (!p) continue;
         now.add(purl); res.packages++;
         if (before.size && !before.has(purl)) res.added++;
-        upsertImageRow.run(key, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt);
+        upsertImageRow.run(key, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt, cpesOf(s, purl));
       }
       for (const purl of before) if (!now.has(purl)) { db.prepare("delete from image_sbom where key = ? and purl = ?").run(key, purl); res.removed++; }
     }
@@ -484,7 +492,7 @@ export function recordSbom(instanceId: string, collectedAt: string, sbom: SbomDa
         const p = parsePurl(purl); if (!p) continue;
         now.add(purl); res.packages++;
         if (before.size && !before.has(purl)) res.added++;
-        upsertSbomRow.run(instanceId, "dir", ref, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt);
+        upsertSbomRow.run(instanceId, "dir", ref, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt, cpesOf(s, purl));
       }
       for (const purl of before) if (!now.has(purl)) { db.prepare("delete from instance_sbom where instance_id = ? and source = 'dir' and ref = ? and purl = ?").run(instanceId, ref, purl); res.removed++; }
     }
@@ -532,7 +540,7 @@ export function hibernationSetupOf(instanceId: string): { probe: ProbeHibernatio
 }
 
 export interface InstanceSoftware {
-  os: { instance_id: string; collected_at: string; os_id: string | null; os_version: string | null; os_name: string | null; kernel: string | null; kernel_upstream: string | null; kernel_package: string | null; kernel_package_version: string | null; kernel_package_source: string | null; arch: string | null; package_manager: string | null; packages: number } | null;
+  os: { instance_id: string; collected_at: string; os_id: string | null; os_version: string | null; os_name: string | null; kernel: string | null; kernel_upstream: string | null; kernel_package: string | null; kernel_package_version: string | null; kernel_package_source: string | null; os_cpe: string | null; arch: string | null; package_manager: string | null; packages: number } | null;
   packages: { ecosystem: string; name: string; version: string; arch: string | null; source: string | null; first_seen: string; last_seen: string; gone: boolean }[];
   binaries: { name: string; version: string; path: string | null; first_seen: string; last_seen: string; gone: boolean }[];
   images: { image: string; image_id: string | null; digest: string | null; created: string | null; platform: string | null; first_seen: string; last_seen: string; gone: boolean }[];
@@ -544,7 +552,7 @@ export interface InstanceSoftware {
    *  runs that nobody has read yet is listed with status pending. */
   sbom: { scan: { collected_at: string; available: boolean; tool: string | null; note: string | null; cap: number; sources: number; packages: number; images_mode: "all" | "local" | null } | null;
     sources: { source: string; ref: string; image_id: string | null; digest: string | null; platform: string | null; status: string; total: number; listed: number; collected_at: string; note: string | null; scanned_on: string | null; via: "scanner" | "box" | null }[];
-    packages: { source: string; ref: string; purl: string; type: string; namespace: string | null; name: string; version: string | null; first_seen: string; last_seen: string }[] };
+    packages: { source: string; ref: string; purl: string; type: string; namespace: string | null; name: string; version: string | null; first_seen: string; last_seen: string; /** the CPEs syft assigned, a JSON list best first; null from an older probe */ cpes: string | null }[] };
 }
 
 /** Everything the software probe knows about one instance; `q` filters packages by name. */
@@ -566,8 +574,8 @@ export function softwareOn(instanceId: string, opts: { q?: string; limit?: numbe
         union all select 'image' as source, ii.image as ref, coalesce(s.image_id, ii.image_id) as image_id, coalesce(s.digest, ii.digest) as digest, coalesce(s.platform, ii.platform) as platform, coalesce(s.status, 'pending') as status, coalesce(s.total, 0) as total, coalesce(s.listed, 0) as listed, coalesce(s.collected_at, ii.last_seen) as collected_at, s.note, s.scanned_on, s.via
           from instance_images ii left join image_sbom_scans s on s.key = ${IMG_KEY} where ii.instance_id = ? and ii.gone = 0
         order by source desc, ref`).all(instanceId, instanceId) as any[]).map((r) => ({ ...r, digest: r.digest ? String(r.digest).split("@").pop() : null })),
-      packages: db.prepare(`select * from (select source, ref, purl, type, namespace, name, version, first_seen, last_seen from instance_sbom where instance_id = ?${q ? " and lower(name) like ?" : ""}
-        union all select 'image' as source, ii.image as ref, p.purl, p.type, p.namespace, p.name, p.version, p.first_seen, p.last_seen from image_sbom p join instance_images ii on p.key = ${IMG_KEY} where ii.instance_id = ? and ii.gone = 0${q ? " and lower(p.name) like ?" : ""})
+      packages: db.prepare(`select * from (select source, ref, purl, type, namespace, name, version, first_seen, last_seen, cpes from instance_sbom where instance_id = ?${q ? " and lower(name) like ?" : ""}
+        union all select 'image' as source, ii.image as ref, p.purl, p.type, p.namespace, p.name, p.version, p.first_seen, p.last_seen, p.cpes from image_sbom p join instance_images ii on p.key = ${IMG_KEY} where ii.instance_id = ? and ii.gone = 0${q ? " and lower(p.name) like ?" : ""})
         order by source desc, ref, type, name limit ?`).all(...(q ? [instanceId, q, instanceId, q, limit] : [instanceId, instanceId, limit])) as any[],
     },
   };

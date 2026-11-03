@@ -152,8 +152,9 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/6");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/7");
     assert.deepEqual(j.packages, expected[name], name);
+    assert.ok(j.os.cpe === null || /^cpe:/.test(j.os.cpe), `software/7: the OS CPE os-release declares, or null (${j.os.cpe})`);
     // probe software/6: the package that owns the running kernel (dpkg by name, rpm by the modules directory it owns) and the upstream version read from it;
     // a host that publishes /proc/version_signature (Ubuntu) names the upstream version itself, whatever the fakes say
     const signed = fs.existsSync("/proc/version_signature");
@@ -183,7 +184,7 @@ test("the sbom script: with syft it scans each running image and the filesystem,
     w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n"); // macOS has none; the script falls back to no bound either way
   }
   // one image times out, one lists a duplicate and a distro package, the filesystem lists an OS package (dropped: dpkg owns it) and far more than the budget
-  w(bin, "syft", `#!/bin/sh\necho "$* tmpdir=\${TMPDIR:-}" >> ${log}\nif [ -n "\${TMPDIR:-}" ]; then mkdir -p "$TMPDIR/stereoscope-fake" && : > "$TMPDIR/stereoscope-fake/layer.tar"; fi\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\npkg:npm/express@4.19.2\\npkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\n' "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
+  w(bin, "syft", `#!/bin/sh\necho "$* tmpdir=\${TMPDIR:-}" >> ${log}\nif [ -n "\${TMPDIR:-}" ]; then mkdir -p "$TMPDIR/stereoscope-fake" && : > "$TMPDIR/stereoscope-fake/layer.tar"; fi\nprev=""; for a in "$@"; do if [ "$prev" = "-t" ]; then [ -f "$a" ] || exit 3; grep -q 'range .artifacts' "$a" || exit 3; fi; prev=$a; done\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\tcpe:2.3:a:aws-sdk:core:3.1.0:*:*:*:*:*:*:* cpe:2.3:a:aws:core:3.1.0:*:*:*:*:*:*:* \\npkg:npm/express@4.19.2\\tcpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:* cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*\\npkg:npm/express@4.19.2\\tcpe:2.3:a:other:express:4.19.2:*:*:*:*:*:*:*\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\t\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\tcpe:2.3:a:haxx:curl:8.5.0:*:*:*:*:*:*:*\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\tcpe:2.3:a:package-%s:package-%s:1.0.%s:*:*:*:*:*:*:*\\n' "$i" "$i" "$i" "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
   const run = (PATH: string, script = pr.defaultProbeScript("sbom"), extra: Record<string, string> = {}) => { const r = spawnSync("sh", [], { input: script, encoding: "utf8", env: { ...process.env, PATH, ...extra } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
   const scratch = path.join(dir, "aws-advisor-sbom"); // the name the guarded removals require
   const line = run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: scratch });
@@ -194,11 +195,11 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   assert.ok(fs.existsSync(path.join(other, "keep")), "a scratch path that does not end in /aws-advisor-sbom is refused, not emptied");
   assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
   const j = parseProbeOutput(line);
-  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/4"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
+  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/5"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
   assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0"); assert.equal(j.sbom?.images_mode, "all", "the default: every running image, here");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
-  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, platform: "linux/arm64", status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"] }, "duplicates dropped, order kept; a local build has an id and no digest; the platform travels");
-  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", platform: "linux/amd64", status: "timeout", total: 0, note: null, purls: [] }, "a pulled image carries its registry digest");
+  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, platform: "linux/arm64", status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/%40aws-sdk/core@3.1.0": ["cpe:2.3:a:aws-sdk:core:3.1.0:*:*:*:*:*:*:*", "cpe:2.3:a:aws:core:3.1.0:*:*:*:*:*:*:*"], "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*", "cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*"] } }, "duplicates dropped (the first line's CPEs kept), order kept; a purl without CPEs is out of the map; a local build has an id and no digest; the platform travels");
+  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", platform: "linux/amd64", status: "timeout", total: 0, note: null, purls: [], cpes: {} }, "a pulled image carries its registry digest");
   assert.equal(by["image huge:1"]!.status, "skipped"); assert.equal(by["image huge:1"]!.platform, "linux/amd64"); assert.match(by["image huge:1"]!.note ?? "", /^needs about \d+ MB of scratch space under .*, \d+ MB free$/, "an image the free disk cannot hold is skipped, not half-read");
   assert.ok(!fs.readFileSync(log, "utf8").includes("docker:huge:1"), "syft was never asked for it");
   assert.equal(by["dir /"]!.image_id, null); assert.equal(by["dir /"]!.platform, null); assert.equal(j.upload, undefined, "no upload URL: no receipt");
@@ -214,7 +215,15 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
   assert.ok(args.includes(`tmpdir=${scratch}`), "syft is given the probe's scratch directory as TMPDIR");
   for (const ex of ["./proc/**", "./sys/**", "./var/lib/docker/**", "./home/*/.cache/**"]) assert.ok(args.includes(`--exclude ${ex}`), `the filesystem scan excludes ${ex} (globbing off)`);
-  assert.ok(args.includes("-o purls") && args.includes("-q"), "purls only, quiet");
+  assert.ok(args.includes("-o template") && args.includes(`-t ${scratch}/purlcpe.tmpl`) && args.includes("-q"), `the purl and CPE template from the scratch directory, quiet: ${args}`);
+  assert.ok(Object.values(by["dir /"]!.cpes).every((c) => c.length === 1 && c[0]!.startsWith("cpe:2.3:a:package-")) && Object.keys(by["dir /"]!.cpes).length === by["dir /"]!.purls.length, "every listed purl keeps its CPEs, trimmed with the list");
+  // a syft too old for the template model refuses it: the scan is retried for the purls alone and the lists come without CPEs
+  const oldSyft = path.join(dir, "oldsyft"); fs.mkdirSync(oldSyft);
+  for (const f of ["docker", "dpkg-query", "timeout"]) fs.copyFileSync(path.join(bin, f), path.join(oldSyft, f));
+  w(oldSyft, "syft", `#!/bin/sh\ncase "$*" in version) printf 'Application: syft\\nVersion: 0.98.0\\n';; *"-o template"*) echo "unable to render template: can't evaluate field artifacts" >&2; exit 1;; *docker:app:latest*) printf 'pkg:npm/express@4.19.2\\n';; *dir:/*) printf 'pkg:pypi/requests@2.32.3\\n';; *) exit 124;; esac\n`);
+  const legacy = parseProbeOutput(run(`${oldSyft}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  const lb = Object.fromEntries(legacy.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
+  assert.deepEqual([lb["image app:latest"]!.status, lb["image app:latest"]!.purls, lb["image app:latest"]!.cpes, lb["dir /"]!.status, lb["dir /"]!.purls], ["ok", ["pkg:npm/express@4.19.2"], {}, "ok", ["pkg:pypi/requests@2.32.3"]], "the purls-only fallback");
   assert.ok(args.includes(`--exclude .${path.join(bin, "syft")}`), "syft does not catalog its own Go modules");
   // no syft and the install switch off: reported, left alone
   const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__INSTALL__", "no")));
@@ -259,7 +268,7 @@ test("the software script with an upload URL: a result that fits goes inline wit
   assert.equal(small.kind, "software"); assert.equal(small.packages?.length, 3, "inline, whole"); assert.match(small.upload ?? "", /^uploaded \d+ /); assert.equal(small.inline, undefined);
   w("dpkg-query", dpkg(2000));
   const big = run();
-  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/6");
+  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/7");
   const whole = parseProbeOutput(gunzipSync(fs.readFileSync(capture)).toString("utf8"));
   assert.equal(whole.packages?.length, 2000, "the object holds every package"); assert.equal(whole.os?.id ?? null, whole.os?.id ?? null);
 });
@@ -274,13 +283,14 @@ test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, 
   assert.equal(sw.parsePurl("nonsense"), null);
   const iid = "i-0sbom00000000001";
   const r1 = sw.recordSbom(iid, "2026-10-29T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, images_mode: "all", sources: [
-    { source: "image", ref: "app:latest", status: "ok", total: 2, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?upstream=glibc&distro=debian-12"] },
-    { source: "dir", ref: "/", status: "ok", total: 1, purls: ["pkg:pypi/requests@2.32.3"] } ] })!;
+    { source: "image", ref: "app:latest", status: "ok", total: 2, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*", "cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*"], "pkg:deb/debian/libc6@2.36-9?upstream=glibc&distro=debian-12": ["not a cpe"] } },
+    { source: "dir", ref: "/", status: "ok", total: 1, purls: ["pkg:pypi/requests@2.32.3"], cpes: { "pkg:pypi/requests@2.32.3": ["cpe:2.3:a:python:requests:2.32.3:*:*:*:*:*:*:*"] } } ] })!;
   assert.equal(r1.packages, 3); assert.equal(r1.sources, 2); assert.equal(r1.added, 0, "a first scan adds nothing");
   assert.deepEqual(r1.images.ok, [`ref:${iid}|app:latest`], "an image with neither digest nor id is keyed by the box and the reference");
   let on = sw.softwareOn(iid).sbom;
   assert.equal(on.scan?.available, true); assert.equal(on.scan?.packages, 3); assert.equal(on.scan?.tool, "syft 1.55.0"); assert.equal(on.scan?.images_mode, "all");
   assert.deepEqual(on.packages.map((p) => [p.ref, p.type, p.name, p.version]), [["app:latest", "deb", "libc6", "2.36-9"], ["app:latest", "npm", "express", "4.19.2"], ["/", "pypi", "requests", "2.32.3"]]);
+  assert.deepEqual(on.packages.map((p) => p.cpes), [null, JSON.stringify(["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*", "cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*"]), JSON.stringify(["cpe:2.3:a:python:requests:2.32.3:*:*:*:*:*:*:*"])], "the CPEs syft assigned stay with the row (sbom 1.7); a malformed one is dropped");
   assert.deepEqual(on.sources.map((s) => [s.source, s.ref, s.status, s.scanned_on, s.via]), [["image", "app:latest", "ok", iid, "box"], ["dir", "/", "ok", iid, "box"]], "the image's scan is the box's own, through the box's image row");
   // the image timed out this time (its rows stay), the filesystem moved on: one version replaced, one package new
   const r2 = sw.recordSbom(iid, "2026-10-30T10:00:00Z", { available: true, tool: "syft 1.55.0", cap: 3000, sources: [
@@ -313,7 +323,7 @@ test("the images script: each entry of the batch is pulled from its registry by 
   for (const where of [bin, noaws]) {
     w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n");
     // logs its arguments and keeps a copy of the config it was given (the scratch directory is emptied after every scan); one image times out, one is read
-    w(where, "syft", `#!/bin/sh\necho "$*" >> ${log}\nprev=""; for a in "$@"; do if [ "$prev" = "-c" ]; then cp "$a" ${cfgcopy}; fi; prev=$a; done\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *registry:nginx@sha256:*) exit 124;; *registry:*) printf 'pkg:npm/express@4.19.2\\npkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12\\n';; *) exit 2;; esac\n`);
+    w(where, "syft", `#!/bin/sh\necho "$*" >> ${log}\nprev=""; for a in "$@"; do if [ "$prev" = "-c" ]; then cp "$a" ${cfgcopy}; fi; prev=$a; done\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *registry:nginx@sha256:*) exit 124;; *registry:*) printf 'pkg:npm/express@4.19.2\\tcpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*\\npkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12\\tcpe:2.3:a:gnu:glibc:2.36-9:*:*:*:*:*:*:* cpe:2.3:a:libc6:libc6:2.36-9:*:*:*:*:*:*:*\\n';; *) exit 2;; esac\n`);
   }
   w(bin, "aws", "#!/bin/sh\ncase \"$*\" in 'ecr get-login-password --region eu-west-1') printf 'TOKEN-EU\\n';; 'ecr-public get-login-password --region us-east-1') printf 'TOKEN-PUBLIC\\n';; *) exit 1;; esac\n");
   const sha = (c: string) => `sha256:${c.repeat(64)}`;
@@ -321,15 +331,15 @@ test("the images script: each entry of the batch is pulled from its registry by 
   const script = (images: string) => pr.defaultProbeScript("images").replace("__IMAGES__", images).replace("__IMAGE_TIMEOUT__", "90").replace("__INSTALL__", "no").replace("__UPLOAD__", "");
   const run = (PATH: string, s: string) => { const r = spawnSync("sh", [], { input: s, encoding: "utf8", env: { ...process.env, PATH, AWS_ADVISOR_SBOM_TMP: path.join(dir, "aws-advisor-sbom") } }); assert.equal(r.status, 0, r.stderr); return parseProbeOutput(r.stdout.trim().split("\n").pop() || ""); };
   const j = run(`${bin}:/usr/bin:/bin`, script(batch));
-  assert.equal(j.kind, "images"); assert.equal(j.probe, "aws-advisor/images/1"); assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.images_mode, null);
+  assert.equal(j.kind, "images"); assert.equal(j.probe, "aws-advisor/images/2"); assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.images_mode, null);
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [s.ref, s]));
   assert.deepEqual(Object.keys(by), batch.split(" ").map((e) => e.split("|")[0]), "one record per entry, in order");
-  assert.deepEqual(by[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`], { source: "image", ref: `123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`, image_id: null, digest: sha("a"), platform: "linux/arm64", status: "ok", total: 2, note: null, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12"] }, "the digest from the entry, no docker id, the platform, distro purls kept (the image's OS packages are its own)");
+  assert.deepEqual(by[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`], { source: "image", ref: `123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`, image_id: null, digest: sha("a"), platform: "linux/arm64", status: "ok", total: 2, note: null, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*"], "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12": ["cpe:2.3:a:gnu:glibc:2.36-9:*:*:*:*:*:*:*", "cpe:2.3:a:libc6:libc6:2.36-9:*:*:*:*:*:*:*"] } }, "the digest from the entry, no docker id, the platform, distro purls kept (the image's OS packages are its own) with the CPEs syft assigned");
   assert.equal(by[`nginx@${sha("b")}`]!.status, "timeout"); assert.equal(by[`nginx@${sha("b")}`]!.platform, "linux/amd64");
   assert.equal(by[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.status, "ok"); assert.equal(by[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.platform, null, "no platform in the entry: syft picks the host's");
   const args = fs.readFileSync(log, "utf8").split("\n");
   const api = args.find((l) => l.includes(`registry:123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@`))!;
-  assert.ok(api.includes("--platform linux/arm64") && api.includes("-o purls") && api.includes("-c ") && api.includes("/aws-advisor-sbom/syft.yaml"), `pulled from the registry for the box's platform with the config: ${api}`);
+  assert.ok(api.includes("--platform linux/arm64") && api.includes("-o template") && api.includes("/aws-advisor-sbom/purlcpe.tmpl") && api.includes("-c ") && api.includes("/aws-advisor-sbom/syft.yaml"), `pulled from the registry for the box's platform with the config and the purl and CPE template: ${api}`);
   assert.ok(!args.find((l) => l.includes(`registry:public.ecr.aws`))!.includes("--platform"), "no platform flag without a platform");
   const cfg = fs.readFileSync(cfgcopy, "utf8");
   assert.ok(cfg.includes("authority: 123456789012.dkr.ecr.eu-west-1.amazonaws.com") && cfg.includes('password: "TOKEN-EU"') && cfg.includes("authority: public.ecr.aws") && cfg.includes('password: "TOKEN-PUBLIC"'), `one auth entry per ECR host, the token from the CLI: ${cfg}`);

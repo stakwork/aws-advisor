@@ -36,10 +36,20 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   assert.equal(node.row.id, "pkg:binary:node:20.18.0", "the id the probe's reading of the same node gets"); assert.equal(node.row.ecosystem, "binary"); assert.equal(node.row.purl, "pkg:generic/node");
   assert.equal(node.row.id, g.packageId("binary", "node", "20.18.0")); assert.equal(g.sbomEcosystem("npm"), "npm");
   assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "nonsense", name: "x", version: null }), null);
+  // the CPEs (src/sec/cpe.ts): what syft assigned when the row has them (stored as a JSON list, best first), the rule's candidates when not
+  const withCpes = g.sbomGraphRow({ ...base, source: "image", ref: "nginx:1.27", purl: "pkg:deb/debian/libssl3@3.0.11-1~deb12u2?upstream=openssl&distro=debian-12", name: "libssl3", version: "3.0.11-1~deb12u2", cpes: JSON.stringify(["cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "cpe:2.3:a:libssl3:libssl3:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "junk"]) })!;
+  assert.equal(withCpes.row.cpe, "cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "the first CPE the probe listed is the one the node is known by");
+  assert.deepEqual(withCpes.row.cpes, ["cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "cpe:2.3:a:libssl3:libssl3:3.0.11-1~deb12u2:*:*:*:*:*:*:*"], "every candidate, in the probe's order, anything that is not a CPE dropped");
+  assert.equal(deb.row.cpe, "cpe:2.3:a:libssl3:libssl3:3.0.11-1\\~deb12u2:*:*:*:*:*:*:*", "no CPEs stored (an older probe): the syft-style guesses, the name first, the version bound as the formatted string binds it (~ escaped, as syft prints +)");
+  assert.deepEqual(deb.row.cpes, ["cpe:2.3:a:libssl3:libssl3:3.0.11-1\\~deb12u2:*:*:*:*:*:*:*", "cpe:2.3:a:openssl:libssl3:3.0.11-1\\~deb12u2:*:*:*:*:*:*:*", "cpe:2.3:a:openssl:openssl:3.0.11-1\\~deb12u2:*:*:*:*:*:*:*"], "then the source package as vendor");
+  assert.equal(node.row.cpe, "cpe:2.3:a:nodejs:node.js:20.18.0:*:*:*:*:*:*:*", "syft's generic purl for a program the probe also names takes NVD's name for it, as syft's classifier would");
+  assert.equal(py.row.cpe, "cpe:2.3:a:requests:requests:2.31.0:*:*:*:*:*:*:*", "a library nobody named: its name as vendor and product");
+  assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "pkg:npm/%40aws-sdk/core@3.1.0", name: "@aws-sdk/core", version: "3.1.0", cpes: ["cpe:2.3:a:amazon:aws-sdk:3.1.0:*:*:*:*:*:*:*"] })!.row.cpe, "cpe:2.3:a:amazon:aws-sdk:3.1.0:*:*:*:*:*:*:*", "a list is taken as it is");
 });
 
 test("kernelComponent: the running kernel is versioned by its upstream x.y.z (shared across boxes, sortable against the kernel CNA's ranges); without it the node is named by uname -r and carries no sort_key", () => {
   const deb = g.kernelComponent({ instance_id: "i-1", kernel: "6.1.0-54-cloud-amd64", kernel_upstream: "6.1.176", arch: "x86_64", collected_at: "2026-11-02T04:10:00Z" });
+  assert.equal(deb.cpe, "cpe:2.3:o:linux:linux_kernel:6.1.176:*:*:*:*:*:*:*", "the kernel's CPE at its upstream version");
   assert.equal(deb.id, "pkg:kernel:linux:6.1.176"); assert.equal(deb.version, "6.1.176"); assert.equal(deb.purl, "pkg:generic/linux"); assert.equal(deb.scope, "kernel"); assert.equal(deb.source_kind, "uname");
   assert.equal(deb.sort_key, "00000006.00000001.00000176.00000000.00000000=", "6.1.176 < 6.1.190: inside a range fixed in 6.1.190, as it should be");
   const amzn = g.kernelComponent({ instance_id: "i-2", kernel: "6.1.176-200.100.amzn2023.x86_64", kernel_upstream: "6.1.176", arch: "x86_64", collected_at: "2026-11-02T04:10:00Z" });

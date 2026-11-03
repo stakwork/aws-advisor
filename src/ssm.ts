@@ -76,7 +76,7 @@ export interface ProbeListener { proto: "tcp" | "udp"; port: number; bind: strin
 export interface ProbeFirewall { available: boolean; backend: "legacy" | "nf_tables" | "iptables" | "nftables" | null; v4: string[]; v6: string[]; nft: string[]; v4_lines: number; v6_lines: number; nft_lines: number; /** the lists were left out because even compressed they would not fit the output cap */ oversize: boolean }
 
 /** One syft scan of the sbom probe: a running image (ref as `docker ps` names it) or the host filesystem (ref "/"); `total` is what syft found, `purls` what fit the budget. */
-export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem; the images probe knows no docker id) */ image_id: string | null; digest: string | null; /** sbom 1.6 / images 1.0: the image's os/arch (a multi-arch digest resolves differently per platform); null for the filesystem */ platform: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; /** sbom 1.5: why a scan was skipped (scratch space, the time budget), null otherwise */ note: string | null; purls: string[] }
+export interface ProbeSbomSource { source: "image" | "dir"; ref: string; /** sbom 1.4: the image behind the name, its docker id and its registry digest (null for a build that never left the box; always null for the filesystem; the images probe knows no docker id) */ image_id: string | null; digest: string | null; /** sbom 1.6 / images 1.0: the image's os/arch (a multi-arch digest resolves differently per platform); null for the filesystem */ platform: string | null; status: "ok" | "timeout" | "error" | "skipped"; total: number; /** sbom 1.5: why a scan was skipped (scratch space, the time budget), null otherwise */ note: string | null; purls: string[]; /** sbom 1.7 / images 1.1: the CPEs syft assigned each listed purl, best first (the NVD dictionary match or a classifier declaration, then its name guesses); a purl without any is absent; empty from an older probe */ cpes: Record<string, string[]> }
 export interface ProbeSbom { available: boolean; tool: string | null; /** sbom 1.1: what the probe did about a missing syft (installed, failed and why, or left alone), null when it was there */ install: string | null; /** sbom 1.6: which images the box scanned: all of them, or only the local builds (the image scanner has the rest); null from an older probe and from the images probe */ images_mode: "all" | "local" | null; cap: number; sources: ProbeSbomSource[] }
 
 export interface ProbeResult {
@@ -108,7 +108,7 @@ export interface ProbeResult {
   kind?: ProbeKind | "all";
   probes_at?: Partial<Record<ProbeKind | "all", string>>;
   /** The software probe: the OS, the kernel, every package, the versions of well-known programs, the container images. */
-  os?: { id: string | null; version: string | null; name: string | null };
+  os?: { id: string | null; version: string | null; name: string | null; /** software/7: the CPE the distribution declares in os-release (CPE_NAME), null where it declares none or from an older probe */ cpe: string | null };
   kernel?: string | null;
   /** Software 6: the running kernel's upstream version (the x.y.z the kernel CNA's ranges name; uname -r is an ABI on Debian and Ubuntu) and the
    *  installed package that owns the booted image (what the distribution's advisories name, and which of several installed kernels is running). */
@@ -189,13 +189,26 @@ function parseHibernation(h: any): ProbeHibernation {
   };
 }
 
-/** The sbom section, typed: at most 60 scans of 50,000 purls each (an S3 object carries whole lists; an inline one is trimmed by the script), a purl being a printable `pkg:<type>/...` string of up to 300 characters. */
+/** The sbom section, typed: at most 60 scans of 50,000 purls each (an S3 object carries whole lists; an inline one is trimmed by the script), a purl being a printable `pkg:<type>/...` string of up to 300 characters,
+ *  each with up to 8 CPE 2.3 strings (`cpe:2.3:a:...`, printable, up to 300 characters) when the probe assigned any (sbom 1.7); a CPE of a purl not in the list is dropped with it. */
 export function parseSbom(s: any): ProbeSbom {
   const status = (v: unknown): ProbeSbomSource["status"] => (v === "timeout" || v === "error" || v === "skipped" ? v : "ok");
   const note = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
-  const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => ({
-    source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, platform: x.source === "image" ? note(x.platform, 40) : null, status: status(x.status), total: Math.max(0, int(x.total)), note: note(x.note, 200),
-    purls: (Array.isArray(x.purls) ? x.purls : []).filter((p: unknown) => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300).slice(0, 50000) as string[] }));
+  const isPurl = (p: unknown): p is string => typeof p === "string" && /^pkg:[a-z0-9.+-]+\/[\x20-\x7e]+$/i.test(p) && p.length <= 300;
+  const isCpe = (c: unknown): c is string => typeof c === "string" && /^cpe:2\.3:[aoh]:[\x20-\x7e]+$/.test(c) && c.length <= 300;
+  const sources: ProbeSbomSource[] = (Array.isArray(s.sources) ? s.sources : []).filter((x: any) => x && (x.source === "image" || x.source === "dir") && typeof x.ref === "string" && x.ref).slice(0, 60).map((x: any) => {
+    const purls = (Array.isArray(x.purls) ? x.purls : []).filter(isPurl).slice(0, 50000) as string[];
+    const cpes: Record<string, string[]> = {};
+    if (x.cpes && typeof x.cpes === "object" && !Array.isArray(x.cpes)) {
+      const listed = new Set(purls);
+      for (const [purl, v] of Object.entries(x.cpes as Record<string, unknown>)) {
+        if (!listed.has(purl) || !Array.isArray(v)) continue;
+        const list = v.filter(isCpe).slice(0, 8);
+        if (list.length) cpes[purl] = list;
+      }
+    }
+    return { source: x.source, ref: String(x.ref).replace(/[^\x20-\x7e]/g, "").slice(0, 300), image_id: x.source === "image" ? note(x.image_id, 100) : null, digest: x.source === "image" ? note(x.digest, 100) : null, platform: x.source === "image" ? note(x.platform, 40) : null, status: status(x.status), total: Math.max(0, int(x.total)), note: note(x.note, 200), purls, cpes };
+  });
   return { available: s.available === true, tool: note(s.tool, 40), install: note(s.install, 200), images_mode: s.images_mode === "all" || s.images_mode === "local" ? s.images_mode : null, cap: Math.max(0, int(s.cap)), sources };
 }
 
@@ -256,7 +269,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
       container: l.container == null ? null : String(l.container).slice(0, 120), container_port: l.container_port == null ? null : int(l.container_port) })) : undefined,
     firewall: raw.firewall && typeof raw.firewall === "object" ? parseFirewall(raw.firewall) : undefined,
     kind,
-    os: raw.os && typeof raw.os === "object" ? { id: raw.os.id == null ? null : String(raw.os.id).slice(0, 40), version: raw.os.version == null ? null : String(raw.os.version).slice(0, 40), name: raw.os.name == null ? null : String(raw.os.name).slice(0, 120) } : undefined,
+    os: raw.os && typeof raw.os === "object" ? { id: raw.os.id == null ? null : String(raw.os.id).slice(0, 40), version: raw.os.version == null ? null : String(raw.os.version).slice(0, 40), name: raw.os.name == null ? null : String(raw.os.name).slice(0, 120), cpe: typeof raw.os.cpe === "string" && /^cpe:/i.test(raw.os.cpe) ? raw.os.cpe.replace(/[^\x20-\x7e]/g, "").slice(0, 200) : null } : undefined,
     kernel: raw.kernel === undefined ? undefined : raw.kernel == null ? null : String(raw.kernel).slice(0, 80),
     kernel_upstream: raw.kernel_upstream === undefined ? undefined : raw.kernel_upstream == null ? null : String(raw.kernel_upstream).slice(0, 40),
     kernel_package: raw.kernel_package === undefined ? undefined : raw.kernel_package && typeof raw.kernel_package === "object" && typeof raw.kernel_package.n === "string" && raw.kernel_package.n
@@ -652,7 +665,7 @@ const warnedNoImagesParameter = new Set<ProbeKind>();
 /** What goes into instance_metrics for an sbom or images result: the scans without their package lists (the tables hold those; a row per box per day must stay small). */
 export function storedForm(data: ProbeResult): ProbeResult {
   if ((data.kind !== "sbom" && data.kind !== "images") || !data.sbom) return data;
-  return { ...data, sbom: { ...data.sbom, sources: data.sbom.sources.map((s) => ({ ...s, purls: [] })) } };
+  return { ...data, sbom: { ...data.sbom, sources: data.sbom.sources.map((s) => ({ ...s, purls: [], cpes: {} })) } };
 }
 
 /** A parsed probe result stored (as `storeAs`, which is `data` unless a lighter form is wanted) and fed to the hooks of its kind: the probe flow and the S3 replay both end here. */
