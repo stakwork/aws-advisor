@@ -131,7 +131,8 @@ async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<Pro
     try { images = await imagePass(); } catch (e: any) { console.error(`[${tag}] the image half failed: ${e?.message || e}`); }
     console.log(`[${tag}] image scanner ${imageScanner()}: ${images?.ok ? `${images.scanned.length} image(s) read${images.failed.length ? `, ${images.failed.length} not read` : ""} of ${images.candidates} due; the boxes scan only their local builds (images=local)` : `${images?.reason || "failed"}; the boxes scan every running image themselves this pass (images=all)`}`);
   }
-  const parameters = kind === "sbom" && imageScanner() ? { images: sbomImagesMode(images) } : undefined;
+  // the sbom document's parameters: the images mode while a scanner is configured, and what the box reads of itself (Settings > Probe pass; sbom 1.7)
+  const parameters = kind === "sbom" ? { ...(imageScanner() ? { images: sbomImagesMode(images) } : {}), host: config.probeSbomHost } : undefined;
   const { scope, intervalHours } = probeKindSettings(kind);
   const targets = probeTargets(kind, undefined, { ignoreInterval });
   const result: ProbePassResult = { kind, started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, databases: null, images, took_ms: 0 };

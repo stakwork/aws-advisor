@@ -692,18 +692,32 @@ aws ssm create-document --name AwsAdvisorProbe-host --document-type Command --do
 # the same for docker, apps, software, sbom and images
 ```
 
-The `sbom` probe reads what the running container images and the host filesystem contain beyond the OS packages
-(npm, pypi, golang, java, ruby, rust, ... as package URLs) with [syft](https://github.com/anchore/syft). A box without
-syft gets the pinned release installed (`PROBE_SBOM_INSTALL`, on by default: the document's `install` parameter; the
-official installer fetches it from GitHub, verifies its checksum and puts it in `/usr/local/bin`), which is the one
-write any probe makes and needs curl and egress from the box; with the setting off, or when the install fails, the box
-is reported as not available with the reason and nothing is scanned. It scans each image through the Docker daemon,
-then the filesystem with the kernel and device trees, runtime state, caches, logs, the container stores and every
-non-local mount excluded, within a 1200 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 1500 s;
-images are unpacked in a scratch directory under `/var/tmp` that is emptied after every scan, and one the free disk
-cannot hold is skipped), and trims the lists to fit SSM's 24,000-character output cap, each scan reporting its true
-count. What it finds is on the instance's Software tab and in the graph as `CONTAINS` edges from the image to its
-packages (`src/graph_software.ts`). An image is identified by its content there: the repository at its registry digest
+The `sbom` probe reads what runs on the box beyond the OS packages with [syft](https://github.com/anchore/syft), in
+place: nothing is pulled, saved or unpacked on a box. A box without syft gets the pinned release installed
+(`PROBE_SBOM_INSTALL`, on by default: the document's `install` parameter; the official installer fetches it from GitHub,
+verifies its checksum and puts it in `/usr/local/bin`), which is the one write any probe makes and needs curl and egress
+from the box; with the setting off, or when the install fails, the box is reported as not available with the reason and
+nothing is read. What it reads of the box itself is `PROBE_SBOM_HOST` (Settings › Probe pass › What syft reads on each
+box; the document's `host` parameter): `processes`, the default, walks `/proc` and gives syft the executable of every
+running process, host and container alike, each once; a host program at its path, a container's through the root
+filesystem the daemon keeps mounted for it (`docker inspect`'s MergedDir, or the containerd task root on a Kubernetes
+node), never by entering the container. That yields what each program is, its version with the CPE syft assigns it
+(`pkg:generic/node@22.12.0`, `cpe:2.3:a:nodejs:node.js:22.12.0`), and for a Go or Rust program the modules compiled into
+it; a binary replaced or removed while running is reported as skipped. A Chromium build syft has no classifier for
+(the headless shell Playwright and Puppeteer download, Chrome for Testing) is read from the version text inside the
+file instead, as `pkg:generic/chrome` with `cpe:2.3:a:google:chrome:<version>`, the record saying so. An executable nothing identifies
+is kept too: the record carries the file's sha256 and size and, on the host, the package that owns it, and the graph
+holds it as a `SoftwareComponent` at version `unknown` with `classified: false` (unless a package owns it or the software
+probe already versioned it there), so what the fleet runs unnamed is visible and the next classifier can be written from it. `filesystem` walks the host filesystem for
+language packages as before (with the kernel and device trees, runtime state, caches, logs, the container stores and
+every non-local mount excluded), `both` does both, `none` leaves the box to its images. The images it is asked for (the
+`images` parameter: every running image, or only the local builds while a scanner is configured) are read the same way,
+through the root of a container that runs them, so the packages inside them (npm, pypi, golang, java, ruby, rust, ...)
+are known without a save; an image whose container root is not mounted where the daemon or containerd keep it is skipped
+and says so. All within a 1200 s budget (`PROBE_SBOM_CRON`, daily by default; the document times out at 1500 s), the
+lists trimmed to fit SSM's 24,000-character output cap with each scan reporting its true count. What it finds is on the
+instance's Software tab and in the graph: a running executable's packages are `INSTALLED_ON` the box with the path and
+the container on the edge, an image's are `CONTAINS` edges from the image to its packages (`src/graph_software.ts`). An image is identified by its content there: the repository at its registry digest
 (`image:redis@sha256:…`), or the local image id for a build that never left the box, so two boxes on different builds
 of `redis:latest` are two nodes and a box that pulls the new build moves to a new node. (Cluster workloads' `BUILT_FROM`
 edges still point at `image:<ref>` nodes by name, since a workload spec names a tag.)

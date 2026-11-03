@@ -36,6 +36,17 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   assert.equal(node.row.id, "pkg:binary:node:20.18.0", "the id the probe's reading of the same node gets"); assert.equal(node.row.ecosystem, "binary"); assert.equal(node.row.purl, "pkg:generic/node");
   assert.equal(node.row.id, g.packageId("binary", "node", "20.18.0")); assert.equal(g.sbomEcosystem("npm"), "npm");
   assert.equal(g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "nonsense", name: "x", version: null }), null);
+  // a running executable (sbom 1.7): INSTALLED_ON the box at its path, with the container it runs in; the same node syft and the software probe give that program
+  const cnode = g.sbomGraphRow({ ...base, source: "proc", ref: "container:abcdefabcdef:/usr/local/bin/node", purl: "pkg:generic/node@20.18.0", name: "node", version: "20.18.0" })!;
+  assert.equal(cnode.edge, "installed_on"); assert.equal(cnode.row.id, "pkg:binary:node:20.18.0"); assert.equal(cnode.row.path, "/usr/local/bin/node"); assert.equal(cnode.row.container, "abcdefabcdef");
+  const hnode = g.sbomGraphRow({ ...base, source: "proc", ref: "host:/usr/sbin/sshd", purl: "pkg:generic/openssh@9.2p1", name: "openssh", version: "9.2p1" })!;
+  assert.equal(hnode.row.path, "/usr/sbin/sshd"); assert.equal(hnode.row.container, null, "a host process");
+  assert.equal(npm.row.container, null, "the filesystem: no container, no path");
+  // an executable nothing identified: a binary component at version unknown, classified false, hash and size on the edge
+  const un = g.unclassifiedComponentRow({ instance_id: "i-1", ref: "container:abcdefabcdef:/ms-playwright/chromium-1243/chrome-linux64/chrome_crashpad_handler", container: "abcdefabcdef", sha256: "ab".repeat(32), size: 1234567, collected_at: "2026-11-03T12:00:00Z" })!;
+  assert.deepEqual([un.id, un.name, un.version, un.ecosystem, un.source_kind, un.classified, un.purl, un.sort_key, un.cpe, un.cpes, un.path, un.container, un.sha256, un.size, un.scope], ["pkg:binary:chrome_crashpad_handler:unknown", "chrome_crashpad_handler", "unknown", "binary", "unclassified", false, "pkg:generic/chrome-crashpad-handler", null, null, [], "/ms-playwright/chromium-1243/chrome-linux64/chrome_crashpad_handler", "abcdefabcdef", "ab".repeat(32), 1234567, "tool"]);
+  assert.equal(g.unclassifiedComponentRow({ instance_id: "i-1", ref: "host:/usr/sbin/sshd", collected_at: "2026-11-03T12:00:00Z" })!.container, null);
+  assert.equal(g.unclassifiedComponentRow({ instance_id: "i-1", ref: "nonsense", collected_at: "2026-11-03T12:00:00Z" }), null);
   // the CPEs (src/sec/cpe.ts): what syft assigned when the row has them (stored as a JSON list, best first), the rule's candidates when not
   const withCpes = g.sbomGraphRow({ ...base, source: "image", ref: "nginx:1.27", purl: "pkg:deb/debian/libssl3@3.0.11-1~deb12u2?upstream=openssl&distro=debian-12", name: "libssl3", version: "3.0.11-1~deb12u2", cpes: JSON.stringify(["cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "cpe:2.3:a:libssl3:libssl3:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "junk"]) })!;
   assert.equal(withCpes.row.cpe, "cpe:2.3:a:openssl:openssl:3.0.11-1~deb12u2:*:*:*:*:*:*:*", "the first CPE the probe listed is the one the node is known by");

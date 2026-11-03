@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -28,7 +29,7 @@ test("every probe kind has a document of its own that passes sh -n, embeds its h
   }
   assert.ok(Object.keys((pr.probeDocument("docker") as any).parameters).includes("signals"));
   assert.deepEqual((pr.probeDocument("host") as any).parameters, {});
-  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "images", "upload"]);
+  assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "images", "host", "upload"]);
   assert.deepEqual(Object.keys((pr.probeDocument("images") as any).parameters), ["install", "images", "timeout", "upload"]);
   assert.deepEqual((pr.probeDocument("sbom") as any).parameters.images.allowedValues, ["all", "local"]);
   assert.equal((pr.probeDocument("images") as any).parameters.images.default, "", "a batch is always passed");
@@ -172,23 +173,46 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
   }
 });
 
-test("the sbom script: with syft it scans each running image and the filesystem, keeps each scan's status, trims to the budget and fits the SSM cap; without syft it says so and scans nothing", async () => {
+test("the sbom script: with syft it reads each running executable in place (host and container, through the root the daemon keeps mounted), reads each running image through that root, walks the filesystem only when asked, keeps each scan's status, trims to the budget and fits the SSM cap; without syft it says so and reads nothing", async () => {
   const { parseProbeOutput, SSM_OUTPUT_CAP } = await import("../ssm.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-syft-"));
   const bin = path.join(dir, "bin"); fs.mkdirSync(bin); const bare = path.join(dir, "bare"); fs.mkdirSync(bare);
   const log = path.join(dir, "args.log");
   const w = (where: string, name: string, body: string) => fs.writeFileSync(path.join(where, name), body, { mode: 0o755 });
+  // four running containers of three images, as the daemon lists them, and the root filesystems it keeps mounted: nginx's and app's exist, huge's does not
+  const cid = (c: string) => c.repeat(64); const short = (c: string) => cid(c).slice(0, 12);
+  const roots = path.join(dir, "roots");
+  for (const r of ["nginx", "app"]) { fs.mkdirSync(path.join(roots, r, "usr", "local", "bin"), { recursive: true }); fs.writeFileSync(path.join(roots, r, "usr", "local", "bin", "node"), "#!/bin/sh\n", { mode: 0o755 }); }
+  const ps = `${cid("1")}\tnginx:1.27\n${cid("2")}\tapp:latest\n${cid("3")}\thuge:1\n${cid("4")}\tnginx:1.27\n`;
+  const inspect = `${cid("1")}|sha256:bbbb|${roots}/nginx\n${cid("2")}|sha256:aaaa|${roots}/app\n${cid("3")}|sha256:dddd|${roots}/huge\n${cid("4")}|sha256:bbbb|${roots}/nginx\n`;
   for (const where of [bin, bare]) {
-    w(where, "docker", "#!/bin/sh\ncase \"$1 $2 $5\" in info*) exit 0;; ps*) printf 'nginx:1.27\\napp:latest\\nnginx:1.27\\nhuge:1\\n';; 'image inspect nginx:1.27') printf 'sha256:bbbb|nginx@sha256:cccc|52428800|linux/amd64\\n';; 'image inspect app:latest') printf 'sha256:aaaa||104857600|linux/arm64\\n';; 'image inspect huge:1') printf 'sha256:dddd|huge@sha256:eeee|9000000000000000000|linux/amd64\\n';; *) exit 1;; esac\n");
+    w(where, "docker", `#!/bin/sh\ncase "$1 $2 $3" in info*) exit 0;; "ps --no-trunc --format") printf '%s' '${ps}';; "ps --format "*) printf 'nginx:1.27\\napp:latest\\nhuge:1\\n';; "inspect --format "*) printf '%s' '${inspect}';; "image inspect --format") case "$5" in nginx:1.27) printf 'sha256:bbbb|nginx@sha256:cccc|linux/amd64\\n';; app:latest) printf 'sha256:aaaa||linux/arm64\\n';; huge:1) printf 'sha256:dddd|huge@sha256:eeee|linux/amd64\\n';; *) exit 1;; esac;; *) exit 1;; esac\n`);
     w(where, "dpkg-query", "#!/bin/sh\nexit 0\n");
+    w(where, "dpkg", `#!/bin/sh\ncase "$*" in "-S "*/hostbin/sshd) printf 'openssh-server: %s\\n' "$2";; *) exit 1;; esac\n`); // what owns a host executable
     w(where, "timeout", "#!/bin/sh\nshift; exec \"$@\"\n"); // macOS has none; the script falls back to no bound either way
   }
-  // one image times out, one lists a duplicate and a distro package, the filesystem lists an OS package (dropped: dpkg owns it) and far more than the budget
-  w(bin, "syft", `#!/bin/sh\necho "$* tmpdir=\${TMPDIR:-}" >> ${log}\nif [ -n "\${TMPDIR:-}" ]; then mkdir -p "$TMPDIR/stereoscope-fake" && : > "$TMPDIR/stereoscope-fake/layer.tar"; fi\nprev=""; for a in "$@"; do if [ "$prev" = "-t" ]; then [ -f "$a" ] || exit 3; grep -q 'range .artifacts' "$a" || exit 3; fi; prev=$a; done\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *docker:nginx:1.27*) exit 124;; *docker:app:latest*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\tcpe:2.3:a:aws-sdk:core:3.1.0:*:*:*:*:*:*:* cpe:2.3:a:aws:core:3.1.0:*:*:*:*:*:*:* \\npkg:npm/express@4.19.2\\tcpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:* cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*\\npkg:npm/express@4.19.2\\tcpe:2.3:a:other:express:4.19.2:*:*:*:*:*:*:*\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\t\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\tcpe:2.3:a:haxx:curl:8.5.0:*:*:*:*:*:*:*\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\tcpe:2.3:a:package-%s:package-%s:1.0.%s:*:*:*:*:*:*:*\\n' "$i" "$i" "$i" "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
-  const run = (PATH: string, script = pr.defaultProbeScript("sbom"), extra: Record<string, string> = {}) => { const r = spawnSync("sh", [], { input: script, encoding: "utf8", env: { ...process.env, PATH, ...extra } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
+  // a /proc of the test's own (AWS_ADVISOR_PROC): node twice in the app container (read once), node in a nginx container (another image: read again), a host
+  // program (a file of the test's), a binary replaced while running, a process in the container whose root is not mounted, and a kernel thread with no executable
+  const proc = path.join(dir, "proc"); fs.mkdirSync(proc); fs.mkdirSync(path.join(proc, "self"));
+  const hostbin = path.join(dir, "hostbin"); fs.mkdirSync(hostbin); fs.writeFileSync(path.join(hostbin, "sshd"), "#!/bin/sh\n", { mode: 0o755 });
+  const p = (pid: number, exe: string | null, c: string | null) => { fs.mkdirSync(path.join(proc, String(pid))); if (exe) fs.symlinkSync(exe, path.join(proc, String(pid), "exe")); fs.writeFileSync(path.join(proc, String(pid), "cgroup"), c ? `0::/system.slice/docker-${cid(c)}.scope\n` : "0::/system.slice/ssh.service\n"); };
+  p(100, "/usr/local/bin/node", "2"); p(101, "/usr/local/bin/node", "2"); p(102, "/usr/local/bin/node", "4"); p(103, path.join(hostbin, "sshd"), null); p(104, "/usr/sbin/old (deleted)", null); p(105, "/usr/bin/python3", "3"); p(106, null, null);
+  // Playwright's headless Chromium in the app container: syft has no classifier for it, the version text inside the file is read instead
+  const shell = "/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell";
+  fs.mkdirSync(path.dirname(path.join(roots, "app", shell)), { recursive: true }); fs.writeFileSync(path.join(roots, "app", shell), "\x7fELF\0\0junk Google Chrome for Testing\0Chrome/153.0.8010.12\0more", { mode: 0o755 });
+  p(107, shell, "2");
+  // nothing identifies these: a crash handler in the app container, and a host program no package owns (the test's own file): hash, size and owner travel with the record
+  const crashpad = "/ms-playwright/chromium-1243/chrome-linux64/chrome_crashpad_handler";
+  fs.mkdirSync(path.dirname(path.join(roots, "app", crashpad)), { recursive: true }); fs.writeFileSync(path.join(roots, "app", crashpad), "\x7fELF\0crashpad\0", { mode: 0o755 }); p(108, crashpad, "2");
+  fs.writeFileSync(path.join(hostbin, "mytool"), "#!/bin/sh\nexit 0\n", { mode: 0o755 }); p(109, path.join(hostbin, "mytool"), null);
+  const sha256 = (f: string) => createHash("sha256").update(fs.readFileSync(f)).digest("hex");
+  // the fake syft logs its arguments, checks the template it is given, and answers by what it is asked to read: an executable, a container root, the filesystem
+  w(bin, "syft", `#!/bin/sh\necho "$* tmpdir=\${TMPDIR:-}" >> ${log}\nif [ -n "\${TMPDIR:-}" ]; then mkdir -p "$TMPDIR/stereoscope-fake" && : > "$TMPDIR/stereoscope-fake/layer.tar"; fi\nprev=""; for a in "$@"; do if [ "$prev" = "-t" ]; then [ -f "$a" ] || exit 3; grep -q 'range .artifacts' "$a" || exit 3; fi; prev=$a; done\ncase "$*" in version) printf 'Application: syft\\nVersion: 1.55.0\\n';; *file:*/node\\ *) printf 'pkg:generic/node@22.12.0\\tcpe:2.3:a:nodejs:node.js:22.12.0:*:*:*:*:*:*:*\\n';; *file:*) exit 0;; *dir:${roots}/nginx*) exit 124;; *dir:${roots}/app*) printf 'pkg:npm/%%40aws-sdk/core@3.1.0\\tcpe:2.3:a:aws-sdk:core:3.1.0:*:*:*:*:*:*:* cpe:2.3:a:aws:core:3.1.0:*:*:*:*:*:*:* \\npkg:npm/express@4.19.2\\tcpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:* cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*\\npkg:npm/express@4.19.2\\tcpe:2.3:a:other:express:4.19.2:*:*:*:*:*:*:*\\npkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12\\t\\n';; *dir:/*) printf 'pkg:deb/ubuntu/curl@8.5.0?arch=amd64\\tcpe:2.3:a:haxx:curl:8.5.0:*:*:*:*:*:*:*\\n'; i=0; while [ $i -lt 6000 ]; do printf 'pkg:pypi/package-%s@1.0.%s\\tcpe:2.3:a:package-%s:package-%s:1.0.%s:*:*:*:*:*:*:*\\n' "$i" "$i" "$i" "$i" "$i"; i=$((i+1)); done;; *) exit 2;; esac\n`);
+  const run = (PATH: string, script = pr.defaultProbeScript("sbom"), extra: Record<string, string> = {}) => { const r = spawnSync("sh", [], { input: script, encoding: "utf8", env: { ...process.env, PATH, AWS_ADVISOR_PROC: proc, ...extra } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim().split("\n").pop() || ""; };
   const scratch = path.join(dir, "aws-advisor-sbom"); // the name the guarded removals require
   const line = run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: scratch });
-  assert.ok(!fs.existsSync(scratch), "the scratch directory syft unpacked images in is gone when the probe exits");
+  const firstRun = fs.readFileSync(log, "utf8"); // what syft was asked in this run alone
+  assert.ok(!fs.existsSync(scratch), "the scratch directory (the template) is gone when the probe exits");
   // a directory of another name is never touched: the probe then leaves syft its default TMPDIR
   const other = path.join(dir, "elsewhere"); fs.mkdirSync(other); fs.writeFileSync(path.join(other, "keep"), "");
   run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: other });
@@ -197,60 +221,88 @@ test("the sbom script: with syft it scans each running image and the filesystem,
   const j = parseProbeOutput(line);
   assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/5"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
   assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0"); assert.equal(j.sbom?.images_mode, "all", "the default: every running image, here");
+  assert.equal(j.sbom?.host_mode, "processes", "the default: the running executables, not the filesystem");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
-  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, platform: "linux/arm64", status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/%40aws-sdk/core@3.1.0": ["cpe:2.3:a:aws-sdk:core:3.1.0:*:*:*:*:*:*:*", "cpe:2.3:a:aws:core:3.1.0:*:*:*:*:*:*:*"], "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*", "cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*"] } }, "duplicates dropped (the first line's CPEs kept), order kept; a purl without CPEs is out of the map; a local build has an id and no digest; the platform travels");
-  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", platform: "linux/amd64", status: "timeout", total: 0, note: null, purls: [], cpes: {} }, "a pulled image carries its registry digest");
-  assert.equal(by["image huge:1"]!.status, "skipped"); assert.equal(by["image huge:1"]!.platform, "linux/amd64"); assert.match(by["image huge:1"]!.note ?? "", /^needs about \d+ MB of scratch space under .*, \d+ MB free$/, "an image the free disk cannot hold is skipped, not half-read");
-  assert.ok(!fs.readFileSync(log, "utf8").includes("docker:huge:1"), "syft was never asked for it");
-  assert.equal(by["dir /"]!.image_id, null); assert.equal(by["dir /"]!.platform, null); assert.equal(j.upload, undefined, "no upload URL: no receipt");
-  // local mode (sbom 1.6): the images with a registry digest are the scanner's and are not listed; the local build and the filesystem stay
-  const nginxScans = () => fs.readFileSync(log, "utf8").split("\n").filter((l) => l.includes("docker:nginx:1.27")).length;
-  const beforeLocal = nginxScans();
-  const local = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__IMAGES_MODE__", "local"), { AWS_ADVISOR_SBOM_TMP: scratch }));
-  assert.equal(local.sbom?.images_mode, "local");
-  assert.deepEqual(local.sbom!.sources.map((s) => `${s.source} ${s.ref}`), ["image app:latest", "dir /"], "nginx (digest) and huge (digest) are left to the scanner, not even reported as skipped");
-  assert.equal(nginxScans(), beforeLocal, "the digested image was not scanned in local mode");
-  assert.equal(by["dir /"]!.status, "ok"); assert.equal(by["dir /"]!.total, 6000, "the OS package is left to the software probe; the true count is reported");
-  assert.ok(by["dir /"]!.purls.length < 6000 && by["dir /"]!.purls.length >= 100 && by["dir /"]!.purls.every((p) => p.startsWith("pkg:pypi/")), `trimmed to the budget (${by["dir /"]!.purls.length}, cap ${j.sbom!.cap})`);
-  const args = fs.readFileSync(log, "utf8").split("\n").find((l) => l.includes("dir:/"))!;
+  const logText = () => fs.readFileSync(log, "utf8");
+  // the running executables (sbom 1.7), each read once in place: a container's through the root the daemon reports, with the container and its image on the record
+  assert.deepEqual(by[`proc container:${short("2")}:/usr/local/bin/node`], { source: "proc", ref: `container:${short("2")}:/usr/local/bin/node`, image_id: "sha256:aaaa", digest: null, platform: null, container: short("2"), sha256: null, size: null, package: null, status: "ok", total: 1, note: null, purls: ["pkg:generic/node@22.12.0"], cpes: { "pkg:generic/node@22.12.0": ["cpe:2.3:a:nodejs:node.js:22.12.0:*:*:*:*:*:*:*"] } }, "a container process: the binary read through the container root, once for the two processes of that image");
+  assert.equal(by[`proc container:${short("4")}:/usr/local/bin/node`]?.status, "ok", "the same path in another image is another executable, read again");
+  const sshdRec = by[`proc host:${path.join(hostbin, "sshd")}`]!;
+  assert.deepEqual([sshdRec.status, sshdRec.container, sshdRec.purls, sshdRec.sha256, sshdRec.size, sshdRec.package], ["ok", null, [], sha256(path.join(hostbin, "sshd")), fs.statSync(path.join(hostbin, "sshd")).size, "openssh-server"], "a host process at its own path, nothing recognised in it: its hash, size and the package that owns it");
+  const toolRec = by[`proc host:${path.join(hostbin, "mytool")}`]!;
+  assert.deepEqual([toolRec.sha256, toolRec.size, toolRec.package], [sha256(path.join(hostbin, "mytool")), fs.statSync(path.join(hostbin, "mytool")).size, null], "no package owns it: hash and size alone");
+  const crashRec = by[`proc container:${short("2")}:${crashpad}`]!;
+  assert.deepEqual([crashRec.status, crashRec.purls, crashRec.sha256, crashRec.size, crashRec.package, crashRec.container], ["ok", [], sha256(path.join(roots, "app", crashpad)), fs.statSync(path.join(roots, "app", crashpad)).size, null, short("2")], "a container executable nothing identifies: hashed through the container root, no package asked (the container is not entered)");
+  assert.equal(by["proc host:/usr/sbin/old"]?.status, "skipped"); assert.match(by["proc host:/usr/sbin/old"]?.note ?? "", /gone from disk/, "a binary replaced while running cannot be read in place");
+  assert.equal(by[`proc container:${short("3")}:/usr/bin/python3`]?.status, "skipped"); assert.match(by[`proc container:${short("3")}:/usr/bin/python3`]?.note ?? "", /not mounted where the daemon or containerd keep it/);
+  assert.deepEqual([by[`proc container:${short("2")}:${shell}`]?.status, by[`proc container:${short("2")}:${shell}`]?.purls, by[`proc container:${short("2")}:${shell}`]?.cpes, by[`proc container:${short("2")}:${shell}`]?.note], ["ok", ["pkg:generic/chrome@153.0.8010.12"], { "pkg:generic/chrome@153.0.8010.12": ["cpe:2.3:a:google:chrome:153.0.8010.12:*:*:*:*:*:*:*"] }, "version read from the text inside the binary (syft has no classifier for it)"], "a headless Chromium: syft found nothing, the version text inside the file names it, as Chrome at that version");
+  assert.equal(j.sbom!.sources.filter((s) => s.source === "proc").length, 8, "one record per distinct executable: the duplicate process and the kernel thread add none");
+  assert.equal(firstRun.split("\n").filter((l) => l.includes(`file:${roots}/app/usr/local/bin/node`)).length, 1, "syft read the container's binary in place, once");
+  assert.ok(!logText().includes("docker:"), "no image is saved through the daemon any more");
+  // the images, each read through the root of one container that runs it, with that container on the record
+  assert.deepEqual(by["image app:latest"], { source: "image", ref: "app:latest", image_id: "sha256:aaaa", digest: null, platform: "linux/arm64", container: short("2"), sha256: null, size: null, package: null, status: "ok", total: 3, note: null, purls: ["pkg:npm/%40aws-sdk/core@3.1.0", "pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=amd64&upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/%40aws-sdk/core@3.1.0": ["cpe:2.3:a:aws-sdk:core:3.1.0:*:*:*:*:*:*:*", "cpe:2.3:a:aws:core:3.1.0:*:*:*:*:*:*:*"], "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*", "cpe:2.3:a:express:express:4.19.2:*:*:*:*:*:*:*"] } }, "duplicates dropped (the first line's CPEs kept), order kept; a purl without CPEs is out of the map; a local build has an id and no digest; the platform travels");
+  assert.deepEqual(by["image nginx:1.27"], { source: "image", ref: "nginx:1.27", image_id: "sha256:bbbb", digest: "sha256:cccc", platform: "linux/amd64", container: short("1"), sha256: null, size: null, package: null, status: "timeout", total: 0, note: null, purls: [], cpes: {} }, "a pulled image carries its registry digest; read through the first container that runs it");
+  assert.equal(by["image huge:1"]!.status, "skipped"); assert.equal(by["image huge:1"]!.platform, "linux/amd64"); assert.match(by["image huge:1"]!.note ?? "", /not mounted where the daemon or containerd keep it/, "an image whose container root is not mounted is skipped: nothing is pulled or saved on a box");
+  assert.ok(logText().includes(`dir:${roots}/app --base-path ${roots}/app`), "the container root is read in place, links resolved inside it");
+  assert.equal(by["dir /"], undefined, "the filesystem is not walked in processes mode");
+  // host=both: the filesystem as before, next to the executables; filesystem: the filesystem alone; none: only the images
+  const both = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__HOST_MODE__", "both"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  const bb = Object.fromEntries(both.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
+  assert.equal(both.sbom?.host_mode, "both"); assert.ok(bb[`proc container:${short("2")}:/usr/local/bin/node`], "the executables");
+  assert.equal(bb["dir /"]!.status, "ok"); assert.equal(bb["dir /"]!.total, 6000, "the OS package is left to the software probe; the true count is reported");
+  assert.deepEqual([bb["dir /"]!.image_id, bb["dir /"]!.platform, bb["dir /"]!.container, both.upload], [null, null, null, undefined], "no upload URL: no receipt");
+  assert.ok(bb["dir /"]!.purls.length < 6000 && bb["dir /"]!.purls.length >= 100 && bb["dir /"]!.purls.every((p) => p.startsWith("pkg:pypi/")), `trimmed to the budget (${bb["dir /"]!.purls.length}, cap ${both.sbom!.cap})`);
+  assert.ok(Object.values(bb["dir /"]!.cpes).every((c) => c.length === 1 && c[0]!.startsWith("cpe:2.3:a:package-")) && Object.keys(bb["dir /"]!.cpes).length === bb["dir /"]!.purls.length, "every listed purl keeps its CPEs, trimmed with the list");
+  const args = logText().split("\n").find((l) => l.includes("dir:/ "))!;
   assert.ok(args.includes(`tmpdir=${scratch}`), "syft is given the probe's scratch directory as TMPDIR");
   for (const ex of ["./proc/**", "./sys/**", "./var/lib/docker/**", "./home/*/.cache/**"]) assert.ok(args.includes(`--exclude ${ex}`), `the filesystem scan excludes ${ex} (globbing off)`);
   assert.ok(args.includes("-o template") && args.includes(`-t ${scratch}/purlcpe.tmpl`) && args.includes("-q"), `the purl and CPE template from the scratch directory, quiet: ${args}`);
-  assert.ok(Object.values(by["dir /"]!.cpes).every((c) => c.length === 1 && c[0]!.startsWith("cpe:2.3:a:package-")) && Object.keys(by["dir /"]!.cpes).length === by["dir /"]!.purls.length, "every listed purl keeps its CPEs, trimmed with the list");
-  // a syft too old for the template model refuses it: the scan is retried for the purls alone and the lists come without CPEs
-  const oldSyft = path.join(dir, "oldsyft"); fs.mkdirSync(oldSyft);
-  for (const f of ["docker", "dpkg-query", "timeout"]) fs.copyFileSync(path.join(bin, f), path.join(oldSyft, f));
-  w(oldSyft, "syft", `#!/bin/sh\ncase "$*" in version) printf 'Application: syft\\nVersion: 0.98.0\\n';; *"-o template"*) echo "unable to render template: can't evaluate field artifacts" >&2; exit 1;; *docker:app:latest*) printf 'pkg:npm/express@4.19.2\\n';; *dir:/*) printf 'pkg:pypi/requests@2.32.3\\n';; *) exit 124;; esac\n`);
-  const legacy = parseProbeOutput(run(`${oldSyft}:/usr/bin:/bin`, pr.defaultProbeScript("sbom"), { AWS_ADVISOR_SBOM_TMP: scratch }));
-  const lb = Object.fromEntries(legacy.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
-  assert.deepEqual([lb["image app:latest"]!.status, lb["image app:latest"]!.purls, lb["image app:latest"]!.cpes, lb["dir /"]!.status, lb["dir /"]!.purls], ["ok", ["pkg:npm/express@4.19.2"], {}, "ok", ["pkg:pypi/requests@2.32.3"]], "the purls-only fallback");
   assert.ok(args.includes(`--exclude .${path.join(bin, "syft")}`), "syft does not catalog its own Go modules");
+  const fsOnly = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__HOST_MODE__", "filesystem"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  assert.deepEqual(fsOnly.sbom!.sources.map((s) => s.source).sort(), ["dir", "image", "image", "image"], "filesystem alone: no executables");
+  const none = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__HOST_MODE__", "none"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  assert.deepEqual(none.sbom!.sources.map((s) => s.source), ["image", "image", "image"], "none: the images alone");
+  // local mode (sbom 1.6): the images with a registry digest are the scanner's and are not listed; the local build and the executables stay
+  const nginxReads = () => logText().split("\n").filter((l) => l.includes(`dir:${roots}/nginx`)).length;
+  const beforeLocal = nginxReads();
+  const local = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__IMAGES_MODE__", "local"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  assert.equal(local.sbom?.images_mode, "local");
+  assert.deepEqual(local.sbom!.sources.filter((s) => s.source === "image").map((s) => s.ref), ["app:latest"], "nginx (digest) and huge (digest) are left to the scanner, not even reported as skipped");
+  assert.equal(local.sbom!.sources.filter((s) => s.source === "proc").length, 8, "the executables are read whatever the images mode");
+  assert.equal(nginxReads(), beforeLocal, "the digested image was not read in local mode");
   // no syft and the install switch off: reported, left alone
-  const none = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__INSTALL__", "no")));
-  assert.deepEqual(none.sbom, { available: false, tool: null, install: "not installed; the install parameter is no", images_mode: "all", cap: 3000, sources: [] });
-  // the switch on (the default): the installer is fetched with curl and run; the fake one copies the fake syft into the target directory, then the scan runs with it
+  const noSyft = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__INSTALL__", "no")));
+  assert.deepEqual(noSyft.sbom, { available: false, tool: null, install: "not installed; the install parameter is no", images_mode: "all", host_mode: "processes", cap: 3000, sources: [] });
+  // the switch on (the default): the installer is fetched with curl and run; the fake one copies the fake syft into the target directory, then the reads run with it
   const target = path.join(dir, "installed");
   w(bare, "curl", `#!/bin/sh\ncase "$*" in *get.anchore.io/syft*) printf 'mkdir -p "$2"; cp "%s" "$2/syft"\n' "${path.join(bin, "syft")}";; *) exit 22;; esac\n`);
   const got = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.probeScript("sbom"), { AWS_ADVISOR_SYFT_DIR: target }));
-  assert.equal(got.sbom?.install, "installed v1.55.0"); assert.equal(got.sbom?.available, true); assert.equal(got.sbom?.sources.length, 4, "scanned right after installing");
+  assert.equal(got.sbom?.install, "installed v1.55.0"); assert.equal(got.sbom?.available, true); assert.equal(got.sbom?.sources.length, 11, "read right after installing: eight executables, three images");
   assert.ok(fs.existsSync(path.join(target, "syft")));
-  // the switch on but no egress: the failure and what it needs are reported, nothing scanned
+  // the switch on but no egress: the failure and what it needs are reported, nothing read
   w(bare, "curl", "#!/bin/sh\nexit 6\n");
   const failed = parseProbeOutput(run(`${bare}:/usr/bin:/bin`, pr.probeScript("sbom"), { AWS_ADVISOR_SYFT_DIR: path.join(dir, "nowhere") }));
   assert.equal(failed.sbom?.available, false); assert.match(failed.sbom?.install ?? "", /^install failed: curl, egress/);
   // an upload URL (probe 2.1): the whole, untrimmed result is posted gzip-compressed with curl; the inline line carries the receipt and stays trimmed
   const capture = path.join(dir, "uploaded.json.gz");
   w(bin, "curl", `#!/bin/sh\ncase "$*" in *" -X PUT "*) for a in "$@"; do case "$a" in @*) cp "\${a#@}" "$UPLOAD_CAPTURE";; esac; done; exit 0;; *) exit 22;; esac\n`);
-  const withUrl = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__UPLOAD__", "https://bucket.s3.amazonaws.com/k?X-Amz-Signature=1"), { UPLOAD_CAPTURE: capture }));
+  const withUrl = parseProbeOutput(run(`${bin}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__UPLOAD__", "https://bucket.s3.amazonaws.com/k?X-Amz-Signature=1").replace("__HOST_MODE__", "both"), { UPLOAD_CAPTURE: capture }));
   assert.match(withUrl.upload ?? "", /^uploaded \d+ [0-9a-f]{64}$/, "the receipt: bytes and sha256");
   assert.ok(withUrl.sbom!.sources.find((s) => s.ref === "/")!.purls.length < 6000, "the inline list is still trimmed");
-  const { gunzipSync } = await import("node:zlib"); const { createHash } = await import("node:crypto");
+  const { gunzipSync } = await import("node:zlib");
   const blob = fs.readFileSync(capture);
   assert.equal(`uploaded ${blob.length} ${createHash("sha256").update(blob).digest("hex")}`, withUrl.upload, "the receipt describes the object");
   const whole = parseProbeOutput(gunzipSync(blob).toString("utf8"));
   assert.equal(whole.sbom!.cap, 0); assert.equal(whole.sbom!.sources.find((s) => s.ref === "/")!.purls.length, 6000, "the object holds everything");
   assert.equal(whole.sbom!.sources.find((s) => s.ref === "nginx:1.27")!.digest, "sha256:cccc");
   assert.equal(whole.upload, undefined, "the object was written before the receipt existed");
+  // a syft too old for the template model refuses it: each read is retried for the purls alone and the lists come without CPEs
+  const oldSyft = path.join(dir, "oldsyft"); fs.mkdirSync(oldSyft);
+  for (const f of ["docker", "dpkg-query", "timeout"]) fs.copyFileSync(path.join(bin, f), path.join(oldSyft, f));
+  w(oldSyft, "syft", `#!/bin/sh\ncase "$*" in version) printf 'Application: syft\\nVersion: 0.98.0\\n';; *"-o template"*) echo "unable to render template: can't evaluate field artifacts" >&2; exit 1;; *file:*/node\\ *) printf 'pkg:generic/node@22.12.0\\n';; *file:*) exit 0;; *dir:${roots}/app*) printf 'pkg:npm/express@4.19.2\\n';; *dir:/*) printf 'pkg:pypi/requests@2.32.3\\n';; *) exit 124;; esac\n`);
+  const legacy = parseProbeOutput(run(`${oldSyft}:/usr/bin:/bin`, pr.defaultProbeScript("sbom").replace("__HOST_MODE__", "both"), { AWS_ADVISOR_SBOM_TMP: scratch }));
+  const lb = Object.fromEntries(legacy.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
+  assert.deepEqual([lb["image app:latest"]!.status, lb["image app:latest"]!.purls, lb["image app:latest"]!.cpes, lb["dir /"]!.status, lb["dir /"]!.purls, lb[`proc container:${short("2")}:/usr/local/bin/node`]!.purls], ["ok", ["pkg:npm/express@4.19.2"], {}, "ok", ["pkg:pypi/requests@2.32.3"], ["pkg:generic/node@22.12.0"]], "the purls-only fallback");
 });
 
 test("the software script with an upload URL: a result that fits goes inline with the receipt; one the cap would cut becomes a stub, the whole in S3", async () => {
@@ -312,6 +364,21 @@ test("parsePurl takes a package URL apart; recordSbom keeps each scan's status, 
   sw.recordSbom(iid, "2026-11-01T10:00:00Z", { available: false, sources: [] });
   on = sw.softwareOn(iid).sbom; assert.equal(on.scan?.available, false); assert.deepEqual(on.packages.map((p) => p.ref), ["app:latest", "app:latest"]); assert.deepEqual(on.sources.map((s) => s.ref), ["app:latest"]);
   assert.ok(sw.softwareSummary().sbom.without_syft >= 1);
+  // sbom 1.7: a running executable (source proc) is the box's own reading like the filesystem, kept with its container and the container's image, gone when the process is
+  const pid = "i-0sbom00000000002";
+  const node = { source: "proc" as const, ref: "container:abcdefabcdef:/usr/local/bin/node", image_id: "sha256:aaaa", container: "abcdefabcdef", status: "ok", total: 1, purls: ["pkg:generic/node@22.12.0"], cpes: { "pkg:generic/node@22.12.0": ["cpe:2.3:a:nodejs:node.js:22.12.0:*:*:*:*:*:*:*"] } };
+  const sshd = { source: "proc" as const, ref: "host:/usr/sbin/sshd", status: "ok", total: 0, purls: [], sha256: "ab".repeat(32), size: 1234567, package: "openssh-server" };
+  const p1 = sw.recordSbom(pid, "2026-11-03T10:00:00Z", { available: true, tool: "syft 1.55.0", host_mode: "processes", sources: [node, sshd, { source: "proc", ref: "container:fedcba987654:/usr/bin/python3", container: "fedcba987654", status: "skipped", total: 0, note: "the container root filesystem is not mounted where the daemon or containerd keep it", purls: [] }] })!;
+  assert.equal(p1.sources, 3); assert.equal(p1.packages, 1); assert.deepEqual(p1.failed, [{ ref: "container:fedcba987654:/usr/bin/python3", status: "skipped" }]);
+  let pon = sw.softwareOn(pid).sbom;
+  assert.equal(pon.scan?.host_mode, "processes");
+  assert.deepEqual(pon.sources.map((s) => [s.source, s.ref, s.container, s.image_id, s.status]), [["proc", "container:abcdefabcdef:/usr/local/bin/node", "abcdefabcdef", "sha256:aaaa", "ok"], ["proc", "container:fedcba987654:/usr/bin/python3", "fedcba987654", null, "skipped"], ["proc", "host:/usr/sbin/sshd", null, null, "ok"]], "by ref: the containers, then the host");
+  assert.deepEqual(pon.sources.map((s) => [s.sha256, s.size, s.package]), [[null, null, null], [null, null, null], ["ab".repeat(32), 1234567, "openssh-server"]], "an executable nothing identified keeps its hash, size and owning package");
+  assert.deepEqual(pon.packages.map((p) => [p.source, p.ref, p.name, p.version, p.cpes]), [["proc", "container:abcdefabcdef:/usr/local/bin/node", "node", "22.12.0", JSON.stringify(["cpe:2.3:a:nodejs:node.js:22.12.0:*:*:*:*:*:*:*"])]]);
+  assert.ok(sw.wherePackage("node").some((w) => w.kind === "sbom" && w.instance_id === pid && w.ref === "container:abcdefabcdef:/usr/local/bin/node"), "found across the fleet like any sbom package");
+  const p2 = sw.recordSbom(pid, "2026-11-04T10:00:00Z", { available: true, host_mode: "processes", sources: [sshd] })!;
+  assert.equal(p2.removed, 1, "the node process ended: its reading goes");
+  pon = sw.softwareOn(pid).sbom; assert.deepEqual(pon.sources.map((s) => s.ref), ["host:/usr/sbin/sshd"]); assert.deepEqual(pon.packages, []);
 });
 
 test("the images script: each entry of the batch is pulled from its registry by digest with its platform, ECR hosts get a token through the AWS CLI into a syft config file, and each image's status is reported", async () => {
@@ -334,7 +401,7 @@ test("the images script: each entry of the batch is pulled from its registry by 
   assert.equal(j.kind, "images"); assert.equal(j.probe, "aws-advisor/images/2"); assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.images_mode, null);
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [s.ref, s]));
   assert.deepEqual(Object.keys(by), batch.split(" ").map((e) => e.split("|")[0]), "one record per entry, in order");
-  assert.deepEqual(by[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`], { source: "image", ref: `123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`, image_id: null, digest: sha("a"), platform: "linux/arm64", status: "ok", total: 2, note: null, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*"], "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12": ["cpe:2.3:a:gnu:glibc:2.36-9:*:*:*:*:*:*:*", "cpe:2.3:a:libc6:libc6:2.36-9:*:*:*:*:*:*:*"] } }, "the digest from the entry, no docker id, the platform, distro purls kept (the image's OS packages are its own) with the CPEs syft assigned");
+  assert.deepEqual(by[`123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`], { source: "image", ref: `123456789012.dkr.ecr.eu-west-1.amazonaws.com/api@${sha("a")}`, image_id: null, digest: sha("a"), platform: "linux/arm64", container: null, sha256: null, size: null, package: null, status: "ok", total: 2, note: null, purls: ["pkg:npm/express@4.19.2", "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12"], cpes: { "pkg:npm/express@4.19.2": ["cpe:2.3:a:expressjs:express:4.19.2:*:*:*:*:*:*:*"], "pkg:deb/debian/libc6@2.36-9?arch=arm64&upstream=glibc&distro=debian-12": ["cpe:2.3:a:gnu:glibc:2.36-9:*:*:*:*:*:*:*", "cpe:2.3:a:libc6:libc6:2.36-9:*:*:*:*:*:*:*"] } }, "the digest from the entry, no docker id, the platform, distro purls kept (the image's OS packages are its own) with the CPEs syft assigned");
   assert.equal(by[`nginx@${sha("b")}`]!.status, "timeout"); assert.equal(by[`nginx@${sha("b")}`]!.platform, "linux/amd64");
   assert.equal(by[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.status, "ok"); assert.equal(by[`public.ecr.aws/docker/library/redis@${sha("c")}`]!.platform, null, "no platform in the entry: syft picks the host's");
   const args = fs.readFileSync(log, "utf8").split("\n");

@@ -110,6 +110,10 @@ if (!hasColumn("instance_images", "source")) db.exec("alter table instance_image
 // sbom 1.7 / images 1.1: the CPEs syft assigned a purl, a JSON list best first (null from an older probe; the graph then forms the candidates itself, src/sec/cpe.ts)
 for (const t of ["instance_sbom", "image_sbom"]) if (!hasColumn(t, "cpes")) db.exec(`alter table ${t} add column cpes text`);
 if (!hasColumn("instance_sbom_scans", "images_mode")) db.exec("alter table instance_sbom_scans add column images_mode text");
+// sbom 1.7: what the box read of itself (the host parameter), and for a proc source (one running executable) or an image read through a container, which container
+if (!hasColumn("instance_sbom_scans", "host_mode")) db.exec("alter table instance_sbom_scans add column host_mode text");
+for (const c of ["container", "sha256", "package"]) if (!hasColumn("instance_sbom_sources", c)) db.exec(`alter table instance_sbom_sources add column ${c} text`);
+if (!hasColumn("instance_sbom_sources", "size")) db.exec("alter table instance_sbom_sources add column size integer");
 /** The image key of an instance_images row in SQL: its sbom_key, else the per-box fallback a box's own scan of an image without digest or id gets (`ii` is the alias). */
 const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
 
@@ -366,15 +370,15 @@ export function componentPurl(p: Purl): string {
 }
 
 /** One syft scan as the probe prints it (src/ssm.ts ProbeSbomSource). */
-export interface SbomSource { source: "image" | "dir"; ref: string; image_id?: string | null; digest?: string | null; /** sbom 1.6 / images 1.0: the image's os/arch */ platform?: string | null; status: string; total?: number; /** why a scan was skipped */ note?: string | null; purls?: string[]; /** sbom 1.7 / images 1.1: the CPEs syft assigned each purl, best first */ cpes?: Record<string, string[]> }
-export interface SbomData { available?: boolean; tool?: string | null; install?: string | null; /** sbom 1.6: all, or local (only the images without a registry digest; the scanner has the rest) */ images_mode?: "all" | "local" | null; cap?: number; sources?: SbomSource[] }
+export interface SbomSource { source: "image" | "dir" | "proc"; ref: string; image_id?: string | null; digest?: string | null; /** sbom 1.7: the container a proc source runs in; for one nothing identified, the file's hash and size and the host package that owns it */ container?: string | null; sha256?: string | null; size?: number | null; package?: string | null; /** sbom 1.6 / images 1.0: the image's os/arch */ platform?: string | null; status: string; total?: number; /** why a scan was skipped */ note?: string | null; purls?: string[]; /** sbom 1.7 / images 1.1: the CPEs syft assigned each purl, best first */ cpes?: Record<string, string[]> }
+export interface SbomData { available?: boolean; tool?: string | null; install?: string | null; /** sbom 1.6: all, or local (only the images without a registry digest; the scanner has the rest) */ images_mode?: "all" | "local" | null; /** sbom 1.7: what the box read of itself */ host_mode?: string | null; cap?: number; sources?: SbomSource[] }
 export interface RecordSbomResult { available: boolean; tool: string | null; /** what the probe did about a missing syft */ note: string | null; sources: number; packages: number; /** purls syft found that did not fit the probe's output budget */ trimmed: number; failed: { ref: string; status: string }[]; added: number; removed: number; /** the image scans, written to the image tables (recordImageSbom) */ images: RecordImageSbomResult }
 export interface RecordImageSbomResult { scans: number; /** the keys scanned ok this time */ ok: string[]; failed: { key: string; ref: string; status: string; note: string | null }[]; packages: number; /** purls syft found that did not fit the probe's output budget */ trimmed: number; added: number; removed: number }
 
-const upsertSbomScan = db.prepare(`insert into instance_sbom_scans(instance_id, collected_at, available, tool, cap, sources, packages, note, images_mode) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id) do update set collected_at = excluded.collected_at, available = excluded.available, tool = excluded.tool, cap = excluded.cap, sources = excluded.sources, packages = excluded.packages, note = excluded.note, images_mode = excluded.images_mode`);
-const upsertSbomSource = db.prepare(`insert into instance_sbom_sources(instance_id, source, ref, status, total, listed, collected_at, image_id, digest, note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  on conflict(instance_id, source, ref) do update set status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, collected_at = excluded.collected_at, image_id = coalesce(excluded.image_id, image_id), digest = coalesce(excluded.digest, digest), note = excluded.note`);
+const upsertSbomScan = db.prepare(`insert into instance_sbom_scans(instance_id, collected_at, available, tool, cap, sources, packages, note, images_mode, host_mode) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id) do update set collected_at = excluded.collected_at, available = excluded.available, tool = excluded.tool, cap = excluded.cap, sources = excluded.sources, packages = excluded.packages, note = excluded.note, images_mode = excluded.images_mode, host_mode = excluded.host_mode`);
+const upsertSbomSource = db.prepare(`insert into instance_sbom_sources(instance_id, source, ref, status, total, listed, collected_at, image_id, digest, note, container, sha256, size, package) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  on conflict(instance_id, source, ref) do update set status = excluded.status, total = excluded.total, listed = case when excluded.status = 'ok' then excluded.listed else listed end, collected_at = excluded.collected_at, image_id = coalesce(excluded.image_id, image_id), digest = coalesce(excluded.digest, digest), note = excluded.note, container = coalesce(excluded.container, container), sha256 = excluded.sha256, size = excluded.size, package = excluded.package`);
 const upsertSbomRow = db.prepare(`insert into instance_sbom(instance_id, source, ref, purl, type, namespace, name, version, first_seen, last_seen, cpes) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   on conflict(instance_id, source, ref, purl) do update set last_seen = excluded.last_seen, cpes = coalesce(excluded.cpes, cpes)`);
 const upsertImageScan = db.prepare(`insert into image_sbom_scans(key, ref, repository, digest, image_id, platform, status, total, listed, tool, note, scanned_on, via, collected_at, ok_at, first_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -468,36 +472,40 @@ export function recordSbom(instanceId: string, collectedAt: string, sbom: SbomDa
   if (!sbom || typeof sbom !== "object") return null;
   const res: RecordSbomResult = { available: sbom.available === true, tool: sbom.tool ? clean(sbom.tool, 40) || null : null, note: sbom.install ? clean(sbom.install, 200) || null : null, sources: 0, packages: 0, trimmed: 0, failed: [], added: 0, removed: 0, images: { scans: 0, ok: [], failed: [], packages: 0, trimmed: 0, added: 0, removed: 0 } };
   const mode = sbom.images_mode === "local" ? "local" : sbom.images_mode === "all" ? "all" : null;
+  const host = ["processes", "filesystem", "both", "none"].includes(String(sbom.host_mode)) ? String(sbom.host_mode) : null;
   db.transaction(() => {
     if (!res.available) {
       // syft gone from the box: what it read of the filesystem is no longer known to be there (an image's contents stay facts about the image)
       for (const t of ["instance_sbom", "instance_sbom_sources"]) db.prepare(`delete from ${t} where instance_id = ?`).run(instanceId);
-      upsertSbomScan.run(instanceId, collectedAt, 0, null, 0, 0, 0, res.note, mode);
+      upsertSbomScan.run(instanceId, collectedAt, 0, null, 0, 0, 0, res.note, mode, host);
       return;
     }
+    // the box's own scans: the filesystem (dir) and, since sbom 1.7, each running executable (proc), kept under the box like any package it has
     const seen = new Set<string>();
     for (const s of sbom.sources ?? []) {
-      if (!s || s.source !== "dir") continue;
+      if (!s || (s.source !== "dir" && s.source !== "proc")) continue;
       const ref = clean(s.ref, 300); if (!ref) continue;
-      if (seen.has(ref)) continue; seen.add(ref);
+      const sk = `${s.source}\t${ref}`; if (seen.has(sk)) continue; seen.add(sk);
       const status = sbomStatus(s.status);
       const purls = status === "ok" ? [...new Set((s.purls ?? []).map((p) => clean(p, 300)).filter(Boolean))] : [];
       res.sources++;
-      upsertSbomSource.run(instanceId, "dir", ref, status, int(s.total), purls.length, collectedAt, null, null, s.note ? clean(s.note, 200) || null : null);
+      const container = s.source === "proc" && s.container && /^[0-9a-f]{12}$/.test(String(s.container)) ? String(s.container) : null;
+      const sha = s.source === "proc" && s.sha256 && /^[0-9a-f]{64}$/.test(String(s.sha256)) ? String(s.sha256) : null;
+      upsertSbomSource.run(instanceId, s.source, ref, status, int(s.total), purls.length, collectedAt, s.source === "proc" && s.image_id ? clean(s.image_id, 100) || null : null, null, s.note ? clean(s.note, 200) || null : null, container, sha, s.source === "proc" && s.size != null && Number.isFinite(Number(s.size)) ? int(s.size) : null, s.source === "proc" && s.package ? clean(s.package, 120) || null : null);
       if (status !== "ok") { res.failed.push({ ref, status }); continue; } // the rows of the last good scan stay
       res.trimmed += Math.max(0, int(s.total) - purls.length);
-      const before = new Set((db.prepare("select purl from instance_sbom where instance_id = ? and source = 'dir' and ref = ?").all(instanceId, ref) as { purl: string }[]).map((r) => r.purl));
+      const before = new Set((db.prepare("select purl from instance_sbom where instance_id = ? and source = ? and ref = ?").all(instanceId, s.source, ref) as { purl: string }[]).map((r) => r.purl));
       const now = new Set<string>();
       for (const purl of purls) {
         const p = parsePurl(purl); if (!p) continue;
         now.add(purl); res.packages++;
         if (before.size && !before.has(purl)) res.added++;
-        upsertSbomRow.run(instanceId, "dir", ref, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt, cpesOf(s, purl));
+        upsertSbomRow.run(instanceId, s.source, ref, purl, p.type, p.namespace, clean(p.full_name, 200), p.version ? clean(p.version, 120) : null, collectedAt, collectedAt, cpesOf(s, purl));
       }
-      for (const purl of before) if (!now.has(purl)) { db.prepare("delete from instance_sbom where instance_id = ? and source = 'dir' and ref = ? and purl = ?").run(instanceId, ref, purl); res.removed++; }
+      for (const purl of before) if (!now.has(purl)) { db.prepare("delete from instance_sbom where instance_id = ? and source = ? and ref = ? and purl = ?").run(instanceId, s.source, ref, purl); res.removed++; }
     }
-    // a filesystem scan the probe no longer reports: its rows go with it (an image the box stopped running keeps its scan: other boxes may run it; pruneImageSboms retires it later)
-    for (const r of db.prepare("select source, ref from instance_sbom_sources where instance_id = ?").all(instanceId) as { source: string; ref: string }[]) if (r.source !== "dir" || !seen.has(r.ref)) {
+    // a filesystem scan or an executable the probe no longer reports (the process ended, the mode changed): its rows go with it (an image the box stopped running keeps its scan: other boxes may run it; pruneImageSboms retires it later)
+    for (const r of db.prepare("select source, ref from instance_sbom_sources where instance_id = ?").all(instanceId) as { source: string; ref: string }[]) if ((r.source !== "dir" && r.source !== "proc") || !seen.has(`${r.source}\t${r.ref}`)) {
       res.removed += (db.prepare("delete from instance_sbom where instance_id = ? and source = ? and ref = ?").run(instanceId, r.source, r.ref) as { changes: number }).changes;
       db.prepare("delete from instance_sbom_sources where instance_id = ? and source = ? and ref = ?").run(instanceId, r.source, r.ref);
     }
@@ -511,7 +519,7 @@ export function recordSbom(instanceId: string, collectedAt: string, sbom: SbomDa
     const imagePackages = imageKeys.size ? Number((db.prepare(`select count(*) as n from image_sbom where key in (${[...imageKeys.values()].map(() => "?").join(",")})`).get(...imageKeys.values()) as { n: number }).n) : 0;
     const dirPackages = (db.prepare("select count(*) as n from instance_sbom where instance_id = ?").get(instanceId) as { n: number }).n;
     res.packages = dirPackages + imagePackages;
-    upsertSbomScan.run(instanceId, collectedAt, 1, res.tool, int(sbom.cap), res.sources, res.packages, res.note, mode);
+    upsertSbomScan.run(instanceId, collectedAt, 1, res.tool, int(sbom.cap), res.sources, res.packages, res.note, mode, host);
   })();
   return res;
 }
@@ -550,8 +558,8 @@ export interface InstanceSoftware {
   /** The sbom probe: whether syft is on the box, each scan (image or filesystem) with its status and counts, and the packages (`q` filters by name).
    *  An image's scan is the image's (image_sbom_scans), whoever read it: `scanned_on` names the scanner instance or the box, `via` which; an image the box
    *  runs that nobody has read yet is listed with status pending. */
-  sbom: { scan: { collected_at: string; available: boolean; tool: string | null; note: string | null; cap: number; sources: number; packages: number; images_mode: "all" | "local" | null } | null;
-    sources: { source: string; ref: string; image_id: string | null; digest: string | null; platform: string | null; status: string; total: number; listed: number; collected_at: string; note: string | null; scanned_on: string | null; via: "scanner" | "box" | null }[];
+  sbom: { scan: { collected_at: string; available: boolean; tool: string | null; note: string | null; cap: number; sources: number; packages: number; images_mode: "all" | "local" | null; /** sbom 1.7: what the box read of itself */ host_mode: string | null } | null;
+    sources: { source: string; ref: string; image_id: string | null; digest: string | null; platform: string | null; /** sbom 1.7: the container a running executable runs in (source proc); for one nothing identified, its hash, size and owning host package */ container: string | null; sha256: string | null; size: number | null; package: string | null; status: string; total: number; listed: number; collected_at: string; note: string | null; scanned_on: string | null; via: "scanner" | "box" | null }[];
     packages: { source: string; ref: string; purl: string; type: string; namespace: string | null; name: string; version: string | null; first_seen: string; last_seen: string; /** the CPEs syft assigned, a JSON list best first; null from an older probe */ cpes: string | null }[] };
 }
 
@@ -568,10 +576,10 @@ export function softwareOn(instanceId: string, opts: { q?: string; limit?: numbe
     bundles: db.prepare("select parent, parent_version, name, version, first_seen, last_seen from instance_bundles where instance_id = ? order by parent, name").all(instanceId) as any[],
     depends: db.prepare("select name, dep, first_seen, last_seen from instance_depends where instance_id = ? order by name, dep").all(instanceId) as any[],
     sbom: {
-      scan: ((r) => (r ? { ...r, available: Boolean(r.available), images_mode: r.images_mode === "all" || r.images_mode === "local" ? r.images_mode : null } : null))(db.prepare("select collected_at, available, tool, note, cap, sources, packages, images_mode from instance_sbom_scans where instance_id = ?").get(instanceId) as any),
+      scan: ((r) => (r ? { ...r, available: Boolean(r.available), images_mode: r.images_mode === "all" || r.images_mode === "local" ? r.images_mode : null } : null))(db.prepare("select collected_at, available, tool, note, cap, sources, packages, images_mode, host_mode from instance_sbom_scans where instance_id = ?").get(instanceId) as any),
       // the filesystem scans are the box's own rows; the image scans come through the box's image rows, from whoever read the image
-      sources: (db.prepare(`select source, ref, image_id, digest, null as platform, status, total, listed, collected_at, note, instance_id as scanned_on, 'box' as via from instance_sbom_sources where instance_id = ?
-        union all select 'image' as source, ii.image as ref, coalesce(s.image_id, ii.image_id) as image_id, coalesce(s.digest, ii.digest) as digest, coalesce(s.platform, ii.platform) as platform, coalesce(s.status, 'pending') as status, coalesce(s.total, 0) as total, coalesce(s.listed, 0) as listed, coalesce(s.collected_at, ii.last_seen) as collected_at, s.note, s.scanned_on, s.via
+      sources: (db.prepare(`select source, ref, image_id, digest, null as platform, container, sha256, size, package, status, total, listed, collected_at, note, instance_id as scanned_on, 'box' as via from instance_sbom_sources where instance_id = ?
+        union all select 'image' as source, ii.image as ref, coalesce(s.image_id, ii.image_id) as image_id, coalesce(s.digest, ii.digest) as digest, coalesce(s.platform, ii.platform) as platform, null as container, null as sha256, null as size, null as package, coalesce(s.status, 'pending') as status, coalesce(s.total, 0) as total, coalesce(s.listed, 0) as listed, coalesce(s.collected_at, ii.last_seen) as collected_at, s.note, s.scanned_on, s.via
           from instance_images ii left join image_sbom_scans s on s.key = ${IMG_KEY} where ii.instance_id = ? and ii.gone = 0
         order by source desc, ref`).all(instanceId, instanceId) as any[]).map((r) => ({ ...r, digest: r.digest ? String(r.digest).split("@").pop() : null })),
       packages: db.prepare(`select * from (select source, ref, purl, type, namespace, name, version, first_seen, last_seen, cpes from instance_sbom where instance_id = ?${q ? " and lower(name) like ?" : ""}

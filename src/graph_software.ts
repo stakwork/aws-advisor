@@ -61,9 +61,9 @@ UNWIND $rows AS row
 MATCH (b:AdvisorResource {id: row.instance_id})
 ${COMPUTE_OF("b", "c")}
 MERGE (p:SoftwareComponent {id: row.id}) ON CREATE SET p.first_seen = $now
-SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, cpe: row.cpe, cpes: row.cpes, scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', is_deleted: false, deleted_at: null, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+SET p += {name: row.name, version: row.version, ecosystem: row.ecosystem, source_name: row.source_name, source_kind: row.source_kind, advisory_ecosystem: row.advisory_ecosystem, scope: row.scope, purl: row.purl, source_purl: row.source_purl, sort_key: row.sort_key, version_purl: row.version_purl, cpe: row.cpe, cpes: row.cpes, classified: coalesce(row.classified, true), scheme: 'purl', product_key: row.purl, package: row.name, native_type: 'software_component', is_deleted: false, deleted_at: null, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
 MERGE (p)-[r:INSTALLED_ON]->(c)
-SET r += {arch: row.arch, path: row.path, first_seen: row.first_seen, last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
+SET r += {arch: row.arch, path: row.path, container: row.container, sha256: row.sha256, size: row.size, first_seen: row.first_seen, last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
 
 const IMAGE_CYPHER = `
 UNWIND $rows AS row
@@ -232,7 +232,8 @@ export function imageRef(image: string): { id: string; repository: string; tag: 
   return { id: `image:${image}`, repository: hasTag ? noDigest.slice(0, idx) : noDigest, tag: image.includes("@") ? null : hasTag ? noDigest.slice(idx + 1) : "latest" };
 }
 
-/** One instance_sbom row as the graph takes it: a filesystem purl is INSTALLED_ON the box like any package (PACKAGE_CYPHER), a purl inside
+/** One instance_sbom row as the graph takes it: a filesystem purl, or one read from a running executable (source proc, the ref naming the host path or the
+ *  container and the path), is INSTALLED_ON the box like any package (PACKAGE_CYPHER), a purl inside
  *  an image is CONTAINS from the image node (CONTAINS_CYPHER). The purl\'s own type is the ecosystem; a distro purl carries the image\'s
  *  distribution (distro qualifier, else the namespace) and source package (upstream), so its identity and advisory ecosystem are that
  *  distribution\'s, not the host\'s. The package id is the package\'s; the image id travels as image_id. Pure; null for a purl that does not parse. */
@@ -249,9 +250,21 @@ export function sbomGraphRow(r: { instance_id: string; source: string; ref: stri
   if (!DISTRO_ECOSYSTEMS.has(p.type)) { const purl = componentPurl(p); identity.purl = purl; identity.source_purl = purl; }
   const eco = sbomEcosystem(p.type);
   const node = { id: packageId(eco, String(r.name), version), name: String(r.name), version, ecosystem: eco, source_name: upstream, source_kind: "syft", advisory_ecosystem: advisory, scope: eco === "binary" ? packageScope(String(r.name)).scope : "library", version_purl: String(r.purl), ...identity, ...sbomCpe(r.cpes, { ecosystem: eco, name: String(r.name), version, source: upstream }) };
-  if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, first_seen: r.first_seen, last_seen: r.last_seen } };
+  if (r.source === "dir") return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: null, container: null, first_seen: r.first_seen, last_seen: r.last_seen } };
+  // a running executable (sbom 1.7): INSTALLED_ON the box at the path it runs from, with the container it runs in when it is a container process
+  if (r.source === "proc") { const m = /^(?:host|container:([0-9a-f]{12})):(\/.*)$/.exec(String(r.ref)); return { edge: "installed_on", row: { instance_id: r.instance_id, ...node, arch: p.qualifiers.arch ?? null, path: m?.[2] ?? null, container: m?.[1] ?? null, first_seen: r.first_seen, last_seen: r.last_seen } }; }
   const im = imageRef(String(r.ref));
   return { edge: "contains", row: { instance_id: r.instance_id, ...node, image_id: imageNodeId(String(r.ref), r.digest, r.image_id), image: String(r.ref), repository: im.repository, tag: im.tag, digest: r.digest ? String(r.digest).split("@").pop() : null, docker_image_id: r.image_id ?? null, platform: r.platform ?? null, first_seen: r.first_seen, last_seen: r.last_seen } };
+}
+
+/** A running executable nothing identified (sbom 1.7: syft found no package in it and the probe's text read knew it no better), as the graph keeps it: a binary
+ *  component named by the file at version `unknown` with `classified: false`, INSTALLED_ON the box at its path with the container, the file's sha256 and size
+ *  on the edge. One node per name across the fleet, however many builds (the hashes tell them apart on the edges); no purl version, no sort_key, no CPE: it is
+ *  the list of what the fleet runs that no rule names yet, where the next classifier (src/probes.ts sniff) is written from. Null for a ref that does not parse. */
+export function unclassifiedComponentRow(s: { instance_id: string; ref: string; container?: string | null; sha256?: string | null; size?: number | null; collected_at: string }): Record<string, unknown> | null {
+  const m = /^(?:host|container:([0-9a-f]{12})):(\/.*)$/.exec(String(s.ref)); if (!m) return null;
+  const path = m[2]!; const name = path.split("/").pop() || "unknown";
+  return { instance_id: s.instance_id, version_purl: null, id: packageId("binary", name, "unknown"), name, version: "unknown", ecosystem: "binary", source_name: null, source_kind: "unclassified", advisory_ecosystem: null, scope: packageScope(name).scope, arch: null, path, container: m[1] ?? null, sha256: s.sha256 ?? null, size: s.size ?? null, first_seen: s.collected_at, last_seen: s.collected_at, ...componentIdentity({ ecosystem: "binary", name, version: "unknown" }), sort_key: null, cpe: null, cpes: [], classified: false };
 }
 
 /** The image key of an instance_images row in SQL (software_inventory.ts IMG_KEY): its sbom_key, else the per-box fallback. */
@@ -287,7 +300,9 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   for (const b of bundleRows) {
     pkgRows.push({ instance_id: b.instance_id, version_purl: null, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "process_versions", advisory_ecosystem: null, scope: "library", arch: null, path: null, first_seen: b.first_seen, last_seen: b.last_seen, ...componentIdentity({ ecosystem: "binary", name: b.name, version: b.version }), ...componentCpe({ ecosystem: "binary", name: b.name, version: b.version }) });
   }
+  const versionedPaths = new Set<string>(); // what the software probe read a version from, by path: a running executable there is identified already
   for (const b of rows(`select instance_id, name, version, path, first_seen, last_seen, gone from instance_binaries where 1=1${where}`, ...args)) {
+    if (b.path) versionedPaths.add(`${b.instance_id}\t${b.path}`);
     pkgRows.push({ instance_id: b.instance_id, version_purl: null, id: packageId("binary", b.name, b.version), name: b.name, version: b.version, ecosystem: "binary", source_name: null, source_kind: "binary_version", advisory_ecosystem: null, scope: packageScope(b.name).scope, arch: null, path: b.path ?? null, first_seen: b.first_seen, last_seen: b.last_seen, ...componentIdentity({ ecosystem: "binary", name: b.name, version: b.version }), ...componentCpe({ ecosystem: "binary", name: b.name, version: b.version }) });
   }
   for (const o of os.values()) {
@@ -305,10 +320,16 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // which knows the path; the syft row would only rewrite the same node and edge with less
   const probed = new Set(pkgRows.filter((p) => p.ecosystem === "binary").map((p) => `${p.instance_id}\t${p.id}`));
   const containsRows: any[] = [];
-  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.cpes, p.first_seen, p.last_seen, null as digest, null as image_id, null as platform from instance_sbom p where p.source = 'dir'${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
+  for (const r of rows(`select p.instance_id, p.source, p.ref, p.purl, p.name, p.version, p.cpes, p.first_seen, p.last_seen, null as digest, null as image_id, null as platform from instance_sbom p where p.source in ('dir', 'proc')${where.replace(" instance_id in", " p.instance_id in")}`, ...args)) {
     const g = sbomGraphRow(r); if (!g) continue;
-    if (g.edge === "installed_on" && g.row.ecosystem === "binary" && probed.has(`${g.row.instance_id}\t${g.row.id}`)) continue;
+    if (g.edge === "installed_on" && g.row.ecosystem === "binary" && !g.row.container && probed.has(`${g.row.instance_id}\t${g.row.id}`)) continue; // a container's own copy keeps its row: the edge says which container
     (g.edge === "installed_on" ? pkgRows : containsRows).push(g.row);
+  }
+  // running executables nothing identified (sbom 1.7): kept as unclassified components, except a host program a package owns or the software probe versioned at that path (those are identified)
+  for (const s of rows(`select s.instance_id, s.ref, s.container, s.image_id, s.sha256, s.size, s.package, s.collected_at from instance_sbom_sources s where s.source = 'proc' and s.status = 'ok' and s.listed = 0${where.replace(" instance_id in", " s.instance_id in")}`, ...args)) {
+    const r = unclassifiedComponentRow(s); if (!r) continue;
+    if (!r.container && (s.package || versionedPaths.has(`${s.instance_id}\t${r.path}`))) continue;
+    pkgRows.push(r);
   }
   const containsSeen = new Set<string>();
   for (const r of rows(`select ii.instance_id, 'image' as source, ii.image as ref, p.purl, p.name, p.version, p.cpes, p.first_seen, p.last_seen, coalesce(s.digest, ii.digest) as digest, coalesce(s.image_id, ii.image_id) as image_id, coalesce(s.platform, ii.platform) as platform
