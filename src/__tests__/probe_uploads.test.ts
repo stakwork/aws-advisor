@@ -15,22 +15,24 @@ const { setSetting } = await import("../db.js");
 
 const AT = new Date("2026-10-29T12:45:19.123Z");
 
-test("upload keys follow the dated layout (kind, day, account, box, time) and parse back; the legacy layout still parses; markers, cluster objects and unknown kinds do not", () => {
+test("upload keys follow the dated layout (kind, day, hour, account, box, time) and parse back; the legacy layout still parses; markers, cluster objects and unknown kinds do not", () => {
   const key = u.uploadKey("123456789012", "i-0abc123456789def0", "sbom", AT);
-  assert.equal(key, "aws-advisor/probes/sbom/2026-10-29/123456789012/i-0abc123456789def0/2026-10-29T12-45-19-123Z.json.gz");
+  assert.equal(key, "aws-advisor/probes/sbom/2026-10-29/12/123456789012/i-0abc123456789def0/2026-10-29T12-45-19-123Z.json.gz");
   assert.deepEqual(u.parseUploadKey(key), { account_id: "123456789012", instance_id: "i-0abc123456789def0", kind: "sbom", at: "2026-10-29T12:45:19.123Z", layout: "dated" });
-  assert.equal(u.uploadKey(null, "i-0abc123456789def0", "host", AT), "aws-advisor/probes/host/2026-10-29/unknown/i-0abc123456789def0/2026-10-29T12-45-19-123Z.json.gz", "no account known");
+  assert.equal(u.uploadKey(null, "i-0abc123456789def0", "host", AT), "aws-advisor/probes/host/2026-10-29/12/unknown/i-0abc123456789def0/2026-10-29T12-45-19-123Z.json.gz", "no account known");
   assert.deepEqual(u.parseUploadKey("aws-advisor/probes/123456789012/i-0abc123456789def0/software/2026-10-29T12-45-19-123Z.json.gz"),
     { account_id: "123456789012", instance_id: "i-0abc123456789def0", kind: "software", at: "2026-10-29T12:45:19.123Z", layout: "legacy" }, "an object from before the dated layout");
   assert.equal(u.parseUploadKey("aws-advisor/probes/readme.txt"), null);
   assert.equal(u.parseUploadKey("aws-advisor/probes/_check/2026-10-29T12-45-19-123Z.txt"), null, "the bucket check's marker");
-  assert.equal(u.parseUploadKey("aws-advisor/probes/cluster-images/2026-10-29/123456789012/prod/2026-10-29T12-45-19-123Z.json.gz"), null, "a cluster-images object is not a probe result");
-  assert.equal(u.parseUploadKey("aws-advisor/probes/firmware/2026-10-29/123456789012/i-0abc123456789def0/2026-10-29T12-45-19-123Z.json.gz"), null, "a kind this build does not know");
+  assert.equal(u.parseUploadKey("aws-advisor/probes/cluster-images/2026-10-29/12/123456789012/prod/2026-10-29T12-45-19-123Z.json.gz"), null, "a cluster-images object is not a probe result");
+  assert.equal(u.parseUploadKey("aws-advisor/probes/firmware/2026-10-29/12/123456789012/i-0abc123456789def0/2026-10-29T12-45-19-123Z.json.gz"), null, "a kind this build does not know");
 });
 
-test("the cluster-images key names the cluster as a slug under its own tree", () => {
-  assert.equal(u.clusterImagesKey("123456789012", "prod", AT), "aws-advisor/probes/cluster-images/2026-10-29/123456789012/prod/2026-10-29T12-45-19-123Z.json.gz");
-  assert.equal(u.clusterImagesKey(null, "team a/eu west", AT), "aws-advisor/probes/cluster-images/2026-10-29/unknown/team_a_eu_west/2026-10-29T12-45-19-123Z.json.gz", "a name the key cannot carry as is");
+test("the cluster-images key names the cluster as a slug under its own hour prefix; hourPrefix is UTC day and hour", () => {
+  assert.equal(u.hourPrefix(AT), "2026-10-29/12");
+  assert.equal(u.hourPrefix(new Date("2026-12-31T23:59:59.999Z")), "2026-12-31/23", "the last hour of a year");
+  assert.equal(u.clusterImagesKey("123456789012", "prod", AT), "aws-advisor/probes/cluster-images/2026-10-29/12/123456789012/prod/2026-10-29T12-45-19-123Z.json.gz");
+  assert.equal(u.clusterImagesKey(null, "team a/eu west", AT), "aws-advisor/probes/cluster-images/2026-10-29/12/unknown/team_a_eu_west/2026-10-29T12-45-19-123Z.json.gz", "a name the key cannot carry as is");
 });
 
 test("receipts carry bytes and sha256; no bucket means no check and no signing", async () => {
@@ -55,10 +57,10 @@ async function withS3(reply: (name: string, input: any) => any, fn: (s3: Instanc
 test("putProbeObject writes the JSON gzip-compressed under the key and answers with the object's size and hash", async () => {
   await withS3(() => ({}), async (s3, calls) => {
     const body = { probe: "aws-advisor/cluster-images/1", kind: "cluster-images", nodes: [{ instance_id: "i-1", images: [] }] };
-    const r = await u.putProbeObject("aws-advisor/probes/cluster-images/2026-10-29/123456789012/prod/x.json.gz", body, s3);
+    const r = await u.putProbeObject("aws-advisor/probes/cluster-images/2026-10-29/12/123456789012/prod/x.json.gz", body, s3);
     assert.equal(calls.length, 1); assert.equal(calls[0]!.name, "PutObjectCommand");
     const { Bucket, Key, Body, ContentType, ContentEncoding } = calls[0]!.input;
-    assert.deepEqual([Bucket, Key, ContentType, ContentEncoding], ["advisor-probes", "aws-advisor/probes/cluster-images/2026-10-29/123456789012/prod/x.json.gz", "application/json", "gzip"]);
+    assert.deepEqual([Bucket, Key, ContentType, ContentEncoding], ["advisor-probes", "aws-advisor/probes/cluster-images/2026-10-29/12/123456789012/prod/x.json.gz", "application/json", "gzip"]);
     assert.deepEqual(JSON.parse(gunzipSync(Body).toString("utf8")), body);
     assert.deepEqual(r, { bytes: Body.length, sha256: createHash("sha256").update(Body).digest("hex") });
   });
@@ -67,13 +69,13 @@ test("putProbeObject writes the JSON gzip-compressed under the key and answers w
 test("listProbeUploads walks only the wanted kinds' trees and the legacy account trees, never the markers or the cluster objects, and reads both layouts", async () => {
   const t = "2026-10-29T12-45-19-123Z";
   const trees: Record<string, { Key: string; Size: number }[]> = {
-    "aws-advisor/probes/software/": [{ Key: `aws-advisor/probes/software/2026-10-29/123456789012/i-0abc123456789def0/${t}.json.gz`, Size: 10 }],
-    "aws-advisor/probes/host/": [{ Key: `aws-advisor/probes/host/2026-10-29/123456789012/i-0abc123456789def0/${t}.json.gz`, Size: 5 }],
+    "aws-advisor/probes/software/": [{ Key: `aws-advisor/probes/software/2026-10-29/12/123456789012/i-0abc123456789def0/${t}.json.gz`, Size: 10 }],
+    "aws-advisor/probes/host/": [{ Key: `aws-advisor/probes/host/2026-10-29/12/123456789012/i-0abc123456789def0/${t}.json.gz`, Size: 5 }],
     "aws-advisor/probes/123456789012/": [
       { Key: `aws-advisor/probes/123456789012/i-0abc123456789def0/software/${t}.json.gz`, Size: 20 },
       { Key: `aws-advisor/probes/123456789012/i-0abc123456789def0/sbom/${t}.json.gz`, Size: 30 },
     ],
-    "aws-advisor/probes/cluster-images/": [{ Key: `aws-advisor/probes/cluster-images/2026-10-29/123456789012/prod/${t}.json.gz`, Size: 7 }],
+    "aws-advisor/probes/cluster-images/": [{ Key: `aws-advisor/probes/cluster-images/2026-10-29/12/123456789012/prod/${t}.json.gz`, Size: 7 }],
     "aws-advisor/probes/_check/": [{ Key: `aws-advisor/probes/_check/${t}.txt`, Size: 1 }],
   };
   const reply = (name: string, input: any) => {

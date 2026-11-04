@@ -783,11 +783,11 @@ the advisor's role). The advisor checks the bucket with that identity before it 
 Settings › Probes says whether uploads work, Settings › Permissions has the same check ("Probe uploads bucket"), the log
 says when the state changes, and a box whose own upload failed is logged with the reason from its receipt. The inline line stays the fallback (trimmed, or a stub once the whole
 is in S3), and a document deployed before the parameter existed keeps answering inline until it is redeployed. Objects
-are kept under `<prefix>/<kind>/<yyyy-mm-dd>/<account>/<instance>/<time>.json.gz` (objects from before 2026-11-04 sit
+are kept under `<prefix>/<kind>/<yyyy-mm-dd>/<hh>/<account>/<instance>/<time>.json.gz` (objects from before 2026-11-04 sit
 at `<prefix>/<account>/<instance>/<kind>/<time>.json.gz` and are still read), so "Probes: re-ingest the uploads in S3"
-(Schedules, by hand) can replay the newest per box and kind after a recorder change, and a poller can walk one kind by
-day. The images a Kubernetes cluster's nodes run come from the cluster API, not a probe, so the cluster refresh writes
-them to the same bucket as `<prefix>/cluster-images/<yyyy-mm-dd>/<account>/<cluster>/<time>.json.gz`. The bucket is the
+(Schedules, by hand) can replay the newest per box and kind after a recorder change, and an hourly poller lists one kind
+for one hour prefix, whatever the fleet size. The images a Kubernetes cluster's nodes run come from the cluster API, not a probe, so the cluster refresh writes
+them to the same bucket as `<prefix>/cluster-images/<yyyy-mm-dd>/<hh>/<account>/<cluster>/<time>.json.gz`. The bucket is the
 inventory the Strut probe ingest builds the package side of the graph from: `docs/probe-s3-strut.md` lists the objects
 and their shapes.
 

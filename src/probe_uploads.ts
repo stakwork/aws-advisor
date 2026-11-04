@@ -17,10 +17,11 @@ import { PROBE_KINDS, type ProbeKind } from "./probes.js";
  * change, only egress to S3: the URL carries the advisor's signature. Objects are kept, so a probe can be re-ingested later
  * (src/probe_upload_ingest.ts) and a poller can walk the bucket by day.
  *
- * Keys: <prefix>/<kind>/<yyyy-mm-dd>/<account id>/<instance id>/<time>.json.gz (the dated layout, 2026-11-04), so a poller
- * lists one kind for a few days without walking everything; <prefix>/cluster-images/<yyyy-mm-dd>/<account>/<cluster>/<time>.json.gz
- * for the images a Kubernetes cluster's nodes run (src/cluster_inventory.ts: not a probe, the cluster API says it). Objects
- * written before this date sit at <prefix>/<account id>/<instance id>/<kind>/<time>.json.gz and are still read.
+ * Keys: <prefix>/<kind>/<yyyy-mm-dd>/<hh>/<account id>/<instance id>/<time>.json.gz (the dated layout, 2026-11-04): an hourly
+ * poller lists one kind for the hour it is responsible for and nothing else, whatever the fleet size, and a replay is a list of
+ * hour prefixes; <prefix>/cluster-images/<yyyy-mm-dd>/<hh>/<account>/<cluster>/<time>.json.gz for the images a Kubernetes
+ * cluster's nodes run (src/cluster_inventory.ts: not a probe, the cluster API says it). Objects written before this date sit at
+ * <prefix>/<account id>/<instance id>/<kind>/<time>.json.gz and are still read.
  */
 
 db.exec(`create table if not exists probe_uploads (
@@ -34,27 +35,28 @@ const prefix = (): string => config.probeUploadPrefix.replace(/^\/+|\/+$/g, "") 
 const client = (): S3Client => { const base = accountCredentials(null); return new S3Client({ region: config.probeUploadRegion || base.region, credentials: base.provider }); };
 
 const stamp = (at: Date): string => at.toISOString().replace(/[:.]/g, "-");
-const day = (at: Date): string => at.toISOString().slice(0, 10);
+/** The hour prefix of an instant: `<yyyy-mm-dd>/<hh>` in UTC. Pure. */
+export const hourPrefix = (at: Date): string => `${at.toISOString().slice(0, 10)}/${at.toISOString().slice(11, 13)}`;
 const TIME = String.raw`(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)`;
-const DATED = new RegExp(String.raw`(?:^|/)([a-z]+)/(\d{4}-\d{2}-\d{2})/([^/]+)/(i-[0-9a-f]{8,17})/${TIME}\.json\.gz$`);
+const DATED = new RegExp(String.raw`(?:^|/)([a-z]+)/(\d{4}-\d{2}-\d{2})/(\d{2})/([^/]+)/(i-[0-9a-f]{8,17})/${TIME}\.json\.gz$`);
 const LEGACY = new RegExp(String.raw`(?:^|/)([^/]+)/(i-[0-9a-f]{8,17})/([a-z]+)/${TIME}\.json\.gz$`);
 const isKind = (k: string): k is ProbeKind => (PROBE_KINDS as readonly string[]).includes(k);
 const timeOf = (t: string): string => `${t.slice(0, 10)}T${t.slice(11, 13)}:${t.slice(14, 16)}:${t.slice(17, 19)}.${t.slice(20, 23)}Z`;
 
 /** The object key of one run (the dated layout). Pure. */
 export const uploadKey = (accountId: string | null | undefined, instanceId: string, kind: ProbeKind, at: Date = new Date()): string =>
-  `${prefix()}/${kind}/${day(at)}/${accountId || "unknown"}/${instanceId}/${stamp(at)}.json.gz`;
+  `${prefix()}/${kind}/${hourPrefix(at)}/${accountId || "unknown"}/${instanceId}/${stamp(at)}.json.gz`;
 
 /** The key of a cluster's node-images object: the cluster name as a slug (what the key allows), the time of the refresh. Pure. */
 export const clusterImagesKey = (accountId: string | null | undefined, clusterName: string, at: Date = new Date()): string =>
-  `${prefix()}/cluster-images/${day(at)}/${accountId || "unknown"}/${(String(clusterName).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "cluster")}/${stamp(at)}.json.gz`;
+  `${prefix()}/cluster-images/${hourPrefix(at)}/${accountId || "unknown"}/${(String(clusterName).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "cluster")}/${stamp(at)}.json.gz`;
 
 export interface ParsedUploadKey { account_id: string; instance_id: string; kind: ProbeKind; at: string; /** which layout the key follows */ layout: "dated" | "legacy" }
 
 /** What a key says: the account, the box, the kind and when; null for an object that is not a probe result (the `_check` markers, the cluster-images objects, a kind this build does not know). Pure. */
 export function parseUploadKey(key: string): ParsedUploadKey | null {
   const d = DATED.exec(key);
-  if (d && isKind(d[1]!)) return { kind: d[1], at: timeOf(d[5]!), account_id: d[3]!, instance_id: d[4]!, layout: "dated" };
+  if (d && isKind(d[1]!)) return { kind: d[1], at: timeOf(d[6]!), account_id: d[4]!, instance_id: d[5]!, layout: "dated" };
   const l = LEGACY.exec(key);
   if (l && isKind(l[3]!) && l[1] !== "cluster-images") return { account_id: l[1]!, instance_id: l[2]!, kind: l[3], at: timeOf(l[4]!), layout: "legacy" };
   return null;
