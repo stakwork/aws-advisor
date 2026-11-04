@@ -724,8 +724,9 @@ edges still point at `image:<ref>` nodes by name, since a workload spec names a 
 
 **The image scanner: each image once, not once per box.** The same image runs on many boxes and each used to unpack and
 read it; set `PROBE_IMAGES_SCANNER` (Settings › Probe pass › Image scanner instance) to the id of one SSM-online Linux
-instance and the sbom pass reads the fleet's registry images there instead (`src/image_pass.ts`, the `images` probe).
-Before the boxes run, the pass lists the distinct images the running boxes carry (the software probe's `instance_images`:
+instance and the images pass reads the fleet's registry images there instead (`src/image_pass.ts`, the `images` probe,
+`PROBE_IMAGES_CRON`, daily after the sbom pass; until 2026-11-04 it ran inside the sbom pass, before the boxes). The pass
+lists the distinct images the running boxes carry (the software probe's `instance_images`:
 registry digest and platform, keyed `digest|platform` because a multi-arch tag's digest is the index, the same on an
 amd64 and an arm64 box with different contents), skips those read ok within `PROBE_SBOM_INTERVAL_HOURS`, and sends the
 scanner the rest in batches of 15 as the document's `images` parameter (`repo@sha256:…|os/arch`, one command per batch,
@@ -1044,7 +1045,7 @@ outcome under the row.
 - `PROBE_CRON` (default `30 5 * * *`, `off` to disable) runs the SSM probe automatically, but only where it can
   change a decision: running, SSM-online instances whose 30-day CPU is under `PROBE_IDLE_CPU` (default 20 %) or
   that carry an open idle-instance recommendation, skipping any probed more recently than `PROBE_MIN_INTERVAL_HOURS` (default 20; 1 with an hourly cron, 24 with a daily one; a five-minute margin is built in so the next pass is never skipped), at most `PROBE_MAX`
-  (default 25) per pass, three at a time (the sbom pass twenty: its boxes work for minutes each while the advisor only waits; with an image scanner configured the sbom pass first sends it the fleet's registry images in batches, one command each). `PROBE_SCOPE=all` widens the pass to every SSM-online running instance
+  (default 25) per pass, three at a time (the sbom pass twenty: its boxes work for minutes each while the advisor only waits; with an image scanner configured the images pass sends it the fleet's registry images in batches, one command each, on its own schedule, and the sbom boxes read only their local builds while the scanner has answered within two sbom intervals). `PROBE_SCOPE=all` widens the pass to every SSM-online running instance
   (cap raised to 100), so the Inventory carries memory, disk and process data for the whole fleet. It runs half an hour before the daily collection so the idle-instance
   rule sees fresh memory and process data. Samples older than 30 days are pruned. `POST /api/probe-pass` runs it
   by hand and `GET /api/probe-pass/targets` previews the candidates.

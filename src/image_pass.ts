@@ -1,5 +1,5 @@
 /**
- * The image half of the sbom pass: the distinct container images the fleet runs, read once each on the designated scanner
+ * The images pass (PROBE_IMAGES_CRON, a cron of its own since 2026-11-04; before that the first half of the sbom pass): the distinct container images the fleet runs, read once each on the designated scanner
  * instance (Settings > Probe pass > Image scanner instance) instead of once per box. The software probe lists every box's
  * running images with their registry digest and platform (instance_images, keyed by imageKey), and the cluster inventory lists
  * the pods' images on every Kubernetes node the same way (the probe sees none there: containerd, no docker command); this pass takes the keys
@@ -9,9 +9,10 @@
  * scan records as the sbom probe; the hook records them into the image tables (software_inventory.ts recordImageSbom)
  * and the graph gets CONTAINS edges for every box running the image.
  *
- * What the per-box sbom probe then does follows from the outcome (sbomImagesMode): when the scanner answered, the boxes
- * scan only their local builds (images=local); when there is no scanner, it is offline, or every batch failed, the boxes
- * scan every image themselves, as before, so nothing is lost to the scanner being away.
+ * What the per-box sbom probe does follows from the scanner's recent outcome (src/probe_pass.ts sbomImagesModeNow, from the
+ * probe_passes table; sbomImagesMode below judges one result): when an images pass answered within two sbom intervals, the
+ * boxes scan only their local builds (images=local); when there is no scanner, or it has not answered, the boxes scan every
+ * image themselves, as before, so nothing is lost to the scanner being away.
  */
 import { config } from "./config.js";
 import { db } from "./db.js";

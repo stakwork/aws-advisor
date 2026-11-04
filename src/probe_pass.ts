@@ -10,7 +10,7 @@ import { db } from "./db.js";
 import { ProbeError, probeInstance } from "./ssm.js";
 import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, legacyKindOf } from "./probes.js";
 import { pruneImageSboms } from "./software_inventory.js"; // also the instance_sbom_scans table the sbom retry rule reads
-import { type ImagePassResult, dueImages, imagePass, imageScanner, sbomImagesMode } from "./image_pass.js";
+import { type ImagePassResult, dueImages, imagePass, imageScanner } from "./image_pass.js";
 import { credentialGate } from "./gate.js";
 import { pruneHistory, rollupDaily } from "./history.js";
 import { checkAllDiskLevels } from "./disk_alerts.js";
@@ -99,7 +99,7 @@ export function probeTargets(kind: ProbeKind = "host", limit?: number, opts: Pro
 }
 
 /** One pass of one kind (host by default); a pass of a kind already running is joined, not doubled (a forced pass joining a scheduled one gets the scheduled one's
- *  selection). The images kind is the scanner half of the sbom pass on its own. `force` (Run pass now on Settings > Probes) ignores the minimum-hours window: every
+ *  selection). The images kind is the scanner's pass (PROBE_IMAGES_CRON, its own cron since 2026-11-04). `force` (Run pass now on Settings > Probes) ignores the minimum-hours window: every
  *  box in scope is probed, however recently it was; the cron keeps the window. */
 export function probePass(kind: ProbeKind = "host", opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const running = inFlight.get(kind);
@@ -109,11 +109,11 @@ export function probePass(kind: ProbeKind = "host", opts: { force?: boolean } = 
   return p;
 }
 
-/** The images kind by hand (Settings > Probes, or POST /api/probes/images/pass): the scanner half alone, as a pass result (candidates are the due images, probed the keys read).
- *  `force` takes every image with a digest, the interval notwithstanding, as a forced per-box pass takes every box. */
+/** The images pass (PROBE_IMAGES_CRON; by hand from Settings > Probes or POST /api/probes/images/pass): the scanner alone, as a pass result (candidates are the due images,
+ *  probed the keys read). `force` takes every image with a digest, the interval notwithstanding, as a forced per-box pass takes every box. */
 async function runImages(opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const t0 = Date.now();
-  const passId = startPass("images", "manual");
+  const passId = startPass("images", opts.force ? "manual" : "cron");
   const images = await imagePass(passId, { force: opts.force === true });
   const failed = [...images.failed.map((f) => ({ instance_id: f.ref, code: f.status, message: f.note || `${f.status} on the scanner` })), ...images.commands_failed.map((c) => ({ instance_id: images.scanner || "*", code: c.code, message: c.message }))];
   if (!images.ok && images.reason && !failed.length) failed.push({ instance_id: images.scanner || "*", code: "skipped", message: images.reason });
@@ -137,15 +137,12 @@ async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<Pro
     finishPass(passId, { candidates: 0, probed: 0, failed, note: `skipped: ${failed[0]!.message}` });
     return { kind, started_at: new Date().toISOString(), candidates: 0, probed: [], failed, pruned: 0, databases: null, took_ms: Date.now() - t0, pass_id: passId };
   }
-  // the sbom pass's image half first (src/image_pass.ts): the registry images once each on the scanner, so the boxes below scan only their own builds;
-  // without a scanner, or when it did not answer, the boxes scan every image themselves as they always did
-  let images: ImagePassResult | null = null;
-  if (kind === "sbom" && imageScanner()) {
-    try { images = await imagePass(passId); } catch (e: any) { console.error(`[${tag}] the image half failed: ${e?.message || e}`); }
-    console.log(`[${tag}] image scanner ${imageScanner()}: ${images?.ok ? `${images.scanned.length} image(s) read${images.failed.length ? `, ${images.failed.length} not read` : ""} of ${images.candidates} due; the boxes scan only their local builds (images=local)` : `${images?.reason || "failed"}; the boxes scan every running image themselves this pass (images=all)`}`);
-  }
+  // the images pass is a cron of its own since 2026-11-04 (PROBE_IMAGES_CRON, runImages): the boxes scan only their local builds (images=local) while the
+  // scanner has answered within two sbom intervals, else every running image themselves, so a scanner that is away costs coverage for one pass, never silently
+  const images: ImagePassResult | null = null;
+  if (kind === "sbom" && imageScanner()) console.log(`[${tag}] image scanner ${imageScanner()}: ${sbomImagesModeNow() === "local" ? "answered recently; the boxes scan only their local builds (images=local)" : "no successful images pass within two sbom intervals; the boxes scan every running image themselves (images=all)"}`);
   // the sbom document's parameters: the images mode while a scanner is configured, and what the box reads of itself (Settings > Probe pass; sbom 1.7)
-  const parameters = kind === "sbom" ? { ...(imageScanner() ? { images: sbomImagesMode(images) } : {}), host: config.probeSbomHost } : undefined;
+  const parameters = kind === "sbom" ? { ...(imageScanner() ? { images: sbomImagesModeNow() } : {}), host: config.probeSbomHost } : undefined;
   const { scope, intervalHours } = probeKindSettings(kind);
   const targets = probeTargets(kind, undefined, { ignoreInterval });
   const result: ProbePassResult = { kind, started_at: new Date().toISOString(), candidates: targets.length, probed: [], failed: [], pruned: 0, databases: null, images, took_ms: 0, pass_id: passId };
@@ -201,8 +198,17 @@ async function run(kind: ProbeKind, opts: { force?: boolean } = {}): Promise<Pro
   result.took_ms = Date.now() - t0;
   finishPass(passId, { candidates: result.candidates, probed: result.probed.length, failed: result.failed, note: imagesNote(images) });
   const byCode = new Map<string, number>(); for (const f of result.failed) byCode.set(f.code, (byCode.get(f.code) || 0) + 1);
-  console.log(`[${tag}] ${result.probed.length} probed, ${result.failed.length} failed of ${result.candidates} candidates in ${result.took_ms} ms${byCode.size ? ` (failures: ${[...byCode].map(([c, n]) => `${c} ${n}`).join(", ")})` : ""}${images ? `; images: ${images.ok ? `${images.scanned.length} read, ${images.failed.length} failed of ${images.candidates} due on ${images.scanner}` : images.reason}` : ""}`);
+  console.log(`[${tag}] ${result.probed.length} probed, ${result.failed.length} failed of ${result.candidates} candidates in ${result.took_ms} ms${byCode.size ? ` (failures: ${[...byCode].map(([c, n]) => `${c} ${n}`).join(", ")})` : ""}`);
   return result;
+}
+
+/** The sbom document's images mode now: `local` (the boxes read only their local builds) when a scanner is configured and an images pass finished within two sbom
+ *  intervals having read something, or having had nothing due; `all` otherwise, so a scanner that is away or failing never leaves the registry images unread. */
+export function sbomImagesModeNow(): "all" | "local" {
+  if (!imageScanner()) return "all";
+  const hours = Math.max(1, config.probeSbomIntervalHours) * 2;
+  const row = db.prepare("select probed, candidates, failed from probe_passes where kind = 'images' and finished_at is not null and datetime(finished_at) > datetime('now', ?) order by id desc limit 1").get(`-${hours} hours`) as { probed: number; candidates: number; failed: number } | undefined;
+  return row && (row.probed > 0 || (row.candidates === 0 && row.failed === 0)) ? "local" : "all";
 }
 
 /** What the images kind would send now: the due images (Settings > Probes "due now"). */

@@ -33,7 +33,7 @@ const TAB_HINT: Record<Tab, string> = {
 const AWS_SECTIONS = ["access", "permissions", "probes", "benchmarks", "members"] as const;
 type AwsSection = (typeof AWS_SECTIONS)[number];
 const AWS_SECTION_LABEL: Record<AwsSection, string> = { access: "Access", permissions: "Permissions", probes: "Probes", benchmarks: "Benchmarks", members: "Member accounts" };
-const PROBE_CRONS = ["probeCron", "probeDockerCron", "probeAppsCron", "probeSoftwareCron", "probeSbomCron"];
+const PROBE_CRONS = ["probeCron", "probeDockerCron", "probeAppsCron", "probeSoftwareCron", "probeSbomCron", "probeImagesCron"];
 type ProviderInfo = { id: string; label: string; boundary: string; credentials: string; children: string; available: boolean; configured: boolean; sections: { id: string; label: string }[]; ui: { settings: { id: string; label: string; view: string }[] } | null };
 /** A provider whose Settings sections are this page's own (the AWS adapter declares aws.* views: credentials, permissions, probes, benchmarks, members); every other provider's sections are its views in ui/src/views.tsx. */
 const BUILTIN_VIEW = /^aws\./;
@@ -309,7 +309,7 @@ export default function Settings() {
 
       {tab === "schedules" && (
         <>
-          <RuntimeSettings groups={["Schedules"]} exclude={PROBE_CRONS} title="Schedules" note="The four probe passes are scheduled under Accounts › the AWS account › Probes." />
+          <RuntimeSettings groups={["Schedules"]} exclude={PROBE_CRONS} title="Schedules" note="The probe passes are scheduled under Accounts › the AWS account › Probes." />
       <Card title="Schedule, watcher and MCP">
         <ul className="space-y-1 text-sm text-zinc-400">
           <li>Full run: {s.schedule?.runCron ? <>cron <code className="text-zinc-200">{s.schedule.runCron}</code></> : "disabled (RUN_CRON=off)"} · agent auto-dispatch <code className="text-zinc-200">{s.schedule?.agentAutoDispatch}</code></li>
