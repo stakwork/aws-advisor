@@ -773,7 +773,8 @@ are retired after each pass.
 packages (a swarm host's images, a big Node application) outgrows it: the software probe's answer is then cut off and
 the sbom probe trims its lists to fit, reporting the true counts. Set `PROBE_UPLOAD_BUCKET` (and `PROBE_UPLOAD_REGION`,
 `PROBE_UPLOAD_PREFIX`, default `aws-advisor/probes`; Settings › Probe pass) to a bucket in the advisor's account and
-those two probes post their whole result there instead: the advisor presigns a PutObject URL per run and passes it as
+every probe posts its whole result there (host 2.1, docker 2.2, apps 2.2, software 1.8, sbom 1.9, images 1.4; redeploy the
+documents from Settings › Probes): the advisor presigns a PutObject URL per run and passes it as
 the document's `upload` parameter, the script posts the gzip-compressed JSON with curl and prints a receipt (`uploaded
 <bytes> <sha256>`) on its inline line, and the advisor reads the object back, checks it against the receipt and ingests
 it. The boxes need no IAM change (the URL carries the advisor's signature), only egress to S3; the advisor's identity
@@ -782,8 +783,13 @@ the advisor's role). The advisor checks the bucket with that identity before it 
 Settings › Probes says whether uploads work, Settings › Permissions has the same check ("Probe uploads bucket"), the log
 says when the state changes, and a box whose own upload failed is logged with the reason from its receipt. The inline line stays the fallback (trimmed, or a stub once the whole
 is in S3), and a document deployed before the parameter existed keeps answering inline until it is redeployed. Objects
-are kept under `<prefix>/<account>/<instance>/<kind>/<time>.json.gz`, so "Probes: re-ingest the uploads in S3"
-(Schedules, by hand) can replay the newest per box and kind after a recorder change.
+are kept under `<prefix>/<kind>/<yyyy-mm-dd>/<account>/<instance>/<time>.json.gz` (objects from before 2026-11-04 sit
+at `<prefix>/<account>/<instance>/<kind>/<time>.json.gz` and are still read), so "Probes: re-ingest the uploads in S3"
+(Schedules, by hand) can replay the newest per box and kind after a recorder change, and a poller can walk one kind by
+day. The images a Kubernetes cluster's nodes run come from the cluster API, not a probe, so the cluster refresh writes
+them to the same bucket as `<prefix>/cluster-images/<yyyy-mm-dd>/<account>/<cluster>/<time>.json.gz`. The bucket is the
+inventory the Strut probe ingest builds the package side of the graph from: `docs/probe-s3-strut.md` lists the objects
+and their shapes.
 
 The advisor sends a document by name with no `commands` parameter (the script is inside the document; the docker
 one takes the use-signal patterns as its `signals` parameter); the policy also grants `ssm:GetCommandInvocation`,

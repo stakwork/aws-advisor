@@ -1,22 +1,26 @@
 import { createHash } from "node:crypto";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { GetObjectCommand, HeadBucketCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "./config.js";
 import { db } from "./db.js";
 import { accountCredentials } from "./accounts.js";
-import type { ProbeKind } from "./probes.js";
+import { PROBE_KINDS, type ProbeKind } from "./probes.js";
 
 /**
- * The whole result of a probe in S3 (the software and sbom kinds, src/probes.ts UPLOAD_KINDS): GetCommandInvocation
- * returns 24,000 characters of stdout, which a box with a few thousand packages outgrows, so when a bucket is
- * configured (Settings > Probe pass) the advisor signs a PutObject URL per run and passes it as the document's `upload`
- * parameter. The script posts the gzip-compressed JSON there with curl and prints a receipt (`uploaded <bytes> <sha256>`)
- * on its inline line; the advisor reads the object back, checks it against the receipt and ingests that instead of the
- * inline object (which is the trimmed fallback, or a stub). The boxes need no IAM change, only egress to S3: the URL
- * carries the advisor's signature. Objects are kept, so a probe can be re-ingested later (src/probe_upload_ingest.ts).
+ * The whole result of every probe in S3 (docs/probe-s3-strut.md): GetCommandInvocation returns 24,000 characters of stdout,
+ * which a box with a few thousand packages outgrows, and the Strut probe ingest builds the package side of the graph from the
+ * bucket rather than from this process. When a bucket is configured (Settings > Probe pass) the advisor signs a PutObject URL
+ * per run and passes it as the document's `upload` parameter. The script posts the gzip-compressed JSON there with curl and
+ * prints a receipt (`uploaded <bytes> <sha256>`) on its inline line; the advisor reads the object back, checks it against the
+ * receipt and ingests that instead of the inline object (which is the trimmed fallback, or a stub). The boxes need no IAM
+ * change, only egress to S3: the URL carries the advisor's signature. Objects are kept, so a probe can be re-ingested later
+ * (src/probe_upload_ingest.ts) and a poller can walk the bucket by day.
  *
- * Keys: <prefix>/<account id>/<instance id>/<kind>/<time>.json.gz, so the key alone says what an object is.
+ * Keys: <prefix>/<kind>/<yyyy-mm-dd>/<account id>/<instance id>/<time>.json.gz (the dated layout, 2026-11-04), so a poller
+ * lists one kind for a few days without walking everything; <prefix>/cluster-images/<yyyy-mm-dd>/<account>/<cluster>/<time>.json.gz
+ * for the images a Kubernetes cluster's nodes run (src/cluster_inventory.ts: not a probe, the cluster API says it). Objects
+ * written before this date sit at <prefix>/<account id>/<instance id>/<kind>/<time>.json.gz and are still read.
  */
 
 db.exec(`create table if not exists probe_uploads (
@@ -29,16 +33,31 @@ const prefix = (): string => config.probeUploadPrefix.replace(/^\/+|\/+$/g, "") 
 // the parent account's identity signs and reads: the bucket is the advisor's, whichever account the box is in
 const client = (): S3Client => { const base = accountCredentials(null); return new S3Client({ region: config.probeUploadRegion || base.region, credentials: base.provider }); };
 
-/** The object key of one run. Pure. */
-export const uploadKey = (accountId: string | null | undefined, instanceId: string, kind: ProbeKind, at: Date = new Date()): string =>
-  `${prefix()}/${accountId || "unknown"}/${instanceId}/${kind}/${at.toISOString().replace(/[:.]/g, "-")}.json.gz`;
+const stamp = (at: Date): string => at.toISOString().replace(/[:.]/g, "-");
+const day = (at: Date): string => at.toISOString().slice(0, 10);
+const TIME = String.raw`(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)`;
+const DATED = new RegExp(String.raw`(?:^|/)([a-z]+)/(\d{4}-\d{2}-\d{2})/([^/]+)/(i-[0-9a-f]{8,17})/${TIME}\.json\.gz$`);
+const LEGACY = new RegExp(String.raw`(?:^|/)([^/]+)/(i-[0-9a-f]{8,17})/([a-z]+)/${TIME}\.json\.gz$`);
+const isKind = (k: string): k is ProbeKind => (PROBE_KINDS as readonly string[]).includes(k);
+const timeOf = (t: string): string => `${t.slice(0, 10)}T${t.slice(11, 13)}:${t.slice(14, 16)}:${t.slice(17, 19)}.${t.slice(20, 23)}Z`;
 
-/** What a key says: the account, the box, the kind and when; null for an object that is not one of ours. Pure. */
-export function parseUploadKey(key: string): { account_id: string; instance_id: string; kind: string; at: string } | null {
-  const m = /(?:^|\/)([^/]+)\/(i-[0-9a-f]{8,17})\/([a-z]+)\/(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)\.json\.gz$/.exec(key);
-  if (!m) return null;
-  const t = m[4]!; const at = `${t.slice(0, 10)}T${t.slice(11, 13)}:${t.slice(14, 16)}:${t.slice(17, 19)}.${t.slice(20, 23)}Z`;
-  return { account_id: m[1]!, instance_id: m[2]!, kind: m[3]!, at };
+/** The object key of one run (the dated layout). Pure. */
+export const uploadKey = (accountId: string | null | undefined, instanceId: string, kind: ProbeKind, at: Date = new Date()): string =>
+  `${prefix()}/${kind}/${day(at)}/${accountId || "unknown"}/${instanceId}/${stamp(at)}.json.gz`;
+
+/** The key of a cluster's node-images object: the cluster name as a slug (what the key allows), the time of the refresh. Pure. */
+export const clusterImagesKey = (accountId: string | null | undefined, clusterName: string, at: Date = new Date()): string =>
+  `${prefix()}/cluster-images/${day(at)}/${accountId || "unknown"}/${(String(clusterName).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "cluster")}/${stamp(at)}.json.gz`;
+
+export interface ParsedUploadKey { account_id: string; instance_id: string; kind: ProbeKind; at: string; /** which layout the key follows */ layout: "dated" | "legacy" }
+
+/** What a key says: the account, the box, the kind and when; null for an object that is not a probe result (the `_check` markers, the cluster-images objects, a kind this build does not know). Pure. */
+export function parseUploadKey(key: string): ParsedUploadKey | null {
+  const d = DATED.exec(key);
+  if (d && isKind(d[1]!)) return { kind: d[1], at: timeOf(d[5]!), account_id: d[3]!, instance_id: d[4]!, layout: "dated" };
+  const l = LEGACY.exec(key);
+  if (l && isKind(l[3]!) && l[1] !== "cluster-images") return { account_id: l[1]!, instance_id: l[2]!, kind: l[3], at: timeOf(l[4]!), layout: "legacy" };
+  return null;
 }
 
 /** The receipt the script prints: `uploaded <bytes> <sha256>` (the hash is missing where the box has no sha256sum). Pure. */
@@ -55,6 +74,16 @@ export async function presignProbeUpload(opts: { accountId: string | null | unde
     const url = await getSignedUrl(c, new PutObjectCommand({ Bucket: config.probeUploadBucket, Key: key }), { expiresIn: Math.min(Math.max(opts.expiresInSeconds ?? 3600, 600), 7 * 24 * 3600) });
     return { key, url };
   } finally { c.destroy(); }
+}
+
+/** An object the advisor writes itself (the cluster-images one): the JSON gzip-compressed, as the probes post theirs, so one reader serves both. `s3` is a test's client. */
+export async function putProbeObject(key: string, body: unknown, s3?: S3Client): Promise<{ bytes: number; sha256: string }> {
+  const bytes = gzipSync(Buffer.from(JSON.stringify(body), "utf8"), { level: 9 });
+  const c = s3 ?? client();
+  try {
+    await c.send(new PutObjectCommand({ Bucket: config.probeUploadBucket, Key: key, Body: bytes, ContentType: "application/json", ContentEncoding: "gzip" }));
+    return { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  } finally { if (!s3) c.destroy(); }
 }
 
 /** The object back, checked against the receipt (size, sha256) and decompressed: the probe's JSON as text. */
@@ -79,17 +108,36 @@ export function recordProbeUpload(o: { key: string; instanceId: string; accountI
 }
 export const probeUploadIngested = (key: string): boolean => Boolean((db.prepare("select ingested_at from probe_uploads where key = ?").get(key) as { ingested_at: string | null } | undefined)?.ingested_at);
 
-/** Every object under the prefix (paged), with what its key says. */
-export async function listProbeUploads(): Promise<{ key: string; bytes: number; last_modified: string | null; account_id: string; instance_id: string; kind: string; at: string }[]> {
-  const c = client(); const out: Awaited<ReturnType<typeof listProbeUploads>> = [];
-  try {
+export type ProbeUploadObject = ParsedUploadKey & { key: string; bytes: number; last_modified: string | null };
+
+/**
+ * Every probe object under the prefix (paged), with what its key says, in both layouts. One delimiter listing of the prefix
+ * first, then only the wanted kinds' trees (dated) and the account trees (legacy): the `_check` markers, the cluster-images
+ * objects and the kinds not asked for are never walked.
+ */
+export async function listProbeUploads(opts: { kinds?: readonly ProbeKind[]; /** a test's client */ s3?: S3Client } = {}): Promise<ProbeUploadObject[]> {
+  const want = new Set<string>(opts.kinds?.length ? opts.kinds : PROBE_KINDS);
+  const c = opts.s3 ?? client(); const out: ProbeUploadObject[] = []; const root = `${prefix()}/`;
+  const page = async (input: { Prefix: string; Delimiter?: string }, each: (r: Awaited<ReturnType<S3Client["send"]>> & { Contents?: { Key?: string; Size?: number; LastModified?: Date }[]; CommonPrefixes?: { Prefix?: string }[] }) => void) => {
     let token: string | undefined;
     do {
-      const r = await c.send(new ListObjectsV2Command({ Bucket: config.probeUploadBucket, Prefix: `${prefix()}/`, ContinuationToken: token }));
-      for (const o of r.Contents ?? []) { const p = o.Key ? parseUploadKey(o.Key) : null; if (p) out.push({ key: o.Key!, bytes: Number(o.Size ?? 0), last_modified: o.LastModified?.toISOString() ?? null, ...p }); }
+      const r: any = await c.send(new ListObjectsV2Command({ Bucket: config.probeUploadBucket, ...input, ContinuationToken: token }));
+      each(r);
       token = r.IsTruncated ? r.NextContinuationToken : undefined;
     } while (token);
-  } finally { c.destroy(); }
+  };
+  try {
+    const trees: string[] = [];
+    await page({ Prefix: root, Delimiter: "/" }, (r) => {
+      for (const p of r.CommonPrefixes ?? []) {
+        const name = String(p.Prefix ?? "").slice(root.length).replace(/\/$/, "");
+        if (want.has(name) || /^(\d{12}|unknown)$/.test(name)) trees.push(String(p.Prefix));
+      }
+    });
+    for (const tree of trees) await page({ Prefix: tree }, (r) => {
+      for (const o of r.Contents ?? []) { const p = o.Key ? parseUploadKey(o.Key) : null; if (p && want.has(p.kind)) out.push({ key: o.Key!, bytes: Number(o.Size ?? 0), last_modified: o.LastModified?.toISOString() ?? null, ...p }); }
+    });
+  } finally { if (!opts.s3) c.destroy(); }
   return out;
 }
 
@@ -120,7 +168,7 @@ export async function checkProbeUploads(force = false): Promise<ProbeUploadStatu
       try { const { STSClient, GetCallerIdentityCommand } = await import("@aws-sdk/client-sts"); const base = accountCredentials(null); const sts = new STSClient({ region: base.region, credentials: base.provider }); try { identity = (await sts.send(new GetCallerIdentityCommand({}))).Arn ?? null; } finally { sts.destroy(); } } catch { /* the error below says enough */ }
       let step = "HeadBucket (s3:ListBucket)";
       await c.send(new HeadBucketCommand({ Bucket: bucket }));
-      const key = `${prefix()}/_check/${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+      const key = `${prefix()}/_check/${stamp(new Date())}.txt`;
       step = "PutObject (s3:PutObject)";
       await c.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: `aws-advisor probe uploads check ${identity ?? ""}\n`, ContentType: "text/plain" }));
       step = "GetObject (s3:GetObject)";
@@ -131,7 +179,7 @@ export async function checkProbeUploads(force = false): Promise<ProbeUploadStatu
     } catch (e: any) {
       const msg = `${e?.name || "error"}: ${String(e?.message || e).slice(0, 300)}`;
       status = { ...status, bucket, prefix: prefix(), ok: false, error: msg, checked_at: new Date().toISOString(), identity };
-      if (before !== false) console.error(`[probe-uploads] bucket ${bucket} is not usable as ${identity ?? "the advisor's identity"} (${msg}); the software and sbom probes answer inline until it is (a bucket in another account needs a bucket policy for this role; the role needs s3:PutObject, s3:GetObject under ${prefix()}/ and s3:ListBucket)`);
+      if (before !== false) console.error(`[probe-uploads] bucket ${bucket} is not usable as ${identity ?? "the advisor's identity"} (${msg}); every probe answers inline until it is (a bucket in another account needs a bucket policy for this role; the role needs s3:PutObject, s3:GetObject under ${prefix()}/ and s3:ListBucket)`);
     } finally { c.destroy(); checking = null; }
     return probeUploadStatus();
   })();

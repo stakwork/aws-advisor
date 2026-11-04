@@ -219,7 +219,7 @@ test("use-signal patterns: the setting is validated and the probe document takes
   assert.ok(!doc.mainSteps[0].inputs.runCommand.some((l: string) => l.includes("__SIGNALS__")));
   assert.match(defaultProbeScript("docker"), /__SIGNALS__/);
   assert.ok(probeScript("docker", "a=b;;c=d").includes("'a=b;;c=d'"), "the inline path puts the current list in");
-  assert.ok(!defaultProbeScript("host").includes("__SIGNALS__") && Object.keys((probeDocument("host") as any).parameters).length === 0, "only the docker probe takes the signals parameter");
+  assert.ok(!defaultProbeScript("host").includes("__SIGNALS__") && !("signals" in (probeDocument("host") as any).parameters), "only the docker probe takes the signals parameter (every kind takes upload)");
   assert.equal(parseClfDate("25/Sep/2026:10:00:00 +0000"), "2026-09-25T10:00:00.000Z");
   assert.equal(parseClfDate("25/Sep/2026:12:30:00 +0200"), "2026-09-25T10:30:00.000Z");
   assert.equal(parseClfDate("nonsense"), null);

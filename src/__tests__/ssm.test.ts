@@ -362,6 +362,9 @@ test("parseProbeOutput types the sbom section: the scans with their status and c
   assert.equal(p.upload, "uploaded 1234 ab"); assert.equal(p.inline, undefined);
   const stub = parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","inline":false,"upload":"uploaded 99 ff"}');
   assert.equal(stub.inline, false); assert.equal(stub.upload, "uploaded 99 ff"); assert.equal(stub.packages, undefined);
+  // host 2.1: a host stub carries none of the numbers the host kind owns; it parses (the whole is read from S3) instead of failing on a missing cpus
+  const hostStub = parseProbeOutput('{"probe":"aws-advisor/host/3","kind":"host","hostname":"h","collected_at":"2026-10-29T10:00:00Z","inline":false,"upload":"uploaded 99 ff"}');
+  assert.equal(hostStub.inline, false); assert.equal(hostStub.kind, "host"); assert.equal(hostStub.cpus, 0); assert.equal(hostStub.upload, "uploaded 99 ff");
   assert.equal(parseProbeOutput('{"probe":"aws-advisor/software/5","kind":"software","hostname":"h","collected_at":"2026-10-29T10:00:00Z","packages":[]}').sbom, undefined, "another kind carries no sbom section");
 });
 

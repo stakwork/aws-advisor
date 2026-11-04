@@ -3,15 +3,15 @@ import { PROBE_KINDS, type ProbeKind } from "./probes.js";
 import { applyProbeResult, parseProbeOutput, storedForm } from "./ssm.js";
 
 /**
- * The objects the probes left in S3 (src/probe_uploads.ts), ingested again: the newest per box and kind, parsed and
- * applied as if the probe had just answered (the inventory tables, then the graph). A replay after a recorder fix, or
- * for a run whose read-back failed; `replay` false skips objects already ingested. Run from Schedules ("Run now").
+ * The objects the probes left in S3 (src/probe_uploads.ts, both key layouts), ingested again: the newest per box and kind,
+ * parsed and applied as if the probe had just answered (the inventory tables, then the graph). A replay after a recorder fix,
+ * or for a run whose read-back failed; `replay` false skips objects already ingested. Run from Schedules ("Run now").
  */
 export async function ingestProbeUploads(opts: { kinds?: ProbeKind[]; replay?: boolean; log?: (l: string) => void } = {}): Promise<{ objects: number; ingested: number; skipped: number; failed: { key: string; error: string }[] }> {
   const log = opts.log ?? ((l: string) => console.log(`[probe-uploads] ${l}`));
   if (!probeUploadsConfigured()) return { objects: 0, ingested: 0, skipped: 0, failed: [{ key: "*", error: "no upload bucket configured (Settings > Probe pass)" }] };
-  const kinds = new Set<string>(opts.kinds?.length ? opts.kinds : PROBE_KINDS);
-  const all = (await listProbeUploads()).filter((o) => kinds.has(o.kind));
+  const kinds: readonly ProbeKind[] = opts.kinds?.length ? opts.kinds : PROBE_KINDS;
+  const all = await listProbeUploads({ kinds });
   const newest = new Map<string, (typeof all)[number]>();
   for (const o of all) { const k = `${o.instance_id}\t${o.kind}`; const cur = newest.get(k); if (!cur || o.at > cur.at) newest.set(k, o); }
   const res = { objects: all.length, ingested: 0, skipped: 0, failed: [] as { key: string; error: string }[] };

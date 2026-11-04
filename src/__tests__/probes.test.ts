@@ -34,13 +34,16 @@ test("every probe kind has a document of its own that passes sh -n, embeds its h
     assert.ok(pr.probeDocumentInfo(kind).create_command.includes(`/api/probes/${kind}/document`));
   }
   assert.ok(Object.keys((pr.probeDocument("docker") as any).parameters).includes("signals"));
-  assert.deepEqual((pr.probeDocument("host") as any).parameters, {});
+  assert.deepEqual(Object.keys((pr.probeDocument("host") as any).parameters), ["upload"], "host 2.1: the whole result to S3 too");
+  assert.deepEqual(Object.keys((pr.probeDocument("docker") as any).parameters), ["signals", "upload"]);
+  assert.deepEqual(Object.keys((pr.probeDocument("apps") as any).parameters), ["upload"]);
   assert.deepEqual(Object.keys((pr.probeDocument("sbom") as any).parameters), ["install", "images", "host", "upload"]);
   assert.deepEqual(Object.keys((pr.probeDocument("images") as any).parameters), ["install", "images", "timeout", "upload"]);
   assert.deepEqual((pr.probeDocument("sbom") as any).parameters.images.allowedValues, ["all", "local"]);
   assert.equal((pr.probeDocument("images") as any).parameters.images.default, "", "a batch is always passed");
   assert.deepEqual(Object.keys((pr.probeDocument("software") as any).parameters), ["upload"]);
-  for (const k of ["software", "sbom", "images"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload='{{ upload }}'")), `${k}: the upload URL is a document parameter, quoted (a presigned URL is full of & and =)`);
+  for (const k of pr.PROBE_KINDS) { const lines: string[] = (pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand; const full = lines.findIndex((l) => l.startsWith("full=")); const up = lines.findIndex((l) => l.startsWith("upload='{{ upload }}'")); assert.ok(full >= 0 && up > full, `${k}: the whole object is set aside (full=...) before the upload block reads it`); }
+  for (const k of pr.PROBE_KINDS) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("upload='{{ upload }}'")), `${k}: the upload URL is a document parameter, quoted (a presigned URL is full of & and =)`);
   for (const k of ["sbom", "images"] as const) assert.ok((pr.probeDocument(k) as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("install={{ install }}")), `${k}: the install switch is a document parameter`);
   assert.ok((pr.probeDocument("sbom") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("imgmode={{ images }}")), "the sbom images mode is a document parameter");
   assert.ok((pr.probeDocument("images") as any).mainSteps[0].inputs.runCommand.some((l: string) => l.includes("images='{{ images }}'") && l.includes("itmo={{ timeout }}")), "the batch and the per-image timeout are document parameters");
@@ -57,6 +60,11 @@ test("probeKindOf reads the kind from the JSON or the probe id; the old combined
   assert.equal(pr.probeKindOf({ probe: "aws-advisor/host/2", kind: "host" }), "host");
   assert.equal(pr.probeKindOf({ probe: "aws-advisor/software/2" }), "software");
   assert.equal(pr.probeKindOf({ probe: "aws-advisor/other/1" }), "all");
+});
+
+test("no script uses the join template function on RepoDigests: Docker 27 decodes the field as a generic list and join refuses it, which left every image without id and digest (2026-11-04)", () => {
+  for (const kind of pr.PROBE_KINDS) assert.ok(!/\{\{\s*join\b/.test(pr.defaultProbeScript(kind)), `${kind}: use a range over the list instead of join`);
+  for (const kind of ["software", "sbom"] as const) assert.ok(pr.defaultProbeScript(kind).includes("{{range $i, $d := .RepoDigests}}{{if $i}},{{- end}}{{$d}}{{- end}}"), `${kind}: the digests are joined by a range`);
 });
 
 test("every default script passes the read-only validation it imposes on edits", () => {
@@ -159,7 +167,7 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/7");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/8");
     assert.deepEqual(j.packages, expected[name], name);
     assert.ok(j.os.cpe === null || /^cpe:/.test(j.os.cpe), `software/7: the OS CPE os-release declares, or null (${j.os.cpe})`);
     // probe software/6: the package that owns the running kernel (dpkg by name, rpm by the modules directory it owns) and the upstream version read from it;
@@ -225,7 +233,7 @@ test("the sbom script: with syft it reads each running executable in place (host
   assert.ok(fs.existsSync(path.join(other, "keep")), "a scratch path that does not end in /aws-advisor-sbom is refused, not emptied");
   assert.ok(line.length < SSM_OUTPUT_CAP, `the line fits SSM's cap (${line.length})`);
   const j = parseProbeOutput(line);
-  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/6"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
+  assert.equal(j.kind, "sbom"); assert.equal(j.probe, "aws-advisor/sbom/7"); assert.equal(j.sbom?.install, null, "syft was there: nothing to install");
   assert.equal(j.sbom?.available, true); assert.equal(j.sbom?.tool, "syft 1.55.0"); assert.equal(j.sbom?.images_mode, "all", "the default: every running image, here");
   assert.equal(j.sbom?.host_mode, "processes", "the default: the running executables, not the filesystem");
   const by = Object.fromEntries(j.sbom!.sources.map((s) => [`${s.source} ${s.ref}`, s]));
@@ -312,6 +320,22 @@ test("the sbom script: with syft it reads each running executable in place (host
   assert.deepEqual([lb["image app:latest"]!.status, lb["image app:latest"]!.purls, lb["image app:latest"]!.cpes, lb["dir /"]!.status, lb["dir /"]!.purls, lb[`proc container:${short("2")}:/usr/local/bin/node`]!.purls], ["ok", ["pkg:npm/express@4.19.2"], {}, "ok", ["pkg:pypi/requests@2.32.3"], ["pkg:generic/node@22.12.0"]], "the purls-only fallback");
 });
 
+test("the apps script with an upload URL (apps 2.2): the whole result is posted gzip-compressed and the inline line carries the receipt, as every kind now does", async () => {
+  const { parseProbeOutput } = await import("../ssm.js");
+  const { gunzipSync } = await import("node:zlib");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-fake-apps-upload-")); const bin = path.join(dir, "bin"); fs.mkdirSync(bin);
+  const capture = path.join(dir, "uploaded.json.gz");
+  fs.writeFileSync(path.join(bin, "curl"), `#!/bin/sh\ncase "$*" in *" -X PUT "*) for a in "$@"; do case "$a" in @*) cp "\${a#@}" "$UPLOAD_CAPTURE";; esac; done; exit 0;; *) exit 22;; esac\n`, { mode: 0o755 });
+  const r = spawnSync("sh", [], { input: pr.defaultProbeScript("apps").replace("__UPLOAD__", "https://bucket.s3.amazonaws.com/k?sig=1"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, UPLOAD_CAPTURE: capture } });
+  assert.equal(r.status, 0, r.stderr);
+  const inline = parseProbeOutput(r.stdout.trim().split("\n").pop() || "");
+  assert.equal(inline.kind, "apps"); assert.equal(inline.probe, "aws-advisor/apps/4"); assert.match(inline.upload ?? "", /^uploaded \d+ [0-9a-f]{64}$/, "the receipt: bytes and sha256");
+  const blob = fs.readFileSync(capture);
+  assert.equal(`uploaded ${blob.length} ${createHash("sha256").update(blob).digest("hex")}`, inline.upload, "the receipt describes the object");
+  const whole = parseProbeOutput(gunzipSync(blob).toString("utf8"));
+  assert.equal(whole.kind, "apps"); assert.equal(whole.upload, undefined, "the object was written before the receipt existed"); assert.ok(whole.firewall, "the sections are in the object");
+});
+
 test("the software script with an upload URL: a result that fits goes inline with the receipt; one the cap would cut becomes a stub, the whole in S3", async () => {
   const { parseProbeOutput } = await import("../ssm.js");
   const { gunzipSync } = await import("node:zlib");
@@ -327,7 +351,7 @@ test("the software script with an upload URL: a result that fits goes inline wit
   assert.equal(small.kind, "software"); assert.equal(small.packages?.length, 3, "inline, whole"); assert.match(small.upload ?? "", /^uploaded \d+ /); assert.equal(small.inline, undefined);
   w("dpkg-query", dpkg(2000));
   const big = run();
-  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/7");
+  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/8");
   const whole = parseProbeOutput(gunzipSync(fs.readFileSync(capture)).toString("utf8"));
   assert.equal(whole.packages?.length, 2000, "the object holds every package"); assert.equal(whole.os?.id ?? null, whole.os?.id ?? null);
 });
@@ -493,7 +517,7 @@ test("the apps script reports the host firewall (apps 2.1): iptables-save stripp
   fs.writeFileSync(path.join(bin, "iptables"), "#!/bin/sh\necho 'iptables v1.8.7 (nf_tables)'\n", { mode: 0o755 });
   const run = (p: string) => { const r = spawnSync("sh", [], { input: pr.defaultProbeScript("apps"), encoding: "utf8", env: { ...process.env, PATH: p } }); assert.equal(r.status, 0, r.stderr); return parseProbeOutput(r.stdout); };
   const a = run(`${bin}:/usr/bin:/bin`);
-  assert.equal(a.probe, "aws-advisor/apps/3"); assert.equal(a.kind, "apps");
+  assert.equal(a.probe, "aws-advisor/apps/4"); assert.equal(a.kind, "apps");
   const fw = a.firewall!;
   assert.equal(fw.available, true); assert.equal(fw.backend, "nf_tables"); assert.equal(fw.oversize, false);
   assert.deepEqual(fw.v4, dump.filter((l) => !l.startsWith("#")).map((l) => l.replace(/ \[\d+:\d+\]$/, "")), "the lines as printed, no timestamps, no counters, the comment intact");

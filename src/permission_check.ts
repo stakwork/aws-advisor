@@ -96,7 +96,7 @@ export const CAPABILITIES: Capability[] = [
   { id: "probe_uploads", label: "Probe uploads bucket (S3)", group: "ssm", actions: ["s3:ListBucket", "s3:PutObject", "s3:GetObject"],
     sdk: async (ctx) => {
       const { probeUploadsConfigured, checkProbeUploads } = await import("./probe_uploads.js");
-      if (!probeUploadsConfigured()) return { skipped: "no upload bucket configured (Settings > Probe pass): the software and sbom probes answer inline" };
+      if (!probeUploadsConfigured()) return { skipped: "no upload bucket configured (Settings > Probe pass): every probe answers inline" };
       if (!ctx.is_parent) return { skipped: "uploads are signed and read back with the parent's identity" };
       const st = await checkProbeUploads(true);
       if (st.ok) return `bucket ${st.bucket} takes uploads under ${st.prefix}/ as ${st.identity ?? "the advisor"}`;

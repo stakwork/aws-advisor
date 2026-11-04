@@ -22,7 +22,7 @@ import { effectiveSignals } from "./signal_rules.js";
  * as one merged view (each section from its kind's latest row; a pre-2.0 combined probe counts for every section).
  * Tested on Amazon Linux 2023 and Ubuntu 24.04 (needs procps `ps --sort`).
  */
-import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, UPLOAD_KINDS, legacyKindOf, legacyProbeDocumentName, probeInstallValue, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
+import { PROBE_DEFS, PROBE_KINDS, type ProbeKind, GZ_MARKER, PROBE_VERSION, SSM_OUTPUT_CAP, legacyKindOf, legacyProbeDocumentName, probeInstallValue, probeDocument as probeDocumentFor, probeDocumentInfo as probeDocumentInfoFor, probeDocumentName, probeDocumentsInfo, probeKindOf, probeScript } from "./probes.js";
 export { PROBE_DEFS, PROBE_KINDS, PROBE_VERSION, GZ_MARKER, SSM_OUTPUT_CAP, probeScript, probeDocumentsInfo, type ProbeKind };
 /** The host kind's document and info, for the places that still ask for "the" probe document. */
 export const probeDocument = (kind: ProbeKind = "host") => probeDocumentFor(kind);
@@ -234,7 +234,7 @@ export function parseProbeOutput(stdout: string): ProbeResult {
   if (typeof raw?.probe !== "string" || !raw.probe.startsWith("aws-advisor/")) throw new ProbeError("bad_output", "probe output is not from the advisor probe");
   const kind = probeKindOf(raw);
   // a kind that does not own the host sections prints none; the merged view fills them from the host row
-  const hostOwned = kind === "all" || kind === "host";
+  const hostOwned = raw.inline !== false && (kind === "all" || kind === "host"); // a host stub (the whole in S3) carries no numbers
   const num = (v: unknown, what: string): number => { if (!hostOwned && v == null) return 0; const n = Number(v); if (!Number.isFinite(n)) throw new ProbeError("bad_output", `probe output has a bad ${what}`); return n; };
   const proc = (p: any): ProbeProcess => ({ pid: num(p.pid, "pid"), cpu_pct: num(p.cpu_pct, "cpu_pct"), mem_pct: num(p.mem_pct, "mem_pct"), rss_bytes: num(p.rss_bytes, "rss_bytes"), command: String(p.command ?? "") });
   const disk = (d: any): ProbeDisk => ({ mount: String(d.mount ?? ""), filesystem: String(d.filesystem ?? ""), device: d.device == null ? null : String(d.device), volume_id: d.volume_id == null ? null : String(d.volume_id), total_bytes: num(d.total_bytes, "total_bytes"), used_bytes: num(d.used_bytes, "used_bytes"), used_pct: num(d.used_pct, "used_pct") });
@@ -562,7 +562,7 @@ async function probeInstanceInner(instanceId: string, kind: ProbeKind, opts: Pro
   const pollMs = def.timeout_seconds >= 600 ? 10_000 : 2_000;
   // the whole result to S3 when a bucket is configured (src/probe_uploads.ts): a presigned PUT URL the script posts to, so the inline cap trims nothing
   let upload: { key: string; url: string } | null = null;
-  if (UPLOAD_KINDS.includes(kind) && (await probeUploadsReady())) {
+  if (await probeUploadsReady()) {
     try { upload = await presignProbeUpload({ accountId: creds.account_id, instanceId, kind, expiresInSeconds: def.timeout_seconds + 900 }); }
     catch (e: any) { console.warn(`[probe] ${instanceId} ${kind}: no upload URL (${String(e?.message || e).slice(0, 160)}); the inline answer alone`); }
   }
@@ -570,7 +570,7 @@ async function probeInstanceInner(instanceId: string, kind: ProbeKind, opts: Pro
     let commandId = "";
     let documentUsed = probeDocumentName(kind);
     try {
-      // what a document takes: the docker one the use-signal patterns, the sbom one the install switch, the software and sbom ones the upload URL;
+      // what a document takes: the docker one the use-signal patterns, the sbom one the install switch, every kind the upload URL (the whole result to S3);
       // withSignals is the legacy combined document's case
       // the extra parameters of this call: the sbom kind's images mode is dropped for a document that predates it (sbom 1.6); the images kind's batch never is (the document must be deployed)
       let extra: Record<string, string> = { ...(opts.parameters ?? {}) };
@@ -609,11 +609,11 @@ async function probeInstanceInner(instanceId: string, kind: ProbeKind, opts: Pro
           upload = null; sent = await send(documentUsed, def.takes_signals, false);
         } else if (/InvalidDocument\b/i.test(name) && legacyKindOf(kind) === "all" && legacyProbeDocumentName() !== documentUsed) {
           if (!warnedLegacyDocument.has(kind)) { warnedLegacyDocument.add(kind); console.warn(`[probe] SSM document ${documentUsed} does not exist; probing ${kind} through the pre-2.0 combined document ${legacyProbeDocumentName()} until it is created (Settings > Probes)`); }
-          documentUsed = legacyProbeDocumentName();
-          try { sent = await send(documentUsed, true); }
+          documentUsed = legacyProbeDocumentName(); upload = null; // the pre-2.0 document takes no upload parameter: the inline answer alone
+          try { sent = await send(documentUsed, true, false); }
           catch (e2: any) {
             if (!/InvalidParameters/i.test(String(e2?.name || e2?.message))) throw e2;
-            sent = await send(documentUsed, false); // a document from before 1.5 has no signals parameter
+            sent = await send(documentUsed, false, false); // a document from before 1.5 has no signals parameter
           }
         } else throw e;
       }

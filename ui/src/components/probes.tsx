@@ -68,8 +68,8 @@ export function ProbesCard() {
       </p>
       {d.uploads && (
         <p className="mb-3 text-sm text-zinc-400">
-          Whole results to S3 (software and sbom probes):{" "}
-          {!d.uploads.configured ? <>not configured. Set an upload bucket under Probe pass and the two probes post their whole result there instead of trimming to SSM's 24,000-character cap.</>
+          Whole results to S3 (every probe; the Strut ingest reads the bucket):{" "}
+          {!d.uploads.configured ? <>not configured. Set an upload bucket under Probe pass and every probe posts its whole result there (the software and sbom ones instead of trimming to SSM's 24,000-character cap).</>
             : d.uploads.ok ? <><span className="text-emerald-300">bucket {d.uploads.bucket} works</span> under <code className="text-zinc-200">{d.uploads.prefix}/</code>{d.uploads.identity ? <> as <code className="text-zinc-200">{d.uploads.identity}</code></> : null}{d.uploads.checked_at ? <> · checked {when(d.uploads.checked_at)}</> : null}.</>
             : <><span className="text-red-300">bucket {d.uploads.bucket} is not usable</span>{d.uploads.identity ? <> as <code className="text-zinc-200">{d.uploads.identity}</code></> : null}: {d.uploads.error}. The probes answer inline until it is. A bucket in another account needs a bucket policy for this role; the role needs s3:PutObject and s3:GetObject under the prefix and s3:ListBucket on the bucket.</>}
         </p>

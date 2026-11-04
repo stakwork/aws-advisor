@@ -4,6 +4,7 @@ import { K8sError, type K8sCluster, eksToken, k8sListAll } from "./k8s_client.js
 import { accountWhere, scopedStmt, type AccountScope } from "./scope.js";
 import { accountCredentials } from "./accounts.js";
 import { recordNodeImages, type NodeImage } from "./software_inventory.js";
+import { clusterImagesKey, probeUploadsReady, putProbeObject } from "./probe_uploads.js";
 
 /**
  * Clusters and the workloads inside them (docs/cloud-ontology.md §8 step 4): EKS clusters with their Kubernetes
@@ -188,7 +189,22 @@ export function workloadFromEcs(service: any, taskDef: any | undefined, tasks: a
 
 // ---- refresh ----------------------------------------------------------------------------------------------------------------
 
-export interface ClusterRefreshResult { clusters: number; workloads: number; services: number; ingresses: number; policies: number; /** pod images written onto the nodes' boxes (recordNodeImages) */ node_images: number; access: Record<string, string>; errors: string[]; took_ms: number }
+export interface ClusterRefreshResult { clusters: number; workloads: number; services: number; ingresses: number; policies: number; /** pod images written onto the nodes' boxes (recordNodeImages) */ node_images: number; /** cluster-images objects posted to the probe upload bucket (one per EKS cluster read) */ cluster_images_uploaded: number; access: Record<string, string>; errors: string[]; took_ms: number }
+
+/**
+ * The cluster-images object (docs/probe-s3-strut.md): what RUNS_IMAGE a Kubernetes node gets from the cluster API rather than from a
+ * probe (a node runs containerd and the software probe lists no images there), published to the probe upload bucket so the Strut
+ * ingest can write the nodes' image edges from S3 like any probe result. Every node of the cluster is listed, an empty `images` for
+ * one without pods, so an ingest can retire what a node no longer runs. Pure.
+ */
+export function clusterImagesObject(cluster: { arn: string; name: string }, collectedAt: string, byInstance: Map<string, NodeImage[]>): { probe: string; kind: "cluster-images"; collected_at: string; cluster_arn: string; cluster_name: string; nodes: { instance_id: string; images: NodeImage[] }[] } {
+  const nodes = [...byInstance].sort(([a], [b]) => a.localeCompare(b)).map(([instance_id, list]) => {
+    const seen = new Set<string>(); const images: NodeImage[] = [];
+    for (const i of list) { if (!i.image || seen.has(i.image)) continue; seen.add(i.image); images.push({ image: i.image, digest: i.digest ?? null, image_id: i.image_id ?? null, platform: i.platform ?? null }); }
+    return { instance_id, images };
+  });
+  return { probe: "aws-advisor/cluster-images/1", kind: "cluster-images", collected_at: collectedAt, cluster_arn: cluster.arn, cluster_name: cluster.name, nodes };
+}
 
 const upsertCluster = db.prepare(`insert into inventory_cluster(arn, kind, name, region, account_id, version, platform_version, status, endpoint, endpoint_public, public_cidrs, endpoint_private, vpc_id, security_groups, subnets, authentication_mode, oidc_issuer, ca_data, nodes, workloads, namespaces, access_status, access_error, access_checked_at, first_seen, last_seen, gone)
   values (@arn, @kind, @name, @region, @account_id, @version, @platform_version, @status, @endpoint, @endpoint_public, @public_cidrs, @endpoint_private, @vpc_id, @security_groups, @subnets, @authentication_mode, @oidc_issuer, @ca_data, @nodes, @workloads, @namespaces, @access_status, @access_error, @access_checked_at, @now, @now, 0)
@@ -213,7 +229,7 @@ function markGone(table: string, clusterArn: string, keep: string[], at: string)
 /** Reads every cluster and what runs in it; `attempt` is the inventory's Steampipe runner (records a failure, returns undefined). */
 export async function refreshClusters(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<ClusterRefreshResult> {
   const t0 = Date.now(); const at = now();
-  const res: ClusterRefreshResult = { clusters: 0, workloads: 0, services: 0, ingresses: 0, policies: 0, node_images: 0, access: {}, errors: [], took_ms: 0 };
+  const res: ClusterRefreshResult = { clusters: 0, workloads: 0, services: 0, ingresses: 0, policies: 0, node_images: 0, cluster_images_uploaded: 0, access: {}, errors: [], took_ms: 0 };
   const boxOf = nodeBoxResolver(); const platformOfBox = boxPlatforms();
   // the boxes that are cluster nodes this pass, and whether every EKS cluster was read: only then may a box that is no node any more lose its cluster image rows
   const nodeBoxes = new Set<string>(); let everyEksRead = true;
@@ -257,6 +273,11 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
           for (const i of byNode.get(name) ?? []) list.push({ ...i, platform: i.platform ?? platform });
         }
         res.node_images += recordNodeImages(at, byInstance).images; for (const id of byInstance.keys()) nodeBoxes.add(id);
+        // the same facts to the probe upload bucket for the Strut ingest; a failed upload is logged and costs nothing else
+        if (await probeUploadsReady()) {
+          try { await putProbeObject(clusterImagesKey(str(c.account_id), String(c.name), new Date(at)), clusterImagesObject({ arn: String(c.arn), name: String(c.name) }, at, byInstance)); res.cluster_images_uploaded++; }
+          catch (e: any) { console.error(`[clusters] ${c.name}: the cluster-images object was not uploaded (${String(e?.message || e).slice(0, 200)})`); }
+        }
         access = "ok";
       } catch (e: any) {
         everyEksRead = false;

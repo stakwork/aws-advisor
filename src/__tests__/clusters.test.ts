@@ -140,3 +140,17 @@ test("nodeImagesFromPods: the Running pods' container images per node, named as 
   ]);
   assert.deepEqual([...facts], [["ip-10-0-1-2.ec2.internal", { instance_id: "i-0abc0000000000001", platform: "linux/arm64" }], ["fargate-ip-10-0-9-9.ec2.internal", { instance_id: null, platform: null }]]);
 });
+
+test("clusterImagesObject: every node of the cluster with its images deduplicated by reference, an empty list for a node without pods, in a stable order", () => {
+  const byInstance = new Map([
+    ["i-0bbb", [{ image: "nginx:1.27", digest: "sha256:" + "b".repeat(64), image_id: null, platform: "linux/amd64" }]],
+    ["i-0aaa", [{ image: "ghcr.io/example/api:1.4.2", digest: "sha256:" + "a".repeat(64), image_id: null, platform: "linux/arm64" }, { image: "ghcr.io/example/api:1.4.2", digest: null, image_id: null, platform: null }, { image: "", digest: null, image_id: null, platform: null }]],
+    ["i-0ccc", []],
+  ]);
+  const o = ci.clusterImagesObject({ arn: ARN, name: "test" }, "2026-11-04T12:00:00.000Z", byInstance);
+  assert.deepEqual(o, { probe: "aws-advisor/cluster-images/1", kind: "cluster-images", collected_at: "2026-11-04T12:00:00.000Z", cluster_arn: ARN, cluster_name: "test", nodes: [
+    { instance_id: "i-0aaa", images: [{ image: "ghcr.io/example/api:1.4.2", digest: "sha256:" + "a".repeat(64), image_id: null, platform: "linux/arm64" }] },
+    { instance_id: "i-0bbb", images: [{ image: "nginx:1.27", digest: "sha256:" + "b".repeat(64), image_id: null, platform: "linux/amd64" }] },
+    { instance_id: "i-0ccc", images: [] },
+  ] });
+});
