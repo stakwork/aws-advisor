@@ -277,10 +277,19 @@ export interface ContainerImageRef { image_id: string; image: string; repository
 export interface ExecutesRow { container_node: string; id: string; path: string | null; sha256: string | null; size: number | null; first_seen: string; last_seen: string }
 export interface SbomGraphRow { edge: "installed_on" | "contains"; row: Record<string, unknown>; /** the container's edge to the executable, when it runs in a recorded container */ executes?: ExecutesRow }
 
+/** The source package a syft `upstream` qualifier names: deb and apk write `name` or `name@version`; rpm writes the source rpm's filename
+ *  (`libgcrypt-1.10.2-1.amzn2023.0.2.src.rpm`), whose name is what stands before `-<version>-<release>` (neither may hold a dash). Null for none. */
+export function sourcePackage(upstream: string | null | undefined): string | null {
+  if (!upstream) return null;
+  const u = upstream.split("@")[0]!;
+  if (/\.src\.rpm$/i.test(u)) return u.replace(/\.src\.rpm$/i, "").replace(/-[^-]+-[^-]+$/, "") || null;
+  return u || null;
+}
+
 export function sbomGraphRow(r: { instance_id: string; source: string; ref: string; purl: string; name: string; version: string | null; first_seen: string; last_seen: string; digest?: string | null; image_id?: string | null; platform?: string | null; /** the CPEs syft assigned, as the row stores them (a JSON list) or as a list; the rule forms candidates when none */ cpes?: string | string[] | null } & ContainerContext): SbomGraphRow | null {
   const p = parsePurl(String(r.purl)); if (!p) return null;
   const version = String(r.version || p.version || "unknown");
-  const upstream = p.qualifiers.upstream ? p.qualifiers.upstream.split("@")[0] || null : null;
+  const upstream = sourcePackage(p.qualifiers.upstream);
   const distro = /^(.+?)-([0-9][^-]*)$/.exec(p.qualifiers.distro ?? "");
   const distroId = DISTRO_ECOSYSTEMS.has(p.type) ? (distro?.[1] ?? p.namespace ?? null) : null;
   const advisory = distroId ? ecosystemOf(p.type, distroId, distro?.[2] ?? null)?.ecosystem ?? null : null;

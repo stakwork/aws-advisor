@@ -104,16 +104,17 @@ export function probeTargets(kind: ProbeKind = "host", limit?: number, opts: Pro
 export function probePass(kind: ProbeKind = "host", opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const running = inFlight.get(kind);
   if (running) return running;
-  const p = (kind === "images" ? runImages() : run(kind, opts)).finally(() => { inFlight.delete(kind); });
+  const p = (kind === "images" ? runImages(opts) : run(kind, opts)).finally(() => { inFlight.delete(kind); });
   inFlight.set(kind, p);
   return p;
 }
 
-/** The images kind by hand (Settings > Probes, or POST /api/probes/images/pass): the scanner half alone, as a pass result (candidates are the due images, probed the keys read). */
-async function runImages(): Promise<ProbePassResult> {
+/** The images kind by hand (Settings > Probes, or POST /api/probes/images/pass): the scanner half alone, as a pass result (candidates are the due images, probed the keys read).
+ *  `force` takes every image with a digest, the interval notwithstanding, as a forced per-box pass takes every box. */
+async function runImages(opts: { force?: boolean } = {}): Promise<ProbePassResult> {
   const t0 = Date.now();
   const passId = startPass("images", "manual");
-  const images = await imagePass(passId);
+  const images = await imagePass(passId, { force: opts.force === true });
   const failed = [...images.failed.map((f) => ({ instance_id: f.ref, code: f.status, message: f.note || `${f.status} on the scanner` })), ...images.commands_failed.map((c) => ({ instance_id: images.scanner || "*", code: c.code, message: c.message }))];
   if (!images.ok && images.reason && !failed.length) failed.push({ instance_id: images.scanner || "*", code: "skipped", message: images.reason });
   finishPass(passId, { candidates: images.candidates, probed: images.scanned.length, failed, note: imagesNote(images) });

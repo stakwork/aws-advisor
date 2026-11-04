@@ -44,6 +44,7 @@ test("dueImages: distinct registry images across running boxes, the most shared 
   assert.deepEqual(due.map((d) => d.image), ["api:v3", "redis:7"], "nginx was read within the window; api's reading is older than the window; redis failed");
   assert.deepEqual(ip.dueImages(3 * 24 * 60).map((d) => d.image), ["redis:7"], "a wider window keeps api");
   assert.deepEqual(ip.dueImages(undefined, 1).map((d) => d.image), ["api:v3"], "the limit");
+  assert.ok(ip.dueImages(0).map((d) => d.image).includes("redis:7"), "a window of 0 (a pass run by hand) counts an image read a moment ago as due again");
   // the same digest on another platform is another image to read
   images(B, [{ image: "nginx:1.27", digests: `nginx@${SHA("1")}`, platform: "linux/arm64" }]);
   assert.deepEqual(ip.dueImages().map((d) => [d.image, d.platform]), [["api:v3", "linux/arm64"], ["nginx:1.27", "linux/arm64"]], "nginx for arm64 is due, nginx for amd64 was read; redis left B");

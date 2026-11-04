@@ -94,20 +94,21 @@ export const sbomImagesMode = (r: ImagePassResult | null): "all" | "local" => (r
 
 const FATAL = new Set(["not_managed", "permission", "no_credentials", "quota"]);
 
-/** The image half of the sbom pass: due images in batches to the scanner, one command at a time; the hooks record each answer. */
-export async function imagePass(passId: number | null = null): Promise<ImagePassResult> {
+/** The image half of the sbom pass: due images in batches to the scanner, one command at a time; the hooks record each answer. `force` (Run pass now on
+ *  Settings > Probes, as for the per-box kinds) drops the interval window: every registry image the running boxes carry is due, however recently it was read. */
+export async function imagePass(passId: number | null = null, opts: { force?: boolean } = {}): Promise<ImagePassResult> {
   const t0 = Date.now(); const tag = "probe-pass:images";
   const res: ImagePassResult = { started_at: new Date().toISOString(), scanner: imageScanner(), ok: false, reason: null, candidates: 0, batches: 0, scanned: [], failed: [], commands_failed: [], took_ms: 0 };
   const done = (reason: string | null, ok = false) => { res.ok = ok; res.reason = reason; res.took_ms = Date.now() - t0; return res; };
   if (!res.scanner) return done("no image scanner configured (Settings > Probe pass > Image scanner instance)");
   const gate = await credentialGate(tag);
   if (!gate.ok) { console.log(`[${tag}] skipped: ${gate.error || "credentials not working"}`); return done(gate.error || "credentials not working"); }
-  const due = dueImages(); res.candidates = due.length;
-  if (!due.length) { console.log(`[${tag}] nothing due: every registry image the running boxes carry was read within ${windowMinutes()} min, or none has a digest`); return done(null, true); }
+  const due = dueImages(opts.force ? 0 : undefined); res.candidates = due.length;
+  if (!due.length) { console.log(`[${tag}] nothing due: ${opts.force ? "no running box carries a registry image with a digest" : `every registry image the running boxes carry was read within ${windowMinutes()} min, or none has a digest`}`); return done(null, true); }
   const uploads = await probeUploadsReady();
   const batches = batchImages(due.map(imageEntry), imageBatch(config.probeImagesTimeoutSeconds, uploads ? IMAGE_BATCH : INLINE_IMAGE_BATCH));
   res.batches = batches.length;
-  console.log(`[${tag}] ${due.length} image(s) due on ${res.scanner} (${due.reduce((n, d) => n + d.boxes, 0)} box-image pairs) in ${batches.length} batch(es)${uploads ? "" : "; no upload bucket, so small batches under the inline output cap (Settings > Probe pass > Upload bucket lifts that)"}`);
+  console.log(`[${tag}] ${due.length} image(s) due on ${res.scanner}${opts.force ? " (run by hand: the interval ignored, every image with a digest)" : ""} (${due.reduce((n, d) => n + d.boxes, 0)} box-image pairs) in ${batches.length} batch(es)${uploads ? "" : "; no upload bucket, so small batches under the inline output cap (Settings > Probe pass > Upload bucket lifts that)"}`);
   let answered = 0;
   for (const [i, batch] of batches.entries()) {
     const t1 = Date.now();

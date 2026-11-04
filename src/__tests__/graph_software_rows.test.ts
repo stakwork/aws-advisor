@@ -17,6 +17,15 @@ test("sbomGraphRow: a purl inside an image is a CONTAINS row keyed by the packag
   assert.equal(deb.row.advisory_ecosystem, "Debian:12", "the image's distribution, from the distro qualifier");
   assert.equal(deb.row.source_name, "openssl"); assert.equal(deb.row.source_purl, "pkg:deb/debian/openssl"); assert.equal(deb.row.purl, "pkg:deb/debian/libssl3");
   assert.equal(deb.row.version_purl, "pkg:deb/debian/libssl3@3.0.11-1~deb12u2?arch=amd64&upstream=openssl&distro=debian-12", "the purl as syft printed it, qualifiers included"); assert.equal(deb.row.source_kind, "syft");
+  // an Amazon Linux rpm as syft prints it: the namespace and distro say amazon_linux, os-release and the public graph say amzn; the upstream is the src.rpm filename
+  const al = g.sbomGraphRow({ ...base, source: "image", ref: "eks-node-monitoring-agent:v1.4.0", purl: "pkg:rpm/amazon_linux/libgcrypt@1.10.2-1.amzn2023.0.2?arch=x86_64&distro=amazon_linux-2023&upstream=libgcrypt-1.10.2-1.amzn2023.0.2.src.rpm", name: "libgcrypt", version: "1.10.2-1.amzn2023.0.2" })!;
+  assert.equal(al.row.purl, "pkg:rpm/amzn/libgcrypt", "the purl the rpm collector gives the same package, and the one ALAS ranges are filed under");
+  assert.equal(al.row.source_purl, "pkg:rpm/amzn/libgcrypt"); assert.equal(al.row.source_name, "libgcrypt", "the source package, not the src.rpm filename");
+  assert.equal(al.row.advisory_ecosystem, "Amazon Linux:2023", "the release tag, from the distro qualifier");
+  assert.equal(al.row.id, "pkg:rpm:libgcrypt:1.10.2-1.amzn2023.0.2");
+  assert.ok((al.row.cpes as string[]).every((c) => !c.includes(".src.rpm")), "no src.rpm filename leaks into the CPE candidates");
+  assert.equal(g.sourcePackage("python3-libs-3.9.16-1.amzn2023.0.10.src.rpm"), "python3-libs", "a dashed source name keeps its dashes");
+  assert.equal(g.sourcePackage("openssl@3.0.11-1~deb12u2"), "openssl"); assert.equal(g.sourcePackage("openssl"), "openssl"); assert.equal(g.sourcePackage(undefined), null);
   const npm = g.sbomGraphRow({ ...base, source: "dir", ref: "/", purl: "pkg:npm/%40aws-sdk/core@3.1.0", name: "@aws-sdk/core", version: "3.1.0" })!;
   assert.equal(npm.edge, "installed_on");
   assert.equal(npm.row.id, "pkg:npm:@aws-sdk/core:3.1.0"); assert.equal(npm.row.ecosystem, "npm"); assert.equal(npm.row.advisory_ecosystem, null);

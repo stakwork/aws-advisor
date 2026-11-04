@@ -749,8 +749,12 @@ a share of the free memory at the start of each scan (70 % on the scanner, 40 % 
 overrides, at least 512 MB): Go's own `GOMEMLIMIT` everywhere and a hard `MemoryMax` scope where systemd and cgroup v2
 answer, so a runaway read ends as one scan marked `error` with "killed at the memory cap", never as the box's OOM killer
 choosing; it runs at the lowest CPU and I/O priority (`nice`, `ionice`), and reads packages and binaries only: no
-per-file metadata or digests, no digging inside archives, no unknowns bookkeeping, and the catalogers that are neither
-(`SYFT_TRIM` in `src/probes.ts`) left out. The scanner answers with the same scan records; they are kept once per image (`image_sbom_scans`, `image_sbom`) and shown on every
+per-file metadata or digests, no unknowns bookkeeping, and the catalogers that are neither (`SYFT_TRIM` in
+`src/probes.ts`) left out, while the catalogers of installed packages that syft runs for images only (node_modules,
+composer, gemspec, conan, bitnami) are added, so a directory read (the export on the scanner, a container's root or the
+filesystem on a box) sees installed packages the way an image read does; without that a Node image's export came back with
+no npm packages at all. The jars inside a jar are still read (syft's default): a library bundled in an application's fat
+jar is what a vulnerability match has to see. The scanner answers with the same scan records; they are kept once per image (`image_sbom_scans`, `image_sbom`) and shown on every
 box that runs the image, whose `CONTAINS` edges carry the platform they were read on. The boxes then get
 `images=local` and scan only images with no registry digest (built or loaded on the box). Without a scanner, when it is
 not SSM-online, when its first batch fails, or when the sbom document predates the parameter, the boxes scan every image

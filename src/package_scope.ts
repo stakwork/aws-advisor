@@ -1,4 +1,5 @@
 import { slug } from "./sec/purl.js";
+import { distroId } from "./sec/identity.js";
 
 /**
  * Two things the software layer of the graph says about a package so the vulnerability match (a strut workflow walking
@@ -13,7 +14,7 @@ export interface Ecosystem { feed: "osv" | "alas"; ecosystem: string; release?: 
 
 /** The release-qualified advisory ecosystem of a box's packages, or null for a distribution no public feed covers (RHEL, CentOS, Fedora, SUSE, ...). */
 export function ecosystemOf(pm: string | null | undefined, osId: string | null | undefined, osVersion: string | null | undefined): Ecosystem | null {
-  const id = slug(String(osId ?? "")); const ver = String(osVersion ?? "").trim();
+  const id = distroId(osId); const ver = String(osVersion ?? "").trim();
   if (id === "amzn") return ver === "2" || ver === "2023" ? { feed: "alas", ecosystem: `Amazon Linux:${ver}`, release: ver } : null;
   if (pm === "deb") {
     if (id === "ubuntu" && /^\d\d\.\d\d$/.test(ver)) { const [yy, mm] = ver.split(".").map(Number); return { feed: "osv", ecosystem: yy! % 2 === 0 && mm === 4 ? `Ubuntu:${ver}:LTS` : `Ubuntu:${ver}` }; }

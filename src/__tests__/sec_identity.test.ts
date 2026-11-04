@@ -48,6 +48,9 @@ test("componentIdentity: what each kind of installed row becomes", () => {
   assert.equal(componentIdentity({ ecosystem: "runtime", name: "node", version: "22" }).sort_key, null);
   assert.equal(distroOf("deb", null), "debian");
   assert.equal(distroOf("rpm", "Rocky"), "rocky");
+  assert.equal(distroOf("rpm", "amazon_linux"), "amzn", "syft's spelling of Amazon Linux lands on os-release's, so a syft package and an rpm collector package share a purl");
+  assert.equal(componentIdentity({ ecosystem: "rpm", name: "libgcrypt", version: "1.10.2-1.amzn2023.0.2", os_id: "amazon_linux" }).purl, "pkg:rpm/amzn/libgcrypt");
+  assert.equal(componentIdentity({ ecosystem: "rpm", name: "libgcrypt", version: "1.10.2-1.amzn2023.0.2", os_id: "amzn" }).purl, "pkg:rpm/amzn/libgcrypt");
 });
 
 test("the vendored modules match the vuln-graph workspace when it is checked out beside this repo", (t) => {

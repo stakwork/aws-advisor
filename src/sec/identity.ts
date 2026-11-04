@@ -43,9 +43,19 @@ export const isVersionLine = (v: string): boolean => /[x*]/i.test(v) || /^\d+$/.
 
 export const DISTRO_ECOSYSTEMS = new Set(["deb", "rpm", "apk"]);
 
-/** The distribution segment of a distro package's purl: the box's os_id, else the ecosystem's usual home. */
+/** Other spellings of a distribution id, to the one os-release prints (what the rpm collector records and the public graph keys on):
+ *  syft names Amazon Linux `amazon_linux` in an rpm purl's namespace and distro qualifier (`distro=amazon_linux-2023`), os-release says `amzn`. */
+const DISTRO_IDS: Record<string, string> = { "amazon-linux": "amzn", amazonlinux: "amzn" };
+
+/** A distribution id as os-release spells it: slugged, then any other source's spelling mapped (`amazon_linux` → `amzn`); "" for none. */
+export function distroId(osId: string | null | undefined): string {
+  const s = slug(osId ?? "");
+  return DISTRO_IDS[s] ?? s;
+}
+
+/** The distribution segment of a distro package's purl: the box's os_id (distroId), else the ecosystem's usual home. */
 export function distroOf(ecosystem: string, osId: string | null | undefined): string {
-  return slug(osId ?? "") || ({ deb: "debian", rpm: "rpm", apk: "alpine" } as Record<string, string>)[ecosystem] || "unknown";
+  return distroId(osId) || ({ deb: "debian", rpm: "rpm", apk: "alpine" } as Record<string, string>)[ecosystem] || "unknown";
 }
 
 export function componentIdentity(row: InstalledRow): Identity {

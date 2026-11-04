@@ -466,11 +466,13 @@ test("the images script: each entry of the batch is pulled from its registry by 
   // sbom 1.8: syft is trimmed to packages and binaries and runs under the cap at low priority, on the scanner and on the boxes alike
   for (const kind of ["sbom", "images"] as const) {
     const s = pr.defaultProbeScript(kind);
-    for (const v of ["SYFT_FILE_METADATA_SELECTION=none", "SYFT_PACKAGE_SEARCH_INDEXED_ARCHIVES=false", "SYFT_PACKAGE_SEARCH_UNINDEXED_ARCHIVES=false", "SYFT_UNKNOWNS_EXECUTABLES_WITHOUT_PACKAGES=false", "SYFT_PARALLELISM=1", `SYFT_SELECT_CATALOGERS='${pr.SYFT_TRIM}'`, "GOMEMLIMIT=$lastcap", "-p MemoryMax=$lastcap", "nice -n 19"]) assert.ok(s.includes(v), `${kind}: ${v}`);
+    assert.ok(!s.includes("SYFT_PACKAGE_SEARCH_INDEXED_ARCHIVES"), `${kind}: the jars inside a jar are read (syft's default): a bundled library is what the match needs to see`);
+    for (const v of ["SYFT_FILE_METADATA_SELECTION=none", "SYFT_PACKAGE_SEARCH_UNINDEXED_ARCHIVES=false", "SYFT_UNKNOWNS_EXECUTABLES_WITHOUT_PACKAGES=false", "SYFT_PARALLELISM=1", `SYFT_SELECT_CATALOGERS='${pr.SYFT_TRIM}'`, "GOMEMLIMIT=$lastcap", "-p MemoryMax=$lastcap", "nice -n 19"]) assert.ok(s.includes(v), `${kind}: ${v}`);
     assert.ok(!/\btmo "\$secs" "\$syft"/.test(s), `${kind}: every syft read goes through syftrun`);
   }
   assert.equal(pr.defaultProbeScript("images").match(/^mem_pct=70$/m)?.[0], "mem_pct=70"); assert.equal(pr.defaultProbeScript("sbom").match(/^mem_pct=40$/m)?.[0], "mem_pct=40");
-  for (const name of pr.SYFT_TRIM.split(",")) assert.match(name, /^-[a-z-]+-cataloger$/);
+  for (const name of pr.SYFT_TRIM.split(",")) assert.match(name, /^[-+][a-z-]+-cataloger$/);
+  assert.ok(pr.SYFT_TRIM.includes("+javascript-package-cataloger"), "a directory read (the export, a container root, the filesystem) must see installed node_modules, which syft tags for images only");
   assert.equal(fs.readFileSync(path.join(dir, "cfg-at-pull.json"), "utf8"), '{"auths":{"https://index.docker.io/v1/":{"auth":"aHVi"}}}', "the pull ran with a copy of root's docker config: the Hub login applies");
   assert.equal(fs.readFileSync(path.join(home, ".docker", "config.json"), "utf8"), '{"auths":{"https://index.docker.io/v1/":{"auth":"aHVi"}}}', "root's own file is untouched");
   assert.equal(dl.filter((l) => l.startsWith("docker image rm -f ")).length, 4, "the two scanned images and the two failed pulls");

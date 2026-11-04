@@ -15,6 +15,7 @@ test("ecosystemOf: release-qualified ecosystems the way OSV indexes them; Amazon
   assert.deepEqual(ps.ecosystemOf("rpm", "amzn", "2023"), { feed: "alas", ecosystem: "Amazon Linux:2023", release: "2023" });
   assert.deepEqual(ps.ecosystemOf("rpm", "amzn", "2"), { feed: "alas", ecosystem: "Amazon Linux:2", release: "2" });
   assert.equal(ps.ecosystemOf("rpm", "amzn", "2018.03"), null);
+  assert.deepEqual(ps.ecosystemOf("rpm", "amazon_linux", "2023"), { feed: "alas", ecosystem: "Amazon Linux:2023", release: "2023" }, "syft's distro qualifier (amazon_linux-2023) names the same release");
   assert.equal(ps.ecosystemOf("rpm", "rhel", "9.3"), null);
   assert.equal(ps.ecosystemOf(null, null, null), null);
 });
