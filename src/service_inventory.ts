@@ -236,7 +236,16 @@ export function goneScope(rows: ServiceRow[], primary: string | null): string[] 
   return [...accounts];
 }
 
-export async function refreshServiceInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}, primary: string | null = null): Promise<Record<string, number>> {
+/** Read-only collection: ServiceRow[] per native_type (acm_certificate, sns_topic, kms_key, ...; stable id: (native_type, id) with arn where the service has one), plus `threat_findings` (GuardDuty findings, id) when read. KMS references are resolved. No SQLite. */
+export async function collectServiceInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}, primary: string | null = null): Promise<Record<string, any[]>> {
+  const c = await collectServiceRows(onError, onLog);
+  const out: Record<string, any[]> = {};
+  for (const r of c.rows) (out[r.native_type] ??= []).push(r);
+  if (c.findings) out.threat_findings = c.findings;
+  return out;
+}
+
+async function collectServiceRows(onError: (m: string) => void, onLog: (l: string) => void): Promise<{ rows: ServiceRow[]; complete: Set<NativeType>; findings: ThreatFinding[] | null }> {
   const { SERVICE_COLLECTORS } = await import("./services/index.js");
   const ctx: CollectContext = { onError, onLog, select: (t, c, o = {}) => selectAvailable(t, c, o, onError, onLog), metrics: metricSums };
   const rows: ServiceRow[] = []; const complete = new Set<NativeType>(); let findings: ThreatFinding[] | null = null;
@@ -247,6 +256,11 @@ export async function refreshServiceInventory(onError: (m: string) => void = () 
   // KMS references (an alias on a topic, a key id on a file system) become the key's ARN, so ENCRYPTS lands on the key node
   const resolveKey = kmsResolver(rows.filter((r) => r.native_type === "kms_key"));
   for (const r of rows) for (const l of r.links) if (l.resolve === "kms_key") { l.other = resolveKey(l.other, r.account_id, r.region); delete l.resolve; }
+  return { rows, complete, findings };
+}
+
+export async function refreshServiceInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}, primary: string | null = null): Promise<Record<string, number>> {
+  const { rows, complete, findings } = await collectServiceRows(onError, onLog);
   const now = new Date().toISOString();
   const accounts = goneScope(rows, primary);
   const counts: Record<string, number> = {};

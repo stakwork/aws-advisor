@@ -210,6 +210,8 @@ export const config = {
   doormanPort: /^(0|off|false|none)$/i.test(String(process.env.DOORMAN_PORT ?? "").trim()) ? 0 : Number(process.env.DOORMAN_PORT || 9035),
   /** Bearer token the MCP fact server at /mcp expects. Unset = open (local dev only). */
   mcpToken: process.env.MCP_TOKEN || "",
+  /** Bearer token for machine clients of GET|POST /api/inventory/export (src/routes/inventory_export.ts). Unset = only the usual API_TOKEN credentials. */
+  inventoryExportToken: process.env.INVENTORY_EXPORT_TOKEN || "",
   /** SSM document the probe runs through. The custom document embeds the fixed script, so ssm:SendCommand
    *  can be granted on it alone. AWS-RunShellScript runs ANY shell text and is refused outside the tests.
    *  Environment only: it is part of the IAM scoping, not something to change from a browser. */

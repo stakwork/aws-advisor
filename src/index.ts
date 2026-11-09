@@ -19,6 +19,7 @@ import { actions } from "./routes/actions.js";
 import { accounts } from "./routes/accounts.js";
 import { passReports } from "./routes/pass_reports.js";
 import { access } from "./routes/access.js";
+import { inventoryExport } from "./routes/inventory_export.js";
 import { ensureOperationalPatterns } from "./concepts.js";
 loadTasks();
 void ensureOperationalPatterns(); // the operational-pattern Concepts, seeded once into the graph
@@ -48,6 +49,7 @@ process.on("uncaughtException", (err) => console.error(`[fatal-avoided] uncaught
 // between (the advisor unreachable), never when the advisor is reporting an upstream failure (Neo4j, AWS, the agent)
 app.use("/api", (_req, res, next) => { res.setHeader("x-advisor", "1"); next(); });
 app.use("/api", callback); // the agent webhook: before every authenticated router
+app.use("/api", inventoryExport); // per-route auth (API credentials or INVENTORY_EXPORT_TOKEN): before the routers that gate all of /api
 app.use("/api", browse);
 app.use("/api", knowledge);
 app.use("/api", graph);

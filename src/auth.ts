@@ -35,3 +35,13 @@ export function signToken(expiresIn = "1h"): string {
   if (!config.apiToken) return "";
   return jwt.sign({ app: "aws-advisor" }, config.apiToken, { expiresIn: expiresIn as any });
 }
+
+/** Auth for the inventory export routes: the usual API credentials, or INVENTORY_EXPORT_TOKEN as a bearer / x-api-token. */
+export function exportAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  const t = config.inventoryExportToken;
+  if (t) {
+    const bearer = req.header("authorization")?.replace(/^Bearer\s+/i, "");
+    if (safeEqual(bearer, t) || safeEqual(req.header("x-api-token"), t)) return next();
+  }
+  return authMiddleware(req, res, next);
+}

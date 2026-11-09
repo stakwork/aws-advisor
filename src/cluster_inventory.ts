@@ -226,22 +226,35 @@ function markGone(table: string, clusterArn: string, keep: string[], at: string)
   void at;
 }
 
-/** Reads every cluster and what runs in it; `attempt` is the inventory's Steampipe runner (records a failure, returns undefined). */
-export async function refreshClusters(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<ClusterRefreshResult> {
-  const t0 = Date.now(); const at = now();
-  const res: ClusterRefreshResult = { clusters: 0, workloads: 0, services: 0, ingresses: 0, policies: 0, node_images: 0, cluster_images_uploaded: 0, access: {}, errors: [], took_ms: 0 };
-  const boxOf = nodeBoxResolver(); const platformOfBox = boxPlatforms();
-  // the boxes that are cluster nodes this pass, and whether every EKS cluster was read: only then may a box that is no node any more lose its cluster image rows
-  const nodeBoxes = new Set<string>(); let everyEksRead = true;
+export interface ClusterCollected {
+  collected_at: string;
+  /** inventory_cluster params minus `now` (EKS rows have workloads = null when the cluster API could not be read: the refresh keeps the stored count) */
+  clusters: Record<string, any>[];
+  workloads: WorkloadRow[]; services: ServiceRow[]; ingresses: IngressRow[]; policies: NetworkPolicyRow[];
+  /** per node box of an EKS cluster: the pod images it runs (an instance with no pods has an empty list) */
+  nodes: { cluster_arn: string; cluster_name: string; account_id: string | null; instance_id: string; images: NodeImage[] }[];
+  /** ARNs of the EKS clusters whose Kubernetes API was read (the only ones whose workloads/services/ingresses/policies are complete) */
+  eks_read: string[]; eks_listed: boolean; ecs_listed: boolean;
+  access: Record<string, string>; errors: string[];
+}
+
+/**
+ * Read-only collection: every cluster and what runs in it; `attempt` is the inventory's Steampipe runner (records a failure, returns undefined).
+ * Returns { clusters, workloads, services, ingresses, policies, nodes, eks_read, ... } (see ClusterCollected); stable ids: clusters.arn, workloads/services/ingresses/policies .id.
+ * `boxOf` / `platformOfBox` (node name -> instance id, instance id -> platform; from the EC2 inventory) are injected, empty by default. No SQLite, no uploads.
+ */
+export async function collectClusters(attempt: (what: string, sql: string) => Promise<any[] | undefined>, boxOf: (node: string) => string | null = () => null, platformOfBox: Map<string, string> = new Map()): Promise<ClusterCollected> {
+  const at = now();
+  const res: ClusterCollected = { collected_at: at, clusters: [], workloads: [], services: [], ingresses: [], policies: [], nodes: [], eks_read: [], eks_listed: false, ecs_listed: false, access: {}, errors: [] };
   const [eks, nodeGroups, ecs, ecsServices, taskDefs, tasks, cis] = await Promise.all([attempt("EKS clusters", CLUSTER_SQL.eks), attempt("EKS node groups", CLUSTER_SQL.eks_nodes), attempt("ECS clusters", CLUSTER_SQL.ecs), attempt("ECS services", CLUSTER_SQL.ecs_services), attempt("ECS task definitions", CLUSTER_SQL.ecs_task_definitions), attempt("ECS tasks", CLUSTER_SQL.ecs_tasks), attempt("ECS container instances", CLUSTER_SQL.ecs_container_instances)]);
-  const seenClusters: string[] = [];
+  res.eks_listed = Boolean(eks); res.ecs_listed = Boolean(ecs);
   // EKS: the cluster from Steampipe, the workloads from the cluster API
   for (const c of eks ?? []) {
     const vpc = obj(c.resources_vpc_config); const ca = obj(c.certificate_authority);
     const cluster: K8sCluster = { name: String(c.name), endpoint: String(c.endpoint || ""), ca_data: str(ca.Data ?? ca.data), region: String(c.region) };
     const ng = (nodeGroups ?? []).filter((g: any) => g.cluster_name === c.name);
     const nodes = ng.reduce((s: number, g: any) => s + Number(obj(g.scaling_config).DesiredSize ?? obj(g.scaling_config).desiredSize ?? 0), 0);
-    let access = "unknown"; let accessError: string | null = null; let workloads = 0; const namespaces = new Set<string>();
+    let access = "unknown"; let accessError: string | null = null; let workloads: number | null = 0; const namespaces = new Set<string>();
     if (cluster.endpoint) {
       try {
         const token = await eksToken(cluster, accountCredentials(str(c.account_id)));
@@ -256,14 +269,9 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
         const rows: WorkloadRow[] = [];
         for (const [list, kind] of kinds) for (const o of list) { if (kind === "Job" && (o.metadata?.ownerReferences || []).some((r: any) => r.kind === "CronJob")) continue; rows.push(workloadFromK8s(String(c.arn), { ...o, kind }, pods)); }
         const svcRows = services.map((o) => serviceFromK8s(String(c.arn), o)); const ingRows = ingresses.map((o) => ingressFromK8s(String(c.arn), o)); const polRows = policies.map((o) => policyFromK8s(String(c.arn), o));
-        db.transaction(() => {
-          for (const w of rows) { upsertWorkload.run({ ...w, containers: json(w.containers), images: json(w.images), labels: json(w.labels), selector: json(w.selector), nodes: json(w.nodes), now: at }); if (w.namespace) namespaces.add(w.namespace); }
-          for (const s of svcRows) upsertService.run({ ...s, ports: json(s.ports), selector: json(s.selector), lb_hostnames: json(s.lb_hostnames), now: at });
-          for (const i of ingRows) upsertIngress.run({ ...i, hosts: json(i.hosts), rules: json(i.rules), lb_hostnames: json(i.lb_hostnames), tls: i.tls ? 1 : 0, now: at });
-          for (const p of polRows) upsertPolicy.run({ ...p, pod_selector: json(p.pod_selector), policy_types: json(p.policy_types), ingress: json(p.ingress), egress: json(p.egress), now: at });
-          markGone("cluster_workloads", String(c.arn), rows.map((r) => r.id), at); markGone("cluster_services", String(c.arn), svcRows.map((r) => r.id), at); markGone("cluster_ingresses", String(c.arn), ingRows.map((r) => r.id), at); markGone("cluster_network_policies", String(c.arn), polRows.map((r) => r.id), at);
-        })();
-        workloads = rows.length; res.workloads += rows.length; res.services += svcRows.length; res.ingresses += ingRows.length; res.policies += polRows.length;
+        for (const w of rows) if (w.namespace) namespaces.add(w.namespace);
+        res.workloads.push(...rows); res.services.push(...svcRows); res.ingresses.push(...ingRows); res.policies.push(...polRows); res.eks_read.push(String(c.arn));
+        workloads = rows.length;
         // the pods' images onto the nodes' boxes: every node of the cluster (so one that emptied loses its rows), its instance from the Node's providerID, else its DNS name
         const facts = nodeFacts(nodeObjs); const byNode = nodeImagesFromPods(pods); const byInstance = new Map<string, NodeImage[]>();
         for (const name of new Set([...facts.keys(), ...byNode.keys()])) {
@@ -272,26 +280,18 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
           const list = byInstance.get(instance) ?? []; byInstance.set(instance, list);
           for (const i of byNode.get(name) ?? []) list.push({ ...i, platform: i.platform ?? platform });
         }
-        res.node_images += recordNodeImages(at, byInstance).images; for (const id of byInstance.keys()) nodeBoxes.add(id);
-        // the same facts to the probe upload bucket for the Strut ingest; a failed upload is logged and costs nothing else
-        if (await probeUploadsReady()) {
-          try { await putProbeObject(clusterImagesKey(str(c.account_id), String(c.name), new Date(at)), clusterImagesObject({ arn: String(c.arn), name: String(c.name) }, at, byInstance)); res.cluster_images_uploaded++; }
-          catch (e: any) { console.error(`[clusters] ${c.name}: the cluster-images object was not uploaded (${String(e?.message || e).slice(0, 200)})`); }
-        }
+        for (const [instance_id, images] of byInstance) res.nodes.push({ cluster_arn: String(c.arn), cluster_name: String(c.name), account_id: str(c.account_id), instance_id, images });
         access = "ok";
       } catch (e: any) {
-        everyEksRead = false;
         access = e instanceof K8sError ? e.code : "error"; accessError = String(e?.message || e).slice(0, 300);
-        res.errors.push(`${c.name}: ${accessError}`);
-        workloads = Number((db.prepare("select count(*) as n from cluster_workloads where cluster_arn = ? and gone = 0").get(String(c.arn)) as any)?.n || 0);
+        workloads = null; res.errors.push(`${c.name}: ${accessError}`);
       }
-    } else { access = "unreachable"; accessError = "no endpoint"; everyEksRead = false; }
+    } else { access = "unreachable"; accessError = "no endpoint"; }
     res.access[String(c.name)] = access;
-    upsertCluster.run({ arn: String(c.arn), kind: "eks", name: String(c.name), region: str(c.region), account_id: str(c.account_id), version: str(c.version), platform_version: str(c.platform_version), status: str(c.status), endpoint: str(c.endpoint),
+    res.clusters.push({ arn: String(c.arn), kind: "eks", name: String(c.name), region: str(c.region), account_id: str(c.account_id), version: str(c.version), platform_version: str(c.platform_version), status: str(c.status), endpoint: str(c.endpoint),
       endpoint_public: vpc.EndpointPublicAccess == null ? null : vpc.EndpointPublicAccess ? 1 : 0, public_cidrs: json(vpc.PublicAccessCidrs ?? []), endpoint_private: vpc.EndpointPrivateAccess == null ? null : vpc.EndpointPrivateAccess ? 1 : 0, vpc_id: str(vpc.VpcId),
       security_groups: json([...(vpc.SecurityGroupIds ?? []), ...(vpc.ClusterSecurityGroupId ? [vpc.ClusterSecurityGroupId] : [])]), subnets: json(vpc.SubnetIds ?? []), authentication_mode: str(obj(c.access_config).authenticationMode ?? obj(c.access_config).AuthenticationMode) || "CONFIG_MAP",
-      oidc_issuer: str(obj(c.identity).oidc?.issuer ?? obj(c.identity).Oidc?.Issuer), ca_data: cluster.ca_data, nodes, workloads, namespaces: json([...namespaces].sort()), access_status: access, access_error: accessError, access_checked_at: at, now: at });
-    seenClusters.push(String(c.arn)); res.clusters++;
+      oidc_issuer: str(obj(c.identity).oidc?.issuer ?? obj(c.identity).Oidc?.Issuer), ca_data: cluster.ca_data, nodes, workloads, namespaces: json([...namespaces].sort()), access_status: access, access_error: accessError, access_checked_at: at });
   }
   // ECS: everything from Steampipe
   const tdByArn = new Map((taskDefs ?? []).map((t: any) => [String(t.task_definition_arn), t]));
@@ -299,17 +299,63 @@ export async function refreshClusters(attempt: (what: string, sql: string) => Pr
   for (const c of ecs ?? []) {
     const services = (ecsServices ?? []).filter((s: any) => s.cluster_arn === c.cluster_arn);
     const rows = services.map((s: any) => workloadFromEcs(s, tdByArn.get(String(s.task_definition)), (tasks ?? []).filter((t: any) => t.cluster_arn === c.cluster_arn), ciToInstance));
+    res.workloads.push(...rows);
+    res.clusters.push({ arn: String(c.cluster_arn), kind: "ecs", name: String(c.cluster_name), region: str(c.region), account_id: str(c.account_id), version: null, platform_version: null, status: str(c.status), endpoint: null, endpoint_public: null, public_cidrs: "[]", endpoint_private: null, vpc_id: null, security_groups: "[]", subnets: "[]",
+      authentication_mode: null, oidc_issuer: null, ca_data: null, nodes: num(c.registered_container_instances_count), workloads: rows.length, namespaces: "[]", access_status: "ok", access_error: null, access_checked_at: at });
+  }
+  return res;
+}
+
+/** Reads every cluster and what runs in it, and stores it; `attempt` is the inventory's Steampipe runner (records a failure, returns undefined). */
+export async function refreshClusters(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<ClusterRefreshResult> {
+  const t0 = Date.now();
+  const res: ClusterRefreshResult = { clusters: 0, workloads: 0, services: 0, ingresses: 0, policies: 0, node_images: 0, cluster_images_uploaded: 0, access: {}, errors: [], took_ms: 0 };
+  const col = await collectClusters(attempt, nodeBoxResolver(), boxPlatforms());
+  const at = col.collected_at;
+  res.access = col.access; res.errors = col.errors;
+  // the boxes that are cluster nodes this pass, and whether every EKS cluster was read: only then may a box that is no node any more lose its cluster image rows
+  const nodeBoxes = new Set<string>(col.nodes.map((n) => n.instance_id));
+  const eksClusters = col.clusters.filter((c) => c.kind === "eks");
+  const everyEksRead = eksClusters.every((c) => col.eks_read.includes(c.arn));
+  const seenClusters: string[] = [];
+  for (const c of eksClusters) {
+    const arn = String(c.arn); let workloads = c.workloads;
+    if (col.eks_read.includes(arn)) {
+      const rows = col.workloads.filter((w) => w.cluster_arn === arn); const svcRows = col.services.filter((w) => w.cluster_arn === arn); const ingRows = col.ingresses.filter((w) => w.cluster_arn === arn); const polRows = col.policies.filter((w) => w.cluster_arn === arn);
+      db.transaction(() => {
+        for (const w of rows) upsertWorkload.run({ ...w, containers: json(w.containers), images: json(w.images), labels: json(w.labels), selector: json(w.selector), nodes: json(w.nodes), now: at });
+        for (const s of svcRows) upsertService.run({ ...s, ports: json(s.ports), selector: json(s.selector), lb_hostnames: json(s.lb_hostnames), now: at });
+        for (const i of ingRows) upsertIngress.run({ ...i, hosts: json(i.hosts), rules: json(i.rules), lb_hostnames: json(i.lb_hostnames), tls: i.tls ? 1 : 0, now: at });
+        for (const p of polRows) upsertPolicy.run({ ...p, pod_selector: json(p.pod_selector), policy_types: json(p.policy_types), ingress: json(p.ingress), egress: json(p.egress), now: at });
+        markGone("cluster_workloads", arn, rows.map((r) => r.id), at); markGone("cluster_services", arn, svcRows.map((r) => r.id), at); markGone("cluster_ingresses", arn, ingRows.map((r) => r.id), at); markGone("cluster_network_policies", arn, polRows.map((r) => r.id), at);
+      })();
+      res.workloads += rows.length; res.services += svcRows.length; res.ingresses += ingRows.length; res.policies += polRows.length;
+      const byInstance = new Map<string, NodeImage[]>(); for (const n of col.nodes.filter((n) => n.cluster_arn === arn)) byInstance.set(n.instance_id, n.images);
+      res.node_images += recordNodeImages(at, byInstance).images;
+      // the same facts to the probe upload bucket for the Strut ingest; a failed upload is logged and costs nothing else
+      if (await probeUploadsReady()) {
+        try { await putProbeObject(clusterImagesKey(c.account_id, String(c.name), new Date(at)), clusterImagesObject({ arn, name: String(c.name) }, at, byInstance)); res.cluster_images_uploaded++; }
+        catch (e: any) { console.error(`[clusters] ${c.name}: the cluster-images object was not uploaded (${String(e?.message || e).slice(0, 200)})`); }
+      }
+    } else if (workloads == null) {
+      workloads = Number((db.prepare("select count(*) as n from cluster_workloads where cluster_arn = ? and gone = 0").get(arn) as any)?.n || 0);
+    }
+    upsertCluster.run({ ...c, workloads, now: at });
+    seenClusters.push(arn); res.clusters++;
+  }
+  // ECS: everything from Steampipe
+  for (const c of col.clusters.filter((c) => c.kind === "ecs")) {
+    const rows = col.workloads.filter((w) => w.cluster_arn === c.arn);
     db.transaction(() => {
       for (const w of rows) upsertWorkload.run({ ...w, containers: json(w.containers), images: json(w.images), labels: json(w.labels), selector: json(w.selector), nodes: json(w.nodes), now: at });
-      markGone("cluster_workloads", String(c.cluster_arn), rows.map((r) => r.id), at);
+      markGone("cluster_workloads", String(c.arn), rows.map((r) => r.id), at);
     })();
-    upsertCluster.run({ arn: String(c.cluster_arn), kind: "ecs", name: String(c.cluster_name), region: str(c.region), account_id: str(c.account_id), version: null, platform_version: null, status: str(c.status), endpoint: null, endpoint_public: null, public_cidrs: "[]", endpoint_private: null, vpc_id: null, security_groups: "[]", subnets: "[]",
-      authentication_mode: null, oidc_issuer: null, ca_data: null, nodes: num(c.registered_container_instances_count), workloads: rows.length, namespaces: "[]", access_status: "ok", access_error: null, access_checked_at: at, now: at });
-    seenClusters.push(String(c.cluster_arn)); res.clusters++; res.workloads += rows.length;
+    upsertCluster.run({ ...c, now: at });
+    seenClusters.push(String(c.arn)); res.clusters++; res.workloads += rows.length;
   }
   // a box that was a node and is one no more (scaled out of the cluster, moved to another): its pod images go with the pods; an unread cluster keeps its nodes' rows
-  if (eks && everyEksRead) db.prepare(`delete from instance_images where source = 'cluster'${nodeBoxes.size ? ` and instance_id not in (${[...nodeBoxes].map(() => "?").join(",")})` : ""}`).run(...nodeBoxes);
-  if (eks && ecs) db.prepare(`update inventory_cluster set gone = 1 where gone = 0${seenClusters.length ? ` and arn not in (${seenClusters.map(() => "?").join(",")})` : ""}`).run(...seenClusters);
+  if (col.eks_listed && everyEksRead) db.prepare(`delete from instance_images where source = 'cluster'${nodeBoxes.size ? ` and instance_id not in (${[...nodeBoxes].map(() => "?").join(",")})` : ""}`).run(...nodeBoxes);
+  if (col.eks_listed && col.ecs_listed) db.prepare(`update inventory_cluster set gone = 1 where gone = 0${seenClusters.length ? ` and arn not in (${seenClusters.map(() => "?").join(",")})` : ""}`).run(...seenClusters);
   res.took_ms = Date.now() - t0;
   return res;
 }

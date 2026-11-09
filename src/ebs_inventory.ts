@@ -113,12 +113,39 @@ function applyLatestProbes(): number {
 
 // ---- refresh ------------------------------------------------------------------------------------------
 
-export async function refreshEbsInventory(onError: (m: string) => void = () => {}): Promise<number> {
+/** Read-only collection: rows `refreshEbsInventory` persists (minus `now`), plus account_id. Stable id: volume_id. */
+export async function collectEbsInventory(onError: (m: string) => void = () => {}): Promise<Record<string, any>[]> {
+  return (await collectEbsRows(onError)) ?? [];
+}
+
+/** null = the volume list could not be read (refresh then leaves the table untouched). */
+async function collectEbsRows(onError: (m: string) => void): Promise<Record<string, any>[] | null> {
   let vols: any[];
   try { vols = await query<any>(`select volume_id, account_id, region, volume_type, size, iops, throughput, state, encrypted, attachments, create_time, tags ->> 'Name' as name from ${S}.aws_ebs_volume`); }
-  catch (e) { onError(describeError(e, "ebs inventory (aws_ebs_volume)")); return 0; }
+  catch (e) { onError(describeError(e, "ebs inventory (aws_ebs_volume)")); return null; }
   const agg = async (table: string) => { try { return new Map((await query<any>(`select volume_id, sum(sum) as total, max(maximum * sample_count / 86400.0) as peak_ps, count(*) as days from ${S}.${table} where timestamp > now() - interval '30 days' group by 1`)).map((r) => [r.volume_id, r])); } catch (e) { onError(describeError(e, `ebs metrics (${table})`)); return new Map<string, any>(); } };
   const [reads, writes] = await Promise.all([agg("aws_ebs_volume_metric_read_ops_daily"), agg("aws_ebs_volume_metric_write_ops_daily")]);
+  const rows: Record<string, any>[] = [];
+  for (const v of vols) {
+    const att = Array.isArray(v.attachments) ? v.attachments[0] : (() => { try { return JSON.parse(v.attachments || "[]")[0]; } catch { return null; } })();
+    // VolumeRead/WriteOps is a count per sample; the daily table's sum is the day's total (avg IOPS = total / seconds)
+    // and its maximum the busiest single sample, so peak IOPS = maximum / (86400 / sample_count)
+    const r = reads.get(v.volume_id), w = writes.get(v.volume_id);
+    const perSec = (x: any) => (x && Number(x.days) > 0 ? Number(x.total) / (Number(x.days) * 86400) : null);
+    const rAvg = perSec(r), wAvg = perSec(w);
+    const iopsMax = r || w ? Math.max(r ? Number(r.peak_ps) : 0, w ? Number(w.peak_ps) : 0) : null;
+    const row = { volume_id: v.volume_id, region: v.region, volume_type: v.volume_type, size_gb: Number(v.size || 0), iops: v.iops != null ? Number(v.iops) : null, throughput_mibps: v.throughput != null ? Number(v.throughput) : null, state: v.state, encrypted: v.encrypted ? 1 : 0,
+      instance_id: att?.InstanceId ?? null, device: att?.Device ?? null, created: v.create_time ? new Date(v.create_time).toISOString() : null, name: v.name ?? null, account_id: v.account_id ? String(v.account_id) : null,
+      read_iops_avg: rAvg != null ? Math.round(rAvg * 10) / 10 : null, write_iops_avg: wAvg != null ? Math.round(wAvg * 10) / 10 : null, iops_max: iopsMax != null ? Math.round(iopsMax * 10) / 10 : null, metric_days: Number(r?.days || w?.days || 0),
+      monthly_usd: ebsMonthlyCost({ volume_type: v.volume_type, size_gb: Number(v.size || 0), iops: v.iops != null ? Number(v.iops) : null, throughput_mibps: v.throughput != null ? Number(v.throughput) : null }) };
+    rows.push(row);
+  }
+  return rows;
+}
+
+export async function refreshEbsInventory(onError: (m: string) => void = () => {}): Promise<number> {
+  const rows = await collectEbsRows(onError);
+  if (!rows) return 0;
   const now = new Date().toISOString();
   // The usage columns survive a refresh only while the volume stays on the same instance; a detached or moved
   // volume forgets what the old host saw until the new one is probed.
@@ -134,20 +161,9 @@ export async function refreshEbsInventory(onError: (m: string) => void = () => {
   const setAccount = db.prepare("update inventory_ebs set account_id = ? where volume_id = ?");
   let n = 0;
   db.transaction(() => {
-    for (const v of vols) {
-      const att = Array.isArray(v.attachments) ? v.attachments[0] : (() => { try { return JSON.parse(v.attachments || "[]")[0]; } catch { return null; } })();
-      // VolumeRead/WriteOps is a count per sample; the daily table's sum is the day's total (avg IOPS = total / seconds)
-      // and its maximum the busiest single sample, so peak IOPS = maximum / (86400 / sample_count)
-      const r = reads.get(v.volume_id), w = writes.get(v.volume_id);
-      const perSec = (x: any) => (x && Number(x.days) > 0 ? Number(x.total) / (Number(x.days) * 86400) : null);
-      const rAvg = perSec(r), wAvg = perSec(w);
-      const iopsMax = r || w ? Math.max(r ? Number(r.peak_ps) : 0, w ? Number(w.peak_ps) : 0) : null;
-      const row = { volume_id: v.volume_id, region: v.region, volume_type: v.volume_type, size_gb: Number(v.size || 0), iops: v.iops != null ? Number(v.iops) : null, throughput_mibps: v.throughput != null ? Number(v.throughput) : null, state: v.state, encrypted: v.encrypted ? 1 : 0,
-        instance_id: att?.InstanceId ?? null, device: att?.Device ?? null, created: v.create_time ? new Date(v.create_time).toISOString() : null, name: v.name ?? null,
-        read_iops_avg: rAvg != null ? Math.round(rAvg * 10) / 10 : null, write_iops_avg: wAvg != null ? Math.round(wAvg * 10) / 10 : null, iops_max: iopsMax != null ? Math.round(iopsMax * 10) / 10 : null, metric_days: Number(r?.days || w?.days || 0),
-        monthly_usd: ebsMonthlyCost({ volume_type: v.volume_type, size_gb: Number(v.size || 0), iops: v.iops != null ? Number(v.iops) : null, throughput_mibps: v.throughput != null ? Number(v.throughput) : null }), now };
-      up.run(row); n++;
-      if (v.account_id) setAccount.run(String(v.account_id), v.volume_id);
+    for (const { account_id, ...row } of rows) {
+      up.run({ ...row, now }); n++;
+      if (account_id) setAccount.run(account_id, row.volume_id);
     }
     db.prepare("update inventory_ebs set gone = 1 where last_seen <> ?").run(now);
   })();

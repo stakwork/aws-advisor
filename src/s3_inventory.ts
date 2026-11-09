@@ -79,8 +79,12 @@ export async function s3StorageMetrics(regions: string[], onLog: (s: string) => 
 }
 
 
-export async function refreshS3Inventory(onLog: (s: string) => void = () => {}): Promise<{ buckets: number; metered: number; errors: string[] }> {
-  const out = { buckets: 0, metered: 0, errors: [] as string[] };
+/** Read-only collection: the rows `refreshS3Inventory` persists (minus `now`), plus account_id. Stable id: name (bucket names are global). Failures go to onError; null (internal) = bucket list unreadable. */
+export async function collectS3Inventory(onError: (m: string) => void = () => {}, onLog: (s: string) => void = () => {}): Promise<Record<string, any>[]> {
+  return (await collectS3Rows(onError, onLog)) ?? [];
+}
+
+async function collectS3Rows(onError: (m: string) => void, onLog: (s: string) => void): Promise<Record<string, any>[] | null> {
   let buckets: any[];
   // Every hydrated column is a separate S3 call with its own permission; a denied one fails the whole scan,
   // so drop the column that needs the missing action and retry, reporting what is unknown.
@@ -92,37 +96,47 @@ export async function refreshS3Inventory(onLog: (s: string) => void = () => {}):
     catch (e) {
       const m = /not authorized to perform: (s3:\w+)/.exec(String((e as any)?.message ?? e));
       const hit = m && optional.find((o) => o[1] === m[1] && cols.includes(o[0]));
-      if (!hit) { out.errors.push(describeError(e, "s3 inventory (aws_s3_bucket)")); return out; }
+      if (!hit) { onError(describeError(e, "s3 inventory (aws_s3_bucket)")); return null; }
       cols = cols.filter((c) => c !== hit[0]); missing.push(hit[1]);
       onLog(`s3: no ${hit[1]} permission, ${hit[0]} unknown`);
     }
   }
-  if (missing.length) out.errors.push(`S3 columns skipped, missing IAM permission ${missing.join(", ")}; add them to the advisor's policy (see Settings > Permissions)`);
+  if (missing.length) onError(`S3 columns skipped, missing IAM permission ${missing.join(", ")}; add them to the advisor's policy (see Settings > Permissions)`);
   const known = (col: string) => cols.includes(col);
+  // storage metrics are published once a day per bucket and class; the newest point of the last 3 days is the size
+  // read per account: a member's bucket metrics live in the member's CloudWatch, reached through its read role
+  const metrics = new Map<string, { sizes: Record<string, number>; objects: number | null }>();
+  for (const [acct, regions] of bucketsByAccount(buckets)) {
+    try { for (const [k, v] of await s3StorageMetrics(regions, onLog, accountCredentials(acct))) metrics.set(k, v); }
+    catch (e) { onError(describeError(e, `s3 storage metrics${acct ? ` of account ${acct}` : ""} (cloudwatch:ListMetrics, cloudwatch:GetMetricData)`)); }
+  }
+  const rows: Record<string, any>[] = [];
+  for (const b of buckets) {
+    const region = b.region || "us-east-1";
+    const m = metrics.get(b.name); const sizes = m?.sizes ?? {}; const objects = m?.objects ?? null;
+    const total = Object.values(sizes).reduce((s, x) => s + x, 0);
+    let rules: number | null = 0; if (!known("lifecycle_rules")) rules = null; else try { const lr = typeof b.lifecycle_rules === "string" ? JSON.parse(b.lifecycle_rules) : b.lifecycle_rules; rules = Array.isArray(lr) ? lr.length : 0; } catch { rules = 0; }
+    rows.push({ name: b.name, region, created: b.creation_date ? new Date(b.creation_date).toISOString() : null, versioning: known("versioning_enabled") ? (b.versioning_enabled ? 1 : 0) : null, lifecycle_rules: rules, public: known("bucket_policy_is_public") ? (b.bucket_policy_is_public ? 1 : 0) : null,
+      sizes: JSON.stringify(sizes), total_gb: Math.round(total * 1000) / 1000, objects, standard_gb: sizes.StandardStorage ?? 0, monthly_usd: s3MonthlyCost(sizes), metric_day: new Date().toISOString().slice(0, 10), account_id: b.account_id ? String(b.account_id) : null });
+  }
+  return rows;
+}
+
+export async function refreshS3Inventory(onLog: (s: string) => void = () => {}): Promise<{ buckets: number; metered: number; errors: string[] }> {
+  const out = { buckets: 0, metered: 0, errors: [] as string[] };
+  const rows = await collectS3Rows((m) => out.errors.push(m), onLog);
+  if (!rows) return out;
   const now = new Date().toISOString();
   const setS3Account = db.prepare("update inventory_s3 set account_id = ? where name = ?");
   const up = db.prepare(`insert into inventory_s3(name, region, created, versioning, lifecycle_rules, public, sizes, total_gb, objects, standard_gb, monthly_usd, metric_day, first_seen, last_seen, gone)
     values (@name, @region, @created, @versioning, @lifecycle_rules, @public, @sizes, @total_gb, @objects, @standard_gb, @monthly_usd, @metric_day, @now, @now, 0)
     on conflict(name) do update set region = excluded.region, created = excluded.created, versioning = excluded.versioning, lifecycle_rules = excluded.lifecycle_rules, public = excluded.public,
       sizes = excluded.sizes, total_gb = excluded.total_gb, objects = excluded.objects, standard_gb = excluded.standard_gb, monthly_usd = excluded.monthly_usd, metric_day = excluded.metric_day, last_seen = excluded.last_seen, gone = 0`);
-  // storage metrics are published once a day per bucket and class; the newest point of the last 3 days is the size
-  // read per account: a member's bucket metrics live in the member's CloudWatch, reached through its read role
-  const metrics = new Map<string, { sizes: Record<string, number>; objects: number | null }>();
-  for (const [acct, regions] of bucketsByAccount(buckets)) {
-    try { for (const [k, v] of await s3StorageMetrics(regions, onLog, accountCredentials(acct))) metrics.set(k, v); }
-    catch (e) { out.errors.push(describeError(e, `s3 storage metrics${acct ? ` of account ${acct}` : ""} (cloudwatch:ListMetrics, cloudwatch:GetMetricData)`)); }
+  for (const { account_id, ...row } of rows) {
+    up.run({ ...row, now });
+    if (account_id) setS3Account.run(account_id, row.name);
+    out.buckets++; if (row.sizes !== "{}") out.metered++;
   }
-  const worker = (b: any) => {
-    const region = b.region || "us-east-1";
-    const m = metrics.get(b.name); const sizes = m?.sizes ?? {}; const objects = m?.objects ?? null;
-    const total = Object.values(sizes).reduce((s, x) => s + x, 0);
-    let rules: number | null = 0; if (!known("lifecycle_rules")) rules = null; else try { const lr = typeof b.lifecycle_rules === "string" ? JSON.parse(b.lifecycle_rules) : b.lifecycle_rules; rules = Array.isArray(lr) ? lr.length : 0; } catch { rules = 0; }
-    up.run({ name: b.name, region, created: b.creation_date ? new Date(b.creation_date).toISOString() : null, versioning: known("versioning_enabled") ? (b.versioning_enabled ? 1 : 0) : null, lifecycle_rules: rules, public: known("bucket_policy_is_public") ? (b.bucket_policy_is_public ? 1 : 0) : null,
-      sizes: JSON.stringify(sizes), total_gb: Math.round(total * 1000) / 1000, objects, standard_gb: sizes.StandardStorage ?? 0, monthly_usd: s3MonthlyCost(sizes), metric_day: now.slice(0, 10), now });
-    if (b.account_id) setS3Account.run(String(b.account_id), b.name);
-    out.buckets++; if (Object.keys(sizes).length) out.metered++;
-  };
-  for (const b of buckets) worker(b);
   db.prepare("update inventory_s3 set gone = 1 where last_seen <> ?").run(now);
   onLog(`${out.buckets} buckets, ${out.metered} with storage metrics`);
   return out;

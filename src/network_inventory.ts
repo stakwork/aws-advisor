@@ -142,13 +142,22 @@ export function replaceNetwork(parts: Partial<Record<NetworkPart, any[] | undefi
   return counts;
 }
 
-/** Runs every network query through the inventory's `attempt` (which records a failure and returns undefined) and writes what came back. */
-export async function refreshNetworkInventory(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<Record<string, number>> {
+/**
+ * Read-only collection: runs every network query through `attempt` (which records a failure and returns undefined) and returns the Steampipe rows
+ * by kind: subnets, route_tables, internet_gateways, egress_only_gateways, nat_gateways, peerings, endpoints, eips, enis, egress_rules. A query that failed has no key
+ * (`replaceNetwork` then keeps that table as it was). Fold the gateway kinds with `gatewayRows(parts)`. No SQLite.
+ */
+export async function collectNetworkInventory(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<Partial<Record<NetworkPart, any[]>>> {
   const names = Object.keys(NETWORK_SQL) as NetworkPart[];
   const results = await Promise.all(names.map((n) => attempt(n.replace(/_/g, " "), NETWORK_SQL[n])));
-  const parts: Partial<Record<NetworkPart, any[] | undefined>> = {};
-  names.forEach((n, i) => { parts[n] = results[i]; });
-  return replaceNetwork(parts);
+  const parts: Partial<Record<NetworkPart, any[]>> = {};
+  names.forEach((n, i) => { const r = results[i]; if (r) parts[n] = r; });
+  return parts;
+}
+
+/** Runs every network query through the inventory's `attempt` and writes what came back. */
+export async function refreshNetworkInventory(attempt: (what: string, sql: string) => Promise<any[] | undefined>): Promise<Record<string, number>> {
+  return replaceNetwork(await collectNetworkInventory(attempt));
 }
 
 // ---- reading -------------------------------------------------------------------------------------------------------------

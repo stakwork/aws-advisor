@@ -157,6 +157,132 @@ async function findInstance(creds: ReturnType<typeof sdkCredentials>, onError: (
   return null;
 }
 
+interface SsoDirectory {
+  users: any[]; groups: any[]; groupsOf: Map<string, string[]>; sets: Omit<SsoPermissionSetRow, "first_seen" | "last_seen" | "gone" | "users" | "last_used">[];
+  setName: Map<string, string>; setAdmin: Map<string, boolean>; directOf: Map<string, any[]>; groupAssign: Map<string, any[]>; appsOf: Map<string, Set<string>>;
+}
+
+/** The directory, permission sets, assignments and applications as the Identity Center APIs return them. No SQLite. */
+async function readSsoDirectory(inst: Instance, sso: SSOAdminClient, ids: IdentitystoreClient, fail: (m: string) => void, notes: string[]): Promise<SsoDirectory> {
+  // --- the directory
+  let users: any[] = []; let groups: any[] = [];
+  try { users = await pages((t) => ids.send(new ListUsersCommand({ IdentityStoreId: inst.identity_store_id, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.Users, next: r.NextToken }))); noteSuccess(["identitystore:ListUsers"], "identity center"); }
+  catch (e) { fail(describeError(e, "identity center users (identitystore:ListUsers)")); }
+  try { groups = await pages((t) => ids.send(new ListGroupsCommand({ IdentityStoreId: inst.identity_store_id, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.Groups, next: r.NextToken }))); noteSuccess(["identitystore:ListGroups"], "identity center"); }
+  catch (e) { fail(describeError(e, "identity center groups (identitystore:ListGroups)")); }
+  const groupName = new Map(groups.map((g) => [String(g.GroupId), String(g.DisplayName || g.GroupId)]));
+  const groupsOf = new Map<string, string[]>();
+  try {
+    for (const g of groups) {
+      const ms = await pages((t) => ids.send(new ListGroupMembershipsCommand({ IdentityStoreId: inst.identity_store_id, GroupId: g.GroupId, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.GroupMemberships, next: r.NextToken })));
+      for (const m of ms) { const uid = m.MemberId?.UserId; if (uid) groupsOf.set(uid, [...(groupsOf.get(uid) ?? []), groupName.get(String(g.GroupId))!]); }
+    }
+    if (groups.length) noteSuccess(["identitystore:ListGroupMemberships"], "identity center");
+  } catch (e) { fail(describeError(e, "identity center group members (identitystore:ListGroupMemberships)")); }
+
+  // --- the permission sets, with their policies and the accounts they are provisioned to
+  const sets: Omit<SsoPermissionSetRow, "first_seen" | "last_seen" | "gone" | "users" | "last_used">[] = [];
+  try {
+    const arns = await pages((t) => sso.send(new ListPermissionSetsCommand({ InstanceArn: inst.arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.PermissionSets, next: r.NextToken })));
+    noteSuccess(["sso:ListPermissionSets"], "identity center");
+    for (const arn of arns) {
+      const d = await sso.send(new DescribePermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn }));
+      const managed = await pages((t) => sso.send(new ListManagedPoliciesInPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AttachedManagedPolicies, next: r.NextToken })));
+      const customer = await pages((t) => sso.send(new ListCustomerManagedPolicyReferencesInPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.CustomerManagedPolicyReferences, next: r.NextToken })));
+      const inline = (await sso.send(new GetInlinePolicyForPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn }))).InlinePolicy || null;
+      let boundary: string | null = null;
+      try { const b = (await sso.send(new GetPermissionsBoundaryForPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn }))).PermissionsBoundary; boundary = b?.ManagedPolicyArn?.split("/").pop() ?? b?.CustomerManagedPolicyReference?.Name ?? null; } catch { /* none set: the API answers with a not-found */ }
+      const accounts = await pages((t) => sso.send(new ListAccountsForProvisionedPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AccountIds, next: r.NextToken })));
+      const managedArns = managed.map((m) => String(m.Arn || ""));
+      sets.push({ arn, instance_arn: inst.arn, account_id: inst.owner_account_id, name: String(d.PermissionSet?.Name || arn.split("/").pop()), description: d.PermissionSet?.Description ?? null, session_duration: d.PermissionSet?.SessionDuration ?? null, created: iso(d.PermissionSet?.CreatedDate),
+        managed_policies: managed.map((m) => String(m.Name || m.Arn)), customer_managed: customer.map((c) => String(c.Name)), inline_policy: inline, boundary, admin: isAdminPermissionSet(managedArns, inline), accounts: accounts.map(String).sort() });
+    }
+    noteSuccess(["sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet"], "identity center");
+  } catch (e) { fail(describeError(e, "identity center permission sets (sso:ListPermissionSets, sso:DescribePermissionSet)")); }
+  const setName = new Map(sets.map((s) => [s.arn, s.name])); const setAdmin = new Map(sets.map((s) => [s.arn, s.admin]));
+
+  // --- who is assigned where: once per user and once per group, then folded
+  const directOf = new Map<string, any[]>(); const groupAssign = new Map<string, any[]>();
+  try {
+    for (const u of users) directOf.set(String(u.UserId), await pages((t) => sso.send(new ListAccountAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: u.UserId, PrincipalType: "USER", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AccountAssignments, next: r.NextToken }))));
+    for (const g of groups) groupAssign.set(groupName.get(String(g.GroupId))!, await pages((t) => sso.send(new ListAccountAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: g.GroupId, PrincipalType: "GROUP", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AccountAssignments, next: r.NextToken }))));
+    if (users.length || groups.length) noteSuccess(["sso:ListAccountAssignmentsForPrincipal"], "identity center");
+  } catch (e) { fail(describeError(e, "identity center assignments (sso:ListAccountAssignmentsForPrincipal)")); }
+
+  // --- applications (an older instance has none and the API may refuse: a note, not an error)
+  const appName = new Map<string, string>(); const appsOf = new Map<string, Set<string>>();
+  try {
+    const apps = await pages((t) => sso.send(new ListApplicationsCommand({ InstanceArn: inst.arn, MaxResults: 50, NextToken: t })).then((r) => ({ items: r.Applications, next: r.NextToken })));
+    for (const a of apps) if (a.ApplicationArn) appName.set(a.ApplicationArn, String(a.Name || a.ApplicationArn.split("/").pop()));
+    if (apps.length) {
+      const give = (uids: string[], arn: string) => { for (const uid of uids) { const s = appsOf.get(uid) ?? new Set<string>(); s.add(appName.get(arn) ?? arn); appsOf.set(uid, s); } };
+      const members = new Map<string, string[]>(); for (const [uid, gs] of groupsOf) for (const g of gs) members.set(g, [...(members.get(g) ?? []), uid]);
+      for (const u of users) for (const a of await pages((t) => sso.send(new ListApplicationAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: u.UserId, PrincipalType: "USER", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.ApplicationAssignments, next: r.NextToken })))) if (a.ApplicationArn) give([String(u.UserId)], a.ApplicationArn);
+      for (const g of groups) for (const a of await pages((t) => sso.send(new ListApplicationAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: g.GroupId, PrincipalType: "GROUP", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.ApplicationAssignments, next: r.NextToken })))) if (a.ApplicationArn) give(members.get(groupName.get(String(g.GroupId))!) ?? [], a.ApplicationArn);
+    }
+  } catch (e: any) { notes.push(`applications not read: ${String(e?.message || e).slice(0, 160)}`); }
+  return { users, groups, groupsOf, sets, setName, setAdmin, directOf, groupAssign, appsOf };
+}
+
+/** When each permission set's role was last used, per account (the aggregator reaches every account the advisor has): permission-set name -> { account_id: iso }. */
+async function readSsoLastUsed(sets: { name: string }[], notes: string[]): Promise<Map<string, Record<string, string>>> {
+  const lastUsed = new Map<string, Record<string, string>>();
+  if (sets.length) {
+    try {
+      const rows = await query<{ name: string; account_id: string; role_last_used_date: string | null }>(`select name, account_id, role_last_used_date from ${S}.aws_iam_role where name like 'AWSReservedSSO_%'`);
+      for (const r of rows) { const ps = permissionSetOfRole(r.name); const t = iso(r.role_last_used_date); if (ps && t) lastUsed.set(ps, { ...(lastUsed.get(ps) ?? {}), [r.account_id]: t }); }
+      noteSuccess(["iam:ListRoles", "iam:GetRole"], "identity center roles");
+    } catch (e) { notes.push(describeError(e, "permission set roles (aws_iam_role, iam:ListRoles)")); }
+  }
+  return lastUsed;
+}
+
+/** The persisted user rows (minus `now`). `signInFacts` and `activity` come from SQLite (CloudTrail sign-ins, stored trail) and default to none. */
+function ssoUserRows(inst: Instance, dir: SsoDirectory, signInFacts: Map<string, SignInFacts> = new Map(), activity: Map<string, Record<string, string>> = new Map()) {
+  const { users, groupsOf, setName, setAdmin, directOf, groupAssign, appsOf } = dir;
+  return users.map((u) => {
+    const uid = String(u.UserId); const gs = groupsOf.get(uid) ?? [];
+    const assignments = userAssignments(directOf.get(uid) ?? [], gs, groupAssign, setName);
+    const f = signInFacts.get(uid) ?? { last_sign_in: null, sign_ins_30d: 0, failed_30d: 0 };
+    const email = (u.Emails ?? []).find((e: any) => e.Primary)?.Value ?? u.Emails?.[0]?.Value ?? null;
+    return { user_id: uid, identity_store_id: inst.identity_store_id, instance_arn: inst.arn, account_id: inst.owner_account_id, user_name: String(u.UserName || uid), display_name: u.DisplayName ?? (u.Name ? [u.Name.GivenName, u.Name.FamilyName].filter(Boolean).join(" ") || null : null), email, idp: u.ExternalIds?.[0]?.Issuer ?? null, created: iso(u.CreatedAt), status: u.UserStatus ? String(u.UserStatus) : null,
+      groups: JSON.stringify(gs), assignments: JSON.stringify(assignments), accounts: new Set(assignments.map((a) => a.account_id)).size, permission_sets: new Set(assignments.map((a) => a.permission_set_arn)).size, applications: JSON.stringify([...(appsOf.get(uid) ?? [])].sort()),
+      admin: assignments.some((a) => setAdmin.get(a.permission_set_arn)) ? 1 : 0, last_sign_in: f.last_sign_in, sign_ins_30d: f.sign_ins_30d, failed_30d: f.failed_30d, activity: JSON.stringify(activity.get(String(u.UserName || "")) ?? {}) };
+});
+}
+
+/** The persisted permission-set rows (minus `now`). */
+function ssoSetRows(sets: SsoDirectory["sets"], lastUsed: Map<string, Record<string, string>> = new Map(), usersPerSet: Map<string, number> = new Map()) {
+  return sets.map((s) => ({ ...s, managed_policies: JSON.stringify(s.managed_policies), customer_managed: JSON.stringify(s.customer_managed), accounts: JSON.stringify(s.accounts), admin: s.admin ? 1 : 0, last_used: JSON.stringify(lastUsed.get(s.name) ?? {}), users: usersPerSet.get(s.arn) ?? 0 }));
+}
+
+export interface SsoCollected { configured: boolean; instance: Instance | null; users: Record<string, any>[]; groups: { group_id: string; display_name: string; members: string[] }[]; permission_sets: Record<string, any>[]; notes: string[] }
+
+/**
+ * Read-only collection from the Identity Center APIs: `users` (the inventory_sso_user params minus now; sign-in facts and activity, which come from CloudTrail and SQLite, are empty),
+ * `groups` (raw: group_id, display_name, member user ids), `permission_sets` (the inventory_sso_permission_set params minus now; `users` count from the collected users) and `instance`.
+ * Stable ids: users.user_id, permission_sets.arn, groups.group_id. Does not read or write sign-in events.
+ */
+export async function collectSsoInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<SsoCollected> {
+  const notes: string[] = []; const empty: SsoCollected = { configured: false, instance: null, users: [], groups: [], permission_sets: [], notes };
+  let creds: ReturnType<typeof sdkCredentials>;
+  try { creds = sdkCredentials(); } catch (e: any) { onError(String(e?.message || e)); return empty; }
+  const inst = await findInstance(creds, onError);
+  if (!inst) return empty;
+  const sso = new SSOAdminClient({ region: inst.region, credentials: creds.provider });
+  const ids = new IdentitystoreClient({ region: inst.region, credentials: creds.provider });
+  try {
+    const dir = await readSsoDirectory(inst, sso, ids, onError, notes);
+    const lastUsed = await readSsoLastUsed(dir.sets, notes);
+    const users = ssoUserRows(inst, dir);
+    const usersPerSet = new Map<string, number>();
+    for (const r of users) for (const arn of new Set((JSON.parse(r.assignments) as SsoAssignment[]).map((a) => a.permission_set_arn))) usersPerSet.set(arn, (usersPerSet.get(arn) ?? 0) + 1);
+    const members = new Map<string, string[]>(); for (const [uid, gs] of dir.groupsOf) for (const g of gs) members.set(g, [...(members.get(g) ?? []), uid]);
+    const groups = dir.groups.map((g) => ({ group_id: String(g.GroupId), display_name: String(g.DisplayName || g.GroupId), members: members.get(String(g.DisplayName || g.GroupId)) ?? [] }));
+    return { configured: true, instance: inst, users, groups, permission_sets: ssoSetRows(dir.sets, lastUsed, usersPerSet), notes };
+  } finally { sso.destroy(); ids.destroy(); }
+}
+
 export interface SsoRefreshResult { configured: boolean; users: number; groups: number; permission_sets: number; gone: number; sign_ins: number; errors: string[]; took_ms: number }
 
 export async function refreshSsoInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<SsoRefreshResult> {
@@ -177,64 +303,8 @@ export async function refreshSsoInventory(onError: (m: string) => void = () => {
   const trail = new CloudTrailClient({ region, credentials: creds.provider, ...TRAIL_RETRY });
   const now = new Date().toISOString();
   try {
-    // --- the directory
-    let users: any[] = []; let groups: any[] = [];
-    try { users = await pages((t) => ids.send(new ListUsersCommand({ IdentityStoreId: inst.identity_store_id, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.Users, next: r.NextToken }))); noteSuccess(["identitystore:ListUsers"], "identity center"); }
-    catch (e) { fail(describeError(e, "identity center users (identitystore:ListUsers)")); }
-    try { groups = await pages((t) => ids.send(new ListGroupsCommand({ IdentityStoreId: inst.identity_store_id, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.Groups, next: r.NextToken }))); noteSuccess(["identitystore:ListGroups"], "identity center"); }
-    catch (e) { fail(describeError(e, "identity center groups (identitystore:ListGroups)")); }
-    const groupName = new Map(groups.map((g) => [String(g.GroupId), String(g.DisplayName || g.GroupId)]));
-    const groupsOf = new Map<string, string[]>();
-    try {
-      for (const g of groups) {
-        const ms = await pages((t) => ids.send(new ListGroupMembershipsCommand({ IdentityStoreId: inst.identity_store_id, GroupId: g.GroupId, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.GroupMemberships, next: r.NextToken })));
-        for (const m of ms) { const uid = m.MemberId?.UserId; if (uid) groupsOf.set(uid, [...(groupsOf.get(uid) ?? []), groupName.get(String(g.GroupId))!]); }
-      }
-      if (groups.length) noteSuccess(["identitystore:ListGroupMemberships"], "identity center");
-    } catch (e) { fail(describeError(e, "identity center group members (identitystore:ListGroupMemberships)")); }
-
-    // --- the permission sets, with their policies and the accounts they are provisioned to
-    const sets: Omit<SsoPermissionSetRow, "first_seen" | "last_seen" | "gone" | "users" | "last_used">[] = [];
-    try {
-      const arns = await pages((t) => sso.send(new ListPermissionSetsCommand({ InstanceArn: inst.arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.PermissionSets, next: r.NextToken })));
-      noteSuccess(["sso:ListPermissionSets"], "identity center");
-      for (const arn of arns) {
-        const d = await sso.send(new DescribePermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn }));
-        const managed = await pages((t) => sso.send(new ListManagedPoliciesInPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AttachedManagedPolicies, next: r.NextToken })));
-        const customer = await pages((t) => sso.send(new ListCustomerManagedPolicyReferencesInPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.CustomerManagedPolicyReferences, next: r.NextToken })));
-        const inline = (await sso.send(new GetInlinePolicyForPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn }))).InlinePolicy || null;
-        let boundary: string | null = null;
-        try { const b = (await sso.send(new GetPermissionsBoundaryForPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn }))).PermissionsBoundary; boundary = b?.ManagedPolicyArn?.split("/").pop() ?? b?.CustomerManagedPolicyReference?.Name ?? null; } catch { /* none set: the API answers with a not-found */ }
-        const accounts = await pages((t) => sso.send(new ListAccountsForProvisionedPermissionSetCommand({ InstanceArn: inst.arn, PermissionSetArn: arn, MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AccountIds, next: r.NextToken })));
-        const managedArns = managed.map((m) => String(m.Arn || ""));
-        sets.push({ arn, instance_arn: inst.arn, account_id: inst.owner_account_id, name: String(d.PermissionSet?.Name || arn.split("/").pop()), description: d.PermissionSet?.Description ?? null, session_duration: d.PermissionSet?.SessionDuration ?? null, created: iso(d.PermissionSet?.CreatedDate),
-          managed_policies: managed.map((m) => String(m.Name || m.Arn)), customer_managed: customer.map((c) => String(c.Name)), inline_policy: inline, boundary, admin: isAdminPermissionSet(managedArns, inline), accounts: accounts.map(String).sort() });
-      }
-      noteSuccess(["sso:DescribePermissionSet", "sso:ListManagedPoliciesInPermissionSet", "sso:ListCustomerManagedPolicyReferencesInPermissionSet", "sso:GetInlinePolicyForPermissionSet", "sso:ListAccountsForProvisionedPermissionSet"], "identity center");
-    } catch (e) { fail(describeError(e, "identity center permission sets (sso:ListPermissionSets, sso:DescribePermissionSet)")); }
-    const setName = new Map(sets.map((s) => [s.arn, s.name])); const setAdmin = new Map(sets.map((s) => [s.arn, s.admin]));
-
-    // --- who is assigned where: once per user and once per group, then folded
-    const directOf = new Map<string, any[]>(); const groupAssign = new Map<string, any[]>();
-    try {
-      for (const u of users) directOf.set(String(u.UserId), await pages((t) => sso.send(new ListAccountAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: u.UserId, PrincipalType: "USER", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AccountAssignments, next: r.NextToken }))));
-      for (const g of groups) groupAssign.set(groupName.get(String(g.GroupId))!, await pages((t) => sso.send(new ListAccountAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: g.GroupId, PrincipalType: "GROUP", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.AccountAssignments, next: r.NextToken }))));
-      if (users.length || groups.length) noteSuccess(["sso:ListAccountAssignmentsForPrincipal"], "identity center");
-    } catch (e) { fail(describeError(e, "identity center assignments (sso:ListAccountAssignmentsForPrincipal)")); }
-
-    // --- applications (an older instance has none and the API may refuse: a note, not an error)
-    const appName = new Map<string, string>(); const appsOf = new Map<string, Set<string>>();
-    try {
-      const apps = await pages((t) => sso.send(new ListApplicationsCommand({ InstanceArn: inst.arn, MaxResults: 50, NextToken: t })).then((r) => ({ items: r.Applications, next: r.NextToken })));
-      for (const a of apps) if (a.ApplicationArn) appName.set(a.ApplicationArn, String(a.Name || a.ApplicationArn.split("/").pop()));
-      if (apps.length) {
-        const give = (uids: string[], arn: string) => { for (const uid of uids) { const s = appsOf.get(uid) ?? new Set<string>(); s.add(appName.get(arn) ?? arn); appsOf.set(uid, s); } };
-        const members = new Map<string, string[]>(); for (const [uid, gs] of groupsOf) for (const g of gs) members.set(g, [...(members.get(g) ?? []), uid]);
-        for (const u of users) for (const a of await pages((t) => sso.send(new ListApplicationAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: u.UserId, PrincipalType: "USER", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.ApplicationAssignments, next: r.NextToken })))) if (a.ApplicationArn) give([String(u.UserId)], a.ApplicationArn);
-        for (const g of groups) for (const a of await pages((t) => sso.send(new ListApplicationAssignmentsForPrincipalCommand({ InstanceArn: inst.arn, PrincipalId: g.GroupId, PrincipalType: "GROUP", MaxResults: 100, NextToken: t })).then((r) => ({ items: r.ApplicationAssignments, next: r.NextToken })))) if (a.ApplicationArn) give(members.get(groupName.get(String(g.GroupId))!) ?? [], a.ApplicationArn);
-      }
-    } catch (e: any) { notes.push(`applications not read: ${String(e?.message || e).slice(0, 160)}`); }
-
+    const dir = await readSsoDirectory(inst, sso, ids, fail, notes);
+    const { users, groups, sets, setAdmin } = dir;
     // --- sign-ins from the home region's trail
     let signIns = 0; let read = 0; let signInFacts = new Map<string, SignInFacts>();
     if (users.length) {
@@ -269,26 +339,10 @@ export async function refreshSsoInventory(onError: (m: string) => void = () => {
         for (const r of rows) activity.set(r.username, { ...(activity.get(r.username) ?? {}), [r.account_id || (inst.owner_account_id ?? "")]: r.t });
       }
     }
-    // --- when each permission set's role was last used, per account (the aggregator reaches every account the advisor has)
-    const lastUsed = new Map<string, Record<string, string>>();
-    if (sets.length) {
-      try {
-        const rows = await query<{ name: string; account_id: string; role_last_used_date: string | null }>(`select name, account_id, role_last_used_date from ${S}.aws_iam_role where name like 'AWSReservedSSO_%'`);
-        for (const r of rows) { const ps = permissionSetOfRole(r.name); const t = iso(r.role_last_used_date); if (ps && t) lastUsed.set(ps, { ...(lastUsed.get(ps) ?? {}), [r.account_id]: t }); }
-        noteSuccess(["iam:ListRoles", "iam:GetRole"], "identity center roles");
-      } catch (e) { notes.push(describeError(e, "permission set roles (aws_iam_role, iam:ListRoles)")); }
-    }
+    const lastUsed = await readSsoLastUsed(sets, notes);
 
     // --- write
-    const userRows = users.map((u) => {
-      const uid = String(u.UserId); const gs = groupsOf.get(uid) ?? [];
-      const assignments = userAssignments(directOf.get(uid) ?? [], gs, groupAssign, setName);
-      const f = signInFacts.get(uid) ?? { last_sign_in: null, sign_ins_30d: 0, failed_30d: 0 };
-      const email = (u.Emails ?? []).find((e: any) => e.Primary)?.Value ?? u.Emails?.[0]?.Value ?? null;
-      return { user_id: uid, identity_store_id: inst.identity_store_id, instance_arn: inst.arn, account_id: inst.owner_account_id, user_name: String(u.UserName || uid), display_name: u.DisplayName ?? (u.Name ? [u.Name.GivenName, u.Name.FamilyName].filter(Boolean).join(" ") || null : null), email, idp: u.ExternalIds?.[0]?.Issuer ?? null, created: iso(u.CreatedAt), status: u.UserStatus ? String(u.UserStatus) : null,
-        groups: JSON.stringify(gs), assignments: JSON.stringify(assignments), accounts: new Set(assignments.map((a) => a.account_id)).size, permission_sets: new Set(assignments.map((a) => a.permission_set_arn)).size, applications: JSON.stringify([...(appsOf.get(uid) ?? [])].sort()),
-        admin: assignments.some((a) => setAdmin.get(a.permission_set_arn)) ? 1 : 0, last_sign_in: f.last_sign_in, sign_ins_30d: f.sign_ins_30d, failed_30d: f.failed_30d, activity: JSON.stringify(activity.get(String(u.UserName || "")) ?? {}), now };
-    });
+    const userRows = ssoUserRows(inst, dir, signInFacts, activity);
     const usersPerSet = new Map<string, number>();
     for (const r of userRows) for (const arn of new Set((JSON.parse(r.assignments) as SsoAssignment[]).map((a) => a.permission_set_arn))) usersPerSet.set(arn, (usersPerSet.get(arn) ?? 0) + 1);
     const upUser = db.prepare(`insert into inventory_sso_user(user_id, identity_store_id, instance_arn, account_id, user_name, display_name, email, idp, created, status, groups, assignments, accounts, permission_sets, applications, admin, last_sign_in, sign_ins_30d, failed_30d, activity, first_seen, last_seen, gone)
@@ -301,8 +355,8 @@ export async function refreshSsoInventory(onError: (m: string) => void = () => {
         inline_policy = excluded.inline_policy, boundary = excluded.boundary, admin = excluded.admin, accounts = excluded.accounts, last_used = excluded.last_used, users = excluded.users, last_seen = excluded.last_seen, gone = 0`);
     let gone = 0;
     db.transaction(() => {
-      if (users.length) { for (const r of userRows) upUser.run(r); gone += db.prepare("update inventory_sso_user set gone = 1 where gone = 0 and identity_store_id = ? and last_seen < ?").run(inst.identity_store_id, now).changes; }
-      if (sets.length) { for (const s of sets) upSet.run({ ...s, managed_policies: JSON.stringify(s.managed_policies), customer_managed: JSON.stringify(s.customer_managed), accounts: JSON.stringify(s.accounts), admin: s.admin ? 1 : 0, last_used: JSON.stringify(lastUsed.get(s.name) ?? {}), users: usersPerSet.get(s.arn) ?? 0, now }); gone += db.prepare("update inventory_sso_permission_set set gone = 1 where gone = 0 and instance_arn = ? and last_seen < ?").run(inst.arn, now).changes; }
+      if (users.length) { for (const r of userRows) upUser.run({ ...r, now }); gone += db.prepare("update inventory_sso_user set gone = 1 where gone = 0 and identity_store_id = ? and last_seen < ?").run(inst.identity_store_id, now).changes; }
+      if (sets.length) { for (const s of ssoSetRows(sets, lastUsed, usersPerSet)) upSet.run({ ...s, now }); gone += db.prepare("update inventory_sso_permission_set set gone = 1 where gone = 0 and instance_arn = ? and last_seen < ?").run(inst.arn, now).changes; }
     })();
     return done({ configured: true, instance_arn: inst.arn, identity_store_id: inst.identity_store_id, region, owner_account_id: inst.owner_account_id, name: inst.name, status: inst.status, sign_ins_read: signIns }, { configured: true, users: users.length, groups: groups.length, permission_sets: sets.length, gone, sign_ins: signIns });
   } finally { sso.destroy(); ids.destroy(); trail.destroy(); }

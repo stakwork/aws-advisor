@@ -3466,6 +3466,7 @@ What each one is for (✎ = also editable in Settings):
 | `PORT` | you want another port | `9034` |
 | `API_TOKEN` | **required unless `PUBLIC_URL` is localhost**; gates the API and the UI. The app shell itself is public (static JS); without a session it shows a sign-in box that takes the token and the browser then keeps a 30-day session (`/?token=<API_TOKEN>` does the same) | unset = open, refused when `PUBLIC_URL` is not local |
 | `MCP_TOKEN` | **required unless `PUBLIC_URL` is localhost**; gates `/mcp`. The advisor passes it to repo2graph with every dispatch, nothing else to configure | unset = open, refused when `PUBLIC_URL` is not local |
+| `INVENTORY_EXPORT_TOKEN` | optional; a bearer token (or `x-api-token`) that is accepted on `/api/inventory/export*` only, for a workflow that pulls the inventory (see "Inventory export API") | unset = those routes take the usual `API_TOKEN` credentials |
 | `CALLBACK_SECRET` | **required unless `PUBLIC_URL` is localhost**; repo2graph echoes it as `?key=` on the webhook; a result is accepted once per dispatch | unset = open, refused when `PUBLIC_URL` is not local |
 | `BIND_ADDR` | listen on one interface only (`127.0.0.1` on a laptop without a swarm) | unset = all interfaces |
 | ✎ `AGENT_WEB_SEARCH` | the agent may use web search (off: prices and facts come from the MCP tools; a search query is an exfiltration channel for anything a hostile tag or probe line injects into the prompt) | off |
@@ -3612,3 +3613,17 @@ stack's auto-update list.
 2. Seven-day realized-saving verification from Cost Explorer.
 3. sphinx-swarm images as above.
 4. Cross-link the [graph mirror](#graph-mirror) with the code graph (which repository deploys to which instance).
+
+
+### Inventory export API
+
+Read-only bulk export of what the inventory sync collects, for an external workflow that does its own graph writes.
+It runs the same collectors as the sync but writes nothing to SQLite or Neo4j and works with `NEO4J_URI` empty.
+
+- `GET /api/inventory/export/types` → `{ types: [{ type, description }], accounts: [...] }`
+- `GET|POST /api/inventory/export?type=<type>&account=<id>&cursor=<opaque>&limit=1000` (POST: same params in the query or JSON body)
+  → `{ type, account, rows, nextCursor, complete, errors }`. Rows are sorted by id/arn so pages are stable; `limit` is clamped to 5000;
+  collector failures are listed in `errors` (and `complete` is false) instead of a 500. Unknown type, bad cursor or bad limit → 400.
+- Auth: `API_TOKEN` credentials as for every `/api` route (`x-api-token`, Bearer, `?token=`), or `Authorization: Bearer $INVENTORY_EXPORT_TOKEN` if set.
+
+Each call re-collects (cursors are offsets into a fresh, sorted collection), so run a full paging loop quickly or expect small drift.

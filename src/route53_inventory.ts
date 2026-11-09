@@ -389,16 +389,21 @@ export async function awsRanges(onLog: (s: string) => void): Promise<AwsRange[] 
 
 export interface Route53RefreshResult { zones: number; records: number; linked: number; external: number; unmatched: number; errors: string[]; took_ms: number }
 
-export async function refreshRoute53Inventory(onLog: (s: string) => void = () => {}): Promise<Route53RefreshResult> {
-  const t0 = Date.now();
-  const out: Route53RefreshResult = { zones: 0, records: 0, linked: 0, external: 0, unmatched: 0, errors: [], took_ms: 0 };
+/** Read-only collection of the raw Steampipe rows: `zones` (aws_route53_zone), `records` (aws_route53_record) and `queries` ({ zone_id, queries_30d } per public zone, 30 days of DNSQueries). Linking to EC2/RDS/S3/Lambda rows happens in `refreshRoute53Inventory`. Stable ids: zones.id (zoneId()), records zone_id+name+type+set_identifier. */
+export async function collectRoute53Inventory(onError: (m: string) => void = () => {}, onLog: (s: string) => void = () => {}): Promise<{ zones: any[]; records: any[]; queries: { zone_id: string; queries_30d: number }[] }> {
+  const r = await collectRoute53Raw(onError, onLog);
+  return r ? { zones: r.zones, records: r.records, queries: [...r.queries].map(([zone_id, queries_30d]) => ({ zone_id, queries_30d })) } : { zones: [], records: [], queries: [] };
+}
+
+/** null = the zone list could not be read. */
+async function collectRoute53Raw(onError: (m: string) => void, onLog: (s: string) => void): Promise<{ zones: any[]; records: any[]; queries: Map<string, number> } | null> {
   let zones: any[];
   try { zones = await query<any>(`select id, name, private_zone, comment, resource_record_set_count, account_id from ${S}.aws_route53_zone`); }
-  catch (e) { out.errors.push(describeError(e, "route53 zones (aws_route53_zone)")); out.took_ms = Date.now() - t0; return out; }
+  catch (e) { onError(describeError(e, "route53 zones (aws_route53_zone)")); return null; }
   let records: any[] = [];
   if (zones.length) {
     try { records = await query<any>(`select name, zone_id, type, ttl, records, alias_target, set_identifier, weight, failover, region, geo_location, latency_region, multi_value_answer, health_check_id from ${S}.aws_route53_record`); }
-    catch (e) { out.errors.push(describeError(e, "route53 records (aws_route53_record)")); }
+    catch (e) { onError(describeError(e, "route53 records (aws_route53_record)")); }
   }
   // DNS queries per zone over 30 days (the metric lives in us-east-1); alias queries to AWS resources are free, so this is a ceiling
   const queries = new Map<string, number>();
@@ -408,6 +413,15 @@ export async function refreshRoute53Inventory(onLog: (s: string) => void = () =>
       const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); if (vs.length) queries.set(zoneId(z.id), vs.reduce((a, b) => a + b, 0));
     } catch (e) { onLog(`route53: no query metric for ${z.name}: ${String((e as any)?.message ?? e).slice(0, 100)}`); }
   }));
+  return { zones, records, queries };
+}
+
+export async function refreshRoute53Inventory(onLog: (s: string) => void = () => {}): Promise<Route53RefreshResult> {
+  const t0 = Date.now();
+  const out: Route53RefreshResult = { zones: 0, records: 0, linked: 0, external: 0, unmatched: 0, errors: [], took_ms: 0 };
+  const raw = await collectRoute53Raw((m) => out.errors.push(m), onLog);
+  if (!raw) { out.took_ms = Date.now() - t0; return out; }
+  const { zones, records, queries } = raw;
 
   const recIn: RecordIn[] = records.map((r) => ({ name: r.name, type: r.type, alias_target: obj(r.alias_target), values: arr(r.records).map(String) }));
   const idx = await buildIndex(onLog, out.errors);

@@ -82,7 +82,13 @@ async function consumedUnits(accountId: string | null, region: string, names: st
   return out;
 }
 
-export async function refreshDynamodbInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<number> {
+/** Read-only collection: rows `refreshDynamodbInventory` persists, minus open_recs/findings/now (SQLite-derived). Stable id: arn (or account_id+region+name). */
+export async function collectDynamodbInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<Record<string, any>[]> {
+  return (await collectDynamodbRows(onError, onLog)) ?? [];
+}
+
+/** null = the table list could not be read (refresh then leaves the table untouched). */
+async function collectDynamodbRows(onError: (m: string) => void, onLog: (l: string) => void): Promise<Record<string, any>[] | null> {
   // every column is a DescribeTable field; one the plugin version does not have is dropped and reported, the rest still lands
   let cols = ["name", "arn", "region", "account_id", "table_status", "billing_mode", "read_capacity", "write_capacity", "item_count", "table_size_bytes", "table_class", "creation_date_time", "global_secondary_indexes", "point_in_time_recovery_description", "latest_stream_arn", "tags"];
   let tables: any[];
@@ -90,7 +96,7 @@ export async function refreshDynamodbInventory(onError: (m: string) => void = ()
     try { tables = await query<any>(`select ${cols.join(", ")} from ${S}.aws_dynamodb_table`); break; }
     catch (e) {
       const m = /column "?(\w+)"? does not exist/i.exec(String((e as any)?.message ?? e));
-      if (!m || !cols.includes(m[1]) || ["name", "region", "account_id"].includes(m[1])) { onError(describeError(e, "dynamodb inventory (aws_dynamodb_table)")); return 0; }
+      if (!m || !cols.includes(m[1]) || ["name", "region", "account_id"].includes(m[1])) { onError(describeError(e, "dynamodb inventory (aws_dynamodb_table)")); return null; }
       cols = cols.filter((c) => c !== m[1]); onLog(`dynamodb: column ${m[1]} not available, skipped`);
     }
   }
@@ -104,6 +110,29 @@ export async function refreshDynamodbInventory(onError: (m: string) => void = ()
     try { for (const [name, m] of await consumedUnits(account || null, region, names)) metrics.set(`${k}|${name}`, m); }
     catch (e) { onError(describeError(e, `dynamodb metrics ${region}${account ? ` (account ${account})` : ""} (cloudwatch:GetMetricData)`)); }
   }
+  const rows: Record<string, any>[] = [];
+  for (const t of tables) {
+    const account = t.account_id ? String(t.account_id) : "";
+    const gsis: any[] = Array.isArray(json(t.global_secondary_indexes)) ? json(t.global_secondary_indexes) : [];
+    const gsiRead = gsis.reduce((s, g) => s + num(g?.ProvisionedThroughput?.ReadCapacityUnits), 0);
+    const gsiWrite = gsis.reduce((s, g) => s + num(g?.ProvisionedThroughput?.WriteCapacityUnits), 0);
+    const pitr = json(t.point_in_time_recovery_description)?.PointInTimeRecoveryStatus === "ENABLED" ? 1 : 0;
+    const m = metrics.get(`${account}|${t.region}|${t.name}`) ?? { read: 0, write: 0, days: 0 };
+    const facts: DynamoFacts = { billing_mode: t.billing_mode ?? null, read_capacity: num(t.read_capacity), write_capacity: num(t.write_capacity), gsi_read_capacity: gsiRead, gsi_write_capacity: gsiWrite, size_bytes: num(t.table_size_bytes), read_units_30d: m.read, write_units_30d: m.write, metric_days: m.days };
+    const cost = dynamodbMonthlyCost(facts);
+    rows.push({ account_id: account, region: String(t.region || ""), name: String(t.name), arn: t.arn ?? null, status: t.table_status ?? null, billing_mode: t.billing_mode ?? null,
+      read_capacity: facts.read_capacity, write_capacity: facts.write_capacity, gsi_count: gsis.length, gsi_read_capacity: gsiRead, gsi_write_capacity: gsiWrite,
+      item_count: num(t.item_count), size_bytes: facts.size_bytes, table_class: t.table_class ?? null, pitr, stream: t.latest_stream_arn ? 1 : 0, created: t.creation_date_time ? new Date(t.creation_date_time).toISOString() : null,
+      tags: t.tags == null ? null : typeof t.tags === "string" ? t.tags : JSON.stringify(t.tags), read_units_30d: m.read, write_units_30d: m.write, metric_days: m.days,
+      storage_usd: cost.storage_usd, capacity_usd: cost.capacity_usd, monthly_usd: cost.usd_month,
+    });
+  }
+  return rows;
+}
+
+export async function refreshDynamodbInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<number> {
+  const rows = await collectDynamodbRows(onError, onLog);
+  if (!rows) return 0;
   const findingsFor = db.prepare("select count(*) as n from findings where run_id = (select max(run_id) from findings) and (resource = ? or resource = ?)");
   const recsFor = db.prepare("select count(*) as n from recommendations where status = 'open' and (resource = ? or resource = ?)");
   const now = new Date().toISOString();
@@ -117,21 +146,8 @@ export async function refreshDynamodbInventory(onError: (m: string) => void = ()
       storage_usd = excluded.storage_usd, capacity_usd = excluded.capacity_usd, monthly_usd = excluded.monthly_usd, open_recs = excluded.open_recs, findings = excluded.findings, last_seen = excluded.last_seen, gone = 0`);
   let n = 0;
   db.transaction(() => {
-    for (const t of tables) {
-      const account = t.account_id ? String(t.account_id) : "";
-      const gsis: any[] = Array.isArray(json(t.global_secondary_indexes)) ? json(t.global_secondary_indexes) : [];
-      const gsiRead = gsis.reduce((s, g) => s + num(g?.ProvisionedThroughput?.ReadCapacityUnits), 0);
-      const gsiWrite = gsis.reduce((s, g) => s + num(g?.ProvisionedThroughput?.WriteCapacityUnits), 0);
-      const pitr = json(t.point_in_time_recovery_description)?.PointInTimeRecoveryStatus === "ENABLED" ? 1 : 0;
-      const m = metrics.get(`${account}|${t.region}|${t.name}`) ?? { read: 0, write: 0, days: 0 };
-      const facts: DynamoFacts = { billing_mode: t.billing_mode ?? null, read_capacity: num(t.read_capacity), write_capacity: num(t.write_capacity), gsi_read_capacity: gsiRead, gsi_write_capacity: gsiWrite, size_bytes: num(t.table_size_bytes), read_units_30d: m.read, write_units_30d: m.write, metric_days: m.days };
-      const cost = dynamodbMonthlyCost(facts);
-      up.run({ account_id: account, region: String(t.region || ""), name: String(t.name), arn: t.arn ?? null, status: t.table_status ?? null, billing_mode: t.billing_mode ?? null,
-        read_capacity: facts.read_capacity, write_capacity: facts.write_capacity, gsi_count: gsis.length, gsi_read_capacity: gsiRead, gsi_write_capacity: gsiWrite,
-        item_count: num(t.item_count), size_bytes: facts.size_bytes, table_class: t.table_class ?? null, pitr, stream: t.latest_stream_arn ? 1 : 0, created: t.creation_date_time ? new Date(t.creation_date_time).toISOString() : null,
-        tags: t.tags == null ? null : typeof t.tags === "string" ? t.tags : JSON.stringify(t.tags), read_units_30d: m.read, write_units_30d: m.write, metric_days: m.days,
-        storage_usd: cost.storage_usd, capacity_usd: cost.capacity_usd, monthly_usd: cost.usd_month,
-        open_recs: (recsFor.get(String(t.name), t.arn ?? "") as any).n, findings: (findingsFor.get(String(t.name), t.arn ?? "") as any).n, now });
+    for (const row of rows) {
+      up.run({ ...row, open_recs: (recsFor.get(row.name, row.arn ?? "") as any).n, findings: (findingsFor.get(row.name, row.arn ?? "") as any).n, now });
       n++;
     }
     db.prepare("update inventory_dynamodb set gone = 1 where last_seen <> ?").run(now);

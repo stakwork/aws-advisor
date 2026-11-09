@@ -134,13 +134,35 @@ export interface RoleRow {
 
 const ROLES_SQL = `select arn, name, account_id, path, create_date, description, assume_role_policy, role_last_used_date, role_last_used_region, attached_policy_arns, inline_policies, max_session_duration from ${S}.aws_iam_role`;
 
-export async function refreshRoleTrust(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<{ roles: number; outside: number; risky: number }> {
+/** Read-only collection: the rows `refreshRoleTrust` persists (minus `now`). `principals` is the JSON of the parsed trust principals. Stable id: arn. */
+export async function collectRoleTrust(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<Record<string, any>[]> {
+  return (await collectRoleRows(onError)) ?? [];
+}
+
+/** null = the role list could not be read (refresh then leaves the table untouched). */
+async function collectRoleRows(onError: (m: string) => void): Promise<Record<string, any>[] | null> {
   let rows: any[] = [];
-  try { rows = await query(ROLES_SQL); } catch (e: any) { onError(`IAM roles: ${describeError(e, "iam roles (aws_iam_role)")}`); return { roles: 0, outside: 0, risky: 0 }; }
+  try { rows = await query(ROLES_SQL); } catch (e: any) { onError(`IAM roles: ${describeError(e, "iam roles (aws_iam_role)")}`); return null; }
   // the accounts the advisor reaches (the parent and every member) are the organisation's own
   const known = new Set<string>();
   try { const { listAccounts } = await import("./accounts.js"); for (const a of listAccounts()) if (a.account_id) known.add(String(a.account_id)); } catch { /* none known: every other account reads as external */ }
   try { const { credentialsMeta } = await import("./steampipe.js"); const p = credentialsMeta()?.accountId; if (p) known.add(p); } catch { /* the members alone */ }
+  const out: Record<string, any>[] = [];
+  for (const r of rows) {
+    const ps = trustPrincipals(r.assume_role_policy, r.account_id ? String(r.account_id) : null, known);
+    const attached = (Array.isArray(r.attached_policy_arns) ? r.attached_policy_arns : obj(r.attached_policy_arns) ?? []).map(String);
+    const inline = Array.isArray(r.inline_policies) ? r.inline_policies : obj(r.inline_policies) ?? [];
+    const worst = ps.find((p) => p.risk === "alarm") ?? ps.find((p) => p.risk === "warning") ?? null;
+    out.push({ arn: String(r.arn), name: String(r.name), account_id: r.account_id ? String(r.account_id) : null, path: r.path ?? null, created: iso(r.create_date), description: r.description ?? null, last_used: iso(r.role_last_used_date), last_used_region: r.role_last_used_region ?? null,
+      admin: isAdmin(attached, inline) ? 1 : 0, policies: JSON.stringify([...attached.map((a: string) => a.split("/").pop()), ...inline.map((p: any) => `inline ${p?.PolicyName ?? p?.policy_name ?? "policy"}`)]), principals: JSON.stringify(ps), trust: trustSummary(ps),
+      risk: worst?.risk ?? null, risk_reason: worst ? `${worst.who}: ${worst.risk_reason}` : null, max_session_hours: r.max_session_duration ? Number(r.max_session_duration) / 3600 : null });
+  }
+  return out;
+}
+
+export async function refreshRoleTrust(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<{ roles: number; outside: number; risky: number }> {
+  const rows = await collectRoleRows(onError);
+  if (!rows) return { roles: 0, outside: 0, risky: 0 };
   const now = new Date().toISOString(); let outside = 0; let risky = 0;
   const up = db.prepare(`insert into inventory_iam_role(arn, name, account_id, path, created, description, last_used, last_used_region, admin, policies, principals, trust, risk, risk_reason, max_session_hours, first_seen, last_seen, gone)
     values (@arn, @name, @account_id, @path, @created, @description, @last_used, @last_used_region, @admin, @policies, @principals, @trust, @risk, @risk_reason, @max_session_hours, @now, @now, 0)
@@ -148,14 +170,8 @@ export async function refreshRoleTrust(onError: (m: string) => void = () => {}, 
       admin = excluded.admin, policies = excluded.policies, principals = excluded.principals, trust = excluded.trust, risk = excluded.risk, risk_reason = excluded.risk_reason, max_session_hours = excluded.max_session_hours, last_seen = excluded.last_seen, gone = 0`);
   db.transaction(() => {
     for (const r of rows) {
-      const ps = trustPrincipals(r.assume_role_policy, r.account_id ? String(r.account_id) : null, known);
-      const attached = (Array.isArray(r.attached_policy_arns) ? r.attached_policy_arns : obj(r.attached_policy_arns) ?? []).map(String);
-      const inline = Array.isArray(r.inline_policies) ? r.inline_policies : obj(r.inline_policies) ?? [];
-      const worst = ps.find((p) => p.risk === "alarm") ?? ps.find((p) => p.risk === "warning") ?? null;
-      if (isOutsideTrust(ps)) outside++; if (worst) risky++;
-      up.run({ arn: String(r.arn), name: String(r.name), account_id: r.account_id ? String(r.account_id) : null, path: r.path ?? null, created: iso(r.create_date), description: r.description ?? null, last_used: iso(r.role_last_used_date), last_used_region: r.role_last_used_region ?? null,
-        admin: isAdmin(attached, inline) ? 1 : 0, policies: JSON.stringify([...attached.map((a: string) => a.split("/").pop()), ...inline.map((p: any) => `inline ${p?.PolicyName ?? p?.policy_name ?? "policy"}`)]), principals: JSON.stringify(ps), trust: trustSummary(ps),
-        risk: worst?.risk ?? null, risk_reason: worst ? `${worst.who}: ${worst.risk_reason}` : null, max_session_hours: r.max_session_duration ? Number(r.max_session_duration) / 3600 : null, now });
+      if (isOutsideTrust(JSON.parse(r.principals))) outside++; if (r.risk) risky++;
+      up.run({ ...r, now });
     }
   })();
   const gone = rows.length ? db.prepare("update inventory_iam_role set gone = 1 where gone = 0 and last_seen < ?").run(now).changes : 0;

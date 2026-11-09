@@ -106,7 +106,15 @@ async function traffic(lbs: { arn: string; kind: LbKind; name: string; region: s
   return out;
 }
 
-export async function refreshElbInventory(onError: (m: string) => void = () => {}, onLog: (s: string) => void = () => {}): Promise<number> {
+type Ec2Lookup = { instance_id: string; name: string | null; private_ip: string | null }[];
+
+/** Read-only collection: rows `refreshElbInventory` persists (minus open_recs, findings, now). Stable id: arn. `ec2Lookup` (inventory_ec2 rows) only resolves target names; the refresh passes it from SQLite. */
+export async function collectElbInventory(onError: (m: string) => void = () => {}, onLog: (s: string) => void = () => {}, ec2Lookup: Ec2Lookup = []): Promise<Record<string, any>[]> {
+  return (await collectElbRows(onError, onLog, ec2Lookup)) ?? [];
+}
+
+/** null = no balancer list could be read (refresh then leaves the table untouched). */
+async function collectElbRows(onError: (m: string) => void, onLog: (s: string) => void, ec2Lookup: Ec2Lookup): Promise<Record<string, any>[] | null> {
   const opt = async <T,>(what: string, sql: string, required = false): Promise<T[] | null> => {
     try { return await query<T>(sql); }
     catch (e) { const m = describeError(e, `elb inventory (${what})`); if (required) onError(m); else onLog(`elb inventory: ${what} skipped: ${m.slice(0, 140)}`); return null; }
@@ -121,9 +129,9 @@ export async function refreshElbInventory(onError: (m: string) => void = () => {
     opt<any>("aws_ec2_autoscaling_group", `select name, load_balancer_names, target_group_arns from ${S}.aws_ec2_autoscaling_group`),
     opt<any>("aws_ecs_service", `select service_name, cluster_arn, load_balancers from ${S}.aws_ecs_service`),
   ]);
-  if (!albs && !nlbs && !clbs && !gwlbs) return 0;
+  if (!albs && !nlbs && !clbs && !gwlbs) return null;
 
-  const ec2 = db.prepare("select instance_id, name, private_ip from inventory_ec2 where gone = 0").all() as { instance_id: string; name: string | null; private_ip: string | null }[];
+  const ec2 = ec2Lookup;
   const byIp = new Map(ec2.filter((r) => r.private_ip).map((r) => [r.private_ip!, { id: r.instance_id, name: r.name }]));
   const byId = new Map(ec2.map((r) => [r.instance_id, r.name]));
 
@@ -170,6 +178,29 @@ export async function refreshElbInventory(onError: (m: string) => void = () => {
   }
 
   const metrics = lbs.length ? await traffic(lbs.map((l) => ({ arn: l.arn, kind: l.kind, name: l.name, region: l.region })), onLog) : new Map();
+  const rows: Record<string, any>[] = [];
+  for (const lb of lbs) {
+    const all = lb.target_groups.flatMap((g) => g.targets);
+    const healthy = all.filter((t) => t.health === "healthy").length;
+    const unhealthy = all.filter((t) => t.health === "unhealthy").length;
+    const m = metrics.get(lb.arn);
+    const asgList = [...new Set([...lb.target_groups.flatMap((g) => g.asgs || []), ...(asgByLbName.get(lb.name) || [])])];
+    const ecsList = [...new Set([...lb.target_groups.flatMap((g) => g.ecs_services || []), ...(ecsByLbName.get(lb.name) || [])])];
+    rows.push({
+      arn: lb.arn, name: lb.name, kind: lb.kind, scheme: lb.scheme, dns_name: lb.dns_name, state: lb.state, region: lb.region, vpc_id: lb.vpc_id, created: lb.created, azs: lb.azs,
+      security_groups: JSON.stringify(lb.security_groups), tags: JSON.stringify(lb.tags), listeners: JSON.stringify(lb.listeners), target_groups: JSON.stringify(lb.target_groups),
+      targets: all.length, healthy, unhealthy, requests_30d: m?.requests ?? null, gb_30d: m?.bytes != null ? Math.round((m.bytes / 1e9) * 100) / 100 : null, flows_30d: m?.flows ?? null, metric_days: m?.days ?? 0,
+      beanstalk_env: lb.tags["elasticbeanstalk:environment-name"] || null, beanstalk_env_id: lb.tags["elasticbeanstalk:environment-id"] || null, asgs: JSON.stringify(asgList), ecs_services: JSON.stringify(ecsList), monthly_usd: elbMonthlyUsd(lb.kind),
+      account_id: lb.account_id,
+    });
+  }
+  return rows;
+}
+
+export async function refreshElbInventory(onError: (m: string) => void = () => {}, onLog: (s: string) => void = () => {}): Promise<number> {
+  const ec2 = db.prepare("select instance_id, name, private_ip from inventory_ec2 where gone = 0").all() as Ec2Lookup;
+  const rows = await collectElbRows(onError, onLog, ec2);
+  if (!rows) return 0;
   const findingsFor = db.prepare("select count(*) as n from findings where run_id = (select max(run_id) from findings) and (resource = ? or resource = ?)");
   const recsFor = db.prepare("select count(*) as n from recommendations where status = 'open' and (resource = ? or resource = ?)");
   const now = new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -181,25 +212,13 @@ export async function refreshElbInventory(onError: (m: string) => void = () => {
       monthly_usd = excluded.monthly_usd, open_recs = excluded.open_recs, findings = excluded.findings, account_id = coalesce(excluded.account_id, inventory_elb.account_id), last_seen = excluded.last_seen, gone = 0`);
   let n = 0;
   db.transaction(() => {
-    for (const lb of lbs) {
-      const all = lb.target_groups.flatMap((g) => g.targets);
-      const healthy = all.filter((t) => t.health === "healthy").length;
-      const unhealthy = all.filter((t) => t.health === "unhealthy").length;
-      const m = metrics.get(lb.arn);
-      const asgList = [...new Set([...lb.target_groups.flatMap((g) => g.asgs || []), ...(asgByLbName.get(lb.name) || [])])];
-      const ecsList = [...new Set([...lb.target_groups.flatMap((g) => g.ecs_services || []), ...(ecsByLbName.get(lb.name) || [])])];
-      up.run({
-        arn: lb.arn, name: lb.name, kind: lb.kind, scheme: lb.scheme, dns_name: lb.dns_name, state: lb.state, region: lb.region, vpc_id: lb.vpc_id, created: lb.created, azs: lb.azs,
-        security_groups: JSON.stringify(lb.security_groups), tags: JSON.stringify(lb.tags), listeners: JSON.stringify(lb.listeners), target_groups: JSON.stringify(lb.target_groups),
-        targets: all.length, healthy, unhealthy, requests_30d: m?.requests ?? null, gb_30d: m?.bytes != null ? Math.round((m.bytes / 1e9) * 100) / 100 : null, flows_30d: m?.flows ?? null, metric_days: m?.days ?? 0,
-        beanstalk_env: lb.tags["elasticbeanstalk:environment-name"] || null, beanstalk_env_id: lb.tags["elasticbeanstalk:environment-id"] || null, asgs: JSON.stringify(asgList), ecs_services: JSON.stringify(ecsList), monthly_usd: elbMonthlyUsd(lb.kind),
-        open_recs: (recsFor.get(lb.arn, lb.name) as any).n, findings: (findingsFor.get(lb.arn, lb.name) as any).n, account_id: lb.account_id, now,
-      });
+    for (const row of rows) {
+      up.run({ ...row, open_recs: (recsFor.get(row.arn, row.name) as any).n, findings: (findingsFor.get(row.arn, row.name) as any).n, now });
       n++;
     }
     db.prepare("update inventory_elb set gone = 1 where last_seen <> ?").run(now);
   })();
-  onLog(`${n} load balancer(s): ${lbs.filter((l) => l.kind === "alb").length} ALB, ${lbs.filter((l) => l.kind === "nlb").length} NLB, ${lbs.filter((l) => l.kind === "clb").length} classic, ${lbs.filter((l) => l.kind === "gwlb").length} gateway`);
+  onLog(`${n} load balancer(s): ${rows.filter((l) => l.kind === "alb").length} ALB, ${rows.filter((l) => l.kind === "nlb").length} NLB, ${rows.filter((l) => l.kind === "clb").length} classic, ${rows.filter((l) => l.kind === "gwlb").length} gateway`);
   return n;
 }
 

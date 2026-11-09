@@ -160,16 +160,20 @@ function mergeMissing(prev: MissingFact[], current: Omit<MissingFact, "since">[]
 
 const safeJson = (v: unknown): any => { if (v == null) return null; if (typeof v === "string") { try { return JSON.parse(v); } catch { return null; } } return v; };
 
-export async function refreshLambdaInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<number> {
+/** Read-only collection: the rows `refreshLambdaInventory` persists (minus open_recs, findings, facts_missing, now, which come from SQLite). `facts_missing_reasons` is the collector's half of facts_missing. Stable id: arn. */
+export async function collectLambdaInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<Record<string, any>[]> {
+  return (await collectLambdaRows(onError, onLog)) ?? [];
+}
+
+/** null = the function list itself could not be read (refresh then leaves the table untouched). */
+async function collectLambdaRows(onError: (m: string) => void, onLog: (l: string) => void): Promise<Record<string, any>[] | null> {
   let fns: any[];
   try { fns = await query<any>(`select name, account_id, arn, region, runtime, memory_size, architectures, timeout from ${S}.aws_lambda_function`); }
-  catch (e) { onError(describeError(e, "lambda inventory (aws_lambda_function)")); return 0; }
+  catch (e) { onError(describeError(e, "lambda inventory (aws_lambda_function)")); return null; }
   const agg = async (table: string, col: string) => { try { return new Map((await query<any>(`select name, sum(sum) as v, count(*) as days from ${S}.${table} where timestamp > now() - interval '30 days' group by 1`)).map((r) => [r.name, { v: Number(r.v || 0), days: Number(r.days || 0) }])); } catch (e) { onError(describeError(e, `lambda metrics (${table})`)); return new Map<string, { v: number; days: number }>(); } };
   const inv = await agg("aws_lambda_function_metric_invocations_daily", "sum");
   const dur = await agg("aws_lambda_function_metric_duration_daily", "sum");
   const err = await agg("aws_lambda_function_metric_errors_daily", "sum");
-  const findingsFor = db.prepare("select count(*) as n from findings where run_id = (select max(run_id) from findings) and resource = ?");
-  const recsFor = db.prepare("select count(*) as n from recommendations where status = 'open' and resource = ?");
 
   // function facts (Step 2): one query per group, joined by unqualified arn
   const configByArn = await collectConfig(onError, onLog);
@@ -180,6 +184,51 @@ export async function refreshLambdaInventory(onError: (m: string) => void = () =
   const collisions = detectRegionCollisions(fns.map((f) => ({ account_id: f.account_id, name: f.name, region: f.region })));
   if (collisions.size) for (const [key, regions] of collisions) onLog(`function facts: ${key.replace("|", " / ")} is in several regions (${regions.join(", ")}); only one region's facts are kept`);
 
+  const rows: Record<string, any>[] = [];
+  for (const f of fns) {
+    const arch = Array.isArray(f.architectures) ? f.architectures : (() => { try { return JSON.parse(f.architectures || "[]"); } catch { return []; } })();
+    const facts: LambdaFacts = { name: f.name, region: f.region, memory_mb: Number(f.memory_size || 128), arm: arch.includes("arm64"), invocations_30d: inv.get(f.name)?.v ?? 0, duration_ms_30d: dur.get(f.name)?.v ?? 0, days: inv.get(f.name)?.days ?? 0 };
+    const cost = lambdaMonthlyCost(facts);
+    const { arn: baseArn } = stripQualifier(String(f.arn || ""));
+    const accountId = f.account_id ? String(f.account_id) : "";
+    const cfg = configByArn?.get(baseArn);
+    const tags = tagsByArn?.get(baseArn);
+    const envNames = envByArn?.get(baseArn);
+    const polled = polledByArn?.get(baseArn) ?? [];
+    const push = pushByArn.get(baseArn) ?? [];
+
+    const configCollected = Boolean(configByArn);
+    const tagsCollected = Boolean(tagsByArn);
+    const envCollected = Boolean(envByArn);
+    const polledCollected = Boolean(polledByArn);
+    const invokeCollected = !deniedAccounts.has(accountId);
+
+    const reasons: Omit<MissingFact, "since">[] = [];
+    if (!configCollected) reasons.push({ fact: "config", reason: "aws_lambda_function (network, identity, layers) not readable" });
+    if (!tagsCollected) reasons.push({ fact: "tags", reason: "ListTags denied" });
+    if (!invokeCollected) reasons.push({ fact: "invoke_permissions", reason: "GetPolicy denied" });
+    if (!envCollected) reasons.push({ fact: "env_var_names", reason: "environment_variables not readable" });
+    else if (envNames == null && cfg?.kms_key_arn) reasons.push({ fact: "env_var_names", reason: "encrypted environment unreadable (needs kms:Decrypt, not granted by design)" });
+    if (!polledCollected) reasons.push({ fact: "polled_triggers", reason: "aws_lambda_event_source_mapping not readable" });
+    const collision = collisions.get(`${accountId}|${f.name}`);
+    if (collision) reasons.push({ fact: "region_collision", reason: `also in ${collision.filter((r) => r !== f.region).join(", ")}` });
+    rows.push({ account_id: accountId, name: f.name, arn: f.arn, region: f.region, runtime: f.runtime ?? null, memory_mb: facts.memory_mb, arm: facts.arm ? 1 : 0, timeout_s: f.timeout ?? null, invocations_30d: facts.invocations_30d, duration_ms_30d: facts.duration_ms_30d, errors_30d: err.get(f.name)?.v ?? 0, days: facts.days,
+      invocations_month: cost.invocations_month, gb_seconds_month: cost.gb_seconds_month, avg_duration_ms: facts.invocations_30d > 0 ? Math.round(facts.duration_ms_30d / facts.invocations_30d) : null, monthly_usd: cost.usd_month,
+      vpc_id: cfg?.vpc_id ?? null, subnet_ids: cfg ? JSON.stringify(cfg.subnet_ids) : "[]", security_group_ids: cfg ? JSON.stringify(cfg.security_group_ids) : "[]", role_arn: cfg?.role_arn ?? null,
+      layers: cfg ? JSON.stringify(cfg.layers) : "[]", code_size_bytes: cfg?.code_size_bytes ?? null, package_type: cfg?.package_type ?? null,
+      env_var_names: envNames === undefined ? "[]" : JSON.stringify(envNames ?? []), log_group: cfg?.log_group ?? `/aws/lambda/${f.name}`,
+      tags: JSON.stringify(tags ?? {}), polled_triggers: JSON.stringify(polled), push_triggers: JSON.stringify(push), facts_missing_reasons: reasons,
+      config_collected: configCollected ? 1 : 0, tags_collected: tagsCollected ? 1 : 0, env_collected: envCollected ? 1 : 0, polled_collected: polledCollected ? 1 : 0, invoke_collected: invokeCollected ? 1 : 0,
+    });
+  }
+  return rows;
+}
+
+export async function refreshLambdaInventory(onError: (m: string) => void = () => {}, onLog: (l: string) => void = () => {}): Promise<number> {
+  const rows = await collectLambdaRows(onError, onLog);
+  if (!rows) return 0;
+  const findingsFor = db.prepare("select count(*) as n from findings where run_id = (select max(run_id) from findings) and resource = ?");
+  const recsFor = db.prepare("select count(*) as n from recommendations where status = 'open' and resource = ?");
   const prevMissing = new Map<string, MissingFact[]>();
   for (const r of db.prepare("select account_id, name, facts_missing from inventory_lambda").all() as any[]) prevMissing.set(`${r.account_id || ""}|${r.name}`, safeJson(r.facts_missing) || []);
 
@@ -206,52 +255,14 @@ export async function refreshLambdaInventory(onError: (m: string) => void = () =
       facts_missing = excluded.facts_missing`);
   let n = 0;
   db.transaction(() => {
-    for (const f of fns) {
-      const arch = Array.isArray(f.architectures) ? f.architectures : (() => { try { return JSON.parse(f.architectures || "[]"); } catch { return []; } })();
-      const facts: LambdaFacts = { name: f.name, region: f.region, memory_mb: Number(f.memory_size || 128), arm: arch.includes("arm64"), invocations_30d: inv.get(f.name)?.v ?? 0, duration_ms_30d: dur.get(f.name)?.v ?? 0, days: inv.get(f.name)?.days ?? 0 };
-      const cost = lambdaMonthlyCost(facts);
-      const errors = err.get(f.name)?.v ?? 0;
-      const isOpen = Boolean(openErr.get(f.arn));
-      const bad = lambdaErrorVerdict(errors, facts.invocations_30d, config.lambdaErrorPct, 100, isOpen);
-      if (bad && !isOpen) { const pct = (100 * errors) / facts.invocations_30d; const msg = `${f.name}: ${pct.toFixed(1)}% of invocations failed in the last 30 days (${Math.round(errors).toLocaleString()} errors of ${Math.round(facts.invocations_30d).toLocaleString()}); failed invocations are billed like the rest`; insertAlert.run("lambda_errors", f.arn, msg, JSON.stringify({ summary: msg, function: f.name, errors_30d: errors, invocations_30d: facts.invocations_30d, error_pct: pct, memory_mb: facts.memory_mb, monthly_usd: cost.usd_month })); }
-      if (!bad && isOpen) ackErr.run(f.arn);
-
-      const { arn: baseArn } = stripQualifier(String(f.arn || ""));
-      const accountId = f.account_id ? String(f.account_id) : "";
-      const cfg = configByArn?.get(baseArn);
-      const tags = tagsByArn?.get(baseArn);
-      const envNames = envByArn?.get(baseArn);
-      const polled = polledByArn?.get(baseArn) ?? [];
-      const push = pushByArn.get(baseArn) ?? [];
-
-      const configCollected = Boolean(configByArn);
-      const tagsCollected = Boolean(tagsByArn);
-      const envCollected = Boolean(envByArn);
-      const polledCollected = Boolean(polledByArn);
-      const invokeCollected = !deniedAccounts.has(accountId);
-
-      const missingKey = `${accountId}|${f.name}`;
-      const reasons: Omit<MissingFact, "since">[] = [];
-      if (!configCollected) reasons.push({ fact: "config", reason: "aws_lambda_function (network, identity, layers) not readable" });
-      if (!tagsCollected) reasons.push({ fact: "tags", reason: "ListTags denied" });
-      if (!invokeCollected) reasons.push({ fact: "invoke_permissions", reason: "GetPolicy denied" });
-      if (!envCollected) reasons.push({ fact: "env_var_names", reason: "environment_variables not readable" });
-      else if (envNames == null && cfg?.kms_key_arn) reasons.push({ fact: "env_var_names", reason: "encrypted environment unreadable (needs kms:Decrypt, not granted by design)" });
-      if (!polledCollected) reasons.push({ fact: "polled_triggers", reason: "aws_lambda_event_source_mapping not readable" });
-      const collision = collisions.get(`${accountId}|${f.name}`);
-      if (collision) reasons.push({ fact: "region_collision", reason: `also in ${collision.filter((r) => r !== f.region).join(", ")}` });
-      const factsMissing = mergeMissing(prevMissing.get(missingKey) ?? [], reasons, now);
-
-      up.run({ account_id: accountId, name: f.name, arn: f.arn, region: f.region, runtime: f.runtime ?? null, memory_mb: facts.memory_mb, arm: facts.arm ? 1 : 0, timeout_s: f.timeout ?? null, invocations_30d: facts.invocations_30d, duration_ms_30d: facts.duration_ms_30d, errors_30d: err.get(f.name)?.v ?? 0, days: facts.days,
-        invocations_month: cost.invocations_month, gb_seconds_month: cost.gb_seconds_month, avg_duration_ms: facts.invocations_30d > 0 ? Math.round(facts.duration_ms_30d / facts.invocations_30d) : null, monthly_usd: cost.usd_month,
-        open_recs: (recsFor.get(f.arn) as any).n, findings: (findingsFor.get(f.arn) as any).n,
-        vpc_id: cfg?.vpc_id ?? null, subnet_ids: cfg ? JSON.stringify(cfg.subnet_ids) : "[]", security_group_ids: cfg ? JSON.stringify(cfg.security_group_ids) : "[]", role_arn: cfg?.role_arn ?? null,
-        layers: cfg ? JSON.stringify(cfg.layers) : "[]", code_size_bytes: cfg?.code_size_bytes ?? null, package_type: cfg?.package_type ?? null,
-        env_var_names: envNames === undefined ? "[]" : JSON.stringify(envNames ?? []), log_group: cfg?.log_group ?? `/aws/lambda/${f.name}`,
-        tags: JSON.stringify(tags ?? {}), polled_triggers: JSON.stringify(polled), push_triggers: JSON.stringify(push), facts_missing: JSON.stringify(factsMissing),
-        now,
-        config_collected: configCollected ? 1 : 0, tags_collected: tagsCollected ? 1 : 0, env_collected: envCollected ? 1 : 0, polled_collected: polledCollected ? 1 : 0, invoke_collected: invokeCollected ? 1 : 0,
-      });
+    for (const { facts_missing_reasons, ...row } of rows) {
+      const errors = row.errors_30d;
+      const isOpen = Boolean(openErr.get(row.arn));
+      const bad = lambdaErrorVerdict(errors, row.invocations_30d, config.lambdaErrorPct, 100, isOpen);
+      if (bad && !isOpen) { const pct = (100 * errors) / row.invocations_30d; const msg = `${row.name}: ${pct.toFixed(1)}% of invocations failed in the last 30 days (${Math.round(errors).toLocaleString()} errors of ${Math.round(row.invocations_30d).toLocaleString()}); failed invocations are billed like the rest`; insertAlert.run("lambda_errors", row.arn, msg, JSON.stringify({ summary: msg, function: row.name, errors_30d: errors, invocations_30d: row.invocations_30d, error_pct: pct, memory_mb: row.memory_mb, monthly_usd: row.monthly_usd })); }
+      if (!bad && isOpen) ackErr.run(row.arn);
+      const factsMissing = mergeMissing(prevMissing.get(`${row.account_id}|${row.name}`) ?? [], facts_missing_reasons, now);
+      up.run({ ...row, open_recs: (recsFor.get(row.arn) as any).n, findings: (findingsFor.get(row.arn) as any).n, facts_missing: JSON.stringify(factsMissing), now });
       n++;
     }
     db.prepare("update inventory_lambda set gone = 1 where last_seen <> ?").run(now);

@@ -217,14 +217,13 @@ export function refreshInventory(opts: { dns?: boolean } = {}): Promise<RefreshR
   return inflight;
 }
 
-async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
-  const t0 = Date.now();
-  const now = sqliteNow();
-  const errors: string[] = [];
-  const attempt = async (what: string, sql: string): Promise<any[] | undefined> => {
-    try { return await query<any>(sql); } catch (e: any) { errors.push(`${what}: ${describeError(e, `inventory ${what} (${tablesIn(sql).join(", ")})`, 300)}`); return undefined; }
-  };
+/** The core queries by name, for the export API to run one at a time. */
+export const CORE_SQL = { ec2: EC2_SQL, ebs: EBS_SQL, ec2_cpu: EC2_CPU_SQL, rds: RDS_SQL, rds_cpu: RDS_CPU_SQL, elasticache: ELASTICACHE_SQL, rds_conn: RDS_CONN_SQL, rds_iops: RDS_IOPS_SQL,
+  cache_cpu: CACHE_CPU_SQL, sg_rules: SG_RULES_SQL, nacls: NACL_SQL, sgs: SG_SQL, vpcs: VPC_SQL, enis: ENI_SQL };
 
+/** The raw rows of the Steampipe queries the sync reads (no SQLite, no prices), plus the per-resource CloudWatch statistics. Shared by the sync and the export API. */
+export type CoreCollected = Awaited<ReturnType<typeof collectCore>>;
+export async function collectCore(attempt: (what: string, sql: string) => Promise<any[] | undefined>) {
   const [ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules, nacls, sgRows, vpcRows, eniRows] = await Promise.all([
     attempt("ec2", EC2_SQL),
     attempt("ebs", EBS_SQL),
@@ -241,6 +240,41 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
     attempt("VPCs", VPC_SQL),
     attempt("network interfaces", ENI_SQL),
   ]);
+  const stats = await collectStats(rdsRows, cacheRows);
+  return { ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules, nacls, sgRows, vpcRows, eniRows, ...stats };
+}
+
+export async function collectStats(rdsRows: any[] | undefined, cacheRows: any[] | undefined) {
+  const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
+  const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };
+  const minOf = (vs: number[]) => Math.min(...vs), maxOf = (vs: number[]) => Math.max(...vs), sumOf = (vs: number[]) => vs.reduce((a, b) => a + b, 0);
+  await Promise.all([
+    ...(rdsRows || []).map(async (r: any) => { const v = await stat(cwStat("AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", r.db_instance_identifier, r.region, "Minimum"), minOf); if (v != null) rdsMem.set(r.db_instance_identifier, v); }),
+    ...(cacheRows || []).map(async (r: any) => {
+      const [m, e, c] = await Promise.all([
+        stat(cwStat("AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", r.cache_cluster_id, r.region, "Maximum"), maxOf),
+        stat(cwStat("AWS/ElastiCache", "Evictions", "CacheClusterId", r.cache_cluster_id, r.region, "Sum"), sumOf),
+        stat(cwStat("AWS/ElastiCache", "CurrConnections", "CacheClusterId", r.cache_cluster_id, r.region, "Maximum"), maxOf),
+      ]);
+      if (m != null) cacheMem.set(r.cache_cluster_id, m); if (e != null) cacheEvict.set(r.cache_cluster_id, e); if (c != null) cacheConn.set(r.cache_cluster_id, c);
+    }),
+  ]);
+
+  return { rdsMem, cacheMem, cacheEvict, cacheConn };
+}
+
+/** The attempt() helper: a Steampipe query whose failure is recorded in `errors` instead of thrown. */
+export const attemptInto = (errors: string[]) => async (what: string, sql: string): Promise<any[] | undefined> => {
+  try { return await query<any>(sql); } catch (e: any) { errors.push(`${what}: ${describeError(e, `inventory ${what} (${tablesIn(sql).join(", ")})`, 300)}`); return undefined; }
+};
+
+async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
+  const t0 = Date.now();
+  const now = sqliteNow();
+  const errors: string[] = [];
+  const attempt = attemptInto(errors);
+
+  const { ec2Rows, ebsRows, ec2Cpu, rdsRows, rdsCpu, cacheRows, rdsConn, rdsIops, cacheCpu, sgRules, nacls, sgRows, vpcRows, eniRows, rdsMem, cacheMem, cacheEvict, cacheConn } = await collectCore(attempt);
   if (sgRules) { try { const { replaceIngressRules } = await import("./instance_apps.js"); replaceIngressRules(sgRules.map((r: any) => ({ group_id: String(r.group_id), region: r.region ?? null, ip_protocol: r.ip_protocol ?? null, from_port: r.from_port == null ? null : Number(r.from_port), to_port: r.to_port == null ? null : Number(r.to_port), cidr_ipv4: r.cidr_ipv4 ?? null, cidr_ipv6: r.cidr_ipv6 ?? null, referenced_group_id: r.referenced_group_id ?? null, prefix_list_id: r.prefix_list_id ?? null, rule_id: r.security_group_rule_id ?? null, description: r.description || null }))); } catch (e: any) { errors.push(`security group rules: ${e?.message || e}`); } }
   if (nacls) { try { const { replaceNacls } = await import("./instance_apps.js"); replaceNacls(nacls.map((r: any) => ({ acl_id: String(r.acl_id), vpc_id: r.vpc_id ?? null, region: r.region ?? null, is_default: Boolean(r.is_default), subnets: Array.isArray(r.subnets) ? r.subnets.filter(Boolean).map(String) : [], entries: Array.isArray(r.entries) ? r.entries : [] }))); } catch (e: any) { errors.push(`network ACLs: ${String(e?.message || e).slice(0, 200)}`); } }
   if (sgRows || vpcRows || eniRows) {
@@ -261,21 +295,6 @@ async function doRefresh(opts: { dns?: boolean }): Promise<RefreshResult> {
   // the clusters and the workloads inside them (src/cluster_inventory.ts): EKS through the cluster API, ECS through Steampipe
   try { const { refreshClusters } = await import("./cluster_inventory.js"); const c = await refreshClusters(attempt); if (c.errors.length) errors.push(`clusters: ${c.errors.join("; ").slice(0, 300)}`); }
   catch (e: any) { errors.push(`clusters: ${String(e?.message || e).slice(0, 200)}`); }
-  // per-resource CloudWatch statistics the daily tables do not cover (a handful of resources, one call each)
-  const rdsMem = new Map<string, number>(); const cacheMem = new Map<string, number>(); const cacheEvict = new Map<string, number>(); const cacheConn = new Map<string, number>();
-  const stat = async (sql: string, reduce: (vs: number[]) => number): Promise<number | null> => { try { const rows = await query<{ v: string | null }>(sql); const vs = rows.map((r) => Number(r.v)).filter(Number.isFinite); return vs.length ? reduce(vs) : null; } catch { return null; } };
-  const minOf = (vs: number[]) => Math.min(...vs), maxOf = (vs: number[]) => Math.max(...vs), sumOf = (vs: number[]) => vs.reduce((a, b) => a + b, 0);
-  await Promise.all([
-    ...(rdsRows || []).map(async (r: any) => { const v = await stat(cwStat("AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", r.db_instance_identifier, r.region, "Minimum"), minOf); if (v != null) rdsMem.set(r.db_instance_identifier, v); }),
-    ...(cacheRows || []).map(async (r: any) => {
-      const [m, e, c] = await Promise.all([
-        stat(cwStat("AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", r.cache_cluster_id, r.region, "Maximum"), maxOf),
-        stat(cwStat("AWS/ElastiCache", "Evictions", "CacheClusterId", r.cache_cluster_id, r.region, "Sum"), sumOf),
-        stat(cwStat("AWS/ElastiCache", "CurrConnections", "CacheClusterId", r.cache_cluster_id, r.region, "Maximum"), maxOf),
-      ]);
-      if (m != null) cacheMem.set(r.cache_cluster_id, m); if (e != null) cacheEvict.set(r.cache_cluster_id, e); if (c != null) cacheConn.set(r.cache_cluster_id, c);
-    }),
-  ]);
   const rdsConnById = new Map<string, any>((rdsConn || []).map((r: any) => [r.db_instance_identifier, r]));
   const rdsIopsById = new Map<string, any>((rdsIops || []).map((r: any) => [r.db_instance_identifier, r]));
   const cacheCpuById = new Map<string, any>((cacheCpu || []).map((r: any) => [r.cache_cluster_id, r]));
