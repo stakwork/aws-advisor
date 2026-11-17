@@ -1266,3 +1266,141 @@ verdict edges still exist.
 | PublicIp | EIP | static IP | public IP | | anycast |
 | Filter | security group, NACL, WAF | firewall, Cloud Armor | NSG, ASG, WAF | deployment protection, firewall, password, SSO, trusted IPs | WAF, access policies |
 | Endpoint | port, listener, RDS endpoint, function URL | port, forwarding rule | port, listener | deployment URL, function route | route |
+
+---
+
+## 7. Domain registry
+
+> Collector: `src/aws/route53_domains_inventory.ts` — TODO: not yet implemented. See also the Cloudflare adapter for domains registered there.
+
+This layer tracks the registration of apex domains at their registrars — separate from the DNS zone layer (§1, `AdvisorDnsZone`) which tracks records. A domain can have a registration without a zone (registered but DNS not managed here) or a zone without a registration record (zone imported, registrar not in scope).
+
+### Graph shape
+
+```
+AdvisorDomainPortfolio
+    └─ INCLUDES ──► AdvisorDomainRegistration
+                         ├─ REGISTERED_AT ──► AdvisorRegistrar
+                         ├─ IN_ACCOUNT ────► AdvisorAccount
+                         ├─ HAS_CONTACT ───► AdvisorRegistrantContact (×4: registrant, admin, tech, billing)
+                         ├─ HAS_EMAIL_SECURITY ──► AdvisorEmailSecurity
+                         ├─ HAS_EVENT ─────► AdvisorDomainEvent (*)
+                         ├─ DNS_OF ────────► AdvisorDnsZone
+                         │                       └─ IN_ZONE ──► AdvisorDnsRecord
+                         │                                           └─ POINTS_TO ──► LB / Box / CDN / Lambda / S3
+                         │                                                                   └─ (CDN) ORIGIN_OF ──► LB / Box / Storage
+                         └─ ◄─ OWNS ───────── AdvisorIdentity
+```
+
+### Node types
+
+#### AdvisorRegistrar
+
+A domain name registrar.
+
+| property | meaning |
+|---|---|
+| `name` | registrar name (e.g. "GoDaddy", "Namecheap") |
+| `iana_id` | IANA registrar id (optional) |
+| `whois_server` | WHOIS hostname (optional) |
+| `url` | registrar website (optional) |
+
+#### AdvisorDomainRegistration
+
+One apex domain registration as the registrar tracks it.
+
+| property | meaning |
+|---|---|
+| `fqdn` | apex domain, e.g. `stakwork.com` |
+| `registered_at` | registration date (ISO datetime) |
+| `expires_at` | expiry date (ISO datetime) |
+| `days_until_expiry` | computed on each sync |
+| `auto_renew` | registrar auto-renew enabled |
+| `transfer_lock` | transfer lock (clientTransferProhibited) enabled |
+| `privacy_enabled` | WHOIS privacy / redaction active |
+| `dnssec_enabled` | DNSSEC signed at the registrar |
+| `status` | EPP status codes: `active`, `clientTransferProhibited`, `expired`, … |
+| `source` | how the advisor learned of it: `route53_domains` \| `cloudflare` \| `whois` \| `manual` |
+| `managed` | false = found via WHOIS/scan, not via a registrar API |
+| `nameservers` | NS values configured at the registrar |
+| `ns_match` | do `nameservers` match the zone's NS records? |
+| `purpose` | optional label: `product` \| `marketing` \| `defensive` \| `internal` \| `legacy` |
+| `team` | optional owning team label |
+
+#### AdvisorRegistrantContact
+
+A contact record on the registration.
+
+| property | meaning |
+|---|---|
+| `kind` | `registrant` \| `admin` \| `tech` \| `billing` |
+| `name` | contact full name |
+| `org` | organization (optional) |
+| `email` | contact email |
+| `phone` | phone number (optional) |
+| `country` | two-letter country code (optional) |
+
+#### AdvisorEmailSecurity
+
+Email security posture derived from DNS records.
+
+| property | meaning |
+|---|---|
+| `spf` | raw SPF `TXT` record value (optional) |
+| `spf_valid` | SPF parses as valid |
+| `dmarc_policy` | `none` \| `quarantine` \| `reject` |
+| `dmarc_pct` | % of mail covered by DMARC (optional) |
+| `dkim_selectors` | known DKIM selectors found |
+| `status` | overall posture: `protected` \| `partial` \| `none` |
+
+#### AdvisorDomainEvent
+
+One change event on the registration.
+
+| property | meaning |
+|---|---|
+| `kind` | `registration` \| `renewal` \| `transfer` \| `contact_change` \| `lock_change` \| `ns_change` \| `expiry` |
+| `at` | when it happened (ISO datetime) |
+| `by` | actor (IAM user, API key, registrar UI) — optional |
+| `detail` | free text from the registrar API (optional) |
+| `previous_value` | what it was before the change (optional) |
+
+#### AdvisorDomainPortfolio
+
+A named grouping of domain registrations.
+
+| property | meaning |
+|---|---|
+| `name` | portfolio name |
+| `description` | description (optional) |
+
+### Edges
+
+| edge | from → to | notes |
+|---|---|---|
+| `REGISTERED_AT` | AdvisorDomainRegistration → AdvisorRegistrar | which registrar holds it |
+| `HAS_CONTACT` | AdvisorDomainRegistration → AdvisorRegistrantContact | one per `kind` |
+| `DNS_OF` | AdvisorDomainRegistration → AdvisorDnsZone | nameservers delegate to this zone |
+| `IN_ACCOUNT` | AdvisorDomainRegistration → AdvisorAccount | which cloud/registrar account |
+| `OWNS` | AdvisorIdentity → AdvisorDomainRegistration | IAM user / API token responsible |
+| `HAS_EMAIL_SECURITY` | AdvisorDomainRegistration → AdvisorEmailSecurity | email security posture |
+| `HAS_EVENT` | AdvisorDomainRegistration → AdvisorDomainEvent | event history |
+| `INCLUDES` | AdvisorDomainPortfolio → AdvisorDomainRegistration | brand/portfolio grouping |
+| `POINTS_TO` (extend) | AdvisorDnsRecord → AdvisorCdn | resolve CloudFront links to real `AdvisorCdn` nodes (currently only `AdvisorResourceRef`) |
+| `ORIGIN_OF` | AdvisorCdn → AdvisorLoadBalancer \| AdvisorBox \| AdvisorStorage | CDN origin, closing the host-trace chain |
+
+### Alert kinds
+
+| alert key | trigger | level |
+|---|---|---|
+| `domain_expiring` | `days_until_expiry` ≤ 60 | warning; ≤ 14 alarm |
+| `domain_auto_renew_off` | `auto_renew` = false | warning |
+| `domain_transfer_lock_off` | `transfer_lock` = false | warning |
+| `domain_no_zone` | registration has no `DNS_OF` edge | warning |
+| `domain_contact_missing` | no `HAS_CONTACT` edge of kind `registrant` | warning |
+| `domain_ns_mismatch` | registrar nameservers ≠ zone NS records | warning |
+| `domain_unmanaged` | domain has DNS records but no registrar API source | info |
+| `domain_no_spf` | no SPF record | warning |
+| `domain_no_dmarc` | no DMARC record | warning |
+| `domain_dmarc_unenforced` | DMARC p=none | warning |
+| `domain_dkim_missing` | no DKIM selectors found | warning |

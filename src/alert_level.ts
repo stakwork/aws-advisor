@@ -30,5 +30,23 @@ export function alertLevel(a: { kind: string; triage?: unknown; details?: unknow
   if (a.kind === "lambda_errors" || a.kind === "commitment_underused" || a.kind === "cache_memory_high" || a.kind === "rds_memory_low" || a.kind === "network_step") return "warning";
   if (a.kind === "commitment_expiring") return "alarm";
   if (a.kind === "spend_step" || a.kind === "memory_pressure" || a.kind === "log_step" || a.kind === "app_gone" || a.kind === "port_exposed") return "warning";
+  // Domain registry alerts (raised by src/aws/route53_domains_inventory.ts — TODO: collector not yet implemented)
+  // domain_expiring        → warning (days_until_expiry ≤ 60) or alarm (≤ 14)
+  // domain_auto_renew_off  → warning
+  // domain_transfer_lock_off → warning
+  // domain_no_zone         → warning (registration has no DNS_OF edge)
+  // domain_contact_missing → warning (no HAS_CONTACT edge of kind registrant)
+  // domain_ns_mismatch     → warning (registrar nameservers ≠ zone NS records)
+  // domain_unmanaged       → info    (domain has DNS records but no registrar API source)
+  // domain_no_spf          → warning
+  // domain_no_dmarc        → warning
+  // domain_dmarc_unenforced → warning (DMARC p=none)
+  // domain_dkim_missing    → warning
+  if (a.kind === 'domain_expiring') {
+    const days = (a.details as any)?.days_until_expiry;
+    return typeof days === 'number' && days <= 14 ? 'alarm' : 'warning';
+  }
+  if (['domain_auto_renew_off', 'domain_transfer_lock_off', 'domain_no_zone', 'domain_contact_missing', 'domain_ns_mismatch', 'domain_no_spf', 'domain_no_dmarc', 'domain_dmarc_unenforced', 'domain_dkim_missing'].includes(a.kind)) return 'warning';
+  if (a.kind === 'domain_unmanaged') return 'info';
   return "info"; // node_churn and anything expected
 }
