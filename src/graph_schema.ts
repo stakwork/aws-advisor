@@ -3,9 +3,11 @@
  * type_description, <attribute>: 'string' | '?int' | ...}) node per label, (:Schema)-[:CHILD_OF]->(:Schema) up to
  * Jarvis's root Thing (resource labels under AdvisorResource), and one (:Schema)-[:<EDGE_TYPE> {<attribute>: '?type'}]->
  * (:Schema) per (source label, relationship, target label) the graph holds. It is read from the graph itself after a
- * sync, not declared, so it is always what we have: a label, property or edge appears when the mirror first writes it
- * and goes when the last one is gone (node schemas are soft-deleted with is_deleted, as Jarvis does; edge schemas are
- * removed). Ours are the Schema nodes of domain Cloud; Thing and every other domain's schema are never touched.
+ * sync and MERGED into what the schema already holds, never rebuilt: a field declared on a schema (by hand, or by
+ * DECLARED_ATTRIBUTES) survives even when no record holds it yet, an existing node_key / title_key / icon is kept, a
+ * declared label with no records keeps its schema, and a newly observed property is added with its observed type. A
+ * node schema is soft-deleted (is_deleted, as Jarvis does) only when it is not declared and the graph has no records of it;
+ * edge schemas are removed when the graph no longer holds the edge. Ours are the Schema nodes of domain Cloud; Thing and every other domain's schema are never touched.
  */
 import { enabled, readQuery, writeCypher, logError, LEGACY_LABELS, SCHEMA_DOMAIN } from "./graph_mirror.js";
 
@@ -99,6 +101,28 @@ const DESCRIPTIONS: Record<string, string> = {
   KnPlaybook: "Knowledge layer: the playbook for a control, generated from its official sources",
 };
 
+/**
+ * Fields the ontology declares per label (docs/cloud-ontology-final.md §7), as Jarvis attribute types ("?" = optional),
+ * so they exist on the schema before any record holds them. Names Jarvis reserves (description, type ...) are never listed.
+ */
+export const DECLARED_ATTRIBUTES: Record<string, Record<string, string>> = {
+  AdvisorRegistrar: { name: "string", iana_id: "?string", whois_server: "?string", url: "?string" },
+  AdvisorDomainRegistration: {
+    fqdn: "string", registered_at: "?string", expires_at: "?string", days_until_expiry: "?int", auto_renew: "?boolean", transfer_lock: "?boolean",
+    privacy_enabled: "?boolean", dnssec_enabled: "?boolean", status: "?string", source: "?string", managed: "?boolean", nameservers: "?list",
+    ns_match: "?boolean", purpose: "?string", team: "?string",
+  },
+  AdvisorRegistrantContact: { kind: "string", name: "string", org: "?string", email: "string", phone: "?string", country: "?string" },
+  AdvisorEmailSecurity: { spf: "?string", spf_valid: "?boolean", dmarc_policy: "?string", dmarc_pct: "?int", dkim_selectors: "?list", status: "?string" },
+  AdvisorDomainEvent: { kind: "string", at: "string", by: "?string", detail: "?string", previous_value: "?string" },
+  AdvisorDomainPortfolio: { name: "string", description: "?string" },
+};
+
+/** The attribute fields of an existing Schema node's properties: everything that is not a Jarvis/schema field. */
+function attributesOf(props: Record<string, unknown> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(props ?? {}).filter(([k, v]) => !JARVIS_FIELDS.has(k) && typeof v === "string")) as Record<string, string>;
+}
+
 export type AttrType = "string" | "int" | "float" | "boolean" | "list" | "complex";
 
 /** Jarvis's attribute type of a sample of one property's values (as they come back from a read: integers as numbers, dates as strings). */
@@ -126,24 +150,31 @@ export interface NodeSchema { type: string; parent: string; props: Record<string
 export interface EdgeSchema { source: string; target: string; type: string; props: Record<string, string> }
 
 /** The schema nodes and edges for what was sampled (pure, so it is tested without a graph). */
-export function buildSchema(labels: LabelSample[], edges: EdgeSample[]): { nodes: NodeSchema[]; edges: EdgeSchema[] } {
+export function buildSchema(sampled: LabelSample[], edges: EdgeSample[], existing: Record<string, Record<string, unknown>> = {}): { nodes: NodeSchema[]; edges: EdgeSchema[] } {
+  // a declared label, or one whose schema exists and is live, keeps a schema even with no records
+  const have = new Set(sampled.map((l) => l.label));
+  const empty: LabelSample[] = [...new Set([...Object.keys(DECLARED_ATTRIBUTES), ...Object.keys(existing).filter((t) => isOurs(t) && existing[t]?.is_deleted !== true)])]
+    .filter((t) => !have.has(t)).map((label) => ({ label, total: 0, under_base: 0, props: [] }));
+  const labels = [...sampled, ...empty];
   const attrs = new Map<string, Record<string, string>>();
   const skipped = new Map<string, string[]>();
+  const observed = new Map<string, Record<string, string>>();
   for (const l of labels) {
     const a: Record<string, string> = {}; const s: string[] = [];
     for (const p of l.props) {
       if (JARVIS_FIELDS.has(p.key)) { s.push(p.key); continue; }
       a[p.key] = `${p.count >= l.total ? "" : "?"}${attrType(p.values)}`;
     }
-    attrs.set(l.label, a); skipped.set(l.label, s.sort());
+    // observed fields are added to what is already declared; a declared field keeps its type
+    attrs.set(l.label, { ...a, ...Object.fromEntries(Object.entries(DECLARED_ATTRIBUTES[l.label] ?? {}).filter(([k]) => !JARVIS_FIELDS.has(k))), ...attributesOf(existing[l.label]) }); observed.set(l.label, a); skipped.set(l.label, s.sort());
   }
-  const parentOf = (l: LabelSample) => l.label !== BASE && attrs.has(BASE) && l.under_base * 2 > l.total ? BASE : ROOT;
+  const parentOf = (l: LabelSample) => l.total === 0 ? String(existing[l.label]?.parent ?? ROOT) : l.label !== BASE && attrs.has(BASE) && l.under_base * 2 > l.total ? BASE : ROOT;
   // every resource node also carries the base label, so the base's sample holds every subtype's properties: it declares
   // only the ones more than half the resource types share (id, name, state, region, monthly_usd ...), the rest stay with
   // the subtypes that have them
   const children = labels.filter((l) => parentOf(l) === BASE);
   const shared = (key: string) => children.length === 0 || children.filter((c) => c.props.some((p) => p.key === key)).length * 2 > children.length;
-  if (attrs.has(BASE)) attrs.set(BASE, Object.fromEntries(Object.entries(attrs.get(BASE)!).filter(([k]) => shared(k))));
+  if (attrs.has(BASE)) attrs.set(BASE, Object.fromEntries(Object.entries(attrs.get(BASE)!).filter(([k]) => !(k in observed.get(BASE)!) || k in (DECLARED_ATTRIBUTES[BASE] ?? {}) || k in attributesOf(existing[BASE]) || shared(k))));
   const baseAttrs = attrs.get(BASE) ?? {};
   const nodes: NodeSchema[] = labels.map((l) => {
     const parent = parentOf(l);
@@ -152,9 +183,13 @@ export function buildSchema(labels: LabelSample[], edges: EdgeSample[]): { nodes
     const declared = parent === BASE ? Object.fromEntries(Object.entries(own).filter(([k]) => !(k in baseAttrs))) : own;
     const also = skipped.get(l.label)!;
     const description = `${DESCRIPTIONS[l.label] ?? `Cloud Advisor ${l.label.replace(/^(Advisor|Kn)/, "")} nodes`}.${also.length ? ` Also carries ${also.join(", ")} (not listed: Jarvis reserves the names).` : ""}`;
+    const old = existing[l.label] ?? {};
+    const { ref_id: _ref, ...kept } = old; // every non-attribute property the schema has (icon ...) stays; attributes are rebuilt from the merge
+    const base = Object.fromEntries(Object.entries(kept).filter(([k]) => JARVIS_FIELDS.has(k)));
     const props: Record<string, unknown> = {
-      ...declared, type: l.label, parent, domain: SCHEMA_DOMAIN, node_key: `${l.label.toLowerCase()}-id`,
-      title_key: "name" in own || (parent === BASE && "name" in baseAttrs) ? "name" : "id", type_description: description, is_deleted: false,
+      ...base, ...declared, type: l.label, parent, domain: SCHEMA_DOMAIN,
+      node_key: old.node_key ?? `${l.label.toLowerCase()}-id`,
+      title_key: old.title_key ?? ("name" in own || (parent === BASE && "name" in baseAttrs) ? "name" : "id"), type_description: description, is_deleted: false,
     };
     return { type: l.label, parent, props };
   });
@@ -215,7 +250,9 @@ export async function mirrorSchema(): Promise<SchemaCounts | null> {
   const t0 = Date.now();
   const labels = await sampleLabels();
   if (!labels.length) return { node_schemas: 0, edge_schemas: 0, retired: 0, took_ms: Date.now() - t0 }; // an empty graph (mid-wipe) retires nothing
-  const { nodes, edges } = buildSchema(labels, await sampleEdges(labels.map((l) => l.label)));
+  const existing: Record<string, Record<string, unknown>> = {};
+  for (const r of (await readQuery("MATCH (s:Schema {domain: $domain}) RETURN s.type AS type, properties(s) AS props", { domain: SCHEMA_DOMAIN }, READ)).rows) existing[String(r.type)] = (r.props ?? {}) as Record<string, unknown>;
+  const { nodes, edges } = buildSchema(labels, await sampleEdges(labels.map((l) => l.label)), existing);
   // Jarvis seeds Thing on boot; a graph Jarvis never ran on gets the bare root so the hierarchy has somewhere to hang
   await writeCypher("MERGE (t:Schema {type: $root}) ON CREATE SET t.name = 'string', t.node_key = 'thing-name', t.title_key = 'name', t.description_key = 'description', t.ref_id = randomUUID(), t.is_deleted = false", { root: ROOT });
   await writeCypher(`UNWIND $rows AS row MERGE (s:Schema {type: row.type}) WITH s, row, s.ref_id AS rid SET s = row.props SET s.ref_id = coalesce(rid, randomUUID())`, { rows: nodes.map((n) => ({ type: n.type, props: n.props })) });

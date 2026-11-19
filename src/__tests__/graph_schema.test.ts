@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { attrType, buildSchema, specificLabels, type EdgeSample, type LabelSample } from "../graph_schema.js";
+import { attrType, buildSchema, DECLARED_ATTRIBUTES, specificLabels, type EdgeSample, type LabelSample } from "../graph_schema.js";
 
 test("attribute types: Jarvis's words, mixed ints and floats are floats, mixed kinds are complex, nulls ignored", () => {
   assert.equal(attrType(["a", null]), "string");
@@ -60,4 +60,34 @@ test("edge schemas: one per (source, relationship, target), filed under the spec
   const out = buildSchema(labels, edges).edges;
   assert.deepEqual(out.map((e) => `${e.source}-${e.type}->${e.target}`), ["AdvisorCompute-GUARDED_BY->AdvisorFilter", "AdvisorRecommendation-TARGETS->AdvisorCompute"]);
   assert.deepEqual(out[1].props, { since: "?string", weight: "?int" });
+});
+
+const reg = (props: LabelSample["props"]): LabelSample[] => [{ label: "AdvisorDomainRegistration", total: 1, under_base: 0, props }];
+
+test("merge: declared fields, node_key and title_key of an existing schema survive; observed fields are added", () => {
+  const existing = { AdvisorDomainRegistration: { type: "AdvisorDomainRegistration", node_key: "advisordomainregistration-fqdn", title_key: "fqdn", purpose: "?string", custom_x: "?string", icon: "globe", ref_id: "r1" } };
+  const { nodes } = buildSchema(reg([{ key: "fqdn", count: 1, values: ["a.com"] }, { key: "id", count: 1, values: ["x"] }, { key: "extra", count: 1, values: [3] }]), [], existing);
+  const p = nodes.find((n) => n.type === "AdvisorDomainRegistration")!.props;
+  assert.equal(p.purpose, "?string");
+  assert.equal(p.custom_x, "?string");
+  assert.equal(p.node_key, "advisordomainregistration-fqdn");
+  assert.equal(p.title_key, "fqdn");
+  assert.equal(p.icon, "globe");
+  assert.equal(p.extra, "int");
+  assert.equal("ref_id" in p, false);
+});
+
+test("a declared label with no records still gets a node schema with its declared fields", () => {
+  const { nodes } = buildSchema([], []);
+  const p = nodes.find((n) => n.type === "AdvisorDomainRegistration")!;
+  assert.equal(p.parent, "Thing");
+  assert.equal(p.props.auto_renew, "?boolean");
+  assert.equal(p.props.team, "?string");
+  assert.ok(!String(nodes.find((n) => n.type === "AdvisorDomainPortfolio")!.props.description).startsWith("?")); // reserved name is never an attribute
+  for (const label of Object.keys(DECLARED_ATTRIBUTES)) assert.ok(nodes.some((n) => n.type === label));
+});
+
+test("a declared field's type is not overwritten by an observed one", () => {
+  const { nodes } = buildSchema(reg([{ key: "fqdn", count: 1, values: ["a.com"] }, { key: "auto_renew", count: 1, values: ["yes"] }]), []);
+  assert.equal(nodes.find((n) => n.type === "AdvisorDomainRegistration")!.props.auto_renew, "?boolean");
 });
