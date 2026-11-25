@@ -774,7 +774,7 @@ are retired after each pass.
 packages (a swarm host's images, a big Node application) outgrows it: the software probe's answer is then cut off and
 the sbom probe trims its lists to fit, reporting the true counts. Set `PROBE_UPLOAD_BUCKET` (and `PROBE_UPLOAD_REGION`,
 `PROBE_UPLOAD_PREFIX`, default `aws-advisor/probes`; Settings › Probe pass) to a bucket in the advisor's account and
-every probe posts its whole result there (host 2.1, docker 2.2, apps 2.2, software 1.8, sbom 1.9, images 1.4; redeploy the
+every probe posts its whole result there (host 2.1, docker 2.2, apps 2.2, software 1.9, sbom 1.9, images 1.4; redeploy the
 documents from Settings › Probes): the advisor presigns a PutObject URL per run and passes it as
 the document's `upload` parameter, the script posts the gzip-compressed JSON with curl and prints a receipt (`uploaded
 <bytes> <sha256>`) on its inline line, and the advisor reads the object back, checks it against the receipt and ingests

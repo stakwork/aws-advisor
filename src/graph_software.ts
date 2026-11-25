@@ -7,6 +7,7 @@ import { COMPUTE_OF } from "./graph_cypher.js";
 import { DISTRO_ECOSYSTEMS, componentIdentity } from "./sec/identity.js";
 import { componentCpe, sbomCpe } from "./sec/cpe.js";
 import { componentPurl, parsePurl } from "./software_inventory.js";
+import { certGraphRows } from "./instance_certs.js";
 
 /**
  * The software layer of the graph (docs/cloud-ontology.md §2) for the AWS adapter: what the software probe found
@@ -114,6 +115,24 @@ const PRUNE_EXECUTES_CYPHER = `
 UNWIND $rows AS row
 MATCH (k:AdvisorContainer {id: row.container_node})-[r:EXECUTES]->(p:SoftwareComponent)
 WHERE NOT p.id IN row.keep AND coalesce(r.is_deleted, false) = false
+SET r.is_deleted = true, r.deleted_at = $now`;
+
+/** A TLS certificate the software probe read on a box (software/9; src/instance_certs.ts): one node per fingerprint however many boxes hold it
+ *  (the ACM ones are the ACM collector's, keyed by ARN, and never written here), SECURES the compute of each box that holds it, the edge saying
+ *  where (sources, path, container) and whether a port on the box serves it. Public parts only; the id is the SHA-256 fingerprint of the certificate. */
+const CERT_CYPHER = `
+UNWIND $rows AS row
+MATCH (b:AdvisorResource {id: row.instance_id})
+${COMPUTE_OF("b", "c")}
+MERGE (k:AdvisorResource {id: row.id}) ON CREATE SET k.first_seen = $now
+SET k:AdvisorCertificate, k += {name: row.name, kind: 'file_certificate', native_type: 'tls_certificate', native_id: row.fingerprint, fingerprint: row.fingerprint, domains: row.domains, issuer: row.issuer, subject: row.subject, serial: row.serial, not_before: row.not_before, not_after: row.not_after, days_left: row.days_left, source: row.source, wildcard: row.wildcard, renewer_found: row.renewer_found, provenance: row.provenance, provider: $provider, account_id: coalesce(row.account_id, $account), updated_at: $now}
+MERGE (k)-[r:SECURES]->(c)
+SET r += {sources: row.sources, path: row.path, container: row.container, served: row.served, renewer: row.renewer, file_mtime: row.file_mtime, first_seen: coalesce(r.first_seen, row.last_seen), last_seen: row.last_seen, is_deleted: false, deleted_at: null, updated_at: $now}`;
+
+const PRUNE_CERTS_CYPHER = `
+UNWIND $rows AS row
+MATCH (k:AdvisorCertificate)-[r:SECURES]->(c:AdvisorCompute {id: 'compute:' + row.instance_id})
+WHERE k.native_type = 'tls_certificate' AND NOT k.id IN row.keep AND coalesce(r.is_deleted, false) = false
 SET r.is_deleted = true, r.deleted_at = $now`;
 
 /** What the probe read of the operating system (/etc/os-release, uname) onto the compute the box hosts. */
@@ -370,7 +389,7 @@ export function unclassifiedComponentRow(s: { instance_id: string; ref: string; 
 /** The image key of an instance_images row in SQL (software_inventory.ts IMG_KEY): its sbom_key, else the per-box fallback. */
 const IMG_KEY = "coalesce(ii.sbom_key, 'ref:' || ii.instance_id || '|' || ii.image)";
 
-export interface SoftwareGraphCounts { packages: number; installed: number; images: number; contains: number; /** EXECUTES edges, container → running executable */ executes: number; provides: number; bundles: number; depends: number; packaged_as: number; superseded: number; took_ms: number }
+export interface SoftwareGraphCounts { /** AdvisorCertificate SECURES edges written (software/9) */ certs?: number; packages: number; installed: number; images: number; contains: number; /** EXECUTES edges, container → running executable */ executes: number; provides: number; bundles: number; depends: number; packaged_as: number; superseded: number; took_ms: number }
 
 /** Everything the software and sbom probes know about the given boxes (or all). */
 export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGraphCounts | null> {
@@ -517,6 +536,10 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // the image edges are pruned on the probed boxes and on the cluster nodes (their rows are the cluster inventory's, probed or not)
   const clusterNodes = rows(`select distinct instance_id from instance_images where source = 'cluster'${where}`, ...args).map((r) => String(r.instance_id));
   for (const b of chunks(keepOf(imgRows, new Set([...os.keys(), ...clusterNodes])), 50)) await w(PRUNE_IMAGES_CYPHER, b);
+  // the TLS certificates on the boxes (software/9): the node per fingerprint, SECURES from it to each box's compute; a certificate a box no longer holds loses its edge
+  const certRows = certGraphRows(instanceIds);
+  for (const b of chunks(certRows)) await w(CERT_CYPHER, b);
+  for (const b of chunks(keepOf(certRows.map((r) => ({ instance_id: r.instance_id, id: r.id })), instanceIds ?? os.keys()), 50)) await w(PRUNE_CERTS_CYPHER, b);
   // what each image contains; an edge the scans no longer support is retired (the keep list is every key's reading of that image node: the platforms of one digest add up)
   for (const b of chunks(containsRows)) await w(CONTAINS_CYPHER, b);
   const keepBy = new Map<string, Set<string>>();
@@ -565,7 +588,7 @@ export async function mirrorSoftware(instanceIds?: string[]): Promise<SoftwareGr
   // the nodes' own lifecycle, from the edges': what came back is live again, what nothing holds any more is marked (never deleted)
   await writeCypher(REVIVE_COMPONENTS_CYPHER);
   await writeCypher(ORPHAN_COMPONENTS_CYPHER, neoParams({ now }));
-  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, executes: execEdges.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, packaged_as: packagedEdges.length, superseded: supersededRows.length, took_ms: Date.now() - t0 };
+  return { packages: new Set(pkgRows.map((p) => p.id)).size, installed: pkgRows.length, images: imgRows.length, contains: containsRows.length, executes: execEdges.length, provides: provRows.length, bundles: bundleEdges.length, depends: dependEdges.length, packaged_as: packagedEdges.length, superseded: supersededRows.length, certs: certRows.length, took_ms: Date.now() - t0 };
 }
 
 

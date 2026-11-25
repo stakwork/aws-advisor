@@ -29,6 +29,7 @@ export function alertLevel(a: { kind: string; triage?: unknown; details?: unknow
   if (a.kind === "memory_full" || a.kind === "status_check_failed") return "alarm";
   if (a.kind === "lambda_errors" || a.kind === "commitment_underused" || a.kind === "cache_memory_high" || a.kind === "rds_memory_low" || a.kind === "network_step") return "warning";
   if (a.kind === "commitment_expiring") return "alarm";
+  if (a.kind === "cert_expiring") return "warning"; // the alert's own details.level (alarm at 7 days or fewer) is read above
   if (a.kind === "spend_step" || a.kind === "memory_pressure" || a.kind === "log_step" || a.kind === "app_gone" || a.kind === "port_exposed") return "warning";
   // Domain registry alerts (raised by src/aws/route53_domains_inventory.ts — TODO: collector not yet implemented)
   // domain_expiring        → warning (days_until_expiry ≤ 60) or alarm (≤ 14)

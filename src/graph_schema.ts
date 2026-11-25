@@ -40,7 +40,7 @@ const DESCRIPTIONS: Record<string, string> = {
   AdvisorDnsZone: "A DNS hosted zone",
   AdvisorDnsRecord: "A DNS record in a zone and what it points to",
   AdvisorIdentity: "Who can get in: an IAM user or role, an Identity Center user, the root user, a Vercel team member",
-  AdvisorCertificate: "A TLS certificate (ACM) and what terminates TLS with it",
+  AdvisorCertificate: "A TLS certificate (ACM, or one the software probe read on a box: id cert:<sha256 fingerprint>, native_type tls_certificate) and what terminates TLS with it",
   AdvisorMessaging: "A messaging topic (SNS) and where it delivers",
   AdvisorSecret: "An encryption key (KMS) and what it encrypts",
   AdvisorAnalytics: "A query engine workgroup (Athena)",

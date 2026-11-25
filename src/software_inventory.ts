@@ -1,4 +1,6 @@
 import { db } from "./db.js";
+import { certsOn, recordCerts, type CertRow } from "./instance_certs.js";
+import type { ProbeCert, ProbeTlsLive } from "./ssm.js";
 
 /**
  * What is installed on the instances, from the software probe (src/probes.ts, kind "software"): the OS and kernel,
@@ -170,6 +172,8 @@ export interface ProbeHibernation {
   logind_suspend_key?: string | null; swap_active_bytes?: number; swap_file_bytes?: number; mem_bytes?: number;
 }
 export interface SoftwareData {
+  /** software/9: the TLS certificates on the box (null: no openssl there) and what its TLS ports answer (src/instance_certs.ts) */
+  certs?: ProbeCert[] | null; tls_live?: ProbeTlsLive[];
   hibernation?: ProbeHibernation | null;
   os?: { id?: string | null; version?: string | null; name?: string | null; /** software/7: the CPE os-release declares (CPE_NAME) */ cpe?: string | null } | null; kernel?: string | null; arch?: string | null; package_manager?: string | null;
   /** Probe software/6: the running kernel's upstream version and the package that owns the booted image (kernelFacts derives both from older probes where it can). */
@@ -178,7 +182,7 @@ export interface SoftwareData {
   bundles?: ProbeBundle[]; depends?: ProbeDepend[];
 }
 
-export interface RecordSoftwareResult { packages: number; added: string[]; removed: string[]; changed: { name: string; from: string; to: string }[]; binaries: number; images: number; bundles: number; depends: number }
+export interface RecordSoftwareResult { packages: number; added: string[]; removed: string[]; changed: { name: string; from: string; to: string }[]; binaries: number; images: number; bundles: number; depends: number; /** software/9: certificates recorded, expiry alerts raised */ certs?: number; cert_alerts?: number }
 
 // the kernel's three names move together: a probe that read the kernel (uname -r) replaces the upstream version and owning package too, even with nothing (a reboot into a kernel no package owns)
 const upsertOs = db.prepare(`insert into instance_os(instance_id, collected_at, os_id, os_version, os_name, kernel, arch, package_manager, packages, hibernation, kernel_upstream, kernel_package, kernel_package_version, kernel_package_source, os_cpe) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -365,6 +369,10 @@ export function recordSoftware(instanceId: string, collectedAt: string, data: So
     upsertOs.run(instanceId, collectedAt, clean(data.os?.id, 40) || null, clean(data.os?.version, 40) || null, clean(data.os?.name, 120) || null, clean(data.kernel, 80) || null, clean(data.arch, 20) || null, data.package_manager ? eco : null, pkgs.length, data.hibernation && typeof data.hibernation === "object" ? JSON.stringify(data.hibernation).slice(0, 2000) : null,
       kernel.upstream, kernel.pkg?.name ?? null, kernel.pkg?.version ?? null, kernel.pkg?.source ?? null, data.os?.cpe && /^cpe:/i.test(String(data.os.cpe)) ? clean(data.os.cpe, 200) || null : null);
   })();
+  // software/9: the certificates and live TLS answers (replaced whole; a probe without a list leaves them), then the expiry alerts
+  const name = (db.prepare("select name from inventory_ec2 where instance_id = ?").get(instanceId) as { name: string | null } | undefined)?.name ?? null;
+  const cr = recordCerts(instanceId, collectedAt, data, name);
+  if (cr) { res.certs = cr.certs; res.cert_alerts = cr.raised; }
   return res;
 }
 
@@ -580,6 +588,8 @@ export function hibernationSetupOf(instanceId: string): { probe: ProbeHibernatio
 }
 
 export interface InstanceSoftware {
+  /** software/9: the TLS certificates the box holds and what its TLS ports answer */
+  certs: CertRow[]; tls_live: ReturnType<typeof certsOn>["tls_live"];
   os: { instance_id: string; collected_at: string; os_id: string | null; os_version: string | null; os_name: string | null; kernel: string | null; kernel_upstream: string | null; kernel_package: string | null; kernel_package_version: string | null; kernel_package_source: string | null; os_cpe: string | null; arch: string | null; package_manager: string | null; packages: number } | null;
   packages: { ecosystem: string; name: string; version: string; arch: string | null; source: string | null; first_seen: string; last_seen: string; gone: boolean }[];
   binaries: { name: string; version: string; path: string | null; first_seen: string; last_seen: string; gone: boolean }[];
@@ -600,6 +610,7 @@ export function softwareOn(instanceId: string, opts: { q?: string; limit?: numbe
   const q = opts.q ? `%${opts.q.toLowerCase()}%` : null;
   const limit = Math.min(5000, Math.max(1, opts.limit ?? 2000));
   return {
+    ...certsOn(instanceId),
     os: (db.prepare("select * from instance_os where instance_id = ?").get(instanceId) as any) ?? null,
     packages: (db.prepare(`select ecosystem, name, version, arch, source, first_seen, last_seen, gone from instance_packages where instance_id = ?${q ? " and (lower(name) like ? or lower(source) like ?)" : ""} order by name limit ?`).all(...(q ? [instanceId, q, q, limit] : [instanceId, limit])) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
     binaries: (db.prepare(`select name, version, path, first_seen, last_seen, gone from instance_binaries where instance_id = ? order by name`).all(instanceId) as any[]).map((r) => ({ ...r, gone: Boolean(r.gone) })),
