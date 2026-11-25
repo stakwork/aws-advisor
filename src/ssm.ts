@@ -126,6 +126,10 @@ export interface ProbeResult {
   /** Software 4/5: what each runtime install bundles (Node's process.versions, with the install's path) and the dpkg Depends of the packages owning the probed programs. */
   bundles?: { name: string; path: string | null; versions: Record<string, string> }[];
   depends?: { n: string; d: string }[];
+  /** Software 9: the public parts of the TLS certificates the box holds (null: the box has no openssl, so nothing was read) and what its TLS ports answer. */
+  certs?: ProbeCert[] | null;
+  certs_total?: number;
+  tls_live?: ProbeTlsLive[];
   /** The sbom probe: the package URLs syft read from each running image and from the host filesystem, with every scan's status and true count.
    *  The images probe (the scanner instance's batch of registry images) prints the same section. */
   sbom?: ProbeSbom;
@@ -172,6 +176,31 @@ const num = (v: unknown, what: string): number => {
   if (!Number.isFinite(n)) throw new ProbeError("bad_output", `probe output: ${what} is not a number`);
   return n;
 };
+
+/** One certificate the software probe read from a file (public parts only; never a key). */
+export interface ProbeCert {
+  source: "traefik-file" | "traefik-acme" | "caddy" | "certbot" | "nginx" | "apache" | "pem-sweep";
+  path: string; container: string | null; subject: string | null; cn: string | null; issuer: string | null; issuer_cn: string | null; sans: string[]; serial: string | null;
+  not_before: string | null; not_after: string | null; days_left: number | null; fingerprint: string; file_mtime: string | null;
+  renewer_found: boolean; renewer: string | null; provenance: "managed_elsewhere" | "local"; /** a live TLS port on the box answered with this certificate */ served: boolean;
+}
+/** What one TLS port answered on loopback (for one SNI, null for none) and whether it is the certificate the files hold for that name. */
+export interface ProbeTlsLive { port: number; sni: string | null; fingerprint: string; not_after: string | null; match: "match" | "mismatch" | "unknown" }
+
+const CERT_SOURCES = ["traefik-file", "traefik-acme", "caddy", "certbot", "nginx", "apache", "pem-sweep"];
+/** The certs section of software 9, typed and capped (60 certificates, 20 names each, 16 live answers). */
+function parseCerts(list: any[]): ProbeCert[] {
+  const s = (v: unknown, n: number) => (v == null || v === "" ? null : String(v).replace(/[^\x20-\x7e]/g, "").slice(0, n));
+  return list.filter((c: any) => c && typeof c.fingerprint === "string" && /^[0-9a-f]{64}$/.test(c.fingerprint) && typeof c.path === "string" && c.path).slice(0, 60).map((c: any): ProbeCert => ({
+    source: CERT_SOURCES.includes(c.source) ? c.source : "pem-sweep", path: s(c.path, 300)!, container: s(c.container, 120), subject: s(c.subject, 200), cn: s(c.cn, 200), issuer: s(c.issuer, 200), issuer_cn: s(c.issuer_cn, 200),
+    sans: Array.isArray(c.sans) ? c.sans.filter((x: unknown) => typeof x === "string" && x).slice(0, 20).map((x: string) => s(x, 120)!) : [], serial: s(c.serial, 80),
+    not_before: iso(c.not_before), not_after: iso(c.not_after), days_left: c.days_left == null || !Number.isFinite(Number(c.days_left)) ? null : Math.round(Number(c.days_left)), fingerprint: c.fingerprint, file_mtime: iso(c.file_mtime),
+    renewer_found: c.renewer_found === true, renewer: s(c.renewer, 40), provenance: c.provenance === "local" ? "local" : "managed_elsewhere", served: c.served === true }));
+}
+function parseTlsLive(list: any[]): ProbeTlsLive[] {
+  return list.filter((l: any) => l && typeof l.fingerprint === "string" && /^[0-9a-f]{64}$/.test(l.fingerprint) && Number.isInteger(Number(l.port)) && Number(l.port) > 0 && Number(l.port) < 65536).slice(0, 16).map((l: any): ProbeTlsLive => ({
+    port: Number(l.port), sni: l.sni == null || l.sni === "" ? null : String(l.sni).replace(/[^\x20-\x7e]/g, "").slice(0, 120), fingerprint: l.fingerprint, not_after: iso(l.not_after), match: l.match === "match" || l.match === "mismatch" ? l.match : "unknown" }));
+}
 
 /** The hibernation section of software 3, typed field by field: booleans, short strings, byte counts. */
 /** Apps 2.1: the firewall section typed and capped (400 lines of 400 printable characters per family). */
@@ -283,6 +312,9 @@ export function parseProbeOutput(stdout: string): ProbeResult {
     packages: Array.isArray(raw.packages) ? raw.packages.filter((p: any) => p && typeof p.n === "string" && p.n).slice(0, 20000).map((p: any) => ({ n: String(p.n).slice(0, 120), v: String(p.v ?? "").slice(0, 120), a: p.a == null || p.a === "" ? null : String(p.a).slice(0, 20) , s: p.s == null || p.s === "" ? null : String(p.s).slice(0, 120) })) : undefined,
     binaries: Array.isArray(raw.binaries) ? raw.binaries.filter((b: any) => b && typeof b.name === "string" && b.name).slice(0, 100).map((b: any) => ({ name: String(b.name).slice(0, 64), version: String(b.version ?? "").slice(0, 120), path: b.path == null ? null : String(b.path).slice(0, 200) })) : undefined,
     hibernation: raw.hibernation && typeof raw.hibernation === "object" ? parseHibernation(raw.hibernation) : undefined,
+    certs: Array.isArray(raw.certs) ? parseCerts(raw.certs) : raw.certs === null ? null : undefined,
+    certs_total: raw.certs_total == null ? undefined : Math.max(0, int(raw.certs_total)),
+    tls_live: Array.isArray(raw.tls_live) ? parseTlsLive(raw.tls_live) : undefined,
     sbom: raw.sbom && typeof raw.sbom === "object" ? parseSbom(raw.sbom) : undefined,
     upload: raw.upload == null ? undefined : String(raw.upload).replace(/[^\x20-\x7e]/g, "").slice(0, 200),
     inline: raw.inline === false ? false : undefined,

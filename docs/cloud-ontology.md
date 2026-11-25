@@ -563,6 +563,19 @@ Also `origin` (`issued` \| `imported` \| `private`), `days_left`, `used_by` (how
 resource that terminates TLS (ACM's `InUseBy`: a balancer, a distribution, an API), → that resource. An unused
 certificate is `in_use: false`; an expiring one is `days_left` ≤ 30.
 
+**Certificates read on a box (software probe 9).** The software probe also reads the public parts of the TLS certificates a box
+holds (Traefik's file provider directory and `acme.json`, certbot, nginx and Apache directives, Caddy storage, a bounded PEM sweep;
+only `BEGIN CERTIFICATE` blocks, through `openssl x509`, never a key) and asks each TLS port on loopback what it serves
+(`openssl s_client`, SNI from Traefik `Host()` rules). They are `AdvisorCertificate` nodes too, id `cert:<sha256 fingerprint>`
+(one node however many boxes hold the same certificate; ACM ones stay keyed by ARN and are never read from a box), `native_type:
+tls_certificate`, `kind: file_certificate`, with `domains`, `issuer`, `subject`, `serial`, `not_before`, `not_after`, `days_left`,
+`source` (`traefik-file` \| `traefik-acme` \| `caddy` \| `certbot` \| `nginx` \| `apache` \| `pem-sweep`), `wildcard`, `renewer_found`
+and `provenance` (`managed_elsewhere` when nothing on the box renews it: a certificate copied in from another server, or an
+orphan). Edge `(AdvisorCertificate)-[:SECURES {sources, path, container, served, renewer, file_mtime}]->(AdvisorCompute)` per box;
+`served` says a live port answered with it, and `file_mtime` far after `not_before` means it was copied, not issued, here. A
+certificate that expires in 30 days or fewer raises a `cert_expiring` alert per box and certificate (warning; alarm at 7 days or
+fewer, expired included), closed when the file is replaced; `src/instance_certs.ts` also groups certificates by fingerprint across boxes (`certGroups`).
+
 ### AdvisorAnalytics
 
 A query engine or warehouse that runs analysts' queries over data it does not own: Athena workgroups, BigQuery

@@ -167,7 +167,7 @@ test("the software script reads the source package from dpkg, rpm and apk (what 
     const r = spawnSync("sh", [], { input: pr.defaultProbeScript("software"), encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const last = r.stdout.trim().split("\n").pop() || "{}";
     const j = JSON.parse(last);
-    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/8");
+    assert.equal(j.kind, "software"); assert.equal(j.probe, "aws-advisor/software/9"); assert.ok(Array.isArray(j.certs), "software/9: certs is an array (this box has openssl)"); assert.ok(Array.isArray(j.tls_live) && typeof j.certs_total === "number");
     assert.deepEqual(j.packages, expected[name], name);
     assert.ok(j.os.cpe === null || /^cpe:/.test(j.os.cpe), `software/7: the OS CPE os-release declares, or null (${j.os.cpe})`);
     // probe software/6: the package that owns the running kernel (dpkg by name, rpm by the modules directory it owns) and the upstream version read from it;
@@ -351,7 +351,7 @@ test("the software script with an upload URL: a result that fits goes inline wit
   assert.equal(small.kind, "software"); assert.equal(small.packages?.length, 3, "inline, whole"); assert.match(small.upload ?? "", /^uploaded \d+ /); assert.equal(small.inline, undefined);
   w("dpkg-query", dpkg(2000));
   const big = run();
-  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/8");
+  assert.equal(big.inline, false, "a stub: the inline object would have been cut"); assert.equal(big.packages, undefined); assert.equal(big.kind, "software"); assert.equal(big.probe, "aws-advisor/software/9");
   const whole = parseProbeOutput(gunzipSync(fs.readFileSync(capture)).toString("utf8"));
   assert.equal(whole.packages?.length, 2000, "the object holds every package"); assert.equal(whole.os?.id ?? null, whole.os?.id ?? null);
 });
